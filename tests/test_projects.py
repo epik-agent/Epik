@@ -64,9 +64,7 @@ def test_project_set_status_adds_item_when_not_in_project():
         patch("epik_gh.projects._add_item_to_project", return_value="PVTI_newitem"),
         patch("epik_gh.projects._gql", return_value={}),
     ):
-        result = project_set_status(
-            OWNER, PROJECT_NUMBER, REPO, ISSUE_NUMBER, "Todo"
-        )
+        result = project_set_status(OWNER, PROJECT_NUMBER, REPO, ISSUE_NUMBER, "Todo")
 
     assert result["item_id"] == "PVTI_newitem"
 
@@ -103,9 +101,7 @@ def test_project_get_item_found():
                 "node": {
                     "id": "PVTI_item789",
                     "fieldValues": {
-                        "nodes": [
-                            {"name": "In Progress", "field": {"name": "Status"}}
-                        ]
+                        "nodes": [{"name": "In Progress", "field": {"name": "Status"}}]
                     },
                 }
             },

@@ -39,9 +39,7 @@ def test_parses_json_when_json_fields_provided():
 
 def test_appends_json_flag_to_command():
     payload = json.dumps({"number": 42})
-    with patch(
-        "subprocess.run", return_value=_make_result(stdout=payload)
-    ) as mock_run:
+    with patch("subprocess.run", return_value=_make_result(stdout=payload)) as mock_run:
         run_gh("issue", "view", "42", json_fields=["number"])
     call_args = mock_run.call_args[0][0]
     assert "--json" in call_args
@@ -49,18 +47,14 @@ def test_appends_json_flag_to_command():
 
 
 def test_empty_json_output_returns_empty_dict():
-    with patch(
-        "subprocess.run", return_value=_make_result(stdout="", returncode=0)
-    ):
+    with patch("subprocess.run", return_value=_make_result(stdout="", returncode=0)):
         ok, data, _ = run_gh("something", json_fields=["x"])
     assert ok is True
     assert data == {}
 
 
 def test_passes_input_data_to_stdin():
-    with patch(
-        "subprocess.run", return_value=_make_result(stdout="ok")
-    ) as mock_run:
+    with patch("subprocess.run", return_value=_make_result(stdout="ok")) as mock_run:
         run_gh("api", "something", input_data='{"key": "val"}')
     call_kwargs = mock_run.call_args[1]
     assert call_kwargs["input"] == b'{"key": "val"}'
@@ -70,9 +64,7 @@ def test_raises_auth_error_on_auth_login_in_stderr():
     with (
         patch(
             "subprocess.run",
-            return_value=_make_result(
-                stderr="run gh auth login first", returncode=1
-            ),
+            return_value=_make_result(stderr="run gh auth login first", returncode=1),
         ),
         pytest.raises(AuthError),
     ):
@@ -83,9 +75,7 @@ def test_raises_auth_error_on_authentication_in_stderr():
     with (
         patch(
             "subprocess.run",
-            return_value=_make_result(
-                stderr="Authentication required", returncode=1
-            ),
+            return_value=_make_result(stderr="Authentication required", returncode=1),
         ),
         pytest.raises(AuthError),
     ):
@@ -96,9 +86,7 @@ def test_raises_rate_limit_error_on_rate_limit_message():
     with (
         patch(
             "subprocess.run",
-            return_value=_make_result(
-                stderr="API rate limit exceeded", returncode=1
-            ),
+            return_value=_make_result(stderr="API rate limit exceeded", returncode=1),
         ),
         pytest.raises(RateLimitError),
     ):

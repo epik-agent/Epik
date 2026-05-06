@@ -88,9 +88,7 @@ def test_run_logs_failed_only():
 
 
 def test_run_logs_job_specific():
-    with patch(
-        "epik_gh.runs.run_gh", return_value=(True, "job output", "")
-    ) as mock:
+    with patch("epik_gh.runs.run_gh", return_value=(True, "job output", "")) as mock:
         run_logs(REPO, 42, job_id=7)
     args = mock.call_args[0]
     assert "--job" in args
