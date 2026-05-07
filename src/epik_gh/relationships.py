@@ -44,23 +44,27 @@ def _issue_node_id(repo: str, issue_number: int) -> str:
 
 
 def issue_set_blocked_by(
-    repo: str, issue_number: int, blocked_by_number: int
+    repo: str,
+    issue_number: int,
+    blocked_by_number: int,
+    blocked_by_repo: str | None = None,
 ) -> dict[str, Any]:
     """Mark an issue as blocked by another issue.
 
     Uses the GitHub GraphQL API to create a blocked-by relationship between
-    two issues in the same repository.
+    two issues, optionally in different repositories.
 
     Args:
-        repo: Repository in owner/name format.
+        repo: Repository in owner/name format for the blocked issue.
         issue_number: The issue that is being blocked.
         blocked_by_number: The issue that is doing the blocking.
+        blocked_by_repo: Repository for the blocking issue (defaults to repo).
 
     Returns:
         Dict confirming the relationship was created.
     """
     issue_id = _issue_node_id(repo, issue_number)
-    blocking_id = _issue_node_id(repo, blocked_by_number)
+    blocking_id = _issue_node_id(blocked_by_repo or repo, blocked_by_number)
     mutation = """
     mutation($issueId: ID!, $blockingId: ID!) {
       addIssueRelationship(input: {
@@ -88,24 +92,29 @@ def issue_set_blocked_by(
         "blocked_by": blocked_by_number,
         "relationship": "blocked_by",
         "repo": repo,
+        "blocked_by_repo": blocked_by_repo or repo,
     }
 
 
 def issue_remove_blocked_by(
-    repo: str, issue_number: int, blocked_by_number: int
+    repo: str,
+    issue_number: int,
+    blocked_by_number: int,
+    blocked_by_repo: str | None = None,
 ) -> dict[str, Any]:
     """Remove a blocked-by relationship between two issues.
 
     Args:
-        repo: Repository in owner/name format.
+        repo: Repository in owner/name format for the blocked issue.
         issue_number: The issue that was being blocked.
         blocked_by_number: The issue that was doing the blocking.
+        blocked_by_repo: Repository for the blocking issue (defaults to repo).
 
     Returns:
         Dict confirming the relationship was removed.
     """
     issue_id = _issue_node_id(repo, issue_number)
-    blocking_id = _issue_node_id(repo, blocked_by_number)
+    blocking_id = _issue_node_id(blocked_by_repo or repo, blocked_by_number)
     mutation = """
     mutation($issueId: ID!, $blockingId: ID!) {
       removeIssueRelationship(input: {
@@ -130,6 +139,7 @@ def issue_remove_blocked_by(
         "issue": issue_number,
         "removed_blocked_by": blocked_by_number,
         "repo": repo,
+        "blocked_by_repo": blocked_by_repo or repo,
     }
 
 
@@ -261,31 +271,45 @@ def register(server: FastMCP) -> None:
 
     @server.tool()
     def tool_issue_set_blocked_by(
-        repo: str, issue_number: int, blocked_by_number: int
+        repo: str,
+        issue_number: int,
+        blocked_by_number: int,
+        blocked_by_repo: str | None = None,
     ) -> dict[str, Any]:
         """Mark an issue as blocked by another issue using the GitHub GraphQL API.
 
         Args:
-            repo: Repository in owner/name format.
+            repo: Repository in owner/name format for the blocked issue.
             issue_number: The issue that is being blocked.
             blocked_by_number: The issue that is doing the blocking.
+            blocked_by_repo: Repository for the blocking issue in owner/name format.
+                Defaults to repo (same-repo relationship).
         """
-        return issue_set_blocked_by(repo, issue_number, blocked_by_number)
+        return issue_set_blocked_by(
+            repo, issue_number, blocked_by_number, blocked_by_repo=blocked_by_repo
+        )
 
     tool_issue_set_blocked_by.__name__ = "issue_set_blocked_by"
 
     @server.tool()
     def tool_issue_remove_blocked_by(
-        repo: str, issue_number: int, blocked_by_number: int
+        repo: str,
+        issue_number: int,
+        blocked_by_number: int,
+        blocked_by_repo: str | None = None,
     ) -> dict[str, Any]:
         """Remove a blocked-by relationship between two issues.
 
         Args:
-            repo: Repository in owner/name format.
+            repo: Repository in owner/name format for the blocked issue.
             issue_number: The issue that was being blocked.
             blocked_by_number: The issue that was doing the blocking.
+            blocked_by_repo: Repository for the blocking issue in owner/name format.
+                Defaults to repo (same-repo relationship).
         """
-        return issue_remove_blocked_by(repo, issue_number, blocked_by_number)
+        return issue_remove_blocked_by(
+            repo, issue_number, blocked_by_number, blocked_by_repo=blocked_by_repo
+        )
 
     tool_issue_remove_blocked_by.__name__ = "issue_remove_blocked_by"
 

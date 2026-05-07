@@ -53,6 +53,34 @@ def test_issue_set_blocked_by_happy_path():
     assert result["relationship"] == "blocked_by"
 
 
+def test_issue_set_blocked_by_cross_repo():
+    other_repo = "other/repo"
+    side_effects = [
+        (True, json.dumps(_node_id_response("issue_id_1")), ""),
+        (True, json.dumps(_node_id_response("issue_id_2")), ""),
+        (
+            True,
+            json.dumps(
+                {
+                    "data": {
+                        "addIssueRelationship": {
+                            "issueRelationship": {"type": "BLOCKED_BY"}
+                        }
+                    }
+                }
+            ),
+            "",
+        ),
+    ]
+    with patch("epik_gh.relationships.run_gh", side_effect=side_effects) as mock:
+        result = issue_set_blocked_by(REPO, 1, 2, blocked_by_repo=other_repo)
+
+    assert result["blocked_by_repo"] == other_repo
+    # Second node-id lookup must use other_repo, not REPO
+    second_call_args = mock.call_args_list[1][0]
+    assert "other" in " ".join(second_call_args)
+
+
 def test_issue_set_blocked_by_invalid_repo_format():
     with (
         pytest.raises(ValidationError, match="owner/name"),
@@ -78,6 +106,27 @@ def test_issue_remove_blocked_by_happy_path():
 
     assert result["issue"] == 1
     assert result["removed_blocked_by"] == 2
+
+
+def test_issue_remove_blocked_by_cross_repo():
+    other_repo = "other/repo"
+    side_effects = [
+        (True, json.dumps(_node_id_response("issue_id_1")), ""),
+        (True, json.dumps(_node_id_response("issue_id_2")), ""),
+        (
+            True,
+            json.dumps(
+                {"data": {"removeIssueRelationship": {"clientMutationId": None}}}
+            ),
+            "",
+        ),
+    ]
+    with patch("epik_gh.relationships.run_gh", side_effect=side_effects) as mock:
+        result = issue_remove_blocked_by(REPO, 1, 2, blocked_by_repo=other_repo)
+
+    assert result["blocked_by_repo"] == other_repo
+    second_call_args = mock.call_args_list[1][0]
+    assert "other" in " ".join(second_call_args)
 
 
 def test_issue_list_relationships_happy_path():
