@@ -107,8 +107,9 @@ def issue_create(
         args.extend(["--assignee", assignees])
     if milestone:
         args.extend(["--milestone", milestone])
-    _, data, _ = run_gh(*args, json_fields=["number", "title", "url"])
-    return data  # type: ignore[return-value]
+    # gh issue create doesn't support --json; it returns the issue URL on stdout
+    _, url, _ = run_gh(*args)
+    return {"url": url}
 
 
 def issue_edit(

@@ -76,10 +76,10 @@ def test_issue_get_passes_correct_args():
 
 
 def test_issue_create_happy_path():
-    created = {"number": 5, "title": "New bug", "url": "https://github.com/..."}
-    with _mock_run(created):
+    url = "https://github.com/owner/repo/issues/5"
+    with _mock_run(url):
         result = issue_create(REPO, "New bug")
-    assert result == created
+    assert result == {"url": url}
 
 
 def test_issue_create_empty_title_raises_validation_error():
