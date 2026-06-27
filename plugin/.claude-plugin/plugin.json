@@ -1,0 +1,9 @@
+{
+  "name": "epik",
+  "version": "0.1.0",
+  "description": "Manager-mode feature development on GitHub: converge in CoWork, author the issue graph, launch autonomous builds on Claude Code on the web.",
+  "author": { "name": "Bill McNeill", "url": "https://github.com/wpm" },
+  "homepage": "https://github.com/wpm/epik",
+  "license": "MIT",
+  "keywords": ["github", "feature", "workflow", "agent-teams", "cowork"]
+}
