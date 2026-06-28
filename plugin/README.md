@@ -24,9 +24,63 @@ epik-plugin/
 
 The plugin is **policy**; the MCPs are **mechanism**. `epik-gh` (separate repo) is the GitHub mechanism — a curated `gh` wrapper for authoring the issue graph and reading status. A second, future **Claude-API MCP** (separate repo) will own non-GitHub calls such as the routines `/fire` launch. The plugin declares those servers via `.mcp.json`; it never vendors their source. Installing the plugin brings the declared servers along, including into Claude Code on the web.
 
-## Install (sketch)
+## Install
 
-This repo is its own marketplace. Add it as a plugin marketplace in Claude Code, then install `epik`. The `.mcp.json` runs `epik-gh` via `uvx` from its repo; `gh` must be installed and authenticated (`gh auth login`), and in cloud sessions a setup script must install `gh` and provide a token.
+### Prerequisites
+
+- **Claude Code up to date** — type `/plugin` and confirm the command exists. If it doesn't, update Claude Code.
+- **`uv` installed** — the plugin launches `epik-gh` with `uvx`. See https://docs.astral.sh/uv/.
+- **`gh` installed and authenticated** — run `gh auth login`, verify with `gh auth status`. `epik-gh` delegates all GitHub auth to `gh`.
+- **`epik-gh` repo reachable** — `.mcp.json` fetches it from `github.com/wpm/epik-gh`. If that repo is private, make sure git can authenticate to it.
+
+### Step 0 — remove the old standalone epik-gh
+
+If you previously wired `epik-gh` into the desktop app by hand, remove it first. The plugin registers an MCP server *also* named `epik-gh`, and two same-named servers in one client collide (duplicate `mcp__epik-gh__*` tools).
+
+- Edit `~/Library/Application Support/Claude/claude_desktop_config.json` and delete the `epik-gh` block under `mcpServers`.
+- Optional cleanup of the old binary: `uv tool uninstall epik-gh`.
+
+That manual entry is a plain MCP registration, not a plugin, so `/plugin uninstall` does **not** apply to it.
+
+### Option A — quick local test (no marketplace)
+
+Fastest way to try it; loads the plugin for one session only:
+
+```bash
+claude --plugin-dir /Users/mcneill/Projects/Epik/epik-plugin
+```
+
+Iterate with `/reload-plugins` after edits. No marketplace or install step needed.
+
+### Option B — install from the local marketplace (persistent)
+
+This repo is its own single-entry marketplace.
+
+1. Add the marketplace — point at the plugin directory (it holds `.claude-plugin/marketplace.json`):
+
+   ```
+   /plugin marketplace add /Users/mcneill/Projects/Epik/epik-plugin
+   ```
+
+2. Install the plugin. The form is `plugin-name@marketplace-name`; here both are `epik`:
+
+   ```
+   /plugin install epik@epik
+   ```
+
+3. If it doesn't show up immediately, run `/reload-plugins`.
+
+After you commit later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` (or bump `version` in `plugin.json`) to pick them up.
+
+### Verify
+
+- `/help` lists the commands, namespaced: **`/epik:feature`** and **`/epik:issue`**.
+- The `epik-gh` tools (`mcp__epik-gh__*`) are available — try a read, e.g. ask for the repo's open issues.
+- A fresh session prints the Theory/Practice "which mode are you in" nudge from the SessionStart hook.
+
+### Cloud sessions (Claude Code on the web)
+
+A local-path marketplace isn't reachable from a cloud VM. To use Epik there, **push `epik-plugin` to GitHub** and declare it as a marketplace/plugin in the *project repo's* `.claude/settings.json`; the plugin and its MCP declaration then load at session start. The session's setup script must also `apt install -y gh` and provide a `GH_TOKEN`, since `gh` isn't pre-installed in the cloud.
 
 ## Open refinements (agreed, not yet applied)
 
