@@ -7,7 +7,17 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from . import issues, labels, projects, prs, raw, relationships, repos, runs
+from . import (
+    feature_launch,
+    issues,
+    labels,
+    projects,
+    prs,
+    raw,
+    relationships,
+    repos,
+    runs,
+)
 
 mcp = FastMCP(
     "epik-gh",
@@ -20,7 +30,17 @@ mcp = FastMCP(
 
 def _register_all() -> None:
     """Call register(mcp) for every tool module."""
-    for module in (issues, prs, runs, labels, repos, relationships, projects, raw):
+    for module in (
+        issues,
+        prs,
+        runs,
+        labels,
+        repos,
+        relationships,
+        projects,
+        raw,
+        feature_launch,
+    ):
         module.register(mcp)
 
 

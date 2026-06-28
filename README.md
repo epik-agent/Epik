@@ -78,3 +78,37 @@ To verify:
 ```bash
 gh auth status
 ```
+
+## Build module: `feature_launch`
+
+The build module is the Anthropic-side half of epik. It keeps its auth and state
+**separate** from the `gh` CLI used by the rest of the server. The `feature_launch`
+tool starts a remote feature build by firing a saved [Claude Code routine](https://claude.ai/code)
+via the routines API.
+
+When called with a feature issue number plus a base and target branch, it POSTs to
+the routine's fire endpoint and returns the URL of the cloud session it started.
+
+### One-time routine setup
+
+1. In the Claude Code web UI, create a routine (for example, a "feature runner")
+   that builds a feature when given a feature command.
+2. Add an **API trigger** to the routine. Its prompt should be the feature-command
+   body (the instruction your build follows). `feature_launch` sends the feature
+   issue number and branches as the trigger's `text`.
+3. Enable **"Allow unrestricted branch pushes"** for the repository so the routine
+   can push the build branch.
+4. Copy the routine's **id** and its **API token** — you'll set these as env vars.
+
+### Required environment variables
+
+These are read on every call and must be set in the environment the MCP server runs in:
+
+| Variable | Description |
+| --- | --- |
+| `EPIK_ROUTINE_ID` | The Claude Code routine id whose fire endpoint is called. |
+| `EPIK_ROUTINE_TOKEN` | The routine API bearer token. |
+
+If either is missing or empty, `feature_launch` raises a clear validation error
+naming the missing variable. Non-2xx responses and connection failures also raise
+clear errors.
