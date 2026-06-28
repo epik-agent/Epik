@@ -1,7 +1,11 @@
-"""GraphQL issue relationship tools for epik-gh.
+"""Issue relationship tools for epik-gh.
 
-These tools manage GitHub issue relationships (blocked-by, sub-issues) using
-the GraphQL API via `gh api graphql`.
+These tools manage GitHub issue relationships:
+
+* Blocked-by dependencies use the GitHub REST issue-dependencies API
+  (``repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by``).
+* Sub-issue hierarchy reads/writes use the GraphQL ``sub_issues`` surface, which
+  requires the ``GraphQL-Features: sub_issues`` request header.
 """
 
 from __future__ import annotations
@@ -15,9 +19,28 @@ from .errors import ValidationError
 from .runner import run_gh, split_repo
 
 
-def _gql(query: str, **variables: str | int) -> dict[str, Any]:
-    """Run a GraphQL query/mutation, passing variables as individual -F flags."""
+def _gql(
+    query: str,
+    *,
+    features: str | None = None,
+    **variables: str | int,
+) -> dict[str, Any]:
+    """Run a GraphQL query/mutation, passing variables as individual -F flags.
+
+    Args:
+        query: The GraphQL query or mutation document.
+        features: Optional value for the ``GraphQL-Features`` header. When given,
+            ``-H "GraphQL-Features: <features>"`` is appended to the call (this is
+            required for the sub-issues surface, e.g. ``features="sub_issues"``).
+        **variables: GraphQL variables. Integers are passed with ``-F`` (so gh
+            coerces them to numbers); strings are passed with ``-f``.
+
+    Returns:
+        The parsed JSON response from gh.
+    """
     args: list[str] = ["api", "graphql", "-f", f"query={query}"]
+    if features:
+        args.extend(["-H", f"GraphQL-Features: {features}"])
     for key, value in variables.items():
         # -F coerces integers; -f keeps strings
         flag = "-F" if isinstance(value, int) else "-f"
@@ -45,6 +68,26 @@ def _issue_node_id(repo: str, issue_number: int) -> str:
     return str(node_id)
 
 
+def _issue_rest_id(repo: str, issue_number: int) -> int:
+    """Look up the numeric REST id for an issue.
+
+    This is the ``id`` field from ``GET repos/{owner}/{repo}/issues/{number}``,
+    which is globally unique (NOT the per-repo issue number and NOT the GraphQL
+    node id). It is the identifier accepted by the issue-dependencies API.
+    """
+    owner, name = split_repo(repo)
+    _, data, _ = run_gh(
+        "api",
+        f"repos/{owner}/{name}/issues/{issue_number}",
+        json_fields=["id"],
+    )
+    result: dict[str, Any] = data if isinstance(data, dict) else {}
+    rest_id = result.get("id")
+    if rest_id is None:
+        raise ValidationError(f"Issue #{issue_number} not found in {repo}")
+    return int(rest_id)
+
+
 def issue_set_blocked_by(
     repo: str,
     issue_number: int,
@@ -53,8 +96,9 @@ def issue_set_blocked_by(
 ) -> dict[str, Any]:
     """Mark an issue as blocked by another issue.
 
-    Uses the GitHub GraphQL API to create a blocked-by relationship between
-    two issues, optionally in different repositories.
+    Uses the GitHub REST issue-dependencies API. The blocking issue's numeric
+    REST id is resolved first (which is globally unique, so this also handles the
+    cross-repo case).
 
     Args:
         repo: Repository in owner/name format for the blocked issue.
@@ -65,28 +109,25 @@ def issue_set_blocked_by(
     Returns:
         Dict confirming the relationship was created.
     """
-    issue_id = _issue_node_id(repo, issue_number)
-    blocking_id = _issue_node_id(blocked_by_repo or repo, blocked_by_number)
-    mutation = """
-    mutation($issueId: ID!, $blockingId: ID!) {
-      addIssueRelationship(input: {
-        issueId: $issueId,
-        relatedIssueId: $blockingId,
-        relationshipType: BLOCKED_BY
-      }) {
-        issueRelationship {
-          type
-        }
-      }
-    }
-    """
-    _gql(mutation, issueId=issue_id, blockingId=blocking_id)
+    owner, name = split_repo(repo)
+    blocking_repo = blocked_by_repo or repo
+    blocking_id = _issue_rest_id(blocking_repo, blocked_by_number)
+    payload = json.dumps({"issue_id": blocking_id})
+    run_gh(
+        "api",
+        f"repos/{owner}/{name}/issues/{issue_number}/dependencies/blocked_by",
+        "-X",
+        "POST",
+        "--input",
+        "-",
+        input_data=payload,
+    )
     return {
         "issue": issue_number,
         "blocked_by": blocked_by_number,
         "relationship": "blocked_by",
         "repo": repo,
-        "blocked_by_repo": blocked_by_repo or repo,
+        "blocked_by_repo": blocking_repo,
     }
 
 
@@ -98,6 +139,9 @@ def issue_remove_blocked_by(
 ) -> dict[str, Any]:
     """Remove a blocked-by relationship between two issues.
 
+    Uses the GitHub REST issue-dependencies API. The blocking issue's numeric
+    REST id is resolved first (globally unique, so cross-repo works too).
+
     Args:
         repo: Repository in owner/name format for the blocked issue.
         issue_number: The issue that was being blocked.
@@ -107,60 +151,64 @@ def issue_remove_blocked_by(
     Returns:
         Dict confirming the relationship was removed.
     """
-    issue_id = _issue_node_id(repo, issue_number)
-    blocking_id = _issue_node_id(blocked_by_repo or repo, blocked_by_number)
-    mutation = """
-    mutation($issueId: ID!, $blockingId: ID!) {
-      removeIssueRelationship(input: {
-        issueId: $issueId,
-        relatedIssueId: $blockingId,
-        relationshipType: BLOCKED_BY
-      }) {
-        clientMutationId
-      }
-    }
-    """
-    _gql(mutation, issueId=issue_id, blockingId=blocking_id)
+    owner, name = split_repo(repo)
+    blocking_repo = blocked_by_repo or repo
+    blocking_id = _issue_rest_id(blocking_repo, blocked_by_number)
+    run_gh(
+        "api",
+        f"repos/{owner}/{name}/issues/{issue_number}/dependencies/blocked_by/{blocking_id}",
+        "-X",
+        "DELETE",
+    )
     return {
         "issue": issue_number,
         "removed_blocked_by": blocked_by_number,
         "repo": repo,
-        "blocked_by_repo": blocked_by_repo or repo,
+        "blocked_by_repo": blocking_repo,
     }
 
 
 def issue_list_relationships(repo: str, issue_number: int) -> dict[str, Any]:
-    """List all relationships for an issue (blocked-by and sub-issues).
+    """List the sub-issue hierarchy for an issue (parent and sub-issues).
+
+    Uses the GraphQL ``sub_issues`` surface (requires the
+    ``GraphQL-Features: sub_issues`` header).
 
     Args:
         repo: Repository in owner/name format.
         issue_number: The issue number to query.
 
     Returns:
-        Dict with 'tracked_in' and 'tracked_issues' lists.
+        Dict with ``parent`` (or None) and ``sub_issues`` (a list).
     """
     owner, name = split_repo(repo)
     query = """
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         issue(number: $number) {
-          trackedInIssues(first: 25) {
-            nodes { number title url }
-          }
-          trackedIssues(first: 25) {
-            nodes { number title url }
+          parent { number title url }
+          subIssues(first: 50) {
+            nodes { number title url state }
           }
         }
       }
     }
     """
-    result = _gql(query, owner=owner, name=name, number=issue_number)
-    issue_data = result.get("data", {}).get("repository", {}).get("issue", {})
+    result = _gql(
+        query,
+        features="sub_issues",
+        owner=owner,
+        name=name,
+        number=issue_number,
+    )
+    issue_data = result.get("data", {}).get("repository", {}).get("issue", {}) or {}
+    parent = issue_data.get("parent")
+    sub_issues = issue_data.get("subIssues", {}).get("nodes", [])
     return {
         "issue_number": issue_number,
         "repo": repo,
-        "tracked_in": issue_data.get("trackedInIssues", {}).get("nodes", []),
-        "tracked_issues": issue_data.get("trackedIssues", {}).get("nodes", []),
+        "parent": parent,
+        "sub_issues": sub_issues,
     }
 
 
@@ -168,6 +216,9 @@ def issue_add_sub_issue(
     repo: str, parent_issue_number: int, sub_issue_number: int
 ) -> dict[str, Any]:
     """Add a sub-issue to a parent issue.
+
+    Uses the GraphQL ``addSubIssue`` mutation (requires the
+    ``GraphQL-Features: sub_issues`` header).
 
     Args:
         repo: Repository in owner/name format.
@@ -187,7 +238,7 @@ def issue_add_sub_issue(
       }
     }
     """
-    _gql(mutation, parentId=parent_id, subId=sub_id)
+    _gql(mutation, features="sub_issues", parentId=parent_id, subId=sub_id)
     return {
         "parent": parent_issue_number,
         "sub_issue": sub_issue_number,
@@ -199,6 +250,9 @@ def issue_remove_sub_issue(
     repo: str, parent_issue_number: int, sub_issue_number: int
 ) -> dict[str, Any]:
     """Remove a sub-issue from a parent issue.
+
+    Uses the GraphQL ``removeSubIssue`` mutation (requires the
+    ``GraphQL-Features: sub_issues`` header).
 
     Args:
         repo: Repository in owner/name format.
@@ -218,7 +272,7 @@ def issue_remove_sub_issue(
       }
     }
     """
-    _gql(mutation, parentId=parent_id, subId=sub_id)
+    _gql(mutation, features="sub_issues", parentId=parent_id, subId=sub_id)
     return {
         "parent": parent_issue_number,
         "removed_sub_issue": sub_issue_number,
@@ -236,7 +290,7 @@ def register(server: FastMCP) -> None:
         blocked_by_number: int,
         blocked_by_repo: str | None = None,
     ) -> dict[str, Any]:
-        """Mark an issue as blocked by another issue using the GitHub GraphQL API.
+        """Mark an issue as blocked by another issue.
 
         Args:
             repo: Repository in owner/name format for the blocked issue.
@@ -275,7 +329,7 @@ def register(server: FastMCP) -> None:
 
     @server.tool()
     def tool_issue_list_relationships(repo: str, issue_number: int) -> dict[str, Any]:
-        """List all relationships for an issue (blocked-by and sub-issues).
+        """List the sub-issue hierarchy for an issue (parent and sub-issues).
 
         Args:
             repo: Repository in owner/name format.
