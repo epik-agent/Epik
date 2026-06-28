@@ -117,3 +117,40 @@ def run_gh(
         stderr=stderr,
         exit_code=exit_code,
     )
+
+
+def run_gh_raw(*args: str) -> tuple[int, str, str]:
+    """Run an arbitrary gh command without raising on failure.
+
+    Unlike :func:`run_gh`, this never raises or classifies errors. It returns the
+    raw exit code, stdout, and stderr so callers can surface failures cleanly.
+    FileNotFoundError and timeouts are mapped to a non-zero exit code with a
+    message in stderr.
+
+    Args:
+        *args: Positional arguments passed directly to gh, e.g.
+            "release", "list", "--repo", "owner/repo".
+
+    Returns:
+        (exit_code, stdout, stderr). exit_code is 0 on success.
+    """
+    cmd: list[str] = ["gh", *args]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        return (
+            -1,
+            "",
+            "gh CLI not found. Install it from https://cli.github.com/",
+        )
+    except subprocess.TimeoutExpired:
+        return (-1, "", "gh command timed out after 60 seconds")
+
+    stdout = result.stdout.decode(errors="replace").strip()
+    stderr = result.stderr.decode(errors="replace").strip()
+    return (result.returncode, stdout, stderr)
