@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import (
     feature_launch,
+    feature_status,
     issues,
     labels,
     projects,
@@ -40,6 +41,7 @@ def _register_all() -> None:
         projects,
         raw,
         feature_launch,
+        feature_status,
     ):
         module.register(mcp)
 

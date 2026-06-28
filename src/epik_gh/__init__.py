@@ -16,6 +16,9 @@ from .errors import (
 # Feature launch (build module)
 from .feature_launch import feature_launch
 
+# Feature status aggregator
+from .feature_status import feature_status
+
 # Issues
 from .issues import (
     issue_close,
@@ -68,6 +71,7 @@ __all__ = [
     "RateLimitError",
     "ValidationError",
     "feature_launch",
+    "feature_status",
     "gh_raw",
     "issue_add_sub_issue",
     "issue_close",
