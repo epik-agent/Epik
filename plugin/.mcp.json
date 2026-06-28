@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "epik-gh": {
+    "EpikMCP": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/wpm/epik-gh.git", "epik-gh"]
+      "args": ["--from", "git+https://github.com/wpm/EpikMCP.git", "EpikMCP"]
     }
   }
 }
