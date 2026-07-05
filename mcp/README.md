@@ -77,27 +77,27 @@ one-time routine setup and required environment variables.
 ### Run directly with uvx
 
 ```bash
-uvx --from git+https://github.com/wpm/EpikMCP.git epik-mcp
+uvx --from git+https://github.com/epik-agent/Epik.git#subdirectory=mcp epik-mcp
 ```
 
 ### Install as a uv tool
 
 ```bash
-uv tool install git+https://github.com/wpm/EpikMCP.git
+uv tool install git+https://github.com/epik-agent/Epik.git#subdirectory=mcp
 ```
 
 Or clone and install locally:
 
 ```bash
-git clone https://github.com/wpm/EpikMCP.git
-cd EpikMCP
+git clone https://github.com/epik-agent/Epik.git
+cd Epik/mcp
 uv tool install .
 ```
 
 ### With pip
 
 ```bash
-pip install git+https://github.com/wpm/EpikMCP.git
+pip install git+https://github.com/epik-agent/Epik.git#subdirectory=mcp
 ```
 
 ## Configuring as a CoWork / Claude MCP server
@@ -112,7 +112,7 @@ Add the following to your Claude MCP config (for example,
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wpm/EpikMCP.git",
+        "git+https://github.com/epik-agent/Epik.git#subdirectory=mcp",
         "epik-mcp"
       ],
       "env": {

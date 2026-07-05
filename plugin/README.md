@@ -7,10 +7,9 @@ A *feature* is a unit of code implemented in one or more stories (issues).
 ## What's here
 
 ```
-epik-plugin/
+plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
-    marketplace.json    # single-entry marketplace (this repo installs itself)
   commands/
     feature.md          # orchestrate a feature (Agent Teams, dependency order)
     issue.md            # implement one issue end to end
@@ -22,7 +21,7 @@ epik-plugin/
 
 ## Design in one paragraph
 
-The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (separate repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along, including into Claude Code on the web.
+The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along, including into Claude Code on the web.
 
 ## Install
 
@@ -31,7 +30,7 @@ The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (separate repo) is
 - **Claude Code up to date** — type `/plugin` and confirm the command exists. If it doesn't, update Claude Code.
 - **`uv` installed** — the plugin launches `EpikMCP` with `uvx`. See https://docs.astral.sh/uv/.
 - **`gh` installed and authenticated** — run `gh auth login`, verify with `gh auth status`. `EpikMCP` delegates all GitHub auth to `gh`.
-- **`EpikMCP` repo reachable** — `.mcp.json` fetches it from `github.com/wpm/EpikMCP`. If that repo is private, make sure git can authenticate to it.
+- **`Epik` repo reachable** — `.mcp.json` fetches the server from `github.com/epik-agent/Epik` (subdirectory `mcp`). If that repo is private, make sure git can authenticate to it.
 
 ### Step 0 — remove any same-named manual MCP registration
 
@@ -46,19 +45,19 @@ A manual entry is a plain MCP registration, not a plugin, so `/plugin uninstall`
 Fastest way to try it; loads the plugin for one session only:
 
 ```bash
-claude --plugin-dir /path/to/epik-plugin
+claude --plugin-dir /path/to/Epik/plugin
 ```
 
 Iterate with `/reload-plugins` after edits. No marketplace or install step needed.
 
 ### Option B — install from the local marketplace (persistent)
 
-This repo is its own single-entry marketplace.
+The repo root is a single-entry marketplace (`.claude-plugin/marketplace.json` points at `./plugin`).
 
-1. Add the marketplace — point at the plugin directory (it holds `.claude-plugin/marketplace.json`):
+1. Add the marketplace — from GitHub or a local clone's root:
 
    ```
-   /plugin marketplace add /path/to/epik-plugin
+   /plugin marketplace add epik-agent/Epik
    ```
 
 2. Install the plugin. The form is `plugin-name@marketplace-name`; here both are `epik`:
@@ -79,7 +78,7 @@ After you commit later changes to the plugin, run `/plugin marketplace update ep
 
 ### Cloud sessions (Claude Code on the web)
 
-A local-path marketplace isn't reachable from a cloud VM. To use Epik there, **push `epik-plugin` to GitHub** and declare it as a marketplace/plugin in the *project repo's* `.claude/settings.json`; the plugin and its MCP declaration then load at session start. The session's setup script must also `apt install -y gh` and provide a `GH_TOKEN`, since `gh` isn't pre-installed in the cloud.
+A local-path marketplace isn't reachable from a cloud VM. To use Epik there, declare `epik-agent/Epik` as a marketplace/plugin in the *project repo's* `.claude/settings.json`; the plugin and its MCP declaration then load at session start. The session's setup script must also `apt install -y gh` and provide a `GH_TOKEN`, since `gh` isn't pre-installed in the cloud.
 
 ## Usage
 

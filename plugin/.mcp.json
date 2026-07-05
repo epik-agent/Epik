@@ -2,7 +2,7 @@
   "mcpServers": {
     "EpikMCP": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/wpm/EpikMCP.git", "EpikMCP"]
+      "args": ["--from", "git+https://github.com/epik-agent/Epik.git#subdirectory=mcp", "epik-mcp"]
     }
   }
 }

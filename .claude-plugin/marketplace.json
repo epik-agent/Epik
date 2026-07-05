@@ -1,10 +1,10 @@
 {
   "name": "epik",
-  "owner": { "name": "Bill McNeill", "url": "https://github.com/wpm" },
+  "owner": { "name": "Bill McNeill", "url": "https://github.com/epik-agent" },
   "plugins": [
     {
       "name": "epik",
-      "source": "./",
+      "source": "./plugin",
       "description": "Manager-mode feature development on GitHub."
     }
   ]

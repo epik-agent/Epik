@@ -18,7 +18,7 @@ def gh_raw(args: list[str]) -> dict[str, Any]:
     """Run an arbitrary gh command and return its result without raising.
 
     This is an escape hatch for gh operations that do not have a dedicated tool
-    (e.g. ``["release", "list", "--repo", "wpm/EpikMCP"]``). Pass the arguments
+    (e.g. ``["release", "list", "--repo", "epik-agent/Epik"]``). Pass the arguments
     as a list to avoid shell-quoting bugs; do not pass a single command string.
 
     Args:
@@ -44,7 +44,7 @@ def register(server: FastMCP) -> None:
         """Run an arbitrary gh command and return its result without raising.
 
         Escape hatch for gh operations without a dedicated tool (e.g.
-        ["release", "list", "--repo", "wpm/EpikMCP"]). Pass arguments as a list
+        ["release", "list", "--repo", "epik-agent/Epik"]). Pass arguments as a list
         to avoid shell-quoting bugs; do not pass a single command string.
 
         Args:
