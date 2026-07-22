@@ -25,24 +25,11 @@ The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this 
 
 ## Install
 
-### Prerequisites
+For normal installation — prerequisites, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installation). The sections below only cover development setups.
 
-- **Claude Code up to date** — type `/plugin` and confirm the command exists. If it doesn't, update Claude Code.
-- **`uv` installed** — the plugin launches `EpikMCP` with `uvx`. See https://docs.astral.sh/uv/.
-- **`gh` installed and authenticated** — run `gh auth login`, verify with `gh auth status`. `EpikMCP` delegates all GitHub auth to `gh`.
-- **`Epik` repo reachable** — `.mcp.json` fetches the server from `github.com/epik-agent/Epik` (subdirectory `mcp`). If that repo is private, make sure git can authenticate to it.
+### Developing the plugin — quick local test (no marketplace)
 
-### Step 0 — remove any same-named manual MCP registration
-
-If you previously wired an `EpikMCP` server into the desktop app by hand, remove it first. The plugin registers an MCP server named `EpikMCP`, and two same-named servers in one client collide (duplicate `mcp__EpikMCP__*` tools).
-
-- Edit `~/Library/Application Support/Claude/claude_desktop_config.json` and delete the `EpikMCP` block under `mcpServers`.
-
-A manual entry is a plain MCP registration, not a plugin, so `/plugin uninstall` does **not** apply to it.
-
-### Option A — quick local test (no marketplace)
-
-Fastest way to try it; loads the plugin for one session only:
+Fastest way to try changes; loads the plugin for one session only:
 
 ```bash
 claude --plugin-dir /path/to/Epik/plugin
@@ -50,31 +37,18 @@ claude --plugin-dir /path/to/Epik/plugin
 
 Iterate with `/reload-plugins` after edits. No marketplace or install step needed.
 
-### Option B — install from the local marketplace (persistent)
+### Developing the plugin — install from a local clone (persistent)
 
-The repo root is a single-entry marketplace (`.claude-plugin/marketplace.json` points at `./plugin`).
+The repo root is a single-entry marketplace, so a local clone works exactly like the GitHub install in the root README — just add the clone's root directory instead of `epik-agent/Epik`:
 
-1. Add the marketplace — from GitHub or a local clone's root:
+```
+/plugin marketplace add /path/to/Epik
+/plugin install epik@epik
+```
 
-   ```
-   /plugin marketplace add epik-agent/Epik
-   ```
+After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` (or bump `version` in `plugin.json`) to pick them up.
 
-2. Install the plugin. The form is `plugin-name@marketplace-name`; here both are `epik`:
-
-   ```
-   /plugin install epik@epik
-   ```
-
-3. If it doesn't show up immediately, run `/reload-plugins`.
-
-After you commit later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` (or bump `version` in `plugin.json`) to pick them up.
-
-### Verify
-
-- `/help` lists the commands, namespaced: **`/epik:feature`** and **`/epik:issue`**.
-- The `EpikMCP` tools (`mcp__EpikMCP__*`) are available — try a read, e.g. ask for the repo's open issues.
-- A fresh session prints the Theory/Practice "which mode are you in" nudge from the SessionStart hook.
+Note: if an `EpikMCP` server is also registered by hand in the same client (e.g. an entry you added to a `.mcp.json` outside the plugin), the two same-named servers collide as duplicate `mcp__EpikMCP__*` tools. Remove the manual entry — `/plugin uninstall` doesn't touch plain MCP registrations.
 
 ### Cloud sessions (Claude Code on the web)
 
