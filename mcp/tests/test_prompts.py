@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from epik_mcp.prompts import register, setup_epik, summon_epik
+from epik_mcp.prompts import init_epik, register, summon_epik
 from epik_mcp.resources import SOURCES, load
 
 MCP_DIR = Path(__file__).resolve().parent.parent
@@ -33,19 +33,55 @@ def test_summon_epik_combines_persona_and_philosophy():
     assert text.index("Hello, I'm Epik") < text.index("Programming as Theory Building")
 
 
-def test_setup_epik_is_the_doctor():
-    text = setup_epik()
-    assert "detect" in text and "report" in text
+def test_init_epik_is_the_convergence_dialogue():
+    text = init_epik()
+    assert "idempotent convergence" in text
+    # The former doctor's behaviour is retained in full.
+    assert "Detect everything before changing anything" in text
     assert "EPIK_BUILD_GH_TOKEN" in text
 
 
-async def test_register_exposes_both_prompts():
+def test_init_epik_carries_the_project_spec():
+    """Creation and repair share one spec, so the prompt must contain all of it."""
+    text = init_epik()
+    for item in (
+        ".claude/settings.json",
+        "CLAUDE.md",
+        ".claude/loop.md",
+        "docs/design-history/",
+        "epik-build.yml",
+        "~/.epik/config.json",
+    ):
+        assert item in text, f"init spec is missing {item}"
+
+
+async def test_register_exposes_the_prompts():
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("test")
     register(server)
     names = {p.name for p in await server.list_prompts()}
-    assert {"summon-epik", "setup-epik"} <= names
+    assert {"summon-epik", "init-epik", "setup-epik"} <= names
+
+
+async def test_setup_epik_is_an_alias_of_init_epik():
+    """Plugin-less surfaces were told to reach for setup-epik; keep it working."""
+    from mcp.server.mcpserver import MCPServer
+
+    server = MCPServer("test")
+    register(server)
+    rendered = {
+        name: await server.get_prompt(name) for name in ("init-epik", "setup-epik")
+    }
+    texts = {
+        name: "".join(
+            message.content.text
+            for message in result.messages
+            if hasattr(message.content, "text")
+        )
+        for name, result in rendered.items()
+    }
+    assert texts["setup-epik"] == texts["init-epik"] == init_epik()
 
 
 @pytest.mark.skipif(
