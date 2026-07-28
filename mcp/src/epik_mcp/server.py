@@ -17,6 +17,7 @@ from .feature_status import register as register_feature_status
 from .issues import register as register_issues
 from .labels import register as register_labels
 from .projects import register as register_projects
+from .prompts import register as register_prompts
 from .prs import register as register_prs
 from .raw import register as register_raw
 from .relationships import register as register_relationships
@@ -48,6 +49,7 @@ def _register_all() -> None:
         register_raw,
         register_feature_launch,
         register_feature_status,
+        register_prompts,
     ):
         register(mcp)
 
