@@ -1,6 +1,6 @@
 # Epik
 
-_You say it. We build it._
+_You say it. We make it._
 
 Manager-mode feature development on GitHub: converge on a design, author the
 feature's issue graph, and launch autonomous builds on Claude Code on the web.
