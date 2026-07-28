@@ -4,9 +4,90 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from epik_mcp.repos import repo_default_branch, repo_get
+from epik_mcp.repos import _REPO_FIELDS, repo_default_branch, repo_get
 
 REPO = "owner/repo"
+
+# Field names accepted by `gh repo view --json`, per `gh repo view --json` with no
+# value. Guards against typos like `fullName`, which gh rejects outright.
+GH_REPO_VIEW_FIELDS = {
+    "archivedAt",
+    "assignableUsers",
+    "codeOfConduct",
+    "contactLinks",
+    "createdAt",
+    "defaultBranchRef",
+    "deleteBranchOnMerge",
+    "description",
+    "diskUsage",
+    "forkCount",
+    "fundingLinks",
+    "hasDiscussionsEnabled",
+    "hasIssuesEnabled",
+    "hasProjectsEnabled",
+    "hasWikiEnabled",
+    "homepageUrl",
+    "id",
+    "isArchived",
+    "isBlankIssuesEnabled",
+    "isEmpty",
+    "isFork",
+    "isInOrganization",
+    "isMirror",
+    "isPrivate",
+    "isSecurityPolicyEnabled",
+    "isTemplate",
+    "isUserConfigurationRepository",
+    "issueTemplates",
+    "issues",
+    "labels",
+    "languages",
+    "latestRelease",
+    "licenseInfo",
+    "mentionableUsers",
+    "mergeCommitAllowed",
+    "milestones",
+    "mirrorUrl",
+    "name",
+    "nameWithOwner",
+    "openGraphImageUrl",
+    "owner",
+    "parent",
+    "primaryLanguage",
+    "projects",
+    "projectsV2",
+    "pullRequestTemplates",
+    "pullRequests",
+    "pushedAt",
+    "rebaseMergeAllowed",
+    "repositoryTopics",
+    "securityPolicyUrl",
+    "squashMergeAllowed",
+    "sshUrl",
+    "stargazerCount",
+    "templateRepository",
+    "updatedAt",
+    "url",
+    "usesCustomOpenGraphImage",
+    "viewerCanAdminister",
+    "viewerDefaultCommitEmail",
+    "viewerDefaultMergeMethod",
+    "viewerHasStarred",
+    "viewerPermission",
+    "viewerPossibleCommitEmails",
+    "viewerSubscription",
+    "visibility",
+    "watchers",
+}
+
+
+def test_repo_fields_are_valid_gh_fields():
+    assert set(_REPO_FIELDS) <= GH_REPO_VIEW_FIELDS
+
+
+def test_repo_fields_use_name_with_owner():
+    assert "nameWithOwner" in _REPO_FIELDS
+    assert "fullName" not in _REPO_FIELDS
 
 
 def _mock_run(return_value):
@@ -16,7 +97,7 @@ def _mock_run(return_value):
 def test_repo_get_happy_path():
     repo_data = {
         "name": "repo",
-        "fullName": "owner/repo",
+        "nameWithOwner": "owner/repo",
         "isPrivate": False,
         "url": "https://github.com/owner/repo",
     }

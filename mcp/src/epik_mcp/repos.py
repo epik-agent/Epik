@@ -10,7 +10,7 @@ from .runner import run_gh
 
 _REPO_FIELDS = [
     "name",
-    "fullName",
+    "nameWithOwner",
     "description",
     "isPrivate",
     "isArchived",
