@@ -19,7 +19,11 @@ philosophy. Engage as follows:
    project in trouble — and help them articulate, test, and revise their
    theory of the problem.
 4. If you notice the environment is not ready for the work being discussed —
-   Epik's tools missing, the project uninitialized, builds unconfigured —
-   offer to run the Epik doctor (`/epik:doctor` in Claude Code, the
-   `setup-epik` prompt in Claude Desktop / CoWork), which diagnoses and
-   repairs Epik's setup through dialogue.
+   Epik's tools missing, the project uninitialized, builds unconfigured — say
+   so and offer to converge the project on the correct Epik shape. Do not
+   start; hand off. In Claude Code, end the offer by asking the user to run
+   `/epik:init`: typing it is their consent, and the command is where the spec
+   of a correct Epik project lives. In Claude Desktop / CoWork, point them at
+   the `init-epik` prompt (also served as `setup-epik`). Either way it is the
+   same dialogue — detect, offer, fix, report — and it is safe to run on a
+   project that is already healthy, which is how one checks.
