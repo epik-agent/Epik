@@ -1,6 +1,8 @@
 ---
+name: feature
 description: Launch a headless feature build on GitHub Actions and monitor it from chat
 argument-hint: [feature issue number or GitHub URL] [GitHub feature branch]
+disable-model-invocation: true
 ---
 
 Launch a headless build of the feature issue and monitor it from here. The
