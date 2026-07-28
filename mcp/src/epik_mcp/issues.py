@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import ValidationError
 from .runner import run_gh
@@ -219,7 +219,7 @@ def issue_comment(repo: str, issue_number: int, body: str) -> dict[str, Any]:
     return {"url": url}
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all issue tools with the MCP server."""
 
     @server.tool(name="issue_list")

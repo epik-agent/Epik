@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import ValidationError
 from .runner import run_gh
@@ -78,7 +78,7 @@ def label_delete(repo: str, name: str, confirm: bool = True) -> dict[str, Any]:
     return {"deleted": name, "repo": repo}
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all label tools with the MCP server."""
 
     @server.tool(name="label_list")

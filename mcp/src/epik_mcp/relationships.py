@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import ValidationError
 from .runner import run_gh, split_repo
@@ -280,7 +280,7 @@ def issue_remove_sub_issue(
     }
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all issue relationship tools with the MCP server."""
 
     @server.tool(name="issue_set_blocked_by")

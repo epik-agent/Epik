@@ -1,6 +1,6 @@
 [project]
 name = "epik-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "EpikMCP: the unified plan (GitHub via gh) and build (launch feature builds) MCP for Epik"
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.28.1",
+    "mcp[cli]>=2.0.0,<3",
     "anyio>=4.14.1",
 ]
 

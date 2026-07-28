@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import ValidationError
 from .runner import run_gh
@@ -86,7 +86,7 @@ def pr_get(repo: str, pr_number: int) -> dict[str, Any]:
     return data  # type: ignore[return-value]
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all pull request tools with the MCP server."""
 
     @server.tool(name="pr_list")

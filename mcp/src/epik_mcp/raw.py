@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .runner import run_gh_raw
 
@@ -36,7 +36,7 @@ def gh_raw(args: list[str]) -> dict[str, Any]:
     }
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register the raw passthrough tool with the MCP server."""
 
     @server.tool(name="gh_raw")
