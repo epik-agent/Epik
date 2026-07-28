@@ -39,13 +39,12 @@ def test_setup_epik_is_the_doctor():
     assert "EPIK_BUILD_GH_TOKEN" in text
 
 
-def test_register_exposes_both_prompts():
+async def test_register_exposes_both_prompts():
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("test")
     register(server)
-    # MCPServer stores prompts in a manager keyed by name.
-    names = {p.name for p in server._prompt_manager.list_prompts()}
+    names = {p.name for p in await server.list_prompts()}
     assert {"summon-epik", "setup-epik"} <= names
 
 
@@ -60,7 +59,9 @@ def test_vendored_resources_match_plugin_sources():
         vendored = RESOURCES_DIR / name
         assert source.exists(), f"canonical source missing: {source_rel}"
         assert vendored.exists(), f"vendored copy missing: {name}"
-        assert vendored.read_text() == source.read_text(), (
+        assert vendored.read_text(encoding="utf-8") == source.read_text(
+            encoding="utf-8"
+        ), (
             f"{name} drifted from {source_rel}; "
             "run: uv run python scripts/sync_resources.py"
         )

@@ -33,7 +33,9 @@ def main() -> int:
         if not source.exists():
             print(f"missing canonical source: {source}", file=sys.stderr)
             return 1
-        in_sync = target.exists() and target.read_text() == source.read_text()
+        in_sync = target.exists() and target.read_text(
+            encoding="utf-8"
+        ) == source.read_text(encoding="utf-8")
         if in_sync:
             continue
         if check:
