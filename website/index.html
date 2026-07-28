@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Epik</title>
+  <meta name="description" content="You say it. We make it.">
+  <link rel="icon" href="brand/favicon.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#fafafa">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #fafafa;
+      --fg: #0a0a0a;
+      --muted: #737373;
+      --faint: #a3a3a3;
+      --accent: #00b377;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100svh;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--bg);
+      color: var(--fg);
+      font-family: "Geist", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.25rem;
+      padding: 1rem;
+      text-align: center;
+    }
+    h1 {
+      font-size: 3.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+    hr {
+      width: 4rem;
+      border: none;
+      border-top: 2px solid var(--accent);
+    }
+    .tagline {
+      font-size: 1.25rem;
+      font-style: italic;
+      color: var(--muted);
+    }
+    .logo {
+      margin-top: 0.75rem;
+      height: 3rem;
+      width: 3rem;
+    }
+    .soon {
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    footer {
+      padding-bottom: 2rem;
+      text-align: center;
+      font-size: 0.875rem;
+      color: var(--faint);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Epik</h1>
+    <hr>
+    <p class="tagline">You say it. We make it.</p>
+    <img class="logo" src="brand/logo-mark-light.svg" alt="Epik logo">
+    <p class="soon">Coming soon</p>
+  </main>
+  <footer>
+    <p>&copy; <span id="year">2026</span> Epik</p>
+  </footer>
+  <script>
+    document.getElementById("year").textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>
