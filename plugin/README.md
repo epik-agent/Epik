@@ -13,7 +13,11 @@ plugin/
   skills/
     design/
       SKILL.md          # /epik:design — summon Epik as a design partner
+      persona.md        # canonical persona (vendored into EpikMCP as summon-epik)
       theory-and-practice.md
+    doctor/
+      SKILL.md          # /epik:doctor — Epik checks and repairs its own setup
+      doctor.md         # canonical doctor (vendored into EpikMCP as setup-epik)
     feature/
       SKILL.md          # /epik:feature — launch a headless feature build and monitor it
     init/
@@ -33,6 +37,8 @@ plugin/
 ## Design in one paragraph
 
 The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along, including into Claude Code on the web.
+
+One nuance: the persona and doctor texts are policy, owned here (`skills/design/persona.md`, `theory-and-practice.md`, `skills/doctor/doctor.md`), but the MCP *serves* them as the `summon-epik` and `setup-epik` prompts so plugin-less surfaces (Claude Desktop, CoWork) can summon Epik too. The server vendors copies (`mcp/scripts/sync_resources.py` syncs; CI fails on drift) — ownership stays with the plugin.
 
 ## Install
 
@@ -72,9 +78,10 @@ Two build skills, both invoked explicitly as slash commands namespaced under `ep
 - **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — launch a headless build of a feature: the set of related issues a feature issue points to. It sanity-checks the issue graph, calls the EpikMCP `feature_launch` tool to dispatch the repo's `epik-build.yml` GitHub Actions workflow (which runs the build on the feature branch — the repo needs that workflow plus an `ANTHROPIC_API_KEY` secret), then hands off to `/loop` to monitor via `feature_status` / `run_list`, interrupting only on needs-me events.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, open a pull request, drive it through `/review` and CI, merge into the target branch, close the issue, and clean up.
 
-Plus two explicitly invoked skills:
+Plus three explicitly invoked skills:
 
 - **`/epik:design`** — summon Epik as a software-design partner grounded in the Theory-and-Practice philosophy.
+- **`/epik:doctor`** — Epik checks and repairs its own setup: `gh` auth, project initialization, the headless-build workflow, build secrets, plugin health. Detect → offer → fix → report; only credential pastes are left to the human. (The same dialogue is available as the `setup-epik` MCP prompt in Desktop/CoWork.)
 - **`/epik:init`** — initialize the current directory as an Epik project. Epik detects what's missing, confirms with you, then writes `.claude/settings.json` (per-project enablement, merged into any existing settings — see [`templates/settings.json`](templates/settings.json)), a `CLAUDE.md` stub, `.claude/loop.md` (the build-monitoring `/loop` default), and a `docs/design-history/` scaffold; it can optionally create the GitHub repo using defaults from `~/.epik/config.json`. When Epik is summoned in a directory that isn't yet an Epik project, it offers to initialize it this way.
 
 The SessionStart hook prints a Theory/Practice nudge so you stay aware of which mode you're in: manager mode (delegated, autonomous feature builds) is safe only once the design has converged; while you're still discovering the design you're in theory-building mode and shouldn't delegate a build yet.

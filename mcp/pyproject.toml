@@ -1,6 +1,6 @@
 [project]
 name = "epik-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "EpikMCP: the unified plan (GitHub via gh) and build (launch feature builds) MCP for Epik"
 readme = "README.md"
 authors = [

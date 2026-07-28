@@ -2,196 +2,108 @@
 
 _You say it. We build it._
 
-Manager-mode feature development on GitHub: converge on a design, author the feature's issue graph, and launch autonomous builds on Claude Code on the web.
+Manager-mode feature development on GitHub: converge on a design, author the
+feature's issue graph, and launch autonomous builds on Claude Code on the web.
 
 ## Layout
 
-- [`mcp/`](mcp/README.md) — **EpikMCP**, the GitHub mechanism: an MCP server that authors the issue graph and reads status.
-- [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy layer: skills, hooks, and the declaration of the EpikMCP server.
+- [`mcp/`](mcp/README.md) — **EpikMCP**, the GitHub mechanism: an MCP server
+  that authors the issue graph, reads status, and carries Epik's prompts.
+- [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy
+  layer: skills, hooks, and the declaration of the EpikMCP server.
 
 ## Installation
 
-Epik is a plugin that brings an MCP server along with it. You do not install the server separately — installing the plugin is enough. (The only exception is Claude Desktop / CoWork, which can't load plugins; see [Using Epik from Claude Desktop / CoWork](#using-epik-from-claude-desktop--cowork) below.)
+These sections cover only what must happen before Epik can speak. Everything
+after that — checking `gh` auth, initializing a project, configuring headless
+builds — Epik does itself, in conversation (see [Summoning Epik](#summoning-epik)).
 
-### Prerequisites
+### Claude Code
 
-Work through these in order. Each has a check you can run to confirm it before moving on.
-
-1. **Claude Code**, current version. Check: start `claude` and type `/plugin` — the command should exist. If it doesn't, update Claude Code first.
-
-2. **The `gh` CLI, installed and logged in.** Epik does all of its GitHub reading and writing through `gh`, using whatever account you log it into.
-
-   ```bash
-   # install (macOS)
-   brew install gh
-
-   # log in — follow the prompts
-   gh auth login
-
-   # check
-   gh auth status
-   ```
-
-   You should see `✓ Logged in to github.com account <you>`.
-
-3. **`uv`**, the Python package runner. The plugin uses its `uvx` command to download and run the EpikMCP server automatically — you never install the server yourself.
-
-   ```bash
-   # install (macOS)
-   brew install uv
-
-   # check
-   uvx --version
-   ```
-
-### Install the plugin
-
-Run these two commands **inside a Claude Code session** (they are slash commands, not shell commands):
+You need [Claude Code](https://claude.com/claude-code) (current version), the
+[`gh` CLI](https://cli.github.com/) logged in (`gh auth login`), and
+[`uv`](https://docs.astral.sh/uv/) (its `uvx` command runs the EpikMCP server
+for you). Then, inside a Claude Code session:
 
 ```
 /plugin marketplace add epik-agent/Epik
-```
-
-This registers this GitHub repository as a plugin *marketplace* — a catalog Claude Code can install plugins from. `epik-agent/Epik` is the repository's GitHub `owner/name`; it's the same for everyone (only change it if you're installing from your own fork). You should see:
-
-```
-Successfully added marketplace: epik
-```
-
-Then:
-
-```
 /plugin install epik@epik
-```
-
-The form is `plugin-name@marketplace-name`. This repo is a single-entry marketplace named `epik` containing one plugin also named `epik` — hence the doubled name. (Both names come from [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) in this repo, not from anything on your machine.) You should see:
-
-```
-✓ Installed epik. Run /reload-plugins to apply.
-```
-
-Do what it says:
-
-```
 /reload-plugins
 ```
 
-### Verify it worked
+(`epik-agent/Epik` is this repository; the doubled `epik@epik` is
+`plugin@marketplace`, both named in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).)
 
-In the same session:
+To update later: `/plugin marketplace update epik` then `/reload-plugins`.
+To uninstall: `/plugin uninstall epik@epik` then `/plugin marketplace remove epik`.
 
-- `/help` lists two new commands, **`/epik:feature`** and **`/epik:issue`**.
-- Ask Claude something like *"list the open issues in this repo"* — it should answer via the `EpikMCP` tools (you'll see tool calls named `mcp__…EpikMCP__issue_list` and similar).
+### Claude Desktop / CoWork
 
-That's it for Claude Code. Day-to-day usage is described in the [plugin README](plugin/README.md#usage).
-
-### Per-project enablement (enrolling collaborators)
-
-The install above is **user-scoped**: it registers the marketplace and plugin for *you*, on your machine, across all your projects. To make a *project* self-installing — so every collaborator gets Epik without running any commands — check a `.claude/settings.json` into the project repo containing:
+Claude Desktop (including CoWork sessions) doesn't load Claude Code plugins;
+it gets Epik from the EpikMCP server directly. Add the server to the desktop
+app's config file — `~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows — using
+the absolute path to `uvx` (`which uvx`), and keeping any other servers
+already in the block:
 
 ```json
 {
-  "extraKnownMarketplaces": {
-    "epik": {
-      "source": {
-        "source": "github",
-        "repo": "epik-agent/Epik"
+  "mcpServers": {
+    "EpikMCP": {
+      "command": "/path/to/uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/epik-agent/Epik.git#subdirectory=mcp",
+        "epik-mcp"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/path/to/uvx-directory:/usr/bin:/bin:/usr/sbin:/sbin"
       }
     }
-  },
-  "enabledPlugins": {
-    "epik@epik": true
   }
 }
 ```
 
-`extraKnownMarketplaces` registers this GitHub repository as a marketplace named `epik`; `enabledPlugins` turns on the `epik` plugin from it (the `plugin@marketplace` form, same as `/plugin install`). This file is the whole enrollment mechanism — there is no install script. The flow for a collaborator is:
+Absolute paths matter because the desktop app launches servers with a minimal
+`PATH`; `env.PATH` must include the directories containing `uvx` and `gh`.
+Quit and relaunch the desktop app, then start a **new** conversation.
 
-1. **Clone** the project repo (the settings file comes with it).
-2. **Trust** the folder when Claude Code asks on first launch.
-3. **Accept the prompt** to install the `epik` marketplace and plugin — Claude Code offers this automatically because of the checked-in settings.
+## Summoning Epik
 
-If the project already has a `.claude/settings.json`, merge the two keys into it rather than replacing the file. The canonical copy of this snippet lives in the plugin at [`plugin/templates/settings.json`](plugin/templates/settings.json); the `epik:init` skill writes it into a project for you.
+| Surface | Gesture |
+|---|---|
+| Claude Code (CLI, desktop app, web, IDE) | `/epik:design` |
+| Claude Desktop / CoWork | **+** (attach) → **summon-epik** → send |
 
-This also enables Epik in cloud sessions (Claude Code on the web) for that project — see [Cloud sessions](plugin/README.md#cloud-sessions-claude-code-on-the-web) for the extra setup-script requirements there.
+Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you
+aren't talking to Epik.
 
-### Updating
+From there, everything is dialogue. In particular, Epik can check and repair
+its own setup — `gh` authentication, project initialization, the headless
+build workflow and its secrets, plugin health — via the **doctor**:
+`/epik:doctor` in Claude Code, or the **setup-epik** prompt in
+Desktop/CoWork. Summon the doctor whenever something seems missing; it
+diagnoses, offers fixes, and leaves you only the steps a human must do
+(pasting credentials).
 
-When a new version of Epik is pushed to GitHub:
+To make a project self-installing for collaborators — clone, trust the
+folder, accept the install prompt, done — ask Epik to initialize it
+(`/epik:init`). That writes the project's `.claude/settings.json` enablement
+and scaffolding; the doctor will offer this too when it finds a project
+uninitialized.
 
-```
-/plugin marketplace update epik
-/reload-plugins
-```
+## Troubleshooting the bootstrap
 
-### Uninstalling
+Epik's doctor handles problems that arise once Epik can speak. Only failures
+*of the bootstrap itself* need this section:
 
-```
-/plugin uninstall epik@epik
-/plugin marketplace remove epik
-```
+**`/plugin marketplace add` fails with `JSON Parse error`**
+Claude Code's own marketplace registry is corrupt (often a stray trailing
+comma). Check `python3 -m json.tool ~/.claude/plugins/known_marketplaces.json`
+and fix the syntax it points at. If it says the name `epik` is already in
+use, `/plugin marketplace remove epik` and add it again.
 
-## Using Epik from Claude Desktop / CoWork
-
-Claude Desktop (including CoWork sessions) doesn't load Claude Code plugins, so the plugin install above does nothing for it. Instead, register the EpikMCP server directly in the desktop app's config file. CoWork sessions then reach it as a bridged local tool.
-
-1. **Find the config file:**
-   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-2. **Find the absolute path to `uvx`:**
-
-   ```bash
-   which uvx
-   ```
-
-   You need the absolute path because the desktop app launches servers with a minimal `PATH` that usually doesn't include wherever `uvx` lives.
-
-3. **Add EpikMCP under `mcpServers`** (replace both `/path/to/uvx` placeholders with your answer from step 2, and keep any other servers already in the block):
-
-   ```json
-   {
-     "mcpServers": {
-       "EpikMCP": {
-         "command": "/path/to/uvx",
-         "args": [
-           "--from",
-           "git+https://github.com/epik-agent/Epik.git#subdirectory=mcp",
-           "epik-mcp"
-         ],
-         "env": {
-           "PATH": "/opt/homebrew/bin:/path/to/uvx-directory:/usr/bin:/bin:/usr/sbin:/sbin"
-         }
-       }
-     }
-   }
-   ```
-
-   The `env.PATH` line matters for the same minimal-`PATH` reason: it lets the server find the `gh` CLI (installed at `/opt/homebrew/bin/gh` by Homebrew on Apple Silicon). Include the directory containing `uvx` and the directory containing `gh`.
-
-4. **Quit and relaunch the Claude desktop app**, then start a **new** CoWork task. Existing sessions don't pick up servers started after they connected.
-
-To also launch headless feature builds from Desktop/CoWork (the `feature_launch` tool), the target repository needs the `epik-build.yml` GitHub Actions workflow and an `ANTHROPIC_API_KEY` repository secret — see [Build module setup](mcp/README.md#build-module-feature_launch). No extra local configuration is needed; the tool dispatches the workflow through the same `gh` CLI.
-
-## Troubleshooting
-
-**`/plugin marketplace add` fails with `JSON Parse error: Property name must be a string literal`**
-Claude Code's own marketplace registry file is corrupt (often a stray trailing comma). Check it:
-
-```bash
-python3 -m json.tool ~/.claude/plugins/known_marketplaces.json
-```
-
-If that reports an error, fix the syntax it points at (or delete the file and re-add your marketplaces). This file is Claude Code's, not Epik's — any marketplace command fails the same way until it parses.
-
-**`/plugin marketplace add` says the name `epik` is already in use**
-You added it before (perhaps from a local path). Run `/plugin marketplace remove epik`, then add it again.
-
-**Commands installed but `EpikMCP` tools missing**
-Run `/mcp` to see server status. The usual causes: `uv` isn't installed (the server is launched with `uvx`), or the machine can't reach GitHub to fetch the server package.
-
-**GitHub reads fail even though the server is running**
-The plan tools shell out to `gh`. Run `gh auth status` in a terminal; if it's not logged in, `gh auth login`.
-
-**Desktop/CoWork: server never appears**
-Almost always a path problem: use the absolute `uvx` path in `command`, set `env.PATH` as shown above, restart the app, and start a fresh session. The desktop app's MCP logs are in `~/Library/Logs/Claude/` on macOS.
+**Desktop/CoWork: the EpikMCP server never appears**
+Almost always a path problem: use the absolute `uvx` path in `command`, set
+`env.PATH` as shown above, relaunch the app, and start a fresh conversation.
+The desktop app's MCP logs are in `~/Library/Logs/Claude/` on macOS.

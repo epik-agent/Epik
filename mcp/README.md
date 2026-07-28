@@ -67,6 +67,24 @@ account `gh auth login` has authenticated.
 See [Build module: `feature_launch`](#build-module-feature_launch) below for
 the repository setup the workflow requires.
 
+### Prompts
+
+Besides tools, the server exposes two MCP prompts, so surfaces that don't
+load Claude Code plugins (Claude Desktop, CoWork) can still summon Epik —
+they appear in the chat's **+** (attach) menu:
+
+- **`summon-epik`** — the Epik persona: engagement instructions plus the
+  Theory-and-Practice philosophy. Sending it yields "Hello, I'm Epik."
+- **`setup-epik`** — the Epik doctor: a detect → offer → fix → report
+  dialogue over Epik's own setup (`gh` auth, project initialization, the
+  headless-build workflow, build secrets).
+
+The prompt texts are owned by the plugin (`plugin/skills/design/`,
+`plugin/skills/doctor/`) and vendored into this package under
+`src/epik_mcp/resources/`. After editing the canonical files, run
+`uv run python scripts/sync_resources.py` from `mcp/`; CI (and
+`--check`) fail while the vendored copies drift.
+
 ## Prerequisites
 
 - Python 3.11+
