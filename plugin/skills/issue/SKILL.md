@@ -1,6 +1,8 @@
 ---
+name: issue
 description: Implement a single GitHub issue on its own branch and merge it into the target branch
 argument-hint: [issue number or GitHub URL] [target branch]
+disable-model-invocation: true
 ---
 
 1. Create a git worktree in which to do the work.

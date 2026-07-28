@@ -10,9 +10,14 @@ A *feature* is a unit of code implemented in one or more stories (issues).
 plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
-  commands/
-    feature.md          # launch a headless feature build and monitor it
-    issue.md            # implement one issue end to end
+  skills/
+    design/
+      SKILL.md          # summon Epik as a design partner
+      theory-and-practice.md
+    feature/
+      SKILL.md          # launch a headless feature build and monitor it
+    issue/
+      SKILL.md          # implement one issue end to end
   hooks/
     hooks.json          # SessionStart Theory/Practice nudge
     session-start.sh
@@ -60,7 +65,7 @@ A local-path marketplace isn't reachable from a cloud VM. To use Epik there, dec
 
 ## Usage
 
-Two commands, both namespaced under `epik`:
+Two build skills, both invoked explicitly as slash commands namespaced under `epik` (they never auto-trigger):
 
 - **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — launch a headless build of a feature: the set of related issues a feature issue points to. It sanity-checks the issue graph, calls the EpikMCP `feature_launch` tool to dispatch the repo's `epik-build.yml` GitHub Actions workflow (which runs the build on the feature branch — the repo needs that workflow plus an `ANTHROPIC_API_KEY` secret), then hands off to `/loop` to monitor via `feature_status` / `run_list`, interrupting only on needs-me events.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, open a pull request, drive it through `/review` and CI, merge into the target branch, close the issue, and clean up.
