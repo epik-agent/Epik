@@ -85,6 +85,36 @@ In the same session:
 
 That's it for Claude Code. Day-to-day usage is described in the [plugin README](plugin/README.md#usage).
 
+### Per-project enablement (enrolling collaborators)
+
+The install above is **user-scoped**: it registers the marketplace and plugin for *you*, on your machine, across all your projects. To make a *project* self-installing — so every collaborator gets Epik without running any commands — check a `.claude/settings.json` into the project repo containing:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "epik": {
+      "source": {
+        "source": "github",
+        "repo": "epik-agent/Epik"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "epik@epik": true
+  }
+}
+```
+
+`extraKnownMarketplaces` registers this GitHub repository as a marketplace named `epik`; `enabledPlugins` turns on the `epik` plugin from it (the `plugin@marketplace` form, same as `/plugin install`). This file is the whole enrollment mechanism — there is no install script. The flow for a collaborator is:
+
+1. **Clone** the project repo (the settings file comes with it).
+2. **Trust** the folder when Claude Code asks on first launch.
+3. **Accept the prompt** to install the `epik` marketplace and plugin — Claude Code offers this automatically because of the checked-in settings.
+
+If the project already has a `.claude/settings.json`, merge the two keys into it rather than replacing the file. The canonical copy of this snippet lives in the plugin at [`plugin/templates/settings.json`](plugin/templates/settings.json); the `epik:init` skill writes it into a project for you.
+
+This also enables Epik in cloud sessions (Claude Code on the web) for that project — see [Cloud sessions](plugin/README.md#cloud-sessions-claude-code-on-the-web) for the extra setup-script requirements there.
+
 ### Updating
 
 When a new version of Epik is pushed to GitHub:

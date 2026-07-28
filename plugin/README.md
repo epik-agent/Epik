@@ -16,6 +16,8 @@ plugin/
   hooks/
     hooks.json          # SessionStart Theory/Practice nudge
     session-start.sh
+  templates/
+    settings.json       # .claude/settings.json template that epik:init writes into projects
   .mcp.json             # declares the EpikMCP server (does not contain it)
 ```
 
@@ -52,7 +54,7 @@ Note: if an `EpikMCP` server is also registered by hand in the same client (e.g.
 
 ### Cloud sessions (Claude Code on the web)
 
-A local-path marketplace isn't reachable from a cloud VM. To use Epik there, declare `epik-agent/Epik` as a marketplace/plugin in the *project repo's* `.claude/settings.json`; the plugin and its MCP declaration then load at session start. The session's setup script must also `apt install -y gh` and provide a `GH_TOKEN`, since `gh` isn't pre-installed in the cloud.
+A local-path marketplace isn't reachable from a cloud VM. To use Epik there, declare `epik-agent/Epik` as a marketplace/plugin in the *project repo's* `.claude/settings.json` (the exact JSON is [`templates/settings.json`](templates/settings.json)); the plugin and its MCP declaration then load at session start. The session's setup script must also `apt install -y gh` and provide a `GH_TOKEN`, since `gh` isn't pre-installed in the cloud.
 
 ## Usage
 
