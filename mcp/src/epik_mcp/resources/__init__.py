@@ -15,7 +15,7 @@ from importlib import resources
 SOURCES = {
     "persona.md": "plugin/skills/design/persona.md",
     "theory-and-practice.md": "plugin/skills/design/theory-and-practice.md",
-    "doctor.md": "plugin/skills/doctor/doctor.md",
+    "init.md": "plugin/skills/init/init.md",
 }
 
 
