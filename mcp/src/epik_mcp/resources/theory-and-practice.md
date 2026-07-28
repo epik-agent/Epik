@@ -76,25 +76,3 @@ The theory document should have consequences. An ontology that drives naming
 in the code. A process model that maps to the architecture. If the theory
 document doesn't constrain future decisions, the tension collapses and you
 just have a project with some notes in it.
-
-## A Worked Example: the Electron-to-Plugin Pivot
-
-Epik's own history supplies an example of a theory revision.
-
-The original theory held that Epik was a standalone application: an Electron
-chat client and a headless server, connected by a message bus, with the agent
-runtime and worker orchestration built in-house. Considerable design effort
-went into that architecture — transport protocols, event schemas, process
-supervision.
-
-The diagnostic signal was that each new architectural component duplicated
-something the surrounding platform already provided. Claude Code already *was*
-the chat interface, the agent runtime, and the tool host. The ontology had
-placed those things inside Epik, and the friction of rebuilding them was
-evidence against the ontology — not evidence that the implementation was hard.
-
-The revision: Epik is not an application; it is a **design partner riding an
-existing agent host** — a plugin of commands, skills, and tools. Nearly all of
-the architecture was deleted. None of the theory in this document was. That is
-what a good theory revision looks like: the durable understanding survives,
-and the parts that were really just implementation commitments fall away.
