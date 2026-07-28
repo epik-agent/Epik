@@ -1,0 +1,108 @@
+# Epik headless feature build.
+#
+# Dispatched by the EpikMCP `feature_launch` tool (which runs
+# `gh workflow run epik-build.yml`) or manually from the Actions tab. Runs a
+# headless Claude Code session that implements the feature issue's sub-issues
+# on a feature branch and reports back through GitHub (PRs, issue comments,
+# this run's status).
+#
+# Requirements:
+#   - The `ANTHROPIC_API_KEY` repository secret must be configured.
+#   - Optionally, an `EPIK_BUILD_GH_TOKEN` secret (a PAT with repo scope) can
+#     be configured so that PRs opened by the build trigger CI; the default
+#     `github.token` cannot trigger downstream workflows.
+
+name: Epik Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_issue_number:
+        description: "Feature issue number to build"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch the feature branch is created from (default: repository default branch)"
+        required: false
+        default: ""
+        type: string
+      target_branch:
+        description: "Feature branch the build works on (default: feature-<issue number>)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+  id-token: write
+
+concurrency:
+  group: epik-build-${{ inputs.feature_issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "Epik build: feature #${{ inputs.feature_issue_number }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      BASE_BRANCH: ${{ inputs.base_branch || github.event.repository.default_branch }}
+      TARGET_BRANCH: ${{ inputs.target_branch || format('feature-{0}', inputs.feature_issue_number) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.EPIK_BUILD_GH_TOKEN || github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "epik-build"
+          git config user.email "epik-build@users.noreply.github.com"
+
+      - name: Run headless feature build
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.EPIK_BUILD_GH_TOKEN || github.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.EPIK_BUILD_GH_TOKEN || github.token }}
+          claude_args: |
+            --allowedTools "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,WebFetch,TodoWrite,Task"
+            --max-turns 400
+          prompt: |
+            You are running a headless Epik feature build in GitHub Actions.
+
+            Repository: ${{ github.repository }}
+            Feature issue: #${{ inputs.feature_issue_number }}
+            Base branch: ${{ env.BASE_BRANCH }}
+            Feature branch: ${{ env.TARGET_BRANCH }}
+
+            Implement the feature issue and all of the issues it indicates.
+            The feature issue may specify a set of issues, either as child
+            issues or linked issues described in the text. Do all work on the
+            feature branch. Never touch the default branch.
+
+            1. Read feature issue #${{ inputs.feature_issue_number }} with the
+               gh CLI and identify its sub-issues and their dependency order.
+            2. If the feature branch does not already exist on GitHub, create
+               it from the HEAD of the base branch and push it.
+            3. Implement the issues in dependency order. Each issue gets its
+               own branch named `<issue#>-<slug>` cut from the feature branch,
+               and a pull request targeting the feature branch.
+            4. Watch each pull request's CI with `gh pr checks` and fix
+               failures. When a pull request is green, merge it into the
+               feature branch and close its issue.
+            5. As you go, post progress comments on the feature issue so
+               status is visible from chat: one when the build starts, one as
+               each sub-issue's PR opens and merges, and a final summary.
+
+            The build is complete when all sub-issues are implemented and
+            merged into the feature branch and the feature branch is pushed
+            and ready for review. Do not merge the feature branch itself.
+            If you become blocked (an unresolvable CI failure, a merge
+            conflict you cannot resolve, missing permissions), post a comment
+            on the feature issue explaining exactly what a human needs to do,
+            then stop.

@@ -2,122 +2,86 @@
 
 from __future__ import annotations
 
-import io
-import json
-import urllib.error
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from epik_mcp.errors import EpikMcpError, ValidationError
-from epik_mcp.feature_launch import (
-    ANTHROPIC_VERSION,
-    ROUTINE_BETA,
-    ROUTINES_BASE_URL,
-    feature_launch,
-)
+from epik_mcp.errors import GhError, ValidationError
+from epik_mcp.feature_launch import BUILD_WORKFLOW, feature_launch
 
-ROUTINE_ID = "routine-123"
-ROUTINE_TOKEN = "sk-routine-secret"
-SESSION_URL = "https://claude.ai/code/session_abc"
+REPO = "owner/repo"
 
 
-def _set_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EPIK_ROUTINE_ID", ROUTINE_ID)
-    monkeypatch.setenv("EPIK_ROUTINE_TOKEN", ROUTINE_TOKEN)
+def _mock_run(return_value=""):
+    return patch(
+        "epik_mcp.feature_launch.run_gh", return_value=(True, return_value, "")
+    )
 
 
-class _FakeResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self._raw = json.dumps(payload).encode("utf-8")
+def test_feature_launch_dispatches_workflow():
+    with _mock_run() as mock:
+        result = feature_launch(REPO, 42, "main", "feature-42")
 
-    def read(self) -> bytes:
-        return self._raw
+    args = mock.call_args[0]
+    assert args[:3] == ("workflow", "run", BUILD_WORKFLOW)
+    assert "--repo" in args
+    assert REPO in args
+    assert "--field" in args
+    assert "feature_issue_number=42" in args
+    assert "base_branch=main" in args
+    assert "target_branch=feature-42" in args
 
-    def __enter__(self) -> _FakeResponse:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-
-def test_feature_launch_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_config(monkeypatch)
-    captured: dict[str, Any] = {}
-
-    def fake_urlopen(request: Any, timeout: int = 0) -> _FakeResponse:
-        captured["request"] = request
-        captured["timeout"] = timeout
-        return _FakeResponse({"claude_code_session_url": SESSION_URL})
-
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        result = feature_launch(42, "main", "feature/x")
-
-    assert result == {
-        "session_url": SESSION_URL,
-        "routine_id": ROUTINE_ID,
-        "feature": 42,
-    }
-
-    request = captured["request"]
-    assert request.full_url == f"{ROUTINES_BASE_URL}/{ROUTINE_ID}/fire"
-    assert request.get_method() == "POST"
-
-    # Headers (urllib capitalizes header keys).
-    assert request.get_header("Authorization") == f"Bearer {ROUTINE_TOKEN}"
-    assert request.get_header("Anthropic-beta") == ROUTINE_BETA
-    assert request.get_header("Anthropic-version") == ANTHROPIC_VERSION
-    assert request.get_header("Content-type") == "application/json"
-
-    # Body carries the feature number and branches.
-    body = json.loads(request.data.decode("utf-8"))
-    assert "#42" in body["text"]
-    assert "main" in body["text"]
-    assert "feature/x" in body["text"]
+    assert result["dispatched"] is True
+    assert result["repo"] == REPO
+    assert result["workflow"] == BUILD_WORKFLOW
+    assert result["feature"] == 42
+    assert result["base_branch"] == "main"
+    assert result["target_branch"] == "feature-42"
+    assert result["ref"] is None
 
 
-def test_feature_launch_missing_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("EPIK_ROUTINE_ID", raising=False)
-    monkeypatch.delenv("EPIK_ROUTINE_TOKEN", raising=False)
-    with pytest.raises(ValidationError, match="EPIK_ROUTINE_ID"):
-        feature_launch(1, "main", "target")
+def test_feature_launch_omits_ref_by_default():
+    with _mock_run() as mock:
+        feature_launch(REPO, 1, "main", "feature-1")
+    args = mock.call_args[0]
+    assert "--ref" not in args
 
 
-def test_feature_launch_missing_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EPIK_ROUTINE_ID", ROUTINE_ID)
-    monkeypatch.delenv("EPIK_ROUTINE_TOKEN", raising=False)
-    with pytest.raises(ValidationError, match="EPIK_ROUTINE_TOKEN"):
-        feature_launch(1, "main", "target")
+def test_feature_launch_passes_ref():
+    with _mock_run() as mock:
+        result = feature_launch(REPO, 1, "main", "feature-1", ref="develop")
+    args = mock.call_args[0]
+    assert "--ref" in args
+    assert "develop" in args
+    assert result["ref"] == "develop"
 
 
-def test_feature_launch_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_config(monkeypatch)
+def test_feature_launch_rejects_bad_repo():
+    with pytest.raises(ValidationError, match="owner/name"):
+        feature_launch("not-a-repo", 1, "main", "feature-1")
 
-    def fake_urlopen(request: Any, timeout: int = 0) -> None:
-        raise urllib.error.HTTPError(
-            url=request.full_url,
-            code=403,
-            msg="Forbidden",
-            hdrs=None,  # type: ignore[arg-type]
-            fp=io.BytesIO(b'{"error": "no access"}'),
-        )
 
+def test_feature_launch_rejects_nonpositive_issue_number():
+    with pytest.raises(ValidationError, match="feature_issue_number"):
+        feature_launch(REPO, 0, "main", "feature-1")
+
+
+def test_feature_launch_rejects_empty_base_branch():
+    with pytest.raises(ValidationError, match="base_branch"):
+        feature_launch(REPO, 1, "  ", "feature-1")
+
+
+def test_feature_launch_rejects_empty_target_branch():
+    with pytest.raises(ValidationError, match="target_branch"):
+        feature_launch(REPO, 1, "main", "")
+
+
+def test_feature_launch_propagates_gh_error():
     with (
-        patch("urllib.request.urlopen", side_effect=fake_urlopen),
-        pytest.raises(EpikMcpError, match="403"),
+        patch(
+            "epik_mcp.feature_launch.run_gh",
+            side_effect=GhError("could not create workflow dispatch event"),
+        ),
+        pytest.raises(GhError, match="workflow dispatch"),
     ):
-        feature_launch(7, "main", "target")
-
-
-def test_feature_launch_missing_session_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_config(monkeypatch)
-
-    def fake_urlopen(request: Any, timeout: int = 0) -> _FakeResponse:
-        return _FakeResponse({"something_else": "value"})
-
-    with (
-        patch("urllib.request.urlopen", side_effect=fake_urlopen),
-        pytest.raises(EpikMcpError, match="claude_code_session_url"),
-    ):
-        feature_launch(7, "main", "target")
+        feature_launch(REPO, 7, "main", "feature-7")

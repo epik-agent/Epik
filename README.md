@@ -141,7 +141,7 @@ Claude Desktop (including CoWork sessions) doesn't load Claude Code plugins, so 
 
 4. **Quit and relaunch the Claude desktop app**, then start a **new** CoWork task. Existing sessions don't pick up servers started after they connected.
 
-To also launch cloud feature builds from Desktop/CoWork (the `feature_launch` tool), add `EPIK_ROUTINE_ID` and `EPIK_ROUTINE_TOKEN` to that `env` block — see [Build module setup](mcp/README.md#build-module-feature_launch) for how to create the routine and get those values. Everything else works without them.
+To also launch headless feature builds from Desktop/CoWork (the `feature_launch` tool), the target repository needs the `epik-build.yml` GitHub Actions workflow and an `ANTHROPIC_API_KEY` repository secret — see [Build module setup](mcp/README.md#build-module-feature_launch). No extra local configuration is needed; the tool dispatches the workflow through the same `gh` CLI.
 
 ## Troubleshooting
 

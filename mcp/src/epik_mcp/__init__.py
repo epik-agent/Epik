@@ -1,7 +1,7 @@
 """EpikMCP: the single MCP for Epik.
 
 EpikMCP has two internal modules: a plan module (GitHub access via the gh CLI)
-and a build module (launch feature builds via Anthropic). This package can be
+and a build module (launch feature builds on GitHub Actions). This package can be
 used as a library (import individual functions directly) or as an MCP server
 (run `epik-mcp` or `python -m epik_mcp.server`).
 """
