@@ -12,12 +12,14 @@ plugin/
     plugin.json         # plugin manifest
   skills/
     design/
-      SKILL.md          # summon Epik as a design partner
+      SKILL.md          # /epik:design — summon Epik as a design partner
       theory-and-practice.md
     feature/
-      SKILL.md          # launch a headless feature build and monitor it
+      SKILL.md          # /epik:feature — launch a headless feature build and monitor it
+    init/
+      SKILL.md          # /epik:init — initialize a directory as an Epik project
     issue/
-      SKILL.md          # implement one issue end to end
+      SKILL.md          # /epik:issue — implement one issue end to end
   hooks/
     hooks.json          # SessionStart Theory/Practice nudge
     session-start.sh
@@ -69,6 +71,11 @@ Two build skills, both invoked explicitly as slash commands namespaced under `ep
 
 - **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — launch a headless build of a feature: the set of related issues a feature issue points to. It sanity-checks the issue graph, calls the EpikMCP `feature_launch` tool to dispatch the repo's `epik-build.yml` GitHub Actions workflow (which runs the build on the feature branch — the repo needs that workflow plus an `ANTHROPIC_API_KEY` secret), then hands off to `/loop` to monitor via `feature_status` / `run_list`, interrupting only on needs-me events.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, open a pull request, drive it through `/review` and CI, merge into the target branch, close the issue, and clean up.
+
+Plus two explicitly invoked skills:
+
+- **`/epik:design`** — summon Epik as a software-design partner grounded in the Theory-and-Practice philosophy.
+- **`/epik:init`** — initialize the current directory as an Epik project. Epik detects what's missing, confirms with you, then writes `.claude/settings.json` (per-project enablement, merged into any existing settings — see [`templates/settings.json`](templates/settings.json)), a `CLAUDE.md` stub, `.claude/loop.md` (the build-monitoring `/loop` default), and a `docs/design-history/` scaffold; it can optionally create the GitHub repo using defaults from `~/.epik/config.json`. When Epik is summoned in a directory that isn't yet an Epik project, it offers to initialize it this way.
 
 The SessionStart hook prints a Theory/Practice nudge so you stay aware of which mode you're in: manager mode (delegated, autonomous feature builds) is safe only once the design has converged; while you're still discovering the design you're in theory-building mode and shouldn't delegate a build yet.
 
