@@ -1,6 +1,6 @@
 # epik (plugin)
 
-The Epik plugin: manager-mode **feature** development on GitHub. Converge on a design in CoWork, author the feature's issue graph, and launch autonomous builds on Claude Code on the web — without leaving the thinking.
+The Epik plugin: manager-mode **feature** development on GitHub. Converge on a design in CoWork, author the feature's issue graph, and launch headless builds on GitHub Actions — without leaving the thinking.
 
 A *feature* is a unit of code implemented in one or more stories (issues).
 
@@ -11,12 +11,14 @@ plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
   commands/
-    feature.md          # orchestrate a feature (Agent Teams, dependency order)
+    feature.md          # launch a headless feature build and monitor it
     issue.md            # implement one issue end to end
   hooks/
     hooks.json          # SessionStart Theory/Practice nudge
     session-start.sh
   templates/
+    loop.md             # default /loop body: build monitoring (written to
+                        # projects as .claude/loop.md by epik:init)
     settings.json       # .claude/settings.json template that epik:init writes into projects
   .mcp.json             # declares the EpikMCP server (does not contain it)
 ```
@@ -60,7 +62,7 @@ A local-path marketplace isn't reachable from a cloud VM. To use Epik there, dec
 
 Two commands, both namespaced under `epik`:
 
-- **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — implement a feature: the set of related issues a feature issue points to. It creates the feature branch, implements the issues in dependency order using Agent Teams (in parallel where the dependencies allow), opens a pull request per issue against the feature branch, and shepherds each through CI and review.
+- **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — launch a headless build of a feature: the set of related issues a feature issue points to. It sanity-checks the issue graph, calls the EpikMCP `feature_launch` tool to dispatch the repo's `epik-build.yml` GitHub Actions workflow (which runs the build on the feature branch — the repo needs that workflow plus an `ANTHROPIC_API_KEY` secret), then hands off to `/loop` to monitor via `feature_status` / `run_list`, interrupting only on needs-me events.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, open a pull request, drive it through `/review` and CI, merge into the target branch, close the issue, and clean up.
 
 The SessionStart hook prints a Theory/Practice nudge so you stay aware of which mode you're in: manager mode (delegated, autonomous feature builds) is safe only once the design has converged; while you're still discovering the design you're in theory-building mode and shouldn't delegate a build yet.

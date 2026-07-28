@@ -1,8 +1,8 @@
 """MCP server entrypoint for EpikMCP.
 
 EpikMCP is the single MCP for Epik with two internal modules: a plan module
-(GitHub access via the gh CLI) and a build module (launch feature builds via
-Anthropic). Registers all tool modules and starts the server.
+(GitHub access via the gh CLI) and a build module (launch feature builds on
+GitHub Actions). Registers all tool modules and starts the server.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ mcp = FastMCP(
         "EpikMCP is the single MCP for Epik, with two internal modules. The plan"
         " module wraps the gh CLI for read/write GitHub access (issues,"
         " relationships, projects, labels, repos, read-only PRs and runs). The"
-        " build module launches feature builds via an Anthropic routine."
+        " build module launches headless feature builds by dispatching the"
+        " epik-build.yml workflow on GitHub Actions."
     ),
 )
 

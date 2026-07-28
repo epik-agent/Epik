@@ -6,8 +6,9 @@ internal modules:
 - **plan** — GitHub access via the [`gh` CLI](https://cli.github.com/). Read and
   write issues, relationships, projects, labels and repos, plus read-only access
   to pull requests and CI runs.
-- **build** — launch feature builds via Anthropic. Fires a saved Claude Code
-  routine to start a remote feature build.
+- **build** — launch headless feature builds on GitHub Actions. Dispatches the
+  repository's `epik-build.yml` workflow, which runs a headless Claude Code
+  feature build.
 
 An MCP client (such as Claude) calls these tools directly. Tools are registered
 under the `mcp__epik-mcp__*` prefix.
@@ -57,20 +58,20 @@ account `gh auth login` has authenticated.
 - **Feature status** (`feature_status`)
   - `feature_status` — aggregate the plan-side status of a feature
 
-### build / Anthropic
+### build / GitHub Actions
 
 - **Feature launch** (`feature_launch`)
-  - `feature_launch` — start a remote feature build
+  - `feature_launch` — dispatch the `epik-build.yml` workflow to start a
+    headless feature build
 
-See [Build module: `feature_launch`](#build-module-feature_launch) below for the
-one-time routine setup and required environment variables.
+See [Build module: `feature_launch`](#build-module-feature_launch) below for
+the repository setup the workflow requires.
 
 ## Prerequisites
 
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/) (recommended) or pip
 - [`gh` CLI](https://cli.github.com/) installed and authenticated (`gh auth login`)
-  for the plan module
 
 ## Installation
 
@@ -114,11 +115,7 @@ Add the following to your Claude MCP config (for example,
         "--from",
         "git+https://github.com/epik-agent/Epik.git#subdirectory=mcp",
         "epik-mcp"
-      ],
-      "env": {
-        "EPIK_ROUTINE_ID": "<your-routine-id>",
-        "EPIK_ROUTINE_TOKEN": "<your-routine-token>"
-      }
+      ]
     }
   }
 }
@@ -131,11 +128,7 @@ config directly at the binary:
 {
   "mcpServers": {
     "epik-mcp": {
-      "command": "/Users/YOUR_USERNAME/.local/bin/epik-mcp",
-      "env": {
-        "EPIK_ROUTINE_ID": "<your-routine-id>",
-        "EPIK_ROUTINE_TOKEN": "<your-routine-token>"
-      }
+      "command": "/Users/YOUR_USERNAME/.local/bin/epik-mcp"
     }
   }
 }
@@ -147,60 +140,60 @@ Confirm the binary path with:
 which epik-mcp
 ```
 
-The build-module env vars are only needed if you intend to use `feature_launch`.
-
 ## Authentication
 
-EpikMCP keeps the two modules' authentication separate:
+Both modules authenticate through the `gh` CLI. Before using the tools, make
+sure you are logged in:
 
-- **plan module** delegates all authentication to the `gh` CLI. Before using the
-  plan tools, make sure you are logged in:
+```bash
+gh auth login
+```
 
-  ```bash
-  gh auth login
-  ```
+To verify:
 
-  To verify:
+```bash
+gh auth status
+```
 
-  ```bash
-  gh auth status
-  ```
-
-- **build module** uses the routine environment variables (`EPIK_ROUTINE_ID` and
-  `EPIK_ROUTINE_TOKEN`) described below. It does not use the `gh` CLI.
+The build module additionally requires the target repository to be set up for
+headless builds (see below); the workflow it dispatches uses repository
+secrets, not local environment variables.
 
 ## Build module: `feature_launch`
 
-The build module is the Anthropic-side half of Epik. It keeps its auth and state
-**separate** from the `gh` CLI used by the plan module. The `feature_launch`
-tool starts a remote feature build by firing a saved
-[Claude Code routine](https://claude.ai/code) via the routines API.
+The build module launches headless feature builds on GitHub Actions. The
+`feature_launch` tool runs
 
-When called with a feature issue number plus a base and target branch, it POSTs
-to the routine's fire endpoint and returns the URL of the cloud session it
-started.
+```bash
+gh workflow run epik-build.yml --repo <owner/name> \
+  --field feature_issue_number=<n> \
+  --field base_branch=<base> \
+  --field target_branch=<feature-branch>
+```
 
-### One-time routine setup
+which dispatches the repository's `.github/workflows/epik-build.yml` workflow.
+That workflow runs a headless Claude Code session that builds the feature on
+the given feature branch and reports progress through GitHub (per-issue pull
+requests, issue comments, and the run itself). An optional `ref` argument
+selects the git ref to run the workflow from (default: the repository default
+branch; the ref must contain the workflow file).
 
-1. In the Claude Code web UI, create a routine (for example, a "feature runner")
-   that builds a feature when given a feature command.
-2. Add an **API trigger** to the routine. Its prompt should be the feature-command
-   body (the instruction your build follows). `feature_launch` sends the feature
-   issue number and branches as the trigger's `text`.
-3. Enable **"Allow unrestricted branch pushes"** for the repository so the routine
-   can push the build branch.
-4. Copy the routine's **id** and its **API token** — you'll set these as env vars.
+`feature_launch` returns a dispatch receipt. Follow the build with the
+read-only run tools (`run_list` / `run_get` / `run_logs` filtered to workflow
+`epik-build.yml`) and the `feature_status` aggregator.
 
-### Required environment variables
+### Repository setup
 
-These are read on every call and must be set in the environment the MCP server
-runs in:
+1. The target repository must contain the `epik-build.yml` workflow (this
+   repo's [`.github/workflows/epik-build.yml`](../.github/workflows/epik-build.yml)
+   is the reference implementation).
+2. The **`ANTHROPIC_API_KEY` repository secret must be configured** — the
+   headless Claude Code session authenticates with it.
+3. Optional: an `EPIK_BUILD_GH_TOKEN` secret (a PAT with repo scope). Pull
+   requests opened with the default `github.token` do not trigger downstream
+   workflows, so without this the build's per-issue PRs won't run CI.
+4. The `gh` account used by the MCP server needs permission to dispatch
+   workflows in the target repository (`actions: write`).
 
-| Variable | Description |
-| --- | --- |
-| `EPIK_ROUTINE_ID` | The Claude Code routine id whose fire endpoint is called. |
-| `EPIK_ROUTINE_TOKEN` | The routine API bearer token. |
-
-If either is missing or empty, `feature_launch` raises a clear validation error
-naming the missing variable. Non-2xx responses and connection failures also raise
-clear errors.
+Dispatch failures (missing workflow, no permission) surface as clear gh
+errors; malformed arguments raise validation errors before any call is made.
