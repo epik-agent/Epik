@@ -12,21 +12,17 @@ plugin/
     plugin.json         # plugin manifest
   skills/
     design/
-      SKILL.md          # summon Epik as a design partner
+      SKILL.md          # /epik:design — summon Epik as a design partner
       theory-and-practice.md
     feature/
-      SKILL.md          # launch a headless feature build and monitor it
+      SKILL.md          # /epik:feature — launch a headless feature build and monitor it
+    init/
+      SKILL.md          # /epik:init — initialize a directory as an Epik project
     issue/
-      SKILL.md          # implement one issue end to end
+      SKILL.md          # /epik:issue — implement one issue end to end
   hooks/
     hooks.json          # SessionStart Theory/Practice nudge
     session-start.sh
-  skills/
-    design/
-      SKILL.md          # /epik:design — summon Epik as a design partner
-      theory-and-practice.md
-    init/
-      SKILL.md          # /epik:init — initialize a directory as an Epik project
   templates/
     loop.md             # default /loop body: build monitoring (written to
                         # projects as .claude/loop.md by epik:init)
