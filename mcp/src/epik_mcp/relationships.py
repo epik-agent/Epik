@@ -74,14 +74,14 @@ def _issue_rest_id(repo: str, issue_number: int) -> int:
     This is the ``id`` field from ``GET repos/{owner}/{repo}/issues/{number}``,
     which is globally unique (NOT the per-repo issue number and NOT the GraphQL
     node id). It is the identifier accepted by the issue-dependencies API.
+
+    ``gh api`` has no ``--json`` flag (that belongs to commands like
+    ``gh issue list``), so the full response body is parsed here instead.
     """
     owner, name = split_repo(repo)
-    _, data, _ = run_gh(
-        "api",
-        f"repos/{owner}/{name}/issues/{issue_number}",
-        json_fields=["id"],
-    )
-    result: dict[str, Any] = data if isinstance(data, dict) else {}
+    _, data, _ = run_gh("api", f"repos/{owner}/{name}/issues/{issue_number}")
+    parsed = json.loads(data) if isinstance(data, str) and data else data
+    result: dict[str, Any] = parsed if isinstance(parsed, dict) else {}
     rest_id = result.get("id")
     if rest_id is None:
         raise ValidationError(f"Issue #{issue_number} not found in {repo}")

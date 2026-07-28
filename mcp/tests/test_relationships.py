@@ -82,6 +82,56 @@ def test_issue_set_blocked_by_cross_repo():
     assert "repos/owner/repo/issues/1/dependencies/blocked_by" in second_args
 
 
+def test_issue_rest_id_lookup_does_not_pass_json_to_gh_api():
+    """``gh api`` has no --json flag; passing one made every call fail (#31)."""
+    side_effects = [
+        (True, json.dumps({"id": 987654}), ""),
+        (True, "", ""),
+    ]
+    with patch("epik_mcp.relationships.run_gh", side_effect=side_effects) as mock:
+        issue_set_blocked_by(REPO, 1, 2)
+
+    lookup_args, lookup_kwargs = mock.call_args_list[0]
+    assert lookup_args[0] == "api"
+    assert lookup_kwargs.get("json_fields") is None
+    assert "--json" not in lookup_args
+
+
+def test_issue_set_blocked_by_parses_raw_json_body():
+    """gh api returns the response body as a string, which must be parsed."""
+    side_effects = [
+        (True, json.dumps({"id": 987654, "number": 2}), ""),
+        (True, "", ""),
+    ]
+    with patch("epik_mcp.relationships.run_gh", side_effect=side_effects) as mock:
+        result = issue_set_blocked_by(REPO, 1, 2)
+
+    assert result["blocked_by"] == 2
+    body = json.loads(mock.call_args_list[1][1]["input_data"])
+    assert body == {"issue_id": 987654}
+
+
+def test_issue_remove_blocked_by_parses_raw_json_body():
+    side_effects = [
+        (True, json.dumps({"id": 987654}), ""),
+        (True, "", ""),
+    ]
+    with patch("epik_mcp.relationships.run_gh", side_effect=side_effects) as mock:
+        result = issue_remove_blocked_by(REPO, 1, 2)
+
+    assert result["removed_blocked_by"] == 2
+    delete_args = mock.call_args_list[1][0]
+    assert "repos/owner/repo/issues/1/dependencies/blocked_by/987654" in delete_args
+
+
+def test_issue_rest_id_missing_id_raises():
+    with (
+        pytest.raises(ValidationError, match="not found"),
+        patch("epik_mcp.relationships.run_gh", return_value=(True, "", "")),
+    ):
+        issue_set_blocked_by(REPO, 1, 2)
+
+
 def test_issue_set_blocked_by_invalid_repo_format():
     with (
         pytest.raises(ValidationError, match="owner/name"),
