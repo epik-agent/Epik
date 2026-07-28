@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .runner import run_gh
 
@@ -55,7 +55,7 @@ def repo_default_branch(repo: str) -> str:
     return str(ref.get("name", "main"))
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all repository tools with the MCP server."""
 
     @server.tool(name="repo_get")

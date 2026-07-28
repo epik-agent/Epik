@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from . import cache as _cache
 from .errors import NotFoundError, ValidationError
@@ -437,7 +437,7 @@ def project_invalidate_cache(
     return {"invalidated": "all"}
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register all Projects V2 tools with the MCP server."""
 
     @server.tool(name="project_set_status")

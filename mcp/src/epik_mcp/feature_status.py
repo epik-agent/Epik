@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import EpikMcpError
 from .issues import issue_get
@@ -224,7 +224,7 @@ def feature_status(
     }
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register the feature_status tool with the MCP server."""
 
     @server.tool(name="feature_status")

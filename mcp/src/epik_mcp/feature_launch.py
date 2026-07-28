@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .errors import ValidationError
 from .runner import run_gh, split_repo
@@ -106,7 +106,7 @@ def feature_launch(
     }
 
 
-def register(server: FastMCP) -> None:
+def register(server: MCPServer) -> None:
     """Register the feature_launch tool with the MCP server."""
 
     @server.tool(name="feature_launch")

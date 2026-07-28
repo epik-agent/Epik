@@ -7,7 +7,7 @@ GitHub Actions). Registers all tool modules and starts the server.
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 # Import each module's ``register`` directly. The package ``__init__``
 # re-exports the ``feature_launch`` and ``feature_status`` *functions*, which
@@ -23,7 +23,7 @@ from .relationships import register as register_relationships
 from .repos import register as register_repos
 from .runs import register as register_runs
 
-mcp = FastMCP(
+mcp = MCPServer(
     "epik-mcp",
     instructions=(
         "EpikMCP is the single MCP for Epik, with two internal modules. The plan"
