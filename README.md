@@ -70,31 +70,45 @@ Quit and relaunch the desktop app, then start a **new** conversation.
 
 ## Summoning Epik
 
-| Surface | Gesture |
-|---|---|
-| Claude Code (CLI, desktop app, web, IDE) | `/epik:design` |
-| Claude Desktop / CoWork | **+** (attach) → **summon-epik** → send |
+| Surface | Summon Epik | Converge a project |
+|---|---|---|
+| Claude Code (CLI, desktop app, web, IDE) | `/epik:design` | `/epik:init` |
+| Claude Desktop / CoWork | **+** (attach) → **summon-epik** → send | **+** (attach) → **init-epik** → send |
 
 Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you
 aren't talking to Epik.
 
-From there, everything is dialogue. In particular, Epik can check and repair
-its own setup — `gh` authentication, project initialization, the headless
-build workflow and its secrets, plugin health — via the **doctor**:
-`/epik:doctor` in Claude Code, or the **setup-epik** prompt in
-Desktop/CoWork. Summon the doctor whenever something seems missing; it
-diagnoses, offers fixes, and leaves you only the steps a human must do
-(pasting credentials).
+From there, everything is dialogue.
 
-To make a project self-installing for collaborators — clone, trust the
-folder, accept the install prompt, done — ask Epik to initialize it
-(`/epik:init`). That writes the project's `.claude/settings.json` enablement
-and scaffolding; the doctor will offer this too when it finds a project
-uninitialized.
+### `/epik:init` — idempotent convergence
+
+One command covers setting a project up and putting it right, because they are
+the same thing: **`/epik:init` converges this project on the correct Epik
+shape, and is safe to run any number of times.** What it does depends on what
+it finds — no repository yet, a repository that isn't an Epik project, an Epik
+project that has drifted, or one that's already correct (in which case it says
+so and stops). A greenfield project is simply a maximally broken setup.
+
+It covers `gh` authentication, the project's `.claude/settings.json`
+enablement and scaffolding, the headless build workflow and its secrets,
+repository conventions, and plugin health. The dialogue is detect → offer →
+fix → report: it never changes anything you haven't agreed to, and it leaves
+you only the steps a human must do (pasting credentials). Run it whenever
+something seems missing — running it on a healthy project is how you check.
+
+Creating a repository is **repo-first**: Epik builds it through the GitHub API
+and never needs a clone, because Epik needs GitHub, not your hard drive. What
+it produces is self-installing — a collaborator clones, trusts the folder,
+accepts the install prompt, and is enrolled. That clone + trust is the
+enrollment ritual for joining a project as a terminal builder; operating Epik
+never requires one.
+
+On Desktop/CoWork the same dialogue is the **init-epik** prompt (also served
+under its older name, **setup-epik**).
 
 ## Troubleshooting the bootstrap
 
-Epik's doctor handles problems that arise once Epik can speak. Only failures
+`/epik:init` handles problems that arise once Epik can speak. Only failures
 *of the bootstrap itself* need this section:
 
 **`/plugin marketplace add` fails with `JSON Parse error`**
