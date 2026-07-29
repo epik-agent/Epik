@@ -14,6 +14,6 @@ self-contained.)
 
 This skill is invoked explicitly as `/epik:init`. Typing it is the convergence
 gate applied to projects: the deliberate act that says "this is now an Epik
-project." When Epik is summoned elsewhere (e.g. via `/epik:design`) and notices
+project." When Epik is summoned elsewhere (e.g. via `/epik:summon`) and notices
 the project isn't ready, it should *offer* to converge and point the user here
 rather than reaching for this skill itself.

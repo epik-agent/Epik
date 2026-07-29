@@ -13,8 +13,8 @@ from importlib import resources
 
 # Vendored filename -> canonical path, relative to the repository root.
 SOURCES = {
-    "persona.md": "plugin/skills/design/persona.md",
-    "theory-and-practice.md": "plugin/skills/design/theory-and-practice.md",
+    "persona.md": "plugin/skills/summon/persona.md",
+    "theory-and-practice.md": "plugin/skills/summon/theory-and-practice.md",
     "init.md": "plugin/skills/init/init.md",
 }
 
