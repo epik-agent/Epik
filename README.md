@@ -72,7 +72,7 @@ Quit and relaunch the desktop app, then start a **new** conversation.
 
 | Surface | Summon Epik | Converge a project |
 |---|---|---|
-| Claude Code (CLI, desktop app, web, IDE) | `/epik:design` | `/epik:init` |
+| Claude Code (CLI, desktop app, web, IDE) | `/epik:summon` | `/epik:init` |
 | Claude Desktop / CoWork | **+** (attach) → **summon-epik** → send | **+** (attach) → **init-epik** → send |
 
 Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you

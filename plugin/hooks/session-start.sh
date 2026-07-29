@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Epik SessionStart hook — terse pointer to the design-partner skill.
-# The persona lives in the epik:design skill, not here.
+# Epik SessionStart hook — terse pointer to the summoning skill.
+# The persona lives in the epik:summon skill, not here.
 
 # Stay silent in CI / headless build sessions: no persona bleed for builders.
 if [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CI:-}" ]; then
@@ -8,5 +8,5 @@ if [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CI:-}" ]; then
 fi
 
 cat <<'JSON'
-{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Epik: a design-partner skill (epik:design) is available; the user invokes it explicitly with /epik:design."}}
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Epik: a software-design partner (epik:summon) is available; the user summons it explicitly with /epik:summon."}}
 JSON

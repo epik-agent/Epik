@@ -55,6 +55,11 @@ in-band, on the surfaces Epik already occupies:
    keep functional names; the skill's `description` field still says plainly
    that this summons the design partner, so listings remain discoverable.
 
+   *Amended 2026-07-29 ([#55](https://github.com/epik-agent/Epik/issues/55)):
+   `/epik:hello` was superseded by `/epik:summon` before it shipped — the
+   summoning verb is **summon**, the word the `summon-epik` MCP prompt already
+   used, so one rename served both surfaces.*
+
 ## Options Considered
 
 ### Option A: Hosted connector (remote MCP server)
@@ -114,8 +119,9 @@ free.
 - White-labeling pressure is redirected inward: brand the inside of sessions
   (banner, greeting, statusline), never the surface itself.
 - The rename touches: the skill directory (`plugin/skills/design/` →
-  `plugin/skills/hello/`, keeping the persona file), the hook's pointer text,
-  the README summoning table, and possibly the `summon-epik` MCP prompt name.
+  `plugin/skills/summon/`, keeping the persona file), the hook's pointer text,
+  the README summoning table, and possibly the `summon-epik` MCP prompt name
+  (left unchanged — it was already the right word).
 - Phone/web reach remains unserved by design. **Reopening condition:** if
   mobile/web access becomes a real requirement (not an aesthetic one), the
   hosted-EpikMCP V2 item reopens — evaluated first against "can the stock
@@ -126,6 +132,7 @@ free.
 1. [ ] Rework the SessionStart hook: silent in CI, one-line banner interactively.
 2. [ ] Add an Epik statusline marker for Claude Code sessions in Epik projects.
 3. [ ] Add the identify-as-Epik line to the Claude Project instructions.
-4. [ ] Rename `/epik:design` → `/epik:hello`; update hook pointer, READMEs,
-       and the summoning table; decide whether `summon-epik` becomes `hello`.
+4. [x] Rename the summon; update hook pointer, READMEs, and the summoning
+       table; decide whether `summon-epik` changes name. Shipped as
+       `/epik:summon` (not `/epik:hello`); the MCP prompt names are unchanged.
 5. [ ] Record the reopening condition on the V2 hosted-EpikMCP item.

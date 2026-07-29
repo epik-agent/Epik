@@ -74,7 +74,8 @@ Claude Code plugins (Claude Desktop, CoWork) can still summon Epik — they
 appear in the chat's **+** (attach) menu:
 
 - **`summon-epik`** — the Epik persona: engagement instructions plus the
-  Theory-and-Practice philosophy. Sending it yields "Hello, I'm Epik."
+  philosophy that grounds them. Sending it yields "Hello, I'm Epik." It is the
+  same text behind the plugin's `/epik:summon`.
 - **`init-epik`** — idempotent convergence on the correct Epik shape: a
   detect → offer → fix → report dialogue that creates the repository,
   converts an existing one, or repairs drift (`gh` auth, project enablement,
@@ -85,7 +86,7 @@ appear in the chat's **+** (attach) menu:
   and because "set up" reads more naturally where there is no `/epik:init`
   command to echo.
 
-The prompt texts are owned by the plugin (`plugin/skills/design/`,
+The prompt texts are owned by the plugin (`plugin/skills/summon/`,
 `plugin/skills/init/`) and vendored into this package under
 `src/epik_mcp/resources/`. After editing the canonical files, run
 `uv run python scripts/sync_resources.py` from `mcp/`; CI (and

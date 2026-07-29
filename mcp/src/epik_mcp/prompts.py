@@ -2,7 +2,7 @@
 
 Claude Desktop and CoWork don't load Claude Code plugins, so the persona and
 the init spec travel with the server instead: ``summon-epik`` serves the
-persona (the same text behind the plugin's ``/epik:design``), ``init-epik``
+persona (the same text behind the plugin's ``/epik:summon``), ``init-epik``
 serves the convergence dialogue (the same text behind ``/epik:init``).
 
 ``setup-epik`` is retained as an alias of ``init-epik``: it is the name these
@@ -39,10 +39,7 @@ def register(server: MCPServer) -> None:
     @server.prompt(
         name="summon-epik",
         title="Summon Epik",
-        description=(
-            "Summon Epik, a software-design partner grounded in the"
-            " Theory-and-Practice philosophy."
-        ),
+        description="Summon Epik, your software-design partner.",
     )
     def prompt_summon_epik() -> str:
         return summon_epik()
