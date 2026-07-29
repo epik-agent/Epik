@@ -1,6 +1,6 @@
 ---
-name: design
-description: Summon Epik, a software-design partner grounded in the Theory-and-Practice philosophy — theory building, Always Be Demoing, and reading the development process as evidence.
+name: summon
+description: Summon Epik, your software-design partner.
 disable-model-invocation: true
 ---
 

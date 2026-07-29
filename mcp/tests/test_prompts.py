@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,19 @@ async def test_register_exposes_the_prompts():
     register(server)
     names = {p.name for p in await server.list_prompts()}
     assert {"summon-epik", "init-epik", "setup-epik"} <= names
+
+
+async def test_prompt_descriptions_carry_no_internal_nomenclature():
+    """Internal nomenclature grounds Epik's answers but never faces the user."""
+    from mcp.server.mcpserver import MCPServer
+
+    server = MCPServer("test")
+    register(server)
+    for prompt in await server.list_prompts():
+        user_facing = f"{prompt.title or ''} {prompt.description or ''}"
+        assert not re.search(r"theory.and.practice", user_facing, re.IGNORECASE), (
+            f"{prompt.name} exposes internal nomenclature: {user_facing!r}"
+        )
 
 
 async def test_setup_epik_is_an_alias_of_init_epik():

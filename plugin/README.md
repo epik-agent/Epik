@@ -11,8 +11,8 @@ plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
   skills/
-    design/
-      SKILL.md          # /epik:design — summon Epik as a design partner
+    summon/
+      SKILL.md          # /epik:summon — summon Epik as a design partner
       persona.md        # canonical persona (vendored into EpikMCP as summon-epik)
       theory-and-practice.md
     feature/
@@ -24,7 +24,7 @@ plugin/
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
   hooks/
-    hooks.json          # SessionStart Theory/Practice nudge
+    hooks.json          # SessionStart pointer to /epik:summon
     session-start.sh
   templates/
     loop.md             # default /loop body: build monitoring (written to
@@ -37,7 +37,7 @@ plugin/
 
 The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along, including into Claude Code on the web.
 
-One nuance: the persona and init texts are policy, owned here (`skills/design/persona.md`, `theory-and-practice.md`, `skills/init/init.md`), but the MCP *serves* them as the `summon-epik` and `init-epik` prompts so plugin-less surfaces (Claude Desktop, CoWork) can summon Epik too. The server vendors copies (`mcp/scripts/sync_resources.py` syncs; CI fails on drift) — ownership stays with the plugin.
+One nuance: the persona and init texts are policy, owned here (`skills/summon/persona.md`, `theory-and-practice.md`, `skills/init/init.md`), but the MCP *serves* them as the `summon-epik` and `init-epik` prompts so plugin-less surfaces (Claude Desktop, CoWork) can summon Epik too. The server vendors copies (`mcp/scripts/sync_resources.py` syncs; CI fails on drift) — ownership stays with the plugin.
 
 ## Install
 
@@ -79,12 +79,12 @@ Two build skills, both invoked explicitly as slash commands namespaced under `ep
 
 Plus two explicitly invoked skills:
 
-- **`/epik:design`** — summon Epik as a software-design partner grounded in the Theory-and-Practice philosophy.
+- **`/epik:summon`** — summon Epik, your software-design partner. Epik introduces itself: *"Hello, I'm Epik."*
 - **`/epik:init`** — converge this project on the correct Epik shape, idempotently: safe to run any number of times, doing only what the project's current state calls for. No repository yet → create it. A repository that isn't an Epik project → offer conversion. An Epik project that has drifted → offer the diff. Already correct → say so and stop. The spec it converges on covers `gh` auth, `.claude/settings.json` (per-project enablement, merged into any existing settings — see [`templates/settings.json`](templates/settings.json)), a `CLAUDE.md` stub, `.claude/loop.md` (the build-monitoring `/loop` default), a `docs/design-history/` scaffold, the headless-build workflow, build secrets, repository conventions from `~/.epik/config.json`, and plugin health. Detect → offer → fix → report; nothing changes without your agreement to that specific change, and only credential pastes are left to the human. Creation is repo-first — the repository is built through the GitHub API, no clone involved — and changes to a repository that already exists arrive as a pull request. (The same dialogue is the `init-epik` MCP prompt in Desktop/CoWork, aliased as `setup-epik`.)
 
   [`skills/init/init.md`](skills/init/init.md) is the single home of that spec: creation applies all of it, repair applies the diff, so the two can't drift apart. It absorbed the former `/epik:doctor` skill, whose behaviour it keeps in full — see [the ADR](../docs/design-history/2026-07-28-init-is-idempotent-convergence.md).
 
-The SessionStart hook prints a Theory/Practice nudge so you stay aware of which mode you're in: manager mode (delegated, autonomous feature builds) is safe only once the design has converged; while you're still discovering the design you're in theory-building mode and shouldn't delegate a build yet.
+The SessionStart hook prints a one-line pointer to `/epik:summon` — presence without invocation. It stays silent in CI and headless build sessions so the persona never bleeds into builders.
 
 ## Status
 
