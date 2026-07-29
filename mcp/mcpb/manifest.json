@@ -1,0 +1,63 @@
+{
+  "manifest_version": "0.4",
+  "name": "epik-mcp",
+  "display_name": "Epik",
+  "version": "1.0.0",
+  "description": "You say it. We make it. Manager-mode feature development on GitHub.",
+  "long_description": "EpikMCP is the single MCP server for Epik: converge on a design, author the feature's issue graph, and launch autonomous headless builds on GitHub Actions. The plan module wraps the gh CLI for read/write GitHub access (issues, relationships, projects, labels, repos, read-only PRs and runs); the build module dispatches feature builds and reads their status.\n\nRequires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). To summon Epik in a conversation, attach the **summon-epik** prompt; to set up or repair a project, attach **init-epik**.",
+  "author": {
+    "name": "W.P. McNeill",
+    "email": "billmcn@gmail.com",
+    "url": "https://www.epik-agent.dev/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/epik-agent/Epik.git"
+  },
+  "homepage": "https://www.epik-agent.dev/",
+  "support": "https://github.com/epik-agent/Epik/issues",
+  "icon": "icon.png",
+  "keywords": ["github", "issues", "automation", "builds", "agent", "epik"],
+  "server": {
+    "type": "uv",
+    "entry_point": "main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--project", "${__dirname}", "${__dirname}/main.py"]
+    }
+  },
+  "tools": [
+    { "name": "feature_launch", "description": "Launch an autonomous headless build for a feature issue on GitHub Actions" },
+    { "name": "feature_status", "description": "Report the status of a feature: issues, PRs, and build runs" },
+    { "name": "issue_list", "description": "List issues in a repository" },
+    { "name": "issue_get", "description": "Read a single issue" },
+    { "name": "issue_create", "description": "Create an issue" },
+    { "name": "issue_edit", "description": "Edit an issue's title or body" },
+    { "name": "issue_close", "description": "Close an issue" },
+    { "name": "issue_reopen", "description": "Reopen an issue" },
+    { "name": "issue_comment", "description": "Comment on an issue" },
+    { "name": "issue_set_blocked_by", "description": "Declare a blocked-by relationship between issues" },
+    { "name": "issue_remove_blocked_by", "description": "Remove a blocked-by relationship" },
+    { "name": "issue_list_relationships", "description": "List an issue's relationships" },
+    { "name": "issue_add_sub_issue", "description": "Attach a sub-issue to a parent issue" },
+    { "name": "issue_remove_sub_issue", "description": "Detach a sub-issue from a parent issue" },
+    { "name": "label_list", "description": "List labels in a repository" },
+    { "name": "label_create", "description": "Create a label" },
+    { "name": "label_delete", "description": "Delete a label" },
+    { "name": "project_set_status", "description": "Set a GitHub Project item's status field" },
+    { "name": "project_get_item", "description": "Read a GitHub Project item" },
+    { "name": "project_list_items", "description": "List GitHub Project items" },
+    { "name": "project_invalidate_cache", "description": "Invalidate the cached GitHub Project field metadata" },
+    { "name": "pr_list", "description": "List pull requests (read-only)" },
+    { "name": "pr_get", "description": "Read a pull request (read-only)" },
+    { "name": "repo_get", "description": "Read repository metadata" },
+    { "name": "repo_default_branch", "description": "Get a repository's default branch" },
+    { "name": "run_list", "description": "List GitHub Actions workflow runs" },
+    { "name": "run_get", "description": "Read a workflow run" },
+    { "name": "run_logs", "description": "Fetch logs for a workflow run" },
+    { "name": "gh_raw", "description": "Run an arbitrary gh CLI command (escape hatch)" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}
