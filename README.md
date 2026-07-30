@@ -12,7 +12,7 @@ feature's issue graph, and launch autonomous builds on Claude Code on the web.
 - [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy
   layer: skills, hooks, and the declaration of the EpikMCP server.
 - [`website/`](website/README.md) — the static Epik website, deployed to
-  GitHub Pages from CI on every push to `main`.
+  GitHub Pages on every push to `main` that passes CI.
 
 ## Installation
 
