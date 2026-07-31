@@ -182,3 +182,79 @@ jobs:
             conflict you cannot resolve, missing permissions), post a comment
             on the feature issue explaining exactly what a human needs to do,
             then stop.
+
+      # The build narrates its own progress, but it cannot narrate its own
+      # death — a session that dies mid-turn leaves the feature issue's thread
+      # hanging at "Build started." So when the job fails for any reason, the
+      # workflow says so itself, with the links a human needs to see what
+      # happened. The preflight step already names its own cause, so stay quiet
+      # when it was the step that failed: one comment per failure.
+      - name: Report build failure on the feature issue
+        if: failure() && steps.preflight.outcome != 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.EPIK_BUILD_GH_TOKEN || github.token }}
+          FEATURE_ISSUE: ${{ inputs.feature_issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jobs_api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs"
+
+          # Step-level anchors point a human straight at the log that matters.
+          # A job that failed without a failed step (timeout, cancellation,
+          # runner loss) still gets a line, or the list would come out empty.
+          gh api "$jobs_api" --paginate --jq '
+            .jobs[] | . as $j
+            | ($j.steps // [] | map(select(.conclusion == "failure"))) as $failed
+            | if ($failed | length) > 0
+              then $failed[] | "- `\($j.name)` → step **\(.name)**: \($j.html_url)#step:\(.number):1"
+              elif $j.conclusion == "failure"
+              then "- `\($j.name)`: \($j.html_url) (job failed with no failed step recorded)"
+              else empty end
+          ' > /tmp/failed-jobs.md 2>/dev/null || true
+
+          # Failing checks on the pull requests the build opened, if it got
+          # that far. Merged PRs were green by definition; only open ones can
+          # still be red.
+          : > /tmp/failed-checks.md
+          for pr in $(gh pr list -R "$GITHUB_REPOSITORY" --base "$TARGET_BRANCH" \
+                        --state open --json number --jq '.[].number' 2>/dev/null || true); do
+            fails=$(gh pr checks "$pr" -R "$GITHUB_REPOSITORY" --json name,bucket,link \
+                      --jq '.[] | select(.bucket == "fail") | "  - \(.name): \(.link)"' \
+                      2>/dev/null || true)
+            if [ -n "$fails" ]; then
+              printf -- '- PR #%s\n%s\n' "$pr" "$fails" >> /tmp/failed-checks.md
+            fi
+          done
+
+          {
+            echo "This build failed, and it died without being able to say so" \
+                 "itself — so this comment comes from the workflow, not from me."
+            echo
+            echo "- Feature issue: #$FEATURE_ISSUE"
+            echo "- Feature branch: \`$TARGET_BRANCH\`"
+            echo "- Base branch: \`$BASE_BRANCH\`"
+            echo "- Failed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "- Failed run: $RUN_URL"
+            echo
+            echo "**Where it failed in this run**"
+            echo
+            if [ -s /tmp/failed-jobs.md ]; then
+              cat /tmp/failed-jobs.md
+            else
+              echo "- No failed job or step was recorded yet; see the run itself:" \
+                   "$RUN_URL"
+            fi
+            if [ -s /tmp/failed-checks.md ]; then
+              echo
+              echo "**Failing checks on open pull requests into \`$TARGET_BRANCH\`**"
+              echo
+              cat /tmp/failed-checks.md
+            fi
+            echo
+            echo "Nothing was retried. Relaunch me from chat once the cause is" \
+                 "fixed; whatever work already merged into \`$TARGET_BRANCH\`" \
+                 "stays there."
+          } > /tmp/failure-comment.md
+
+          cat /tmp/failure-comment.md
+          gh issue comment "$FEATURE_ISSUE" -R "$GITHUB_REPOSITORY" \
+            --body-file /tmp/failure-comment.md
