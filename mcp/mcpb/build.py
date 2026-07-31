@@ -8,15 +8,22 @@ Requirements: ``uv`` and ``npx`` (Node) on PATH. Network access for
 
 Usage::
 
-    python mcp/mcpb/build.py
+    python mcp/mcpb/build.py [--version X.Y.Z]
 
 Output: ``mcp/mcpb/dist/epik-mcp-<version>.mcpb`` where ``<version>`` is the
 extension version in ``manifest.json`` (the extension is versioned by the
 manifest, independently of the ``epik-mcp`` package version).
+
+``--version`` overrides the manifest version in the *staged* copy only —
+the checked-in ``manifest.json`` is never modified. The release CI job uses
+this to stamp bundles with the pushed tag, so release candidates
+(``1.0.0-rc.1``) self-identify in Claude Desktop's extension list instead of
+all claiming to be the final version.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -47,7 +54,18 @@ def _strip_dev_dependencies(pyproject: str) -> str:
 
 
 def main() -> int:
-    version = json.loads((HERE / "manifest.json").read_text())["version"]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version",
+        help=(
+            "override the extension version in the staged manifest"
+            " (default: the version in manifest.json)"
+        ),
+    )
+    args = parser.parse_args()
+
+    manifest = json.loads((HERE / "manifest.json").read_text())
+    version: str = args.version or manifest["version"]
     dist = HERE / "dist"
     dist.mkdir(exist_ok=True)
     out = dist / f"epik-mcp-{version}.mcpb"
@@ -62,6 +80,9 @@ def main() -> int:
         )
         for name in BUNDLE_FILES:
             shutil.copy(HERE / name, stage / name)
+        if version != manifest["version"]:
+            manifest["version"] = version
+            (stage / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
         subprocess.run(["uv", "lock"], cwd=stage, check=True)
         subprocess.run(

@@ -25,18 +25,31 @@ the `gh` CLI, logged in.
   `cairosvg logo-mark-light.svg -o icon.png --output-width 512 --output-height 512`).
   Re-render if the brand mark changes.
 - `.mcpbignore` — keeps caches and virtualenvs out of the archive.
+- `compatibility.claude_desktop` in the manifest pins the oldest Claude
+  Desktop version the uv runtime has been verified on (no published
+  support matrix exists); raise it as newer versions are tested.
 - `build.py` — assembles a staging directory (epik-mcp source + the files
   above, dev dependencies stripped, fresh lock) and packs it with the MCPB
   CLI. Requires `uv` and `npx`.
 
 ## Building
 
+Releases build themselves: pushing a `v*` tag runs the `release-mcpb` job in
+[`ci.yml`](../../.github/workflows/ci.yml), which packs the bundle stamped
+with the tag's version and attaches it to a GitHub release for that tag —
+a pre-release when the version carries a suffix, so any number of release
+candidates (`v1.0.0-rc.1`, `v1.0.0-rc.2`, …) can be cut and tested before
+the final `v1.0.0`. The website's download button points at the release
+asset.
+
+To build locally (e.g. to verify exactly what you reviewed):
+
 ```
-python mcp/mcpb/build.py
+python mcp/mcpb/build.py            # version from manifest.json
+python mcp/mcpb/build.py --version 1.0.0-rc.9   # stamped, staged copy only
 ```
 
-Output lands in `mcp/mcpb/dist/` (gitignored). Attach the `.mcpb` to the
-GitHub release so the website can link it directly.
+Output lands in `mcp/mcpb/dist/` (gitignored). Requires `uv` and `npx`.
 
 ## References
 

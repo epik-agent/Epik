@@ -58,6 +58,7 @@
     { "name": "gh_raw", "description": "Run an arbitrary gh CLI command (escape hatch)" }
   ],
   "compatibility": {
+    "claude_desktop": ">=1.24012.9",
     "platforms": ["darwin", "win32", "linux"]
   }
 }
