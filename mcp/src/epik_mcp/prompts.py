@@ -1,13 +1,12 @@
-"""MCP prompts: summon Epik and converge a project on Epik on plugin-less surfaces.
+"""MCP prompts: summon Epik and set a repository up for Epik on plugin-less surfaces.
 
-Claude Desktop and CoWork don't load Claude Code plugins, so the persona and
-the init spec travel with the server instead: ``summon-epik`` serves the
-persona (the same text behind the plugin's ``/epik:summon``), ``init-epik``
-serves the convergence dialogue (the same text behind ``/epik:init``).
+Claude Desktop and Cowork don't load Claude Code plugins, so the persona and
+the setup spec travel with the server instead: ``summon-epik`` serves the
+persona (the same text behind the plugin's ``/epik:summon``), ``init-repository``
+serves the setup dialogue (the same text behind ``/epik:init-repository``).
 
-``setup-epik`` is retained as an alias of ``init-epik``: it is the name these
-surfaces were told to reach for, and "set up" reads more naturally than "init"
-where there is no ``/epik:init`` command to echo.
+Prompt names are already namespaced by the server, so they echo the commands
+exactly; the branding lives in the server name and in each prompt's title.
 """
 
 from __future__ import annotations
@@ -17,9 +16,10 @@ from mcp.server.mcpserver import MCPServer
 from .resources import load
 
 INIT_DESCRIPTION = (
-    "Converge this project on the correct Epik shape: create the repository,"
-    " convert an existing one, or repair drift (gh auth, project enablement,"
-    " the headless-build workflow, build secrets). Safe to run repeatedly."
+    "Set this repository up for Epik, or repair one that has drifted: create"
+    " the repository, convert an existing one, or fix what is missing (gh auth,"
+    " project enablement, the headless-build workflow, build secrets). Safe to"
+    " run any time."
 )
 
 
@@ -28,8 +28,8 @@ def summon_epik() -> str:
     return load("persona.md") + "\n\n---\n\n" + load("theory-and-practice.md")
 
 
-def init_epik() -> str:
-    """The Epik init spec: detect, offer, fix, report — until the project converges."""
+def init_repository() -> str:
+    """The Epik setup spec: detect, offer, fix, report — until the project matches."""
     return load("init.md")
 
 
@@ -45,17 +45,9 @@ def register(server: MCPServer) -> None:
         return summon_epik()
 
     @server.prompt(
-        name="init-epik",
-        title="Initialize an Epik project",
+        name="init-repository",
+        title="Set up a repository for Epik",
         description=INIT_DESCRIPTION,
     )
-    def prompt_init_epik() -> str:
-        return init_epik()
-
-    @server.prompt(
-        name="setup-epik",
-        title="Set up Epik",
-        description=f"Alias of init-epik. {INIT_DESCRIPTION}",
-    )
-    def prompt_setup_epik() -> str:
-        return init_epik()
+    def prompt_init_repository() -> str:
+        return init_repository()

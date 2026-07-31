@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from epik_mcp.prompts import init_epik, register, summon_epik
+from epik_mcp.prompts import init_repository, register, summon_epik
 from epik_mcp.resources import SOURCES, load
 
 MCP_DIR = Path(__file__).resolve().parent.parent
@@ -34,17 +34,17 @@ def test_summon_epik_combines_persona_and_philosophy():
     assert text.index("Hello, I'm Epik") < text.index("Programming as Theory Building")
 
 
-def test_init_epik_is_the_convergence_dialogue():
-    text = init_epik()
+def test_init_repository_is_the_setup_dialogue():
+    text = init_repository()
     assert "idempotent convergence" in text
     # The former doctor's behaviour is retained in full.
     assert "Detect everything before changing anything" in text
     assert "EPIK_BUILD_GH_TOKEN" in text
 
 
-def test_init_epik_carries_the_project_spec():
+def test_init_repository_carries_the_project_spec():
     """Creation and repair share one spec, so the prompt must contain all of it."""
-    text = init_epik()
+    text = init_repository()
     for item in (
         ".claude/settings.json",
         "CLAUDE.md",
@@ -62,7 +62,7 @@ async def test_register_exposes_the_prompts():
     server = MCPServer("test")
     register(server)
     names = {p.name for p in await server.list_prompts()}
-    assert {"summon-epik", "init-epik", "setup-epik"} <= names
+    assert names == {"summon-epik", "init-repository"}
 
 
 async def test_prompt_descriptions_carry_no_internal_nomenclature():
@@ -73,29 +73,25 @@ async def test_prompt_descriptions_carry_no_internal_nomenclature():
     register(server)
     for prompt in await server.list_prompts():
         user_facing = f"{prompt.title or ''} {prompt.description or ''}"
-        assert not re.search(r"theory.and.practice", user_facing, re.IGNORECASE), (
-            f"{prompt.name} exposes internal nomenclature: {user_facing!r}"
-        )
+        for pattern in (r"theory.and.practice", r"converge", r"convergence"):
+            assert not re.search(pattern, user_facing, re.IGNORECASE), (
+                f"{prompt.name} exposes internal nomenclature: {user_facing!r}"
+            )
 
 
-async def test_setup_epik_is_an_alias_of_init_epik():
-    """Plugin-less surfaces were told to reach for setup-epik; keep it working."""
+async def test_init_repository_prompt_echoes_the_command():
+    """One prompt, one name: `init-repository` matches `/epik:init-repository`."""
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer("test")
     register(server)
-    rendered = {
-        name: await server.get_prompt(name) for name in ("init-epik", "setup-epik")
-    }
-    texts = {
-        name: "".join(
-            message.content.text
-            for message in result.messages
-            if hasattr(message.content, "text")
-        )
-        for name, result in rendered.items()
-    }
-    assert texts["setup-epik"] == texts["init-epik"] == init_epik()
+    result = await server.get_prompt("init-repository")
+    text = "".join(
+        message.content.text
+        for message in result.messages
+        if hasattr(message.content, "text")
+    )
+    assert text == init_repository()
 
 
 @pytest.mark.skipif(

@@ -1,9 +1,9 @@
 # Epik build monitoring loop
 
 Default `/loop` body for Epik projects: watch the active headless feature
-build and interrupt only when a human is needed. (The `epik:init` skill
-copies this file to a project's `.claude/loop.md` so a bare `/loop` defaults
-to build monitoring.)
+build and interrupt only when a human is needed. (The `epik:init-repository`
+skill copies this file to a project's `.claude/loop.md` so a bare `/loop`
+defaults to build monitoring.)
 
 Each iteration:
 

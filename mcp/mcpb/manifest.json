@@ -4,7 +4,7 @@
   "display_name": "Epik",
   "version": "1.0.0",
   "description": "You say it. We make it. Manager-mode feature development on GitHub.",
-  "long_description": "EpikMCP is the single MCP server for Epik: converge on a design, author the feature's issue graph, and launch autonomous headless builds on GitHub Actions. The plan module wraps the gh CLI for read/write GitHub access (issues, relationships, projects, labels, repos, read-only PRs and runs); the build module dispatches feature builds and reads their status.\n\nRequires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). To summon Epik in a conversation, attach the **summon-epik** prompt; to set up or repair a project, attach **init-epik**.",
+  "long_description": "EpikMCP is the single MCP server for Epik: settle a design in conversation, author the feature's issue graph, and launch autonomous headless builds on GitHub Actions. The plan module wraps the gh CLI for read/write GitHub access (issues, relationships, projects, labels, repos, read-only PRs and runs); the build module dispatches feature builds and reads their status.\n\nRequires the GitHub CLI (`gh`) installed and logged in (`gh auth login`). To summon Epik in a conversation, use the **Summon Epik** prompt; to set a repository up for Epik or repair one that has drifted, use **Set up a repository for Epik**.",
   "author": {
     "name": "W.P. McNeill",
     "email": "billmcn@gmail.com",
