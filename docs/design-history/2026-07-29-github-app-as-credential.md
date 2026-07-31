@@ -148,7 +148,7 @@ that form and exchange may share one issue â€” filed, not built.
   stock GitHub connector plus conventions cannot meet.
 
 Honest tension, on the record: Cowork-cloud sessions' reliance on the
-desktop bridge is the strongest live evidence *for*àa remote server. But
+desktop bridge is the strongest live evidence *for* a remote server. But
 App-authenticated `workflow_dispatch` entry points likely close the
 write gap serverless, so the tension does not yet justify the station.
 
