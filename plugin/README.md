@@ -1,6 +1,6 @@
 # epik (plugin)
 
-The Epik plugin: manager-mode **feature** development on GitHub. Converge on a design in CoWork, author the feature's issue graph, and launch headless builds on GitHub Actions — without leaving the thinking.
+The Epik plugin: manager-mode **feature** development on GitHub. Settle a design in conversation, author the feature's issue graph, and launch headless builds on GitHub Actions — without leaving the thinking.
 
 A *feature* is a unit of code implemented in one or more stories (issues).
 
@@ -17,10 +17,10 @@ plugin/
       theory-and-practice.md
     feature/
       SKILL.md          # /epik:feature — launch a headless feature build and monitor it
-    init/
-      SKILL.md          # /epik:init — converge a project on the correct Epik shape
+    init-repository/
+      SKILL.md          # /epik:init-repository — set a repository up for Epik
       init.md           # canonical spec of a correct Epik project
-                        # (vendored into EpikMCP as init-epik)
+                        # (vendored into EpikMCP as init-repository)
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
   hooks/
@@ -28,8 +28,9 @@ plugin/
     session-start.sh
   templates/
     loop.md             # default /loop body: build monitoring (written to
-                        # projects as .claude/loop.md by epik:init)
-    settings.json       # .claude/settings.json template that epik:init writes into projects
+                        # projects as .claude/loop.md by epik:init-repository)
+    settings.json       # .claude/settings.json template that epik:init-repository writes
+                        # into projects
   .mcp.json             # declares the EpikMCP server (does not contain it)
 ```
 
@@ -37,11 +38,11 @@ plugin/
 
 The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along, including into Claude Code on the web.
 
-One nuance: the persona and init texts are policy, owned here (`skills/summon/persona.md`, `theory-and-practice.md`, `skills/init/init.md`), but the MCP *serves* them as the `summon-epik` and `init-epik` prompts so plugin-less surfaces (Claude Desktop, CoWork) can summon Epik too. The server vendors copies (`mcp/scripts/sync_resources.py` syncs; CI fails on drift) — ownership stays with the plugin.
+One nuance: the persona and setup texts are policy, owned here (`skills/summon/persona.md`, `theory-and-practice.md`, `skills/init-repository/init.md`), but the MCP *serves* them as the `summon-epik` and `init-repository` prompts so plugin-less surfaces (Claude Desktop, Cowork) can summon Epik too. The server vendors copies (`mcp/scripts/sync_resources.py` syncs; CI fails on drift) — ownership stays with the plugin.
 
 ## Install
 
-For normal installation — prerequisites, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installation). The sections below only cover development setups.
+For normal installation — prerequisites, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installing-and-uninstalling). The sections below only cover development setups.
 
 ### Developing the plugin — quick local test (no marketplace)
 
@@ -80,9 +81,9 @@ Two build skills, both invoked explicitly as slash commands namespaced under `ep
 Plus two explicitly invoked skills:
 
 - **`/epik:summon`** — summon Epik, your software-design partner. Epik introduces itself: *"Hello, I'm Epik."*
-- **`/epik:init`** — converge this project on the correct Epik shape, idempotently: safe to run any number of times, doing only what the project's current state calls for. No repository yet → create it. A repository that isn't an Epik project → offer conversion. An Epik project that has drifted → offer the diff. Already correct → say so and stop. The spec it converges on covers `gh` auth, `.claude/settings.json` (per-project enablement, merged into any existing settings — see [`templates/settings.json`](templates/settings.json)), a `CLAUDE.md` stub, `.claude/loop.md` (the build-monitoring `/loop` default), a `docs/design-history/` scaffold, the headless-build workflow, build secrets, repository conventions from `~/.epik/config.json`, and plugin health. Detect → offer → fix → report; nothing changes without your agreement to that specific change, and only credential pastes are left to the human. Creation is repo-first — the repository is built through the GitHub API, no clone involved — and changes to a repository that already exists arrive as a pull request. (The same dialogue is the `init-epik` MCP prompt in Desktop/CoWork, aliased as `setup-epik`.)
+- **`/epik:init-repository`** — set this repository up for Epik, or repair one that has drifted: safe to run any time, doing only what the project's current state calls for. No repository yet → create it. A repository that isn't an Epik project → offer conversion. An Epik project that has drifted → offer the diff. Already correct → say so and stop. The spec it applies covers `gh` auth, `.claude/settings.json` (per-project enablement, merged into any existing settings — see [`templates/settings.json`](templates/settings.json)), a `CLAUDE.md` stub, `.claude/loop.md` (the build-monitoring `/loop` default), a `docs/design-history/` scaffold, the headless-build workflow, build secrets, repository conventions from `~/.epik/config.json`, and plugin health. Detect → offer → fix → report; nothing changes without your agreement to that specific change, and only credential pastes are left to the human. Creation is repo-first — the repository is built through the GitHub API, no clone involved — and changes to a repository that already exists arrive as a pull request. (The same dialogue is the `init-repository` MCP prompt in Desktop/Cowork.)
 
-  [`skills/init/init.md`](skills/init/init.md) is the single home of that spec: creation applies all of it, repair applies the diff, so the two can't drift apart. It absorbed the former `/epik:doctor` skill, whose behaviour it keeps in full — see [the ADR](../docs/design-history/2026-07-28-init-is-idempotent-convergence.md).
+  [`skills/init-repository/init.md`](skills/init-repository/init.md) is the single home of that spec: creation applies all of it, repair applies the diff, so the two can't drift apart. It absorbed the former `/epik:doctor` skill, whose behaviour it keeps in full — see [the ADR](../docs/design-history/2026-07-28-init-is-idempotent-convergence.md).
 
 The SessionStart hook prints a one-line pointer to `/epik:summon` — presence without invocation. It stays silent in CI and headless build sessions so the persona never bleeds into builders.
 

@@ -1,7 +1,7 @@
 {
   "name": "epik",
   "version": "0.1.0",
-  "description": "Manager-mode feature development on GitHub: converge in CoWork, author the issue graph, launch autonomous builds on Claude Code on the web.",
+  "description": "Manager-mode feature development on GitHub: settle the design in chat, author the issue graph, launch autonomous builds on Claude Code on the web.",
   "author": { "name": "Bill McNeill", "url": "https://github.com/epik-agent" },
   "homepage": "https://github.com/epik-agent/Epik",
   "license": "MIT",
