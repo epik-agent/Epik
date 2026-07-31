@@ -27,7 +27,9 @@ Each iteration:
      decision (check new comments with `issue_get` / `gh_raw` when the build
      run has stalled).
    - The feature completed: all sub-issues closed, their PRs merged into the
-     feature branch. Announce completion and where to review.
+     feature branch, and the build's review pull request into the base branch
+     open. Announce completion and link that pull request — it is where to
+     review, and merging it is the user's call.
 5. Stop looping when the feature completes or the build run ends in failure;
    otherwise continue on a relaxed cadence (every few minutes is plenty —
    headless builds take a while).

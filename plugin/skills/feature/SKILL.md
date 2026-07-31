@@ -40,9 +40,13 @@ the default branch is never touched.
    > and CI state. Stay quiet otherwise. Interrupt me only on needs-me
    > events: the build run fails or stalls, CI on a PR fails repeatedly, the
    > build posts a comment asking for a human decision, or the feature
-   > completes (all sub-issues closed and merged into the feature branch).
+   > completes (all sub-issues closed and merged into the feature branch,
+   > and the build's review PR into the base branch open).
    > Stop looping once the feature completes or the build run ends in
    > failure.
 
 The feature is complete when all issues have been implemented in the feature
-branch and that branch is ready for review.
+branch and the build has opened its review pull request from that branch into
+the base branch. That single pull request is the human review that gates
+merging the feature — report it as where to review, and leave the merge to a
+human.
