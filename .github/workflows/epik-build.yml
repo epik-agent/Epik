@@ -11,6 +11,14 @@
 #   - Optionally, an `EPIK_BUILD_GH_TOKEN` secret (a PAT with repo scope) can
 #     be configured so that PRs opened by the build trigger CI; the default
 #     `github.token` cannot trigger downstream workflows.
+#
+# Failure reporting: every reporting mechanism a headless build has is
+# model-narrated, so the one event the model cannot narrate is its own death.
+# The preflight step below asks the Anthropic API whether this build can run at
+# all and, when the answer is no, writes the explanation onto the feature issue
+# itself. There is deliberately no retry logic anywhere in this workflow:
+# a failed build is documented, and restarting it is a human decision made by
+# relaunching `feature_launch` from chat.
 
 name: Epik Build
 
@@ -31,6 +39,12 @@ on:
         required: false
         default: ""
         type: string
+
+# The model the build runs on, in one place: the preflight call below checks
+# this exact model, and any model pin added to `claude_args` must reference the
+# same variable so the two can never drift apart.
+env:
+  EPIK_BUILD_MODEL: claude-opus-5
 
 permissions:
   contents: write
@@ -61,6 +75,68 @@ jobs:
         run: |
           git config user.name "epik-build"
           git config user.email "epik-build@users.noreply.github.com"
+
+      # A build whose API key is rejected dies before it can say anything: no
+      # turns, no comment, no error text anywhere in the run log. Ask the API
+      # directly instead, and write the answer where the build's failure would
+      # otherwise be invisible — the feature issue.
+      - name: Preflight Anthropic API
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.EPIK_BUILD_GH_TOKEN || github.token }}
+          FEATURE_ISSUE: ${{ inputs.feature_issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          status=$(curl -sS -o /tmp/preflight.json -w '%{http_code}' \
+            https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -nc --arg model "$EPIK_BUILD_MODEL" \
+                  '{model: $model, max_tokens: 1, messages: [{role: "user", content: "ping"}]}')") \
+            || status="000"
+
+          if [ "$status" = "200" ]; then
+            echo "Anthropic API preflight OK ($EPIK_BUILD_MODEL)."
+            exit 0
+          fi
+
+          msg=$(jq -r '.error.message // empty' /tmp/preflight.json 2>/dev/null || true)
+          [ -n "$msg" ] || msg="no error message returned by the API"
+          echo "::error::Anthropic API preflight failed ($status) for model $EPIK_BUILD_MODEL: $msg"
+
+          {
+            if [ "$status" = "000" ]; then
+              echo "I can't start this build: I could not reach the Anthropic" \
+                   "API at all — the request failed before any HTTP response." \
+                   "A human needs to check the run log, and relaunch me once" \
+                   "the API is reachable again."
+            else
+              echo "I can't start this build. The Anthropic API rejected my" \
+                   "key ($status): $msg — a human needs to fix the" \
+                   "\`ANTHROPIC_API_KEY\` secret or the account it bills to," \
+                   "then relaunch me."
+            fi
+            echo
+            if printf '%s' "$msg" | grep -qi 'credit balance'; then
+              echo "Note: Claude subscription credits and API credits are" \
+                   "separate. Check **console.anthropic.com → Plans &" \
+                   "Billing** for the organization this key belongs to" \
+                   "(Settings → API Keys shows the key's workspace/org) — a" \
+                   "balance shown on claude.ai or in a different org does not" \
+                   "fund this key."
+              echo
+            fi
+            echo "- Feature issue: #$FEATURE_ISSUE"
+            echo "- Feature branch: \`$TARGET_BRANCH\`"
+            echo "- Model checked: \`$EPIK_BUILD_MODEL\`"
+            echo "- Failed run: $RUN_URL"
+          } > /tmp/preflight-comment.md
+
+          gh issue comment "$FEATURE_ISSUE" -R "$GITHUB_REPOSITORY" \
+            --body-file /tmp/preflight-comment.md
+          exit 1
 
       - name: Run headless feature build
         uses: anthropics/claude-code-action@v1
