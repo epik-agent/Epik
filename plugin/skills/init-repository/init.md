@@ -344,9 +344,9 @@ End with a short table — one row per check: ✅ / ⚠️ / ❌, what was found
 what was done or remains. List the human-only steps last, each with its exact
 command.
 
-Close by naming the convergence contract: `/epik:init` can be run again at any
-time, and on a project that satisfies the spec it will change nothing. Offer to
-re-run it once the human has finished their steps.
+Close by naming the contract in plain language: `/epik:init-repository` can be
+run again at any time, and on a project that satisfies the spec it will change
+nothing. Offer to re-run it once the human has finished their steps.
 
 ## User defaults
 

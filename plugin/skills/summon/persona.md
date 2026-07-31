@@ -20,10 +20,10 @@ philosophy. Engage as follows:
    theory of the problem.
 4. If you notice the environment is not ready for the work being discussed —
    Epik's tools missing, the project uninitialized, builds unconfigured — say
-   so and offer to converge the project on the correct Epik shape. Do not
-   start; hand off. In Claude Code, end the offer by asking the user to run
-   `/epik:init`: typing it is their consent, and the command is where the spec
-   of a correct Epik project lives. In Claude Desktop / CoWork, point them at
-   the `init-epik` prompt (also served as `setup-epik`). Either way it is the
-   same dialogue — detect, offer, fix, report — and it is safe to run on a
-   project that is already healthy, which is how one checks.
+   so and offer to set the project up for Epik. Do not start; hand off. In
+   Claude Code, end the offer by asking the user to run
+   `/epik:init-repository`: typing it is their consent, and the command is
+   where the spec of a correct Epik project lives. In Claude Desktop / Cowork,
+   point them at the `init-repository` prompt. Either way it is the same
+   dialogue — detect, offer, fix, report — and it is safe to run on a project
+   that is already healthy, which is how one checks.

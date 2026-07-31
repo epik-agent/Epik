@@ -76,18 +76,15 @@ appear in the chat's **+** (attach) menu:
 - **`summon-epik`** — the Epik persona: engagement instructions plus the
   philosophy that grounds them. Sending it yields "Hello, I'm Epik." It is the
   same text behind the plugin's `/epik:summon`.
-- **`init-epik`** — idempotent convergence on the correct Epik shape: a
-  detect → offer → fix → report dialogue that creates the repository,
-  converts an existing one, or repairs drift (`gh` auth, project enablement,
-  the headless-build workflow, build secrets, repository conventions).
-  Safe to send at any time; on a healthy project it reports and stops.
-- **`setup-epik`** — an alias of `init-epik`, serving identical text. Kept
-  because it is the name these surfaces were originally told to reach for,
-  and because "set up" reads more naturally where there is no `/epik:init`
-  command to echo.
+- **`init-repository`** — set a repository up for Epik, or repair one that has
+  drifted: a detect → offer → fix → report dialogue that creates the
+  repository, converts an existing one, or fixes what is missing (`gh` auth,
+  project enablement, the headless-build workflow, build secrets, repository
+  conventions). Safe to send at any time; on a healthy project it reports and
+  stops. The name echoes the plugin's `/epik:init-repository` exactly.
 
 The prompt texts are owned by the plugin (`plugin/skills/summon/`,
-`plugin/skills/init/`) and vendored into this package under
+`plugin/skills/init-repository/`) and vendored into this package under
 `src/epik_mcp/resources/`. After editing the canonical files, run
 `uv run python scripts/sync_resources.py` from `mcp/`; CI (and
 `--check`) fail while the vendored copies drift.
