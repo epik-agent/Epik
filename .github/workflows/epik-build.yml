@@ -6,6 +6,12 @@
 # on a feature branch and reports back through GitHub (PRs, issue comments,
 # this run's status).
 #
+# A build's endpoint is a pull request from the feature branch into the base
+# branch, linked to the feature issue: the single human review that gates
+# merging the feature. The prompt below ends the build by opening it, so the
+# endpoint is part of the workflow rather than something a builder has to
+# think of on its own.
+#
 # Requirements:
 #   - The `ANTHROPIC_API_KEY` repository secret must be configured.
 #   - Optionally, an `EPIK_BUILD_GH_TOKEN` secret (a PAT with repo scope) can
@@ -175,11 +181,24 @@ jobs:
                feature branch and close its issue.
             5. As you go, post progress comments on the feature issue so
                status is visible from chat: one when the build starts, one as
-               each sub-issue's PR opens and merges, and a final summary.
+               each sub-issue's PR opens and merges, and a final summary that
+               links the review pull request from step 6.
+            6. Finish by opening the review pull request: from the feature
+               branch `${{ env.TARGET_BRANCH }}` into the base branch
+               `${{ env.BASE_BRANCH }}`, titled for feature issue
+               #${{ inputs.feature_issue_number }} and with
+               `Closes #${{ inputs.feature_issue_number }}` in its body. This
+               one pull request is the human review that gates merging the
+               feature, so describe what the feature does and what changed in
+               it. If it already exists, leave it open and link that one
+               rather than opening a second.
 
             The build is complete when all sub-issues are implemented and
-            merged into the feature branch and the feature branch is pushed
-            and ready for review. Do not merge the feature branch itself.
+            merged into the feature branch, the feature branch is pushed, and
+            the review pull request from step 6 is open against
+            `${{ env.BASE_BRANCH }}`. Never merge that pull request yourself,
+            and never merge the feature branch into the base branch by any
+            other means — the review is a human's to do.
             If you become blocked (an unresolvable CI failure, a merge
             conflict you cannot resolve, missing permissions), post a comment
             on the feature issue explaining exactly what a human needs to do,
