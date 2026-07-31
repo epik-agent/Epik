@@ -16,7 +16,9 @@
 # model-narrated, so the one event the model cannot narrate is its own death.
 # The preflight step below asks the Anthropic API whether this build can run at
 # all and, when the answer is no, writes the explanation onto the feature issue
-# itself. There is deliberately no retry logic anywhere in this workflow:
+# itself. Every run also leaves the session's raw execution output attached as
+# an artifact, which is where a dead build's last turns survive.
+# There is deliberately no retry logic anywhere in this workflow:
 # a failed build is documented, and restarting it is a human decision made by
 # relaunching `feature_launch` from chat.
 
@@ -183,6 +185,19 @@ jobs:
             on the feature issue explaining exactly what a human needs to do,
             then stop.
 
+      # The raw turn-by-turn record of the session, kept as-is: no schema, no
+      # parsing, just the file. It is the only place a dead build's last turns
+      # survive. `if-no-files-found: ignore` covers the preflight-failure path,
+      # where the Claude step never ran and the file was never created.
+      - name: Upload Claude execution output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output
+          path: ${{ runner.temp }}/claude-execution-output.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       # The build narrates its own progress, but it cannot narrate its own
       # death — a session that dies mid-turn leaves the feature issue's thread
       # hanging at "Build started." So when the job fails for any reason, the
@@ -248,6 +263,12 @@ jobs:
               echo "**Failing checks on open pull requests into \`$TARGET_BRANCH\`**"
               echo
               cat /tmp/failed-checks.md
+            fi
+            if [ -f "$RUNNER_TEMP/claude-execution-output.json" ]; then
+              echo
+              echo "The session's raw execution output is attached to the run" \
+                   "as the \`claude-execution-output\` artifact — that is where" \
+                   "its last turns survive."
             fi
             echo
             echo "Nothing was retried. Relaunch me from chat once the cause is" \
