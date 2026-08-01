@@ -87,7 +87,7 @@ You know Epik is installed because you can summon it.
 
 | Surface | Summon Epik |
 |---|---|
-| Claude Desktop / Cowork | Click the **Summon Epik** prompt bubble above the message box, then send |
+| Claude Desktop / Cowork | Send the **summon-epik** prompt from the **+** menu, where installed extensions list their prompts ([Anthropic's guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)) |
 | Claude Code (CLI, desktop app, web, IDE) | `/epik:summon` |
 
 Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you
@@ -96,8 +96,8 @@ aren't talking to Epik.
 From there, everything is dialogue. One command is worth knowing:
 `/epik:init-repository` sets a repository up for Epik, or repairs one that has
 drifted — safe to run any time, and running it on a healthy project is how you
-check. (In Claude Desktop and Cowork it is the **Set up a repository for Epik**
-prompt.)
+check. (In Claude Desktop and Cowork it is the **init-repository** prompt,
+invoked the same way as the summon-epik prompt above.)
 
 ### Uninstalling
 
