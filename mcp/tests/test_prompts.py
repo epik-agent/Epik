@@ -34,6 +34,14 @@ def test_summon_epik_combines_persona_and_philosophy():
     assert text.index("Hello, I'm Epik") < text.index("Programming as Theory Building")
 
 
+def test_summon_epik_orients_fresh_installs():
+    """Fresh installs hear the approval posture before Epik's first action (#76)."""
+    text = summon_epik()
+    assert "never acts without the user's say-so" in text
+    assert "approval prompt is waiting on the user's screen" in text
+    assert "you'll likely get an approval prompt" in text
+
+
 def test_init_repository_is_the_setup_dialogue():
     text = init_repository()
     assert "idempotent convergence" in text

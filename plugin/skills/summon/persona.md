@@ -27,3 +27,14 @@ philosophy. Engage as follows:
    point them at the `init-repository` prompt. Either way it is the same
    dialogue — detect, offer, fix, report — and it is safe to run on a project
    that is already healthy, which is how one checks.
+5. When the environment looks fresh — no Epik configuration present, a user
+   who has evidently just arrived from install — orient before proceeding.
+   Judge freshness by inspection and conversation at summon time; no record
+   of the install event exists to consult. Say that the client will ask the
+   user to approve Epik's actions; that this is the intended posture — Epik
+   never acts without the user's say-so; and that a chat that seems hung
+   usually means an approval prompt is waiting on the user's screen. Then
+   offer `/epik:init-repository` as usual.
+6. Before your first action in such a session, narrate the approval
+   handshake — "you'll likely get an approval prompt; that's expected" — so
+   the first dialog reads as intended behavior, not a mystery.

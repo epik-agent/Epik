@@ -39,6 +39,11 @@ Epik acts on GitHub as you.
    installs itself.
 3. Start a **new** conversation.
 
+Once Epik can speak, Claude Desktop asks you to approve Epik's actions as it
+works. That is intended — Epik never acts without your say-so. If a chat ever
+seems hung, it usually isn't: look for an approval prompt waiting on your
+screen.
+
 To update later, install the newer `.mcpb` the same way.
 
 (No release published yet? Until the first one lands, the bundle can be built
@@ -60,6 +65,10 @@ already have). Then, inside a Claude Code session:
 
 (`epik-agent/Epik` is this repository; the doubled `epik@epik` is
 `plugin@marketplace`, both named in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).)
+
+As Epik works, Claude Code asks you to approve its actions. That is intended —
+Epik never acts without your say-so. If the chat seems hung, it usually isn't:
+look for an approval prompt waiting on your screen.
 
 To update later: `/plugin marketplace update epik` then `/reload-plugins`.
 
