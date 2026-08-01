@@ -50,18 +50,36 @@ You need a GitHub account, [Claude Code](https://claude.com/claude-code)
 (current version), the [`gh` CLI](https://cli.github.com/) signed in
 (`gh auth login`), and [`uv`](https://docs.astral.sh/uv/) — its `uvx` command
 runs the EpikMCP server for you (plus `git`, which you almost certainly
-already have). Then, inside a Claude Code session:
+already have). Then, inside a Claude Code session, enter the following
+commands one at a time:
 
 ```
 /plugin marketplace add epik-agent/Epik
+```
+
+```
 /plugin install epik@epik
+```
+
+The install command opens a details view asking you to confirm an
+installation scope; confirm it, then reload:
+
+```
 /reload-plugins
 ```
 
 (`epik-agent/Epik` is this repository; the doubled `epik@epik` is
 `plugin@marketplace`, both named in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).)
 
-To update later: `/plugin marketplace update epik` then `/reload-plugins`.
+To update later, again one command at a time:
+
+```
+/plugin marketplace update epik
+```
+
+```
+/reload-plugins
+```
 
 ### Last step: summon Epik
 
