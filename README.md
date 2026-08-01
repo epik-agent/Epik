@@ -39,10 +39,10 @@ Epik acts on GitHub as you.
    installs itself.
 3. Start a **new** conversation.
 
-Once Epik can speak, Claude Desktop asks you to approve Epik's actions as it
-works. That is intended — Epik never acts without your say-so. If a chat ever
-seems hung, it usually isn't: look for an approval prompt waiting on your
-screen.
+Once Epik can speak, Claude Desktop and Cowork ask you to approve Epik's
+actions as it works. That is intended — Epik never acts without your say-so.
+If a chat ever seems hung, it usually isn't: look for an approval prompt
+waiting on your screen.
 
 To update later, install the newer `.mcpb` the same way.
 
