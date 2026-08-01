@@ -55,11 +55,21 @@ You need a GitHub account, [Claude Code](https://claude.com/claude-code)
 (current version), the [`gh` CLI](https://cli.github.com/) signed in
 (`gh auth login`), and [`uv`](https://docs.astral.sh/uv/) — its `uvx` command
 runs the EpikMCP server for you (plus `git`, which you almost certainly
-already have). Then, inside a Claude Code session:
+already have). Then, inside a Claude Code session, enter the following
+commands one at a time:
 
 ```
 /plugin marketplace add epik-agent/Epik
+```
+
+```
 /plugin install epik@epik
+```
+
+The install command opens a details view asking you to confirm an
+installation scope; confirm it, then reload:
+
+```
 /reload-plugins
 ```
 
@@ -70,7 +80,15 @@ As Epik works, Claude Code asks you to approve its actions. That is intended —
 Epik never acts without your say-so. If the chat seems hung, it usually isn't:
 look for an approval prompt waiting on your screen.
 
-To update later: `/plugin marketplace update epik` then `/reload-plugins`.
+To update later, again one command at a time:
+
+```
+/plugin marketplace update epik
+```
+
+```
+/reload-plugins
+```
 
 ### Last step: summon Epik
 
@@ -78,7 +96,7 @@ You know Epik is installed because you can summon it.
 
 | Surface | Summon Epik |
 |---|---|
-| Claude Desktop / Cowork | Click the **Summon Epik** prompt bubble above the message box, then send |
+| Claude Desktop / Cowork | Send the **summon-epik** prompt from the **+** menu, where installed extensions list their prompts ([Anthropic's guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)) |
 | Claude Code (CLI, desktop app, web, IDE) | `/epik:summon` |
 
 Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you
@@ -87,8 +105,8 @@ aren't talking to Epik.
 From there, everything is dialogue. One command is worth knowing:
 `/epik:init-repository` sets a repository up for Epik, or repairs one that has
 drifted — safe to run any time, and running it on a healthy project is how you
-check. (In Claude Desktop and Cowork it is the **Set up a repository for Epik**
-prompt.)
+check. (In Claude Desktop and Cowork it is the **init-repository** prompt,
+invoked the same way as the summon-epik prompt above.)
 
 ### Uninstalling
 

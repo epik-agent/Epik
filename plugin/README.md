@@ -60,6 +60,9 @@ The repo root is a single-entry marketplace, so a local clone works exactly like
 
 ```
 /plugin marketplace add /path/to/Epik
+```
+
+```
 /plugin install epik@epik
 ```
 
