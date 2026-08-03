@@ -13,13 +13,13 @@ use epik::tree::Tree;
 
 const OUTPUT_FILE: &str = "output.txt";
 
-/// Test stand-in for real issue implementation: "implementing" an issue
+/// This test's choice of issue implementation: "implementing" an issue
 /// appends its description to the output file and commits the result to the
-/// destination branch. Wraps `Issue` because the orphan rule keeps this crate
-/// from implementing `Implementable` for it directly.
-struct AppendToOutput<'a>(&'a Issue);
+/// destination branch.
+#[derive(Debug)]
+struct AppendToOutput(Issue);
 
-impl Implementable for AppendToOutput<'_> {
+impl Implementable for AppendToOutput {
     fn implement(&self, _source: &Endpoint, dest: &Endpoint) -> Result<()> {
         let Url::Local(path) = dest.url() else {
             panic!("test endpoints are always local");
@@ -59,16 +59,6 @@ impl Implementable for AppendToOutput<'_> {
     }
 }
 
-/// Implements every issue in the feature, parents before children.
-fn implement_feature(feature: &Feature, source: &Endpoint, dest: &Endpoint) -> Result<()> {
-    let mut order = Vec::new();
-    feature.issues.bfs(|issue| order.push(issue));
-    for issue in order {
-        AppendToOutput(issue).implement(source, dest)?;
-    }
-    Ok(())
-}
-
 /// Creates an empty disposable git repository with `main` checked out and
 /// returns an endpoint pointing at it. The tempdir is returned so it stays
 /// alive for the duration of the test.
@@ -88,16 +78,16 @@ fn implementing_a_feature_commits_issues_in_bfs_order() {
     let feature = Feature {
         repository: Repository::new(Url::local(dir.path())),
         issues: Tree {
-            value: Issue::new(1, "Red"),
+            value: AppendToOutput(Issue::new(1, "Red")),
             children: vec![
-                Tree::new(Issue::new(2, "Green")),
-                Tree::new(Issue::new(3, "Blue")),
+                Tree::new(AppendToOutput(Issue::new(2, "Green"))),
+                Tree::new(AppendToOutput(Issue::new(3, "Blue"))),
             ],
         },
         reviewer: None,
     };
 
-    implement_feature(&feature, &endpoint, &endpoint).unwrap();
+    feature.implement(&endpoint, &endpoint).unwrap();
 
     let output = std::fs::read_to_string(dir.path().join(OUTPUT_FILE)).unwrap();
     assert_eq!(output, "Red\nGreen\nBlue\n");

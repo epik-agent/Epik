@@ -78,7 +78,7 @@ impl Repository {
     }
 
     #[must_use]
-    pub fn feature(&self, _id: u32) -> Feature {
+    pub fn feature(&self, _id: u32) -> Feature<Issue> {
         todo!()
     }
 

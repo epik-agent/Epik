@@ -5,10 +5,22 @@ use crate::repository::{Endpoint, Repository};
 use crate::tree::Tree;
 
 #[derive(Debug)]
-pub struct Feature {
+pub struct Feature<I> {
     pub repository: Repository,
-    pub issues: Tree<Issue>,
+    pub issues: Tree<I>,
     pub reviewer: Option<Persona>,
+}
+
+impl<I: Implementable> Implementable for Feature<I> {
+    /// Implements every issue in the feature, parents before children.
+    fn implement(&self, source: &Endpoint, dest: &Endpoint) -> Result<()> {
+        let mut order = Vec::new();
+        self.issues.bfs(|issue| order.push(issue));
+        for issue in order {
+            issue.implement(source, dest)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
