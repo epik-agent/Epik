@@ -1,8 +1,8 @@
-mod implementation;
-mod repository;
-mod tree;
+pub mod implementation;
+pub mod repository;
+pub mod tree;
 
-enum Persona {
+pub enum Persona {
     Human,
     Epik,
 }

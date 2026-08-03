@@ -13,7 +13,7 @@ impl<T> Tree<T> {
         }
     }
 
-    pub fn bfs(&self, mut visit: impl FnMut(&T)) {
+    pub fn bfs<'a>(&'a self, mut visit: impl FnMut(&'a T)) {
         let mut queue = VecDeque::from([self]);
         while let Some(node) = queue.pop_front() {
             visit(&node.value);

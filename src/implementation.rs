@@ -1,18 +1,29 @@
+use anyhow::Result;
+
 use crate::Persona;
 use crate::repository::{Endpoint, Repository};
 use crate::tree::Tree;
 
 pub struct Feature {
-    repository: Repository,
-    issues: Tree<Issue>,
-    reviewer: Option<Persona>,
+    pub repository: Repository,
+    pub issues: Tree<Issue>,
+    pub reviewer: Option<Persona>,
 }
 
 pub struct Issue {
-    id: u32,
-    description: String,
+    pub id: u32,
+    pub description: String,
 }
 
-trait Implementer {
-    fn implement(&self, source: Endpoint, dest: Endpoint);
+impl Issue {
+    pub fn new(id: u32, description: impl Into<String>) -> Self {
+        Issue {
+            id,
+            description: description.into(),
+        }
+    }
+}
+
+pub trait Implementable {
+    fn implement(&self, source: &Endpoint, dest: &Endpoint) -> Result<()>;
 }
