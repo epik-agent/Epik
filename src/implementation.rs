@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::Persona;
 use crate::logging::Log;
@@ -24,7 +25,7 @@ impl<I: Implementable> Implementable for Feature<I> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Issue {
     pub id: u32,
     pub description: String,

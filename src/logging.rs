@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::mpsc::Sender;
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,27 @@ impl Log for Sender<Event> {
     fn emit(&mut self, event: Event) {
         // A gone receiver is not this sender's problem.
         let _ = self.send(event);
+    }
+}
+
+/// Writes each event as one JSON line: the wire format for logs that cross
+/// a process boundary.
+#[derive(Debug)]
+pub struct JsonLines<W: Write>(W);
+
+impl<W: Write> JsonLines<W> {
+    pub const fn new(writer: W) -> Self {
+        Self(writer)
+    }
+}
+
+impl<W: Write> Log for JsonLines<W> {
+    fn emit(&mut self, event: Event) {
+        // Emitting is infallible: an event that can't be written is dropped.
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = writeln!(self.0, "{json}");
+            let _ = self.0.flush();
+        }
     }
 }
 

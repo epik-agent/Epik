@@ -5,6 +5,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
@@ -12,6 +13,7 @@ use epik::implementation::{Feature, Implementable, Issue};
 use epik::logging::{Event, Log, Silent};
 use epik::repository::{Branch, Endpoint, Repository, Url};
 use epik::tree::Tree;
+use serde::Serialize;
 
 const OUTPUT_FILE: &str = "output.txt";
 
@@ -64,18 +66,35 @@ impl Implementable for AppendToOutput {
 }
 
 /// Red is the parent of Green and Blue.
-fn red_green_blue(dir: &tempfile::TempDir) -> Feature<AppendToOutput> {
+fn red_green_blue() -> Tree<Issue> {
+    Tree {
+        value: Issue::new(1, "Red"),
+        children: vec![
+            Tree::new(Issue::new(2, "Green")),
+            Tree::new(Issue::new(3, "Blue")),
+        ],
+    }
+}
+
+fn red_green_blue_feature(dir: &tempfile::TempDir) -> Feature<AppendToOutput> {
     Feature {
         repository: Repository::new(Url::local(dir.path())),
-        issues: Tree {
-            value: AppendToOutput(Issue::new(1, "Red")),
-            children: vec![
-                Tree::new(AppendToOutput(Issue::new(2, "Green"))),
-                Tree::new(AppendToOutput(Issue::new(3, "Blue"))),
-            ],
-        },
+        issues: red_green_blue().map(AppendToOutput),
         reviewer: None,
     }
+}
+
+/// The event stream a red/green/blue run should produce: BFS order, one
+/// started/implemented pair per issue.
+const fn expected_events() -> [Event; 6] {
+    [
+        Event::IssueStarted { id: 1 },
+        Event::IssueImplemented { id: 1 },
+        Event::IssueStarted { id: 2 },
+        Event::IssueImplemented { id: 2 },
+        Event::IssueStarted { id: 3 },
+        Event::IssueImplemented { id: 3 },
+    ]
 }
 
 /// Creates an empty disposable git repository with `main` checked out and
@@ -89,20 +108,12 @@ fn disposable_repo() -> (tempfile::TempDir, Endpoint) {
     (dir, endpoint)
 }
 
-#[test]
-fn implementing_a_feature_commits_issues_in_bfs_order() {
-    let (dir, endpoint) = disposable_repo();
-    let feature = red_green_blue(&dir);
-
-    feature
-        .implement(&endpoint, &endpoint, &mut Silent)
-        .unwrap();
-
+/// The output file is checked in: it reads Red/Green/Blue, nothing is left
+/// dirty or untracked, and each issue produced its own commit on main.
+fn assert_red_green_blue_committed(dir: &tempfile::TempDir) {
     let output = std::fs::read_to_string(dir.path().join(OUTPUT_FILE)).unwrap();
     assert_eq!(output, "Red\nGreen\nBlue\n");
 
-    // The output file is checked in: nothing left dirty or untracked, and
-    // each issue produced its own commit on main.
     let git = git2::Repository::open(dir.path()).unwrap();
     let mut status_options = git2::StatusOptions::new();
     status_options.include_untracked(true);
@@ -117,9 +128,21 @@ fn implementing_a_feature_commits_issues_in_bfs_order() {
 }
 
 #[test]
+fn implementing_a_feature_commits_issues_in_bfs_order() {
+    let (dir, endpoint) = disposable_repo();
+    let feature = red_green_blue_feature(&dir);
+
+    feature
+        .implement(&endpoint, &endpoint, &mut Silent)
+        .unwrap();
+
+    assert_red_green_blue_committed(&dir);
+}
+
+#[test]
 fn implementation_events_stream_over_a_channel() {
     let (dir, endpoint) = disposable_repo();
-    let feature = red_green_blue(&dir);
+    let feature = red_green_blue_feature(&dir);
 
     let (mut sender, receiver) = mpsc::channel();
     feature
@@ -128,15 +151,41 @@ fn implementation_events_stream_over_a_channel() {
     drop(sender);
 
     let events: Vec<Event> = receiver.iter().collect();
-    assert_eq!(
-        events,
-        [
-            Event::IssueStarted { id: 1 },
-            Event::IssueImplemented { id: 1 },
-            Event::IssueStarted { id: 2 },
-            Event::IssueImplemented { id: 2 },
-            Event::IssueStarted { id: 3 },
-            Event::IssueImplemented { id: 3 },
-        ]
-    );
+    assert_eq!(events, expected_events());
+}
+
+/// Mirror of the worker binary's Job: what a run needs to know, on the wire.
+#[derive(Serialize)]
+struct Job<'a> {
+    source: &'a Endpoint,
+    dest: &'a Endpoint,
+    issues: Tree<Issue>,
+}
+
+#[test]
+fn implementing_in_a_separate_process_streams_events() {
+    let (dir, endpoint) = disposable_repo();
+    let job = Job {
+        source: &endpoint,
+        dest: &endpoint,
+        issues: red_green_blue(),
+    };
+
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_epik-worker"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    serde_json::to_writer(worker.stdin.take().unwrap(), &job).unwrap();
+    let output = worker.wait_with_output().unwrap();
+    assert!(output.status.success(), "worker exited with failure");
+
+    let events: Vec<Event> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events, expected_events());
+
+    assert_red_green_blue_committed(&dir);
 }

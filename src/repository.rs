@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::implementation::{Feature, Issue};
 
 /// Where a repository lives: a working copy on the local filesystem, or a
 /// hosted repository reached over the network. Everything downstream that
 /// cares about the distinction dispatches on this.
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum Url {
     Local(PathBuf),
     Remote(String),
@@ -23,7 +25,7 @@ impl Url {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Branch(String);
 
 impl Branch {
@@ -38,7 +40,7 @@ impl Branch {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Endpoint {
     url: Url,
     branch: Branch,

@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 
-#[derive(Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Tree<T> {
     pub value: T,
     pub children: Vec<Self>,
@@ -13,6 +15,22 @@ impl<T> Tree<T> {
             value,
             children: Vec::new(),
         }
+    }
+
+    /// Maps every value in the tree, preserving its shape.
+    #[must_use]
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Tree<U> {
+        fn go<T, U>(tree: Tree<T>, f: &mut impl FnMut(T) -> U) -> Tree<U> {
+            Tree {
+                value: f(tree.value),
+                children: tree
+                    .children
+                    .into_iter()
+                    .map(|child| go(child, &mut *f))
+                    .collect(),
+            }
+        }
+        go(self, &mut f)
     }
 
     pub fn bfs<'a>(&'a self, mut visit: impl FnMut(&'a T)) {
