@@ -1,16 +1,1 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-.claude/*
-!.claude/settings.json
-!.claude/loop.md
-
-# IDE
-.idea/
+/target
