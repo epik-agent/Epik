@@ -5,9 +5,11 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use epik::implementation::{Feature, Implementable, Issue};
+use epik::logging::{Event, Log, Silent};
 use epik::repository::{Branch, Endpoint, Repository, Url};
 use epik::tree::Tree;
 
@@ -20,7 +22,8 @@ const OUTPUT_FILE: &str = "output.txt";
 struct AppendToOutput(Issue);
 
 impl Implementable for AppendToOutput {
-    fn implement(&self, _source: &Endpoint, dest: &Endpoint) -> Result<()> {
+    fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
+        log.emit(Event::IssueStarted { id: self.0.id });
         let Url::Local(path) = dest.url() else {
             panic!("test endpoints are always local");
         };
@@ -55,7 +58,23 @@ impl Implementable for AppendToOutput {
             &tree,
             &parents,
         )?;
+        log.emit(Event::IssueImplemented { id: self.0.id });
         Ok(())
+    }
+}
+
+/// Red is the parent of Green and Blue.
+fn red_green_blue(dir: &tempfile::TempDir) -> Feature<AppendToOutput> {
+    Feature {
+        repository: Repository::new(Url::local(dir.path())),
+        issues: Tree {
+            value: AppendToOutput(Issue::new(1, "Red")),
+            children: vec![
+                Tree::new(AppendToOutput(Issue::new(2, "Green"))),
+                Tree::new(AppendToOutput(Issue::new(3, "Blue"))),
+            ],
+        },
+        reviewer: None,
     }
 }
 
@@ -73,21 +92,11 @@ fn disposable_repo() -> (tempfile::TempDir, Endpoint) {
 #[test]
 fn implementing_a_feature_commits_issues_in_bfs_order() {
     let (dir, endpoint) = disposable_repo();
+    let feature = red_green_blue(&dir);
 
-    // Red is the parent of Green and Blue.
-    let feature = Feature {
-        repository: Repository::new(Url::local(dir.path())),
-        issues: Tree {
-            value: AppendToOutput(Issue::new(1, "Red")),
-            children: vec![
-                Tree::new(AppendToOutput(Issue::new(2, "Green"))),
-                Tree::new(AppendToOutput(Issue::new(3, "Blue"))),
-            ],
-        },
-        reviewer: None,
-    };
-
-    feature.implement(&endpoint, &endpoint).unwrap();
+    feature
+        .implement(&endpoint, &endpoint, &mut Silent)
+        .unwrap();
 
     let output = std::fs::read_to_string(dir.path().join(OUTPUT_FILE)).unwrap();
     assert_eq!(output, "Red\nGreen\nBlue\n");
@@ -105,4 +114,29 @@ fn implementing_a_feature_commits_issues_in_bfs_order() {
     let mut walk = git.revwalk().unwrap();
     walk.push_head().unwrap();
     assert_eq!(walk.count(), 3);
+}
+
+#[test]
+fn implementation_events_stream_over_a_channel() {
+    let (dir, endpoint) = disposable_repo();
+    let feature = red_green_blue(&dir);
+
+    let (mut sender, receiver) = mpsc::channel();
+    feature
+        .implement(&endpoint, &endpoint, &mut sender)
+        .unwrap();
+    drop(sender);
+
+    let events: Vec<Event> = receiver.iter().collect();
+    assert_eq!(
+        events,
+        [
+            Event::IssueStarted { id: 1 },
+            Event::IssueImplemented { id: 1 },
+            Event::IssueStarted { id: 2 },
+            Event::IssueImplemented { id: 2 },
+            Event::IssueStarted { id: 3 },
+            Event::IssueImplemented { id: 3 },
+        ]
+    );
 }
