@@ -1,3 +1,7 @@
+// Tests are entitled to panic. The allow-unwrap-in-tests clippy setting only
+// covers #[test] functions, not the helpers here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -43,7 +47,14 @@ impl Implementable for AppendToOutput<'_> {
             .and_then(|r| r.peel_to_commit().ok());
         let parents: Vec<&git2::Commit> = parent.iter().collect();
         let message = format!("Implement issue #{}: {}", self.0.id, self.0.description);
-        git.commit(Some(&branch_ref), &signature, &signature, &message, &tree, &parents)?;
+        git.commit(
+            Some(&branch_ref),
+            &signature,
+            &signature,
+            &message,
+            &tree,
+            &parents,
+        )?;
         Ok(())
     }
 }

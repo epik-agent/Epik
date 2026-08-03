@@ -1,0 +1,26 @@
+#!/bin/sh
+# Pre-commit checks: formatting (auto-fixed), strict lints and typechecking
+# (commit fails). Activate once per clone with:
+#     git config core.hooksPath .githooks
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Nothing Rust-related staged: nothing to check.
+if git diff --cached --quiet -- '*.rs' Cargo.toml Cargo.lock clippy.toml; then
+    exit 0
+fi
+
+# Formatting is deterministically fixable: format everything, then restage
+# the files that were already staged so the fixes ride along with the commit.
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+cargo fmt --all
+if [ -n "$staged" ]; then
+    printf '%s\n' "$staged" | while IFS= read -r file; do
+        [ -f "$file" ] && git add -- "$file"
+    done
+fi
+
+# Lints are not deterministically fixable: fail the commit if any fire.
+# Clippy fully typechecks every target along the way.
+cargo clippy --all-targets --all-features -- -D warnings

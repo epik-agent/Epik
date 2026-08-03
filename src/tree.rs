@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
 
+#[derive(Debug)]
 pub struct Tree<T> {
     pub value: T,
-    pub children: Vec<Tree<T>>,
+    pub children: Vec<Self>,
 }
 
 impl<T> Tree<T> {
-    pub fn new(value: T) -> Self {
-        Tree {
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self {
             value,
             children: Vec::new(),
         }
