@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::Persona;
+use crate::event::Event;
 use crate::logging::Log;
 use crate::repository::{Endpoint, Repository};
 use crate::tree::Tree;
@@ -15,7 +16,12 @@ pub struct Feature<I> {
 
 impl<I: Implementable> Implementable for Feature<I> {
     /// Implements every issue in the feature, parents before children.
-    fn implement(&self, source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
+    fn implement(
+        &self,
+        source: &Endpoint,
+        dest: &Endpoint,
+        log: &mut dyn Log<Event>,
+    ) -> Result<()> {
         let mut order = Vec::new();
         self.issues.bfs(|issue| order.push(issue));
         for issue in order {
@@ -48,5 +54,6 @@ pub trait Implementable {
     /// # Errors
     ///
     /// Returns an error when the underlying repository operations fail.
-    fn implement(&self, source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()>;
+    fn implement(&self, source: &Endpoint, dest: &Endpoint, log: &mut dyn Log<Event>)
+    -> Result<()>;
 }

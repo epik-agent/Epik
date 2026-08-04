@@ -9,8 +9,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use epik::event::Event;
 use epik::implementation::{Feature, Implementable, Issue};
-use epik::logging::{Event, Log, Silent};
+use epik::logging::{Log, Silent};
 use epik::repository::{Branch, Endpoint, Repository, Url};
 use epik::tree::Tree;
 use serde::Serialize;
@@ -24,7 +25,12 @@ const OUTPUT_FILE: &str = "output.txt";
 struct AppendToOutput(Issue);
 
 impl Implementable for AppendToOutput {
-    fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
+    fn implement(
+        &self,
+        _source: &Endpoint,
+        dest: &Endpoint,
+        log: &mut dyn Log<Event>,
+    ) -> Result<()> {
         log.emit(Event::IssueStarted { id: self.0.id });
         let Url(path) = dest.url();
         let git = git2::Repository::open(path)

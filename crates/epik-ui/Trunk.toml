@@ -1,0 +1,8 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Matches `devUrl` in `crates/epik-app/tauri.conf.json`.
+port = 1420
+open = false

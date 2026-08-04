@@ -11,8 +11,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, ensure};
+use epik::event::Event;
 use epik::implementation::{Feature, Implementable, Issue};
-use epik::logging::{Event, JsonLines, Log};
+use epik::logging::{JsonLines, Log};
 use epik::repository::{Endpoint, Repository, Url};
 use epik::tree::Tree;
 use serde::Deserialize;
@@ -32,7 +33,12 @@ struct Job {
 struct AppendAndCommit(Issue);
 
 impl Implementable for AppendAndCommit {
-    fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
+    fn implement(
+        &self,
+        _source: &Endpoint,
+        dest: &Endpoint,
+        log: &mut dyn Log<Event>,
+    ) -> Result<()> {
         let Url(path) = dest.url();
         log.emit(Event::IssueStarted { id: self.0.id });
 

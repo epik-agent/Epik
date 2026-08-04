@@ -1,0 +1,16 @@
+[package]
+name = "epik-app"
+version.workspace = true
+edition.workspace = true
+description = "The Epik desktop window: a Tauri host over the epik library"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+epik.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
