@@ -16,6 +16,31 @@ pub enum Event {
     IssueImplemented { id: u32 },
 }
 
+/// One observable moment in an assistant turn.
+///
+/// A turn is exactly one `TurnFinished` or one `Failed`, preceded by zero or
+/// more `Delta`s. `Failed` is how a turn that broke mid-stream is reported;
+/// it is not how a refused request is reported, because a refusal never
+/// started a turn. Keeping those two apart is what lets a host put command
+/// errors and streamed failures on different channels.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ChatEvent {
+    /// The next piece of the assistant's reply, as it generates.
+    Delta { text: String },
+    /// The reply is complete and has been written into the transcript.
+    /// `usage` is present only when the provider reported it.
+    TurnFinished { usage: Option<Usage> },
+    /// The turn did not complete. Whatever deltas already arrived stand.
+    Failed { error: String },
+}
+
+/// What a turn cost, as the provider counted it.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
