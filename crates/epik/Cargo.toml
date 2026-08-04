@@ -6,10 +6,21 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["native"]
+# Everything that cannot exist on wasm32, where this crate is a source of
+# types rather than a maker of requests: the HTTP client and the OS keyring.
+# The frontend depends on this crate with `default-features = false`.
+native = ["dep:keyring", "dep:ureq"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml = "1"
+
+keyring = { version = "4", optional = true }
+ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]
 git2 = "0.20"

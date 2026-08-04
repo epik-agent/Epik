@@ -30,6 +30,15 @@ impl<E> Log<E> for Sender<E> {
     }
 }
 
+/// Collecting is logging too: the sink for anything that wants the whole
+/// stream at the end rather than each event as it happens, which is mostly
+/// tests and mostly assertions about order.
+impl<E> Log<E> for Vec<E> {
+    fn emit(&mut self, event: E) {
+        self.push(event);
+    }
+}
+
 /// Writes each event as one JSON line: the wire format for logs that cross
 /// a process boundary.
 #[derive(Debug)]
