@@ -26,9 +26,7 @@ struct AppendToOutput(Issue);
 impl Implementable for AppendToOutput {
     fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
         log.emit(Event::IssueStarted { id: self.0.id });
-        let Url::Local(path) = dest.url() else {
-            panic!("test endpoints are always local");
-        };
+        let Url(path) = &dest.url();
         let git = git2::Repository::open(path)
             .with_context(|| format!("opening working copy at {}", path.display()))?;
         let workdir = git.workdir().expect("test working copies are never bare");
@@ -78,7 +76,7 @@ fn red_green_blue() -> Tree<Issue> {
 
 fn red_green_blue_feature(dir: &tempfile::TempDir) -> Feature<AppendToOutput> {
     Feature {
-        repository: Repository::new(Url::local(dir.path())),
+        repository: Repository::new(Url(dir.path().to_owned())),
         issues: red_green_blue().map(AppendToOutput),
         reviewer: None,
     }
@@ -104,7 +102,7 @@ fn disposable_repo() -> (tempfile::TempDir, Endpoint) {
     let dir = tempfile::tempdir().unwrap();
     let git = git2::Repository::init(dir.path()).unwrap();
     git.set_head("refs/heads/main").unwrap();
-    let endpoint = Endpoint::new(Url::local(dir.path()), Branch::new("main"));
+    let endpoint = Endpoint::new(Url(dir.path().to_owned()), Branch::new("main"));
     (dir, endpoint)
 }
 

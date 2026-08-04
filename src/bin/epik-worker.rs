@@ -10,7 +10,7 @@ use std::io::{Read, Write, stdin, stdout};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use epik::implementation::{Feature, Implementable, Issue};
 use epik::logging::{Event, JsonLines, Log};
 use epik::repository::{Endpoint, Repository, Url};
@@ -33,9 +33,7 @@ struct AppendAndCommit(Issue);
 
 impl Implementable for AppendAndCommit {
     fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
-        let Url::Local(path) = dest.url() else {
-            bail!("only local repositories are implemented so far");
-        };
+        let Url(path) = dest.url();
         log.emit(Event::IssueStarted { id: self.0.id });
 
         let mut file = OpenOptions::new()
@@ -79,11 +77,8 @@ fn main() -> Result<()> {
         .context("reading job from stdin")?;
     let job: Job = serde_json::from_str(&input).context("decoding job")?;
 
-    let Url::Local(path) = job.dest.url() else {
-        bail!("only local repositories are implemented so far");
-    };
     let feature = Feature {
-        repository: Repository::new(Url::local(path)),
+        repository: Repository::new(job.dest.url().clone()),
         issues: job.issues.map(AppendAndCommit),
         reviewer: None,
     };

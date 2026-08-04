@@ -1,29 +1,10 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 use crate::implementation::{Feature, Issue};
 
-/// Where a repository lives: a working copy on the local filesystem, or a
-/// hosted repository reached over the network. Everything downstream that
-/// cares about the distinction dispatches on this.
-#[derive(Debug, Deserialize, Serialize)]
-pub enum Url {
-    Local(PathBuf),
-    Remote(String),
-}
-
-impl Url {
-    #[must_use]
-    pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::Local(path.into())
-    }
-
-    #[must_use]
-    pub fn remote(url: impl Into<String>) -> Self {
-        Self::Remote(url.into())
-    }
-}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Url(pub PathBuf);
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Branch(String);
