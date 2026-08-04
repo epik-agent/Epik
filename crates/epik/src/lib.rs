@@ -1,3 +1,4 @@
+pub mod event;
 pub mod implementation;
 pub mod logging;
 pub mod repository;

@@ -1,1 +1,7 @@
 /target
+# `crates/epik-ui` is its own workspace, so it has its own target directory.
+/crates/epik-ui/target
+# Trunk's output, which the Tauri host embeds at compile time.
+/crates/epik-ui/dist
+# Permission schemas, regenerated from the plugin set on every build.
+/crates/epik-app/gen/schemas
