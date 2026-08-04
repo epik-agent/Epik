@@ -26,7 +26,7 @@ struct AppendToOutput(Issue);
 impl Implementable for AppendToOutput {
     fn implement(&self, _source: &Endpoint, dest: &Endpoint, log: &mut dyn Log) -> Result<()> {
         log.emit(Event::IssueStarted { id: self.0.id });
-        let Url(path) = &dest.url();
+        let Url(path) = dest.url();
         let git = git2::Repository::open(path)
             .with_context(|| format!("opening working copy at {}", path.display()))?;
         let workdir = git.workdir().expect("test working copies are never bare");
@@ -74,9 +74,9 @@ fn red_green_blue() -> Tree<Issue> {
     }
 }
 
-fn red_green_blue_feature(dir: &tempfile::TempDir) -> Feature<AppendToOutput> {
+fn red_green_blue_feature(endpoint: &Endpoint) -> Feature<AppendToOutput> {
     Feature {
-        repository: Repository::new(Url(dir.path().to_owned())),
+        repository: Repository::new(endpoint.url().clone()),
         issues: red_green_blue().map(AppendToOutput),
         reviewer: None,
     }
@@ -128,7 +128,7 @@ fn assert_red_green_blue_committed(dir: &tempfile::TempDir) {
 #[test]
 fn implementing_a_feature_commits_issues_in_bfs_order() {
     let (dir, endpoint) = disposable_repo();
-    let feature = red_green_blue_feature(&dir);
+    let feature = red_green_blue_feature(&endpoint);
 
     feature
         .implement(&endpoint, &endpoint, &mut Silent)
@@ -139,8 +139,8 @@ fn implementing_a_feature_commits_issues_in_bfs_order() {
 
 #[test]
 fn implementation_events_stream_over_a_channel() {
-    let (dir, endpoint) = disposable_repo();
-    let feature = red_green_blue_feature(&dir);
+    let (_dir, endpoint) = disposable_repo();
+    let feature = red_green_blue_feature(&endpoint);
 
     let (mut sender, receiver) = mpsc::channel();
     feature
