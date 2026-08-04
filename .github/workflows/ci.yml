@@ -1,0 +1,247 @@
+# CI for the greenfield workspace.
+#
+# Three jobs, and an aggregate named `CI` that the branch ruleset's required
+# status check resolves to:
+#
+#   workspace  fmt, clippy, and the test suite for the native crates
+#   frontend   the same gates for epik-ui, on the host target and on wasm32
+#   live       the chat client against a real model, with no secret anywhere
+#
+# The live tier is the reason this file exists in the shape it does. Epik's
+# secrets stance pushes keys to their official holders and keeps none of its
+# own, so the first real API test could not be "add a provider key to Actions
+# secrets". Instead CI runs the model itself: Ollama on the CPU runner, a
+# sub-1B model whose blob lives in actions/cache. Tests assert protocol
+# properties, never answer quality, so a tiny model is entirely adequate — and
+# `EPIK_REQUIRE_LIVE=1` means a missing or broken server fails the job rather
+# than skipping a tier that would then look green forever.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, local-client-greenfield]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Small enough to pull in seconds on a CPU runner, large enough to stream a
+  # sentence. The library's own default, so the live tests need no overrides.
+  LIVE_MODEL: smollm2:135m
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workspace:
+    name: Workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          # For the wasm-cleanliness check below: the frontend depends on this
+          # library, so the library's own build for that target is checked
+          # here rather than next door.
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The Tauri host links against the system webview. Without these,
+      # epik-app does not compile and `cargo test --workspace` never starts.
+      - name: Install the webview epik-app links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # The live tier skips here, which is the laptop rule doing its job: this
+      # job has no model server. The `live` job is what makes it execute.
+      - run: cargo test --workspace
+
+      - name: The library stays wasm-clean
+        run: cargo clippy -p epik --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
+
+      - name: The library stays synchronous
+        # Async is the host's problem. A tokio in this graph means something
+        # crossed the line the ADR draws, and it should be noticed here rather
+        # than discovered by a daemon that cannot start.
+        run: |
+          if cargo tree -p epik --all-features -i tokio > /dev/null 2>&1; then
+            echo "::error file=crates/epik/Cargo.toml::epik has acquired a tokio dependency; the library stays synchronous and async is the host's problem"
+            exit 1
+          fi
+          echo "no tokio in epik's dependency graph"
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    # `crates/epik-ui` is its own workspace: its own lockfile, its own target
+    # directory, its own default target.
+    defaults:
+      run:
+        working-directory: crates/epik-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/epik-ui
+
+      - name: Install Trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin"
+          trunk --version
+        env:
+          TRUNK_VERSION: 0.21.14
+
+      - run: cargo fmt --all --check
+
+      # Two targets, two different sets of code. The host target compiles the
+      # pure parts and runs their tests; wasm32 compiles the components.
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      - name: The pure parts test without a wasm toolchain
+        run: cargo test
+
+      - name: The frontend builds
+        run: trunk build
+
+  live:
+    name: Live model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Keyed on the model, so the blob is downloaded once ever rather than
+      # once per run. Restoring before the server starts is what lets `ollama
+      # pull` find it already there.
+      - name: Restore the model blob
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-models-${{ env.LIVE_MODEL }}
+
+      # The tarball rather than the install script: no systemd unit, no
+      # service account, and the models land under the runner's own HOME where
+      # actions/cache can reach them.
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz \
+            | sudo tar -xz -C /usr/local
+          ollama --version
+
+      - name: Start Ollama
+        run: |
+          ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:11434/api/version > /dev/null; then
+              echo "listening: $(curl -s http://localhost:11434/api/version)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Ollama did not start listening within 60s"
+          cat "$RUNNER_TEMP/ollama.log"
+          exit 1
+
+      - name: Pull the model
+        run: |
+          echo "cache hit: ${{ steps.model.outputs.cache-hit || 'false' }}"
+          before=$(du -sm ~/.ollama/models 2>/dev/null | cut -f1)
+          ollama pull "$LIVE_MODEL"
+          after=$(du -sm ~/.ollama/models | cut -f1)
+          before=${before:-0}
+          # A restored cache means the pull moved no bytes. Reported rather
+          # than asserted: a cache the workflow depends on would be a cache
+          # whose first-ever run fails.
+          echo "models directory: ${before}MB before the pull, ${after}MB after"
+          ollama list
+
+      - name: Talk to it
+        # The one place the laptop rule is switched off: here a missing server
+        # is a failure, not a skip.
+        run: cargo test -p epik --test live -- --nocapture
+        env:
+          EPIK_REQUIRE_LIVE: "1"
+          # One declaration of which model, governing both the pull and the
+          # tests, rather than two that could drift apart.
+          EPIK_LIVE_MODEL: ${{ env.LIVE_MODEL }}
+
+      - name: What the server saw
+        if: failure()
+        run: cat "$RUNNER_TEMP/ollama.log"
+
+  ci:
+    # The branch ruleset requires a status check with this exact context, so
+    # this job stands for the whole workflow. `if: always()` plus an explicit
+    # check of the results is deliberate: a *skipped* required check counts as
+    # a passing one, so an aggregate that merely `needs` its dependencies
+    # would wave failures through.
+    name: CI
+    if: always()
+    needs: [workspace, frontend, live]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if ${{ contains(needs.*.result, 'failure')
+                 || contains(needs.*.result, 'cancelled')
+                 || contains(needs.*.result, 'skipped') }}; then
+            echo "::error::at least one job did not succeed"
+            exit 1
+          fi
+
+  deploy-website:
+    # Carried over from the workflow this file replaces. The website is the
+    # deployed version of this project, and the greenfield reset did not touch
+    # it: every push to main that passes CI redeploys it to GitHub Pages.
+    name: Deploy website
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+      - id: deployment
+        uses: actions/deploy-pages@v4
