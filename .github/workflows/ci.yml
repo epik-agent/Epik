@@ -132,6 +132,11 @@ jobs:
   live:
     name: Live model
     runs-on: ubuntu-latest
+    env:
+      # Pinned rather than `latest`: the download URL is a release asset name,
+      # and a project that renames its assets should not be able to break this
+      # job without someone deciding to bump a number.
+      OLLAMA_VERSION: 0.32.5
     steps:
       - uses: actions/checkout@v4
 
@@ -149,14 +154,36 @@ jobs:
           path: ~/.ollama/models
           key: ollama-models-${{ env.LIVE_MODEL }}
 
-      # The tarball rather than the install script: no systemd unit, no
-      # service account, and the models land under the runner's own HOME where
-      # actions/cache can reach them.
+      - name: Restore Ollama
+        id: ollama
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/ollama
+          key: ollama-cpu-${{ env.OLLAMA_VERSION }}
+
+      # The release tarball rather than the install script, and under HOME
+      # rather than /usr/local: the script would create a systemd unit and a
+      # service account whose model directory actions/cache cannot reach, and
+      # a cache action cannot sudo.
+      #
+      # The published bundle unpacks to 2.1GB, two of which are CUDA and
+      # Vulkan backends a CPU runner will never load. Extracting the CPU parts
+      # alone leaves 66MB — small enough that caching it is worth doing, so
+      # every run after this one skips the download entirely.
       - name: Install Ollama
+        if: steps.ollama.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz \
-            | sudo tar -xz -C /usr/local
-          ollama --version
+          mkdir -p "$HOME/.local/ollama"
+          curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+            | tar --zstd -x -C "$HOME/.local/ollama" \
+                --exclude='lib/ollama/cuda_v*' \
+                --exclude='lib/ollama/vulkan'
+          du -sh "$HOME/.local/ollama"
+
+      - name: Put Ollama on PATH
+        run: |
+          echo "cache hit: ${{ steps.ollama.outputs.cache-hit || 'false' }}"
+          echo "$HOME/.local/ollama/bin" >> "$GITHUB_PATH"
 
       - name: Start Ollama
         run: |
@@ -164,6 +191,7 @@ jobs:
           for _ in $(seq 1 60); do
             if curl -sf http://localhost:11434/api/version > /dev/null; then
               echo "listening: $(curl -s http://localhost:11434/api/version)"
+              ollama --version
               exit 0
             fi
             sleep 1
