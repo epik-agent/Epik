@@ -11,6 +11,7 @@ workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+anyhow.workspace = true
 epik.workspace = true
 serde.workspace = true
 tauri = { version = "2", features = [] }

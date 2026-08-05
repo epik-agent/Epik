@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{ChatModel, Message, Reply, StopToken, sse};
+use crate::chat::{ChatModel, Keyed, Message, Reply, StopToken, sse};
 use crate::config::Provider;
 use crate::event::{ChatEvent, Usage};
 use crate::logging::Log;
@@ -67,6 +67,14 @@ impl OpenAiCompatible {
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+}
+
+impl Keyed for OpenAiCompatible {
+    /// The next request authenticates with `key`. The connection is per-turn,
+    /// so nothing has to be torn down for this to take.
+    fn use_key(&mut self, key: Option<String>) {
+        self.key = key;
     }
 }
 

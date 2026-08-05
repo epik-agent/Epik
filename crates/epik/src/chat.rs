@@ -140,6 +140,16 @@ pub trait ChatModel {
     ) -> Result<Reply>;
 }
 
+/// A model that authenticates with a key, and can be handed one later.
+///
+/// This is the seam that makes the paste-your-key card work: a key arriving
+/// after the first turn was refused has to take effect on the conversation
+/// already in progress, not on the next process. A model with nobody to
+/// authenticate to implements this and does nothing with it.
+pub trait Keyed {
+    fn use_key(&mut self, key: Option<String>);
+}
+
 /// The canonical transcript, and the model that extends it.
 ///
 /// A frontend's transcript is a *view*, folded from the event stream. This is
@@ -181,6 +191,14 @@ impl<M: ChatModel> Conversation<M> {
     #[must_use]
     pub const fn model(&self) -> &M {
         &self.model
+    }
+
+    /// The model, to be reconfigured mid-conversation — a key that has just
+    /// arrived, say. The transcript is untouched, which is the whole reason
+    /// this exists rather than building a second conversation: what was said
+    /// stands.
+    pub const fn model_mut(&mut self) -> &mut M {
+        &mut self.model
     }
 
     /// Appends the user's turn, streams the assistant's, and finalizes it

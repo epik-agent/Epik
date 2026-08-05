@@ -41,6 +41,28 @@ pub struct Usage {
     pub completion_tokens: u32,
 }
 
+/// Which conversation something happened in.
+///
+/// A host's registry assigns these; a `Conversation` never learns its own. The
+/// v0 window ignores the field, because only one conversation exists — and
+/// that is exactly the point. One field is the entire architectural cost of
+/// leaving multi-conversation UX open, whereas retrofitting an envelope onto a
+/// protocol already in use is the expensive version of the same decision.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ConversationId(pub u64);
+
+/// An event, and where it came from.
+///
+/// Generic over the vocabulary, so the run cockpit's events will travel in
+/// this same envelope down this same channel rather than needing one of their
+/// own. The sink that does the wrapping is
+/// [`Enveloping`](crate::logging::Enveloping).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Envelope<E> {
+    pub conversation: ConversationId,
+    pub event: E,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +73,42 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn an_envelope_round_trips_with_its_conversation_intact() {
+        let envelope = Envelope {
+            conversation: ConversationId(3),
+            event: ChatEvent::Delta {
+                text: "Hello".to_owned(),
+            },
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        let back: Envelope<ChatEvent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(envelope, back);
+    }
+
+    #[test]
+    fn one_envelope_carries_either_vocabulary() {
+        let run = Envelope {
+            conversation: ConversationId(0),
+            event: Event::IssueStarted { id: 7 },
+        };
+        let chat = Envelope {
+            conversation: ConversationId(0),
+            event: ChatEvent::TurnFinished { usage: None },
+        };
+        // Same wrapper, same field name: a second vocabulary on this channel
+        // costs a client nothing but a second match arm.
+        assert!(
+            serde_json::to_string(&run)
+                .unwrap()
+                .contains("conversation")
+        );
+        assert!(
+            serde_json::to_string(&chat)
+                .unwrap()
+                .contains("conversation")
+        );
     }
 }
