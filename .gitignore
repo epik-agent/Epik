@@ -1,16 +1,7 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-.claude/*
-!.claude/settings.json
-!.claude/loop.md
-
-# IDE
-.idea/
+/target
+# `crates/epik-ui` is its own workspace, so it has its own target directory.
+/crates/epik-ui/target
+# Trunk's output, which the Tauri host embeds at compile time.
+/crates/epik-ui/dist
+# Permission schemas, regenerated from the plugin set on every build.
+/crates/epik-app/gen/schemas

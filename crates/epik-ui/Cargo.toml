@@ -1,0 +1,46 @@
+[package]
+name = "epik-ui"
+version = "0.1.0"
+edition = "2024"
+description = "The Epik window's frontend: Leptos, compiled to wasm by Trunk"
+
+# Its own workspace on purpose. This crate targets wasm32 and is built by
+# Trunk, so it must not share a target directory, a lockfile, or a default
+# target with the native workspace at the repository root.
+[workspace]
+
+# The root workspace's lint policy, restated: workspace lint inheritance
+# cannot cross a workspace boundary.
+[lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+expect_used = "warn"
+unwrap_used = "warn"
+
+[dependencies]
+# The frontend reads the library's own types off the wire rather than
+# redeclaring them. This is what makes `epik` wasm-cleanliness a hard rule.
+# Without default features: the HTTP client and the OS keyring are the host's
+# business and do not exist here.
+epik = { path = "../epik", default-features = false }
+# Assistant turns are markdown. Without default features: the CLI and the
+# HTML-file machinery are not wanted, only the renderer.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Everything below is wasm-only, which is what lets the host-target parts of
+# this crate be tested with a plain `cargo test`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Element"] }

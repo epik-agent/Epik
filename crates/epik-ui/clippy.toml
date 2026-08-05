@@ -1,0 +1,10 @@
+# The root workspace's clippy configuration, restated. Clippy looks for this
+# file from the workspace root, and `crates/epik-ui` is its own workspace, so
+# the one at the repository root does not reach here — the same reason its
+# `Cargo.toml` restates the lint levels.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# Proper nouns that prose is entitled to spell properly. `..` keeps clippy's
+# own list of these rather than replacing it.
+doc-valid-idents = ["..", "OpenAI", "OpenRouter"]

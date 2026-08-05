@@ -1,0 +1,24 @@
+[package]
+name = "epik-app"
+version.workspace = true
+edition.workspace = true
+description = "The Epik desktop window: a Tauri host over the epik library"
+
+[lints]
+workspace = true
+
+[features]
+# Tauri's own switch from `devUrl` to the bundle embedded at compile time.
+# `cargo tauri build` turns this on, and would fail outright if the feature did
+# not exist here — leaving a shipped window that looks for a dev server on
+# localhost and reports a refused connection instead of opening.
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+epik.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }

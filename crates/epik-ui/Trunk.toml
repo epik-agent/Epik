@@ -1,0 +1,13 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Matches `devUrl` in `crates/epik-app/tauri.conf.json`.
+port = 1420
+open = false
+
+[tools]
+# Pinned rather than left to Trunk's default, so that the stylesheet a
+# contributor builds and the one CI builds are produced by the same compiler.
+tailwindcss = "3.4.17"

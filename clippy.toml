@@ -1,0 +1,6 @@
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# Proper nouns that prose is entitled to spell properly. `..` keeps clippy's
+# own list of these rather than replacing it.
+doc-valid-idents = ["..", "OpenAI", "OpenRouter"]
