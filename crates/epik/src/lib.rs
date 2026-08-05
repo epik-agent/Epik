@@ -16,9 +16,11 @@ pub mod chat;
 pub mod config;
 pub mod event;
 pub mod implementation;
+pub mod ipc;
 pub mod keystore;
 pub mod logging;
 pub mod repository;
+pub mod session;
 pub mod tree;
 
 #[derive(Debug)]

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the Epik window is allowed to ask of Tauri itself. The commands in `host.rs` are this crate's own and need no permission; listening to the event channel is Tauri's core event plugin, and does. Without this the window opens, the status bar fills in, and not one delta ever arrives — which is a failure with no error message anywhere, so it is worth saying plainly here.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

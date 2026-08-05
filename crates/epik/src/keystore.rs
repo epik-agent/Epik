@@ -41,6 +41,34 @@ pub trait KeyStore {
     fn set(&mut self, provider: &str, key: &str) -> Result<()>;
 }
 
+/// Where resolution got to.
+///
+/// Three states rather than an `Option`, because "there is no key" and "there
+/// is no way to find out" are different situations and a caller usually wants
+/// to treat them differently.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Resolved {
+    /// A key, from the environment or the store.
+    Found(String),
+    /// None, and nothing wrong. The ordinary state of a fresh install, and the
+    /// permanent state of a local server that wants none.
+    Absent,
+    /// The store would not answer, so whether a key exists is unknown. The
+    /// reason, for whoever has somewhere to say it.
+    Unreachable(String),
+}
+
+impl Resolved {
+    /// The key, if there is one. What a model's constructor takes.
+    #[must_use]
+    pub fn key(self) -> Option<String> {
+        match self {
+            Self::Found(key) => Some(key),
+            Self::Absent | Self::Unreachable(_) => None,
+        }
+    }
+}
+
 /// A store that lives and dies with the process. Tests use this one, which is
 /// the entire reason the trait exists.
 #[derive(Debug, Default)]
@@ -136,6 +164,30 @@ impl<S: KeyStore> Keys<S> {
         self.store.get(provider)
     }
 
+    /// Where the key for `provider` stands, with a store that will not answer
+    /// reported rather than raised.
+    ///
+    /// [`get`](Self::get) makes an unreachable store an error, which is the
+    /// right shape for a caller about to need a key. This is the right shape
+    /// for one that only needs to know where it stands — chiefly opening a
+    /// session, which must not fail for want of a keyring. A client that cannot
+    /// chat to a local model because a headless Linux box has no secret service
+    /// has mistaken its own plumbing for the user's problem; the provider that
+    /// does want a key will say so in its own words soon enough.
+    ///
+    /// The environment override is honoured first, so it works on a machine
+    /// with no store at all.
+    pub fn resolve(&self, provider: &str) -> Resolved {
+        if let Some(key) = &self.override_key {
+            return Resolved::Found(key.clone());
+        }
+        match self.store.get(provider) {
+            Ok(Some(key)) => Resolved::Found(key),
+            Ok(None) => Resolved::Absent,
+            Err(error) => Resolved::Unreachable(format!("{error:#}")),
+        }
+    }
+
     /// Stores a key for `provider`. This is what the paste-your-key card
     /// calls, and after it the chat proceeds without a restart.
     ///
@@ -195,6 +247,66 @@ mod tests {
             keys.get("never-configured").unwrap().as_deref(),
             Some("sk-override")
         );
+    }
+
+    /// A store that has broken down rather than one that is merely empty.
+    #[derive(Debug)]
+    struct Unplugged;
+
+    impl KeyStore for Unplugged {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Err(anyhow::anyhow!("no default store has been set"))
+        }
+
+        fn set(&mut self, _: &str, _: &str) -> Result<()> {
+            Err(anyhow::anyhow!("no default store has been set"))
+        }
+    }
+
+    #[test]
+    fn resolution_reports_the_three_states_it_can_be_in() {
+        let mut store = InMemory::default();
+        store.set("kept", "sk-kept").unwrap();
+        let keys = Keys::with_override(store, None);
+
+        assert_eq!(keys.resolve("kept"), Resolved::Found("sk-kept".to_owned()));
+        assert_eq!(keys.resolve("never-stored"), Resolved::Absent);
+    }
+
+    #[test]
+    fn a_store_that_will_not_answer_is_a_state_rather_than_a_failure() {
+        let keys = Keys::with_override(Unplugged, None);
+
+        let Resolved::Unreachable(reason) = keys.resolve("anthropic") else {
+            panic!("a broken store should resolve to Unreachable");
+        };
+        assert!(reason.contains("no default store"), "{reason}");
+
+        assert!(
+            keys.get("anthropic").is_err(),
+            "the strict reading is still available to a caller that wants it"
+        );
+    }
+
+    #[test]
+    fn the_override_answers_even_with_no_store_to_speak_of() {
+        let keys = Keys::with_override(Unplugged, Some("sk-override".to_owned()));
+
+        assert_eq!(
+            keys.resolve("anthropic"),
+            Resolved::Found("sk-override".to_owned()),
+            "a machine with no keyring can still be told a key"
+        );
+    }
+
+    #[test]
+    fn resolution_yields_the_key_a_model_constructor_takes() {
+        assert_eq!(
+            Resolved::Found("sk-x".to_owned()).key().as_deref(),
+            Some("sk-x")
+        );
+        assert_eq!(Resolved::Absent.key(), None);
+        assert_eq!(Resolved::Unreachable("broken".to_owned()).key(), None);
     }
 
     #[test]

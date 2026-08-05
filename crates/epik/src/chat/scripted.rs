@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use anyhow::{Result, bail};
 
-use crate::chat::{ChatModel, Message, Reply, StopToken};
+use crate::chat::{ChatModel, Keyed, Message, Reply, StopToken};
 use crate::event::{ChatEvent, Usage};
 use crate::logging::Log;
 
@@ -16,6 +16,7 @@ use crate::logging::Log;
 pub struct Scripted {
     turns: VecDeque<Turn>,
     seen: Vec<Vec<Message>>,
+    key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -71,6 +72,21 @@ impl Scripted {
     #[must_use]
     pub fn seen(&self) -> &[Vec<Message>] {
         &self.seen
+    }
+
+    /// The key it was last handed. A scripted model has nobody to
+    /// authenticate to, so this is here to be asserted on: it is how a test
+    /// sees that a key stored through the paste-your-key card reached the
+    /// model rather than only the store.
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+}
+
+impl Keyed for Scripted {
+    fn use_key(&mut self, key: Option<String>) {
+        self.key = key;
     }
 }
 

@@ -7,10 +7,20 @@ use std::sync::mpsc::Sender;
 
 use serde::Serialize;
 
+use crate::event::{ConversationId, Envelope};
+
 /// Somewhere events of type `E` can be sent. Emitting is infallible by
 /// design: a broken log must never abort the work it is describing.
 pub trait Log<E> {
     fn emit(&mut self, event: E);
+}
+
+/// A borrowed log is a log. That is what lets a sink be lent to something that
+/// wants one of its own — [`Enveloping`] wrapping a log it does not own, say.
+impl<E, L: Log<E> + ?Sized> Log<E> for &mut L {
+    fn emit(&mut self, event: E) {
+        (**self).emit(event);
+    }
 }
 
 /// The simplest log ignores everything, whatever it is.
@@ -36,6 +46,37 @@ impl<E> Log<E> for Sender<E> {
 impl<E> Log<E> for Vec<E> {
     fn emit(&mut self, event: E) {
         self.push(event);
+    }
+}
+
+/// Puts every event into an [`Envelope`] on its way to `inner`: the sink an
+/// IPC layer logs through.
+///
+/// The work being observed emits plain events and does not know which
+/// conversation it is; the host, which assigned the id, is what says so. Being
+/// generic over the vocabulary, this serves the run cockpit's events as
+/// readily as chat's.
+#[derive(Debug)]
+pub struct Enveloping<L> {
+    conversation: ConversationId,
+    inner: L,
+}
+
+impl<L> Enveloping<L> {
+    pub const fn new(conversation: ConversationId, inner: L) -> Self {
+        Self {
+            conversation,
+            inner,
+        }
+    }
+}
+
+impl<E, L: Log<Envelope<E>>> Log<E> for Enveloping<L> {
+    fn emit(&mut self, event: E) {
+        self.inner.emit(Envelope {
+            conversation: self.conversation,
+            event,
+        });
     }
 }
 
@@ -90,5 +131,43 @@ mod tests {
     fn silent_swallows_every_vocabulary() {
         Log::emit(&mut Silent, Event::IssueStarted { id: 1 });
         Log::emit(&mut Silent, Noise::Hum);
+    }
+
+    #[test]
+    fn enveloping_stamps_the_conversation_onto_every_event() {
+        let mut collected: Vec<Envelope<Event>> = Vec::new();
+        {
+            let mut log = Enveloping::new(ConversationId(7), &mut collected);
+            log.emit(Event::IssueStarted { id: 1 });
+            log.emit(Event::IssueImplemented { id: 1 });
+        }
+        assert_eq!(
+            collected,
+            [
+                Envelope {
+                    conversation: ConversationId(7),
+                    event: Event::IssueStarted { id: 1 }
+                },
+                Envelope {
+                    conversation: ConversationId(7),
+                    event: Event::IssueImplemented { id: 1 }
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn what_emits_plain_events_needs_no_knowledge_of_the_envelope() {
+        // A `Log<Event>` is all the work being observed ever sees, so it can
+        // be handed an enveloping sink without noticing.
+        fn observed(log: &mut dyn Log<Event>) {
+            log.emit(Event::IssueStarted { id: 4 });
+        }
+
+        let mut collected: Vec<Envelope<Event>> = Vec::new();
+        observed(&mut Enveloping::new(ConversationId(0), &mut collected));
+
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].conversation, ConversationId(0));
     }
 }

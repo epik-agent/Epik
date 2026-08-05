@@ -1,0 +1,98 @@
+/* The window's stylesheet: the tokens, Tailwind, and the few rules that cannot
+ * be utility classes.
+ *
+ * What is here rather than in a `view!` is either not addressable by a class
+ * (the document itself, a scrollbar) or is applied to markup this crate did not
+ * write — the HTML that `markdown::to_html` produces from an assistant turn,
+ * whose elements have no classes because a model does not know Tailwind.
+ */
+
+@import "tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* The document, so that overscroll and the space behind the window are in
+     the theme too rather than showing the browser's own white. */
+  html,
+  body {
+    @apply h-full bg-root text-primary;
+  }
+
+  /* A model's markdown is the one place in the window with unclassed markup, so
+     it is the one place that needs element selectors. */
+  .prose > * + * {
+    @apply mt-3;
+  }
+  .prose h1,
+  .prose h2,
+  .prose h3 {
+    @apply font-medium text-primary;
+  }
+  .prose h1 {
+    @apply text-lg;
+  }
+  .prose h2 {
+    @apply text-base;
+  }
+  .prose h3 {
+    @apply text-sm uppercase tracking-wide text-secondary;
+  }
+  /* No `/opacity` modifiers anywhere in this file: every colour here resolves
+     through a custom property, and Tailwind 3 cannot mix an alpha into one of
+     those. Where a translucent shade is wanted, the brand already states one —
+     `--accent-muted` and its siblings. */
+  .prose a {
+    @apply text-accent underline decoration-accent underline-offset-2;
+  }
+  .prose code {
+    @apply rounded bg-root px-1 py-0.5 font-mono text-[0.85em];
+  }
+  .prose pre {
+    @apply overflow-x-auto rounded-md border border-edge bg-root p-3;
+  }
+  .prose pre code {
+    @apply bg-transparent p-0;
+  }
+  .prose ul {
+    @apply list-disc pl-5;
+  }
+  .prose ol {
+    @apply list-decimal pl-5;
+  }
+  .prose li + li {
+    @apply mt-1;
+  }
+  .prose blockquote {
+    @apply border-l-2 border-edge-strong pl-3 text-secondary;
+  }
+  .prose table {
+    @apply w-full border-collapse text-left;
+  }
+  .prose th,
+  .prose td {
+    @apply border border-edge px-2 py-1;
+  }
+  .prose hr {
+    @apply border-edge;
+  }
+}
+
+@layer components {
+  /* The caret that says a reply is still arriving. A rule rather than a class
+     because it needs a keyframe. */
+  .streaming::after {
+    @apply ml-0.5 inline-block w-[0.5ch] bg-accent align-baseline;
+    content: "";
+    height: 1em;
+    animation: epik-blink 1s step-end infinite;
+  }
+}
+
+@keyframes epik-blink {
+  50% {
+    opacity: 0;
+  }
+}

@@ -1,0 +1,102 @@
+/* Epik's design tokens.
+ *
+ * Derived from `website/brand/brand.json`, which is the palette source of
+ * truth: `tests/brand.rs` fails if a value here disagrees with a value there,
+ * which is what "derived" is allowed to mean for a file kept by hand.
+ *
+ * Every token exists in both themes. The window carries `data-theme` on its
+ * document element, and `:root` holds the dark values so that the very first
+ * paint — before the frontend has run at all — is already in the right one.
+ *
+ * Names follow the brand's own shape: `--<group>-<key>`, kebab-cased. Which of
+ * them a component may use, and under what name, is `tailwind.config.js`.
+ */
+
+:root,
+[data-theme="dark"] {
+  /* bg */
+  --bg-root: #0a0a0a;
+  --bg-surface: #111111;
+  --bg-raised: #1a1a1a;
+  --bg-input: #141414;
+  --bg-bar: #0e0e0e;
+  --bg-hover: #1f1f1f;
+  --bg-active: #262626;
+  --bg-overlay: rgba(0, 0, 0, 0.60);
+
+  /* text */
+  --text-primary: #ededed;
+  --text-secondary: #a0a0a0;
+  --text-muted: #666666;
+  --text-faint: #404040;
+  --text-inverse: #0a0a0a;
+
+  /* accent */
+  --accent-base: #00e599;
+  --accent-hover: #33edb3;
+  --accent-muted: rgba(0, 229, 153, 0.12);
+  --accent-on-accent: #0a0a0a;
+
+  /* semantic */
+  --semantic-success: #00e599;
+  --semantic-success-muted: rgba(0, 229, 153, 0.12);
+  --semantic-warning: #f5a623;
+  --semantic-warning-muted: rgba(245, 166, 35, 0.12);
+  --semantic-error: #ef4444;
+  --semantic-error-muted: rgba(239, 68, 68, 0.12);
+  --semantic-info: #a0a0a0;
+
+  /* border */
+  --border-default: #1f1f1f;
+  --border-strong: #333333;
+
+  /* graph */
+  --graph-closed: #34d399;
+  --graph-open: #f5a623;
+  --graph-active: #00e599;
+  --graph-link: rgba(255, 255, 255, 0.10);
+}
+
+[data-theme="light"] {
+  /* bg */
+  --bg-root: #fafafa;
+  --bg-surface: #f0f0f0;
+  --bg-raised: #e5e5e5;
+  --bg-input: #ffffff;
+  --bg-bar: #f0f0f0;
+  --bg-hover: #e0e0e0;
+  --bg-active: #d4d4d4;
+  --bg-overlay: rgba(0, 0, 0, 0.15);
+
+  /* text */
+  --text-primary: #0a0a0a;
+  --text-secondary: #525252;
+  --text-muted: #737373;
+  --text-faint: #a3a3a3;
+  --text-inverse: #ededed;
+
+  /* accent */
+  --accent-base: #00b377;
+  --accent-hover: #009966;
+  --accent-muted: rgba(0, 179, 119, 0.10);
+  --accent-on-accent: #ffffff;
+
+  /* semantic */
+  --semantic-success: #00b377;
+  --semantic-success-muted: rgba(0, 179, 119, 0.10);
+  --semantic-warning: #d4940a;
+  --semantic-warning-muted: rgba(212, 148, 10, 0.10);
+  --semantic-error: #dc2626;
+  --semantic-error-muted: rgba(220, 38, 38, 0.08);
+  --semantic-info: #525252;
+
+  /* border */
+  --border-default: #e0e0e0;
+  --border-strong: #c7c7c7;
+
+  /* graph */
+  --graph-closed: #34d399;
+  --graph-open: #d4940a;
+  --graph-active: #00b377;
+  --graph-link: rgba(0, 0, 0, 0.08);
+}
