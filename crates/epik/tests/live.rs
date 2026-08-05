@@ -5,6 +5,12 @@
 //! rule would produce a tier that looks green forever without ever having
 //! executed, so `EPIK_REQUIRE_LIVE=1` turns a missing server into a failure.
 //!
+//! A listening server can still lack the model. `GET {base}/models` settles
+//! that in-protocol, and when the list verifiably omits the model this tier
+//! says so: a note beside the eventual failure on a laptop, an upfront panic
+//! under `EPIK_REQUIRE_LIVE=1`. A server that errors or declines to list
+//! models has answered nothing, so nothing is said and nothing is decided.
+//!
 //! What is asserted is protocol, never prose: that a stream started, that
 //! deltas arrived, that the turn finalized, that the transcript grew. A
 //! sub-1B model is entirely adequate for that, and answer quality is not this
@@ -21,6 +27,7 @@ use std::time::Duration;
 use epik::chat::{ChatModel, Conversation, Message, OpenAiCompatible, Role, StopToken};
 use epik::config::Provider;
 use epik::event::ChatEvent;
+use serde::Deserialize;
 
 /// Where the live model is, and which one it is. Defaults describe a local
 /// Ollama; CI overrides neither, because CI installs exactly this.
@@ -38,19 +45,31 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// # Panics
 ///
-/// Panics when nothing is listening and `EPIK_REQUIRE_LIVE` says something
-/// should be.
+/// Panics under `EPIK_REQUIRE_LIVE=1` when nothing is listening, or when what
+/// is listening verifiably does not serve the model.
 fn live_provider() -> Option<Provider> {
     let provider = Provider {
         base_url: env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned()),
         model: env::var(MODEL_ENV).unwrap_or_else(|_| DEFAULT_MODEL.to_owned()),
     };
+    let required = env::var(REQUIRE_ENV).unwrap_or_default() == "1";
 
     if listening(&provider.base_url) {
+        if let Some(served) = missing_from_list(&provider) {
+            let observed = format!(
+                "`{}` is not in the model list at {}/models, which offers: {}. \
+                 Pull it, or set {MODEL_ENV} to a model the server serves.",
+                provider.model,
+                provider.base_url.trim_end_matches('/'),
+                served.join(", "),
+            );
+            assert!(!required, "{REQUIRE_ENV}=1, but {observed}");
+            eprintln!("note: {observed}");
+        }
         return Some(provider);
     }
     assert!(
-        env::var(REQUIRE_ENV).unwrap_or_default() != "1",
+        !required,
         "{REQUIRE_ENV}=1, but nothing is listening at {}. Start a model \
          server, or unset {REQUIRE_ENV} to let this tier skip.",
         provider.base_url
@@ -61,6 +80,31 @@ fn live_provider() -> Option<Provider> {
         provider.base_url
     );
     None
+}
+
+/// The server's model list, when it verifiably lacks `provider.model` — the
+/// ids it does offer, for the message that names them. `None` means present
+/// or unknowable: an endpoint that errors, hangs, or doesn't list models has
+/// not testified, and an advisory check with no evidence stays quiet.
+fn missing_from_list(provider: &Provider) -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct List {
+        data: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+    }
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(PROBE_TIMEOUT))
+        .build()
+        .into();
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let list: List = agent.get(&url).call().ok()?.body_mut().read_json().ok()?;
+
+    let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
+    (!ids.contains(&provider.model)).then_some(ids)
 }
 
 /// Whether anything holds the port `base_url` points at. "Is a server
