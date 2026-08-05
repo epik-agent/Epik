@@ -321,6 +321,20 @@ fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
                 <span class="font-mono text-primary">"Epik"</span>
                 ". Epik keeps a reference to it and never a copy — not in its config file, not anywhere else."
             </p>
+            // A keyring that cannot be reached did not stop the session from
+            // opening, but it will stop a key from being kept, and the moment to
+            // say so is before somebody pastes one.
+            <Show when=move || pane.with(|pane| pane.key_trouble().is_some())>
+                <p class="mt-2 text-xs text-warning">
+                    "This computer's keyring could not be reached, so a key pasted here will not be kept: "
+                    <span class="font-mono">
+                        {move || pane.with(|pane| pane.key_trouble().unwrap_or_default().to_owned())}
+                    </span>
+                    ". Set "
+                    <span class="font-mono">"EPIK_API_KEY"</span>
+                    " instead, or use a provider that wants no key."
+                </p>
+            </Show>
             <div class="mt-3 flex items-center gap-2">
                 <input
                     type="password"

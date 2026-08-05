@@ -73,31 +73,32 @@ fn kebab(camel: &str) -> String {
 }
 
 /// Every `<group>.<key>: value` in one of the brand's palettes, as the token
-/// name it should be declared under.
-fn brand_tokens(theme: &str) -> BTreeMap<String, String> {
-    let brand: serde_json::Value = serde_json::from_str(BRAND).expect("the brand file is JSON");
-    let palette = brand["palette"][theme]
-        .as_object()
-        .expect("each theme is a table of groups");
+/// name it should be declared under. `None` when the brand file is not the
+/// shape this test knows, which is a thing to report rather than assert past.
+fn brand_tokens(theme: &str) -> Option<BTreeMap<String, String>> {
+    let brand: serde_json::Value = serde_json::from_str(BRAND).ok()?;
+    let palette = brand.get("palette")?.get(theme)?.as_object()?;
 
     let mut tokens = BTreeMap::new();
     for (group, entries) in palette {
-        let entries = entries
-            .as_object()
-            .expect("each group is a table of values");
-        for (key, value) in entries {
-            let value = value.as_str().expect("each value is a colour string");
+        for (key, value) in entries.as_object()? {
+            let value = value.as_str()?;
             tokens.insert(format!("{group}-{}", kebab(key)), value.to_owned());
         }
     }
-    tokens
+    Some(tokens)
 }
+
+// The comparisons below wrap the stylesheet's side in `Some` rather than
+// unwrapping the brand's: a brand file that has changed shape then reads as
+// `right: None` instead of a panic, which is the same failure with more of the
+// evidence in it.
 
 #[test]
 fn both_palettes_reach_the_window_exactly_as_the_brand_states_them() {
     for theme in ["dark", "light"] {
         assert_eq!(
-            declared(theme),
+            Some(declared(theme)),
             brand_tokens(theme),
             "the {theme} tokens in styles/tokens.css disagree with brand.json"
         );
@@ -109,7 +110,7 @@ fn the_dark_palette_is_also_what_a_document_with_no_theme_yet_gets() {
     // The theme is applied by the frontend, which cannot run before the first
     // paint. `:root` holding the dark values is what keeps that first frame from
     // being a white flash.
-    assert_eq!(declared_under(":root"), brand_tokens("dark"));
+    assert_eq!(Some(declared_under(":root")), brand_tokens("dark"));
 }
 
 #[test]
@@ -131,10 +132,9 @@ fn every_token_the_config_hands_to_tailwind_is_one_the_stylesheet_declares() {
     let mut referenced = 0;
     for (index, _) in CONFIG.match_indices("var(--") {
         let rest = &CONFIG[index + "var(--".len()..];
-        let token = rest
-            .split(')')
-            .next()
-            .expect("split always yields one part");
+        let Some(token) = rest.split(')').next() else {
+            continue;
+        };
         assert!(
             declared.contains_key(token),
             "tailwind.config.js asks for --{token}, which styles/tokens.css does not declare"

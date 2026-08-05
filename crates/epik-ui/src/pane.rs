@@ -175,19 +175,31 @@ impl Pane {
     /// provider it named has no key to reach it with.
     #[must_use]
     pub fn needs_key(&self) -> bool {
-        self.status.as_ref().is_some_and(|status| !status.has_key)
+        self.status
+            .as_ref()
+            .is_some_and(|status| status.key.wanted())
+    }
+
+    /// Why this computer's keyring could not be consulted, when it could not
+    /// be. Worth saying on the card, since a key pasted onto a machine in that
+    /// state will not be kept either.
+    #[must_use]
+    pub fn key_trouble(&self) -> Option<&str> {
+        self.status.as_ref().and_then(|status| status.key.trouble())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use epik::session::Key;
+
     use super::*;
 
-    fn status(has_key: bool) -> Status {
+    fn status(key: Key) -> Status {
         Status {
             provider: "ollama".to_owned(),
             model: "smollm2:135m".to_owned(),
-            has_key,
+            key,
         }
     }
 
@@ -389,7 +401,7 @@ mod tests {
     fn the_status_bar_names_the_model_the_host_reports() {
         let mut pane = Pane::default();
 
-        pane.opened(status(true));
+        pane.opened(status(Key::Present));
 
         assert_eq!(
             pane.status().map(|status| status.model.as_str()),
@@ -402,7 +414,7 @@ mod tests {
     fn a_provider_with_no_key_asks_for_one() {
         let mut pane = Pane::default();
 
-        pane.opened(status(false));
+        pane.opened(status(Key::Absent));
 
         assert!(
             pane.needs_key(),
@@ -411,11 +423,40 @@ mod tests {
     }
 
     #[test]
+    fn a_keyring_that_will_not_answer_asks_for_a_key_and_says_why_it_may_not_stick() {
+        let mut pane = Pane::default();
+
+        pane.opened(status(Key::Unreachable {
+            reason: "no default store has been set".to_owned(),
+        }));
+
+        assert!(
+            pane.needs_key(),
+            "somewhere to paste one is still the right offer"
+        );
+        assert_eq!(pane.key_trouble(), Some("no default store has been set"));
+    }
+
+    #[test]
+    fn a_key_that_is_there_has_no_trouble_to_report() {
+        let mut pane = Pane::default();
+        pane.opened(status(Key::Present));
+        assert_eq!(pane.key_trouble(), None);
+
+        pane.opened(status(Key::Absent));
+        assert_eq!(
+            pane.key_trouble(),
+            None,
+            "an empty keyring is a working keyring"
+        );
+    }
+
+    #[test]
     fn a_key_that_has_been_stored_puts_the_card_away() {
         let mut pane = Pane::default();
-        pane.opened(status(false));
+        pane.opened(status(Key::Absent));
 
-        pane.opened(status(true));
+        pane.opened(status(Key::Present));
 
         assert!(!pane.needs_key());
     }
@@ -454,7 +495,7 @@ mod tests {
     #[test]
     fn a_whole_conversation_folds_in_order() {
         let mut pane = Pane::default();
-        pane.opened(status(true));
+        pane.opened(status(Key::Present));
 
         assert!(pane.asked("Hi"));
         pane.saw(delta("Hello, "));

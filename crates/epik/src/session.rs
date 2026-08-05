@@ -17,15 +17,49 @@ use serde::{Deserialize, Serialize};
 use crate::chat::{ChatModel, Conversation, Keyed, Message, Reply, StopToken};
 use crate::config::{Config, Provider};
 use crate::event::ChatEvent;
-use crate::keystore::{KeyStore, Keys};
+use crate::keystore::{KeyStore, Keys, Resolved};
 use crate::logging::Log;
+
+/// Whether there is a key to reach the provider with: the answer, never the
+/// key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Key {
+    /// One resolved. Nothing to ask for.
+    Present,
+    /// None, and nothing wrong. The ordinary state of a fresh install, and the
+    /// permanent state of a local server that wants none.
+    Absent,
+    /// The keyring would not answer, so whether one exists is unknown.
+    ///
+    /// Not a reason to refuse a session: a local model needs no key, and a
+    /// provider that wants one will refuse the turn in its own words. It is
+    /// worth saying, though — chiefly because a key pasted onto a machine in
+    /// this state will not be kept either.
+    Unreachable { reason: String },
+}
+
+impl Key {
+    /// Whether to ask for one.
+    #[must_use]
+    pub const fn wanted(&self) -> bool {
+        matches!(self, Self::Absent | Self::Unreachable { .. })
+    }
+
+    /// Why the keyring could not be consulted, when it could not be.
+    #[must_use]
+    pub fn trouble(&self) -> Option<&str> {
+        match self {
+            Self::Unreachable { reason } => Some(reason),
+            Self::Present | Self::Absent => None,
+        }
+    }
+}
 
 /// What a client needs to know about the session it is in.
 ///
 /// A plain serde type, because it crosses the IPC boundary: the status bar
-/// names `model`, and `has_key` is what decides whether the chat pane shows a
-/// paste-your-key card. The key it describes stays where the operating system
-/// put it.
+/// names `model`, and `key` is what decides whether the chat pane shows a
+/// paste-your-key card. The key itself stays where the operating system put it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Status {
     /// The active provider's configured name — which is also the account its
@@ -33,9 +67,8 @@ pub struct Status {
     pub provider: String,
     /// The model the provider was asked for, verbatim from the config.
     pub model: String,
-    /// Whether a key was found. Absent is an ordinary state, not a fault:
-    /// local servers want none.
-    pub has_key: bool,
+    /// Where the key for it stands.
+    pub key: Key,
 }
 
 /// A live chat session.
@@ -63,22 +96,28 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
     /// # Errors
     ///
     /// Returns an error when the config names an active provider it does not
-    /// list, or when the key store could not be consulted. A *missing* key is
-    /// not an error: [`Status::has_key`] reports it, and the client decides
-    /// what to do about it.
+    /// list. Neither a missing key nor an unreachable keyring is an error:
+    /// [`Status::key`] reports where things stand, and the client decides what
+    /// to do about it.
     pub fn with_model(
         config: &Config,
         keys: Keys<S>,
         build: impl FnOnce(&Provider, Option<String>) -> M,
     ) -> Result<Self> {
         let (name, provider) = config.provider()?;
-        let key = keys.get(name)?;
+        let resolved = keys.resolve(name);
         let status = Status {
             provider: name.to_owned(),
             model: provider.model.clone(),
-            has_key: key.is_some(),
+            key: match &resolved {
+                Resolved::Found(_) => Key::Present,
+                Resolved::Absent => Key::Absent,
+                Resolved::Unreachable(reason) => Key::Unreachable {
+                    reason: reason.clone(),
+                },
+            },
         };
-        let model = build(provider, key);
+        let model = build(provider, resolved.key());
         Ok(Self {
             status,
             conversation: Conversation::new(config.system_prompt.clone(), model),
@@ -135,9 +174,14 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         self.keys.set(&self.status.provider, key)?;
         // Read back rather than used as pasted: an `EPIK_API_KEY` override
         // outranks the store and keeps winning for this process, so what the
-        // session uses has to be whatever actually resolves.
+        // session uses has to be whatever actually resolves. The store having
+        // just taken the key, `get` is the strict reading to want here.
         let resolved = self.keys.get(&self.status.provider)?;
-        self.status.has_key = resolved.is_some();
+        self.status.key = if resolved.is_some() {
+            Key::Present
+        } else {
+            Key::Absent
+        };
         self.conversation.model_mut().use_key(resolved);
         Ok(&self.status)
     }
@@ -204,8 +248,9 @@ mod tests {
 
     #[test]
     fn an_empty_store_is_a_session_that_says_it_has_no_key() {
-        assert!(
-            !session(Scripted::default()).status().has_key,
+        assert_eq!(
+            session(Scripted::default()).status().key,
+            Key::Absent,
             "a missing key is a state to render, not a failure to open"
         );
     }
@@ -221,8 +266,66 @@ mod tests {
         })
         .unwrap();
 
-        assert!(session.status().has_key);
+        assert_eq!(session.status().key, Key::Present);
         assert_eq!(session.model().key(), Some("sk-already-there"));
+    }
+
+    /// A machine with no secret service: a container, a headless Linux box, a
+    /// CI runner. The keyring is not merely empty, it will not answer at all.
+    #[derive(Debug)]
+    struct Unplugged;
+
+    impl KeyStore for Unplugged {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Err(anyhow::anyhow!("no default store has been set"))
+        }
+
+        fn set(&mut self, _: &str, _: &str) -> Result<()> {
+            Err(anyhow::anyhow!("no default store has been set"))
+        }
+    }
+
+    #[test]
+    fn a_machine_with_no_keyring_still_opens_a_session() {
+        // This is what makes "point the config at Ollama and keep chatting"
+        // true on a box with no secret service. A local model wants no key, and
+        // a client that would not start for want of a keyring it never needed
+        // has mistaken its own plumbing for the user's problem.
+        let mut session =
+            Session::with_model(&config(), Keys::with_override(Unplugged, None), |_, key| {
+                let mut model = Scripted::saying(["Hello, I'm Epik."]);
+                model.use_key(key);
+                model
+            })
+            .expect("an unreachable keyring is not a reason to refuse a session");
+
+        let Key::Unreachable { reason } = &session.status().key else {
+            panic!("the session should say the keyring could not be reached");
+        };
+        assert!(reason.contains("no default store"), "{reason}");
+        assert!(
+            session.status().key.wanted(),
+            "and should still offer somewhere to put one"
+        );
+
+        session
+            .send("Hi", &mut Silent, &StopToken::new())
+            .expect("and the chat proceeds regardless");
+    }
+
+    #[test]
+    fn a_keyring_that_will_not_take_a_key_says_so_rather_than_pretending() {
+        let mut session =
+            Session::with_model(&config(), Keys::with_override(Unplugged, None), |_, _| {
+                Scripted::default()
+            })
+            .unwrap();
+
+        let error = session
+            .set_key("sk-pasted")
+            .expect_err("a store that cannot keep a key must not claim to have");
+
+        assert!(format!("{error:#}").contains("no default store"));
     }
 
     #[test]
@@ -247,7 +350,11 @@ mod tests {
 
         let status = session.set_key("sk-pasted").expect("the store takes it");
 
-        assert!(status.has_key, "the card has served its purpose and can go");
+        assert_eq!(
+            status.key,
+            Key::Present,
+            "the card has served its purpose and can go"
+        );
         assert_eq!(
             session.model().key(),
             Some("sk-pasted"),
