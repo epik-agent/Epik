@@ -37,46 +37,136 @@ mod sse;
 #[cfg(feature = "native")]
 pub use openai::OpenAiCompatible;
 
-/// Who said a thing.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-}
-
-/// One turn in a transcript.
+/// One turn in a transcript, tagged on the wire by who said it.
+///
+/// The two tool-shaped turns are what make a tool loop possible over a
+/// stateless protocol: the assistant's asks and the tools' answers live in
+/// the transcript, because the transcript is the model's only memory.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
+#[serde(tag = "role", rename_all = "lowercase")]
+pub enum Message {
+    System {
+        content: String,
+    },
+    User {
+        content: String,
+    },
+    /// What the assistant said, and any tools it asked for. Each field is
+    /// omitted from the wire when empty, so a text-only turn serializes
+    /// exactly as it did before tools existed.
+    Assistant {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tool_calls: Vec<ToolCall>,
+    },
+    /// One tool's answer, keyed back to the call that asked for it.
+    Tool {
+        tool_call_id: String,
+        content: String,
+    },
 }
 
 impl Message {
     #[must_use]
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
+        Self::System {
             content: content.into(),
         }
     }
 
     #[must_use]
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
+        Self::User {
             content: content.into(),
         }
     }
 
     #[must_use]
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
+        Self::Assistant {
+            content: content.into(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// The assistant turn that asked for tools — entered into the transcript
+    /// so the model can see what it asked when the results come back.
+    #[must_use]
+    pub fn tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self::Assistant {
+            content: content.into(),
+            tool_calls,
+        }
+    }
+
+    /// One tool's result, answering the call with `id`.
+    #[must_use]
+    pub fn tool_result(id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::Tool {
+            tool_call_id: id.into(),
             content: content.into(),
         }
     }
+}
+
+/// One call the assistant asked for. `id` is how the result finds its way
+/// back to the ask.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub kind: ToolKind,
+    pub function: FunctionCall,
+}
+
+impl ToolCall {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: ToolKind::Function,
+            function: FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+}
+
+/// The kind of a tool or a tool call. The protocol defines exactly one, so
+/// one variant is the whole type: a call of some other kind is
+/// unrepresentable rather than checked for.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolKind {
+    #[default]
+    Function,
+}
+
+/// A named function and its arguments — the model's half of one tool call.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// The arguments as one JSON string, exactly as the model wrote them.
+    /// Providers stream this in fragments; what lands here is the
+    /// concatenation, and decoding it is the tool's business.
+    pub arguments: String,
+}
+
+/// A function offered to the model: a name, what it does, and a JSON schema
+/// for its parameters. The tool registry renders these; this module only
+/// puts them on the wire.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolDeclaration {
+    pub name: String,
+    pub description: String,
+    /// A JSON-schema object, carried opaquely.
+    pub parameters: serde_json::Value,
 }
 
 /// Cancellation: a flag checked between deltas. Cloning shares the flag, so
@@ -108,6 +198,10 @@ impl StopToken {
 pub struct Reply {
     /// Every delta, concatenated.
     pub text: String,
+    /// The calls the model asked for, when the turn ended asking for tools.
+    /// Each one's argument fragments have been concatenated back into the
+    /// one JSON string the model wrote.
+    pub tool_calls: Vec<ToolCall>,
     /// Present only when the provider reported it.
     pub usage: Option<Usage>,
     /// The stop token fired before the model was finished.
