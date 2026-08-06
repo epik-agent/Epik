@@ -19,10 +19,13 @@ pub enum Event {
 /// One observable moment in an assistant turn.
 ///
 /// A turn is exactly one `TurnFinished` or one `Failed`, preceded by zero or
-/// more `Delta`s. `Failed` is how a turn that broke mid-stream is reported;
-/// it is not how a refused request is reported, because a refusal never
-/// started a turn. Keeping those two apart is what lets a host put command
-/// errors and streamed failures on different channels.
+/// more `Delta`s — and, when the model works through tools, by a
+/// `ToolCallStarted` answered by a `ToolCallFinished` or a `ToolCallRefused`
+/// for each call, so a window renders progress rather than silence. `Failed`
+/// is how a turn that broke mid-stream is reported; it is not how a refused
+/// request is reported, because a refusal never started a turn. Keeping
+/// those two apart is what lets a host put command errors and streamed
+/// failures on different channels.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ChatEvent {
     /// The next piece of the assistant's reply, as it generates.
@@ -32,6 +35,18 @@ pub enum ChatEvent {
     TurnFinished { usage: Option<Usage> },
     /// The turn did not complete. Whatever deltas already arrived stand.
     Failed { error: String },
+    /// The assistant asked for a tool, and the registry is running the call.
+    ToolCallStarted {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// The call answered. `content` is exactly what goes back to the model.
+    ToolCallFinished { id: String, content: String },
+    /// The call refused — an unknown tool, arguments that do not fit, or the
+    /// tool's own failure — rendered from the typed error. The model reads
+    /// the same words as a tool result, which is how it gets to try again.
+    ToolCallRefused { id: String, error: String },
 }
 
 /// What a turn cost, as the provider counted it.

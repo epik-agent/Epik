@@ -25,6 +25,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::chat::ToolDeclaration;
+
 /// A tool's face: what a door shows a model. The handler stays behind it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Tool {
@@ -44,6 +46,18 @@ impl Tool {
             name: name.into(),
             description: description.into(),
             schema,
+        }
+    }
+}
+
+/// A tool's face rendered for a provider request: same name, same words,
+/// the schema carried over as the parameters.
+impl From<&Tool> for ToolDeclaration {
+    fn from(tool: &Tool) -> Self {
+        Self {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters: tool.schema.clone(),
         }
     }
 }
@@ -175,6 +189,13 @@ impl Registry {
         self.entries.iter().map(|entry| &entry.tool)
     }
 
+    /// The tools as a provider request carries them, ready for a model's
+    /// `use_tools`.
+    #[must_use]
+    pub fn declarations(&self) -> Vec<ToolDeclaration> {
+        self.tools().map(Into::into).collect()
+    }
+
     /// Calls the tool named `name` with the JSON `arguments` a model
     /// produced, and answers with the handler's output as JSON, ready to go
     /// back to the model.
@@ -269,6 +290,22 @@ mod tests {
         assert_eq!(tools[0].name, "echo");
         assert_eq!(tools[0].description, "Says the text back.");
         assert_eq!(tools[0].schema["required"], json!(["text"]));
+    }
+
+    #[test]
+    fn declarations_render_the_tools_for_a_provider_request() {
+        let registry = echoing();
+
+        let declarations = registry.declarations();
+
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].name, "echo");
+        assert_eq!(declarations[0].description, "Says the text back.");
+        let echo = registry.tools().next().unwrap();
+        assert_eq!(
+            declarations[0].parameters, echo.schema,
+            "the schema goes on the wire verbatim, as the parameters"
+        );
     }
 
     #[test]
