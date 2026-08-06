@@ -24,7 +24,7 @@ use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use epik::chat::{ChatModel, Conversation, Message, OpenAiCompatible, Role, StopToken};
+use epik::chat::{ChatModel, Conversation, Message, OpenAiCompatible, StopToken};
 use epik::config::Provider;
 use epik::event::ChatEvent;
 use serde::Deserialize;
@@ -176,8 +176,7 @@ fn a_live_model_streams_a_reply_into_the_transcript() {
         chat.messages()
     );
     assert_eq!(chat.messages()[0], Message::user("Hi"));
-    assert_eq!(chat.messages()[1].role, Role::Assistant);
-    assert_eq!(chat.messages()[1].content, reply.text);
+    assert_eq!(chat.messages()[1], Message::assistant(reply.text));
 }
 
 #[test]
