@@ -278,7 +278,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
     pub fn create_issue(&self, repo: &Repo, title: &str, body: &str) -> Result<Issue, Error> {
-        self.writes()?;
+        self.needs_token()?;
         self.send(
             Method::Post,
             &format!("repos/{repo}/issues"),
@@ -300,7 +300,7 @@ impl GitHub {
         title: Option<&str>,
         body: Option<&str>,
     ) -> Result<Issue, Error> {
-        self.writes()?;
+        self.needs_token()?;
         let mut fields = serde_json::Map::new();
         if let Some(title) = title {
             fields.insert("title".to_owned(), json!(title));
@@ -323,7 +323,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
     pub fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<(), Error> {
-        self.writes()?;
+        self.needs_token()?;
         self.send::<Value>(
             Method::Post,
             &format!("repos/{repo}/issues/{number}/comments"),
@@ -339,7 +339,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
     pub fn close_issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
-        self.writes()?;
+        self.needs_token()?;
         self.send(
             Method::Patch,
             &format!("repos/{repo}/issues/{number}"),
@@ -361,7 +361,7 @@ impl GitHub {
         base: &str,
         body: &str,
     ) -> Result<Pull, Error> {
-        self.writes()?;
+        self.needs_token()?;
         self.send(
             Method::Post,
             &format!("repos/{repo}/pulls"),
@@ -387,7 +387,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
     pub fn merge_pull(&self, repo: &Repo, number: u64, method: Merge) -> Result<(), Error> {
-        self.writes()?;
+        self.needs_token()?;
         self.send::<Value>(
             Method::Put,
             &format!("repos/{repo}/pulls/{number}/merge"),
@@ -399,6 +399,12 @@ impl GitHub {
     /// Every check run's verdict on `git_ref` — a branch name, a tag, or a
     /// commit SHA. "Is this green" is a fold over the result; a run still
     /// executing has no conclusion yet.
+    ///
+    /// One page of a hundred runs, unpaginated. Epik's own repositories run
+    /// a handful of checks; a commit carrying more than a hundred would come
+    /// back truncated, and a fold over a truncated list can call red green —
+    /// so the cap is stated here, where a caller reads, until a repository
+    /// exists that needs the pagination.
     ///
     /// # Errors
     ///
@@ -471,9 +477,10 @@ impl GitHub {
 
     // ----- plumbing -----
 
-    /// The writing verbs' precondition, checked before any request goes out:
-    /// a refusal for want of a token should cost nothing and change nothing.
-    const fn writes(&self) -> Result<(), Error> {
+    /// The precondition of every verb that needs a token — the writes, and
+    /// all of GraphQL — checked before any request goes out: a refusal for
+    /// want of a token should cost nothing and change nothing.
+    const fn needs_token(&self) -> Result<(), Error> {
         match self.token {
             Some(_) => Ok(()),
             None => Err(Error::TokenAbsent),
@@ -517,7 +524,7 @@ impl GitHub {
     /// failure in-band — HTTP 200 with an `errors` array — so this is where
     /// that shape is settled too.
     fn graphql(&self, query: &'static str, variables: &Value) -> Result<Value, Error> {
-        self.writes()?;
+        self.needs_token()?;
         let url = format!("{}/graphql", self.api);
         let outcome = self
             .agent
