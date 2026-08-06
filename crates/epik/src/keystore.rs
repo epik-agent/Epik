@@ -1,11 +1,13 @@
-//! Where chat keys live: not here.
+//! Where keys live: not here.
 //!
 //! Secrets are pushed to their official holders and Epik keeps references,
 //! never values. A chat key belongs in the OS keyring — Keychain, Credential
 //! Manager, secret service — under service `Epik`, with the provider's
-//! configured name as the account. Anthropic auth stays inside the `claude`
-//! CLI's login, GitHub auth inside `gh`, and CI keys, when they come, in
-//! GitHub Actions secrets.
+//! configured name as the account. The GitHub token is the keyring's second
+//! entry kind, on the same rails under the fixed account
+//! [`GITHUB_ACCOUNT`]: a fine-grained PAT pasted once, never a line in a
+//! config file. Anthropic auth stays inside the `claude` CLI's login, and CI
+//! keys, when they come, in GitHub Actions secrets.
 //!
 //! [`KeyStore`] is the seam that keeps each of those placements an
 //! independent decision — and that keeps a test suite out of anybody's
@@ -20,8 +22,23 @@ use anyhow::Result;
 pub const SERVICE: &str = "Epik";
 
 /// An environment variable that outranks the keyring, for a shell session
-/// that wants to use a different key without storing it anywhere.
+/// that wants to use a different chat key without storing it anywhere.
+///
+/// It answers for every chat provider, and never for the GitHub token.
 pub const OVERRIDE_ENV: &str = "EPIK_API_KEY";
+
+/// The keyring account the GitHub token is filed under.
+///
+/// A fixed name rather than a configured one, because Epik talks to one
+/// GitHub.
+pub const GITHUB_ACCOUNT: &str = "github";
+
+/// The environment variable that outranks the keyring for the GitHub token,
+/// and for nothing else.
+///
+/// The two override envs are strangers by design: [`OVERRIDE_ENV`] never
+/// speaks for GitHub, and this one never speaks for a chat provider.
+pub const GITHUB_OVERRIDE_ENV: &str = "EPIK_GITHUB_TOKEN";
 
 /// Somewhere a provider's key can be kept and found again.
 pub trait KeyStore {
@@ -122,33 +139,44 @@ impl KeyStore for OsKeyring {
 /// Key resolution, in one place: the environment override, then the store,
 /// then absent — and absent is a state the app renders rather than an error.
 ///
-/// The override is read once, when this is built, because a process-wide
-/// override is what an environment variable means. It is read-only:
+/// The overrides are read once, when this is built, because a process-wide
+/// override is what an environment variable means. They are read-only:
 /// [`set`](Self::set) always writes to the store, and an override in force
 /// keeps winning until the process ends.
 #[derive(Debug)]
 pub struct Keys<S> {
     store: S,
     override_key: Option<String>,
+    github_override: Option<String>,
 }
 
 impl<S: KeyStore> Keys<S> {
-    /// Wraps `store`, honouring `EPIK_API_KEY` if it is set to anything.
+    /// Wraps `store`, honouring `EPIK_API_KEY` and `EPIK_GITHUB_TOKEN` if
+    /// they are set to anything.
     #[must_use]
     pub fn new(store: S) -> Self {
-        Self::with_override(
-            store,
-            env::var(OVERRIDE_ENV).ok().filter(|key| !key.is_empty()),
-        )
+        let set = |name| env::var(name).ok().filter(|key: &String| !key.is_empty());
+        Self::with_overrides(store, set(OVERRIDE_ENV), set(GITHUB_OVERRIDE_ENV))
     }
 
-    /// Wraps `store` with a stated override — which is how the resolution
-    /// order gets tested without a process mutating its own environment.
+    /// Wraps `store` with a stated chat-key override and no GitHub one.
     #[must_use]
     pub const fn with_override(store: S, override_key: Option<String>) -> Self {
+        Self::with_overrides(store, override_key, None)
+    }
+
+    /// Wraps `store` with both overrides stated — which is how the resolution
+    /// order gets tested without a process mutating its own environment.
+    #[must_use]
+    pub const fn with_overrides(
+        store: S,
+        override_key: Option<String>,
+        github_override: Option<String>,
+    ) -> Self {
         Self {
             store,
             override_key,
+            github_override,
         }
     }
 
@@ -178,10 +206,26 @@ impl<S: KeyStore> Keys<S> {
     /// The environment override is honoured first, so it works on a machine
     /// with no store at all.
     pub fn resolve(&self, provider: &str) -> Resolved {
-        if let Some(key) = &self.override_key {
-            return Resolved::Found(key.clone());
+        self.stand(self.override_key.as_deref(), provider)
+    }
+
+    /// Where the GitHub token stands: `EPIK_GITHUB_TOKEN`, then the keyring
+    /// under [`GITHUB_ACCOUNT`], then absent.
+    ///
+    /// The same three states as [`resolve`](Self::resolve), for the same
+    /// reason: a client without a token can still browse public repos, and a
+    /// keyring that will not answer is something to render, never a reason to
+    /// refuse. The chat-key override does not answer here — a shell that has
+    /// exported `EPIK_API_KEY` has said nothing about GitHub.
+    pub fn github_token(&self) -> Resolved {
+        self.stand(self.github_override.as_deref(), GITHUB_ACCOUNT)
+    }
+
+    fn stand(&self, override_key: Option<&str>, account: &str) -> Resolved {
+        if let Some(key) = override_key {
+            return Resolved::Found(key.to_owned());
         }
-        match self.store.get(provider) {
+        match self.store.get(account) {
             Ok(Some(key)) => Resolved::Found(key),
             Ok(None) => Resolved::Absent,
             Err(error) => Resolved::Unreachable(format!("{error:#}")),
@@ -196,6 +240,16 @@ impl<S: KeyStore> Keys<S> {
     /// Returns an error when the store would not take it.
     pub fn set(&mut self, provider: &str, key: &str) -> Result<()> {
         self.store.set(provider, key)
+    }
+
+    /// Stores the GitHub token, filed under [`GITHUB_ACCOUNT`]. This is what
+    /// the paste-your-PAT card calls; the config file never sees it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store would not take it.
+    pub fn set_github_token(&mut self, token: &str) -> Result<()> {
+        self.store.set(GITHUB_ACCOUNT, token)
     }
 }
 
@@ -307,6 +361,79 @@ mod tests {
         );
         assert_eq!(Resolved::Absent.key(), None);
         assert_eq!(Resolved::Unreachable("broken".to_owned()).key(), None);
+    }
+
+    #[test]
+    fn a_stored_github_token_round_trips() {
+        let mut keys = Keys::with_override(InMemory::default(), None);
+
+        assert_eq!(keys.github_token(), Resolved::Absent);
+        keys.set_github_token("ghp-pasted").unwrap();
+        assert_eq!(
+            keys.github_token(),
+            Resolved::Found("ghp-pasted".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_github_environment_outranks_the_stored_token() {
+        let mut keys = Keys::with_overrides(
+            InMemory::default(),
+            None,
+            Some("ghp-from-the-environment".to_owned()),
+        );
+        keys.set_github_token("ghp-stored").unwrap();
+
+        assert_eq!(
+            keys.github_token(),
+            Resolved::Found("ghp-from-the-environment".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_chat_override_does_not_answer_for_github() {
+        let keys = Keys::with_overrides(InMemory::default(), Some("sk-chat".to_owned()), None);
+        assert_eq!(keys.github_token(), Resolved::Absent);
+    }
+
+    #[test]
+    fn the_github_override_does_not_answer_for_a_chat_provider() {
+        let keys = Keys::with_overrides(InMemory::default(), None, Some("ghp-token".to_owned()));
+        assert_eq!(keys.resolve("anthropic"), Resolved::Absent);
+    }
+
+    #[test]
+    fn the_two_entry_kinds_are_filed_apart() {
+        let mut keys = Keys::with_override(InMemory::default(), None);
+        keys.set("anthropic", "sk-chat").unwrap();
+        keys.set_github_token("ghp-token").unwrap();
+
+        assert_eq!(
+            keys.resolve("anthropic"),
+            Resolved::Found("sk-chat".to_owned())
+        );
+        assert_eq!(keys.github_token(), Resolved::Found("ghp-token".to_owned()));
+    }
+
+    #[test]
+    fn a_github_token_the_store_cannot_reach_is_a_state_rather_than_a_failure() {
+        let keys = Keys::with_override(Unplugged, None);
+
+        let Resolved::Unreachable(reason) = keys.github_token() else {
+            panic!("a broken store should resolve to Unreachable");
+        };
+        assert!(reason.contains("no default store"), "{reason}");
+    }
+
+    #[test]
+    fn the_github_override_answers_even_with_no_store_to_speak_of() {
+        let keys = Keys::with_overrides(Unplugged, None, Some("ghp-override".to_owned()));
+
+        assert_eq!(
+            keys.github_token(),
+            Resolved::Found("ghp-override".to_owned()),
+            "a machine with no keyring can still be told a token"
+        );
     }
 
     #[test]
