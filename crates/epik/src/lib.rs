@@ -24,6 +24,7 @@ pub mod keystore;
 pub mod logging;
 pub mod repository;
 pub mod session;
+pub mod tools;
 pub mod tree;
 
 #[derive(Debug)]
