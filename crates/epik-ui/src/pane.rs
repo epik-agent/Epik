@@ -27,9 +27,27 @@ pub enum Turn {
     User { text: String },
     /// What the model said, complete. Rendered as markdown.
     Assistant { text: String },
+    /// A tool the model called mid-turn: a modest line naming the tool and
+    /// how the call ended. The rich rendering — arguments, results, all of
+    /// it — is #97's open question; a refusal's words are shown even here,
+    /// because "no GitHub token" is an answer, not plumbing.
+    Tool { name: String, outcome: Outcome },
     /// A turn that broke mid-stream: an error card, sitting where the rest of
     /// the answer would have been.
     Failed { error: String },
+}
+
+/// How a tool call stands: running until the loop says otherwise.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Outcome {
+    Running,
+    Finished,
+    /// The registry refused — an unknown tool, arguments that did not fit,
+    /// or the tool's own typed failure, rendered. A missing GitHub token
+    /// lands here, in the keystore's words.
+    Refused {
+        error: String,
+    },
 }
 
 /// The chat pane's whole state.
@@ -98,12 +116,24 @@ impl Pane {
                 self.finish();
                 self.turns.push(Turn::Failed { error });
             }
-            // Tool activity mid-turn. How the pane renders it is #97's open
-            // question; until then the turn simply stays in flight, which is
-            // already what the streaming state says.
-            ChatEvent::ToolCallStarted { .. }
-            | ChatEvent::ToolCallFinished { .. }
-            | ChatEvent::ToolCallRefused { .. } => {}
+            // Tool activity mid-turn. The words said so far land as a
+            // completed turn so the tool line reads in the order things
+            // happened, and the reply keeps streaming below it. The turn
+            // stays in flight throughout — the reopened streaming state says
+            // so — and #97 owns making any of this rich.
+            ChatEvent::ToolCallStarted { name, .. } => {
+                self.finish();
+                self.turns.push(Turn::Tool {
+                    name,
+                    outcome: Outcome::Running,
+                });
+                self.streaming = Some(String::new());
+            }
+            // Calls run one at a time and each is answered before the next
+            // starts, so the running line is always the one being answered;
+            // the id says nothing this fold does not already know.
+            ChatEvent::ToolCallFinished { .. } => self.settle(Outcome::Finished),
+            ChatEvent::ToolCallRefused { error, .. } => self.settle(Outcome::Refused { error }),
         }
     }
 
@@ -127,6 +157,23 @@ impl Pane {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// Answers the running tool line, when one is running. An answer with no
+    /// running line means a host further along than this build; dropping it
+    /// is the friendly reading, since there is nowhere truthful to put it.
+    fn settle(&mut self, settled: Outcome) {
+        if let Some(Turn::Tool { outcome, .. }) = self.turns.iter_mut().rev().find(|turn| {
+            matches!(
+                turn,
+                Turn::Tool {
+                    outcome: Outcome::Running,
+                    ..
+                }
+            )
+        }) {
+            *outcome = settled;
         }
     }
 
@@ -487,6 +534,131 @@ mod tests {
         pane.saw(delta("hello"));
         pane.saw(ChatEvent::TurnFinished { usage: None });
         assert_eq!(pane.usage(), Some(counted));
+    }
+
+    #[test]
+    fn a_tool_call_shows_as_a_running_line_after_the_words_that_preceded_it() {
+        let mut pane = asked("Is #115 blocked?");
+        pane.saw(delta("Let me look."));
+
+        pane.saw(ChatEvent::ToolCallStarted {
+            id: "call-1".to_owned(),
+            name: "github_issue_graph".to_owned(),
+            arguments: "{}".to_owned(),
+        });
+
+        assert_eq!(
+            pane.turns(),
+            [
+                Turn::User {
+                    text: "Is #115 blocked?".to_owned()
+                },
+                Turn::Assistant {
+                    text: "Let me look.".to_owned()
+                },
+                Turn::Tool {
+                    name: "github_issue_graph".to_owned(),
+                    outcome: Outcome::Running,
+                },
+            ],
+            "the line lands in the order things happened"
+        );
+        assert!(pane.is_busy(), "the turn is still in flight");
+        assert_eq!(pane.streaming(), Some(""), "and the reply streams on below");
+    }
+
+    #[test]
+    fn an_answered_call_settles_the_running_line_and_the_reply_lands_after_it() {
+        let mut pane = asked("Is main green?");
+        pane.saw(ChatEvent::ToolCallStarted {
+            id: "call-1".to_owned(),
+            name: "github_check_conclusions".to_owned(),
+            arguments: "{}".to_owned(),
+        });
+
+        pane.saw(ChatEvent::ToolCallFinished {
+            id: "call-1".to_owned(),
+            content: "[]".to_owned(),
+        });
+        pane.saw(delta("All green."));
+        pane.saw(ChatEvent::TurnFinished { usage: None });
+
+        assert_eq!(
+            pane.turns(),
+            [
+                Turn::User {
+                    text: "Is main green?".to_owned()
+                },
+                Turn::Tool {
+                    name: "github_check_conclusions".to_owned(),
+                    outcome: Outcome::Finished,
+                },
+                Turn::Assistant {
+                    text: "All green.".to_owned()
+                },
+            ]
+        );
+        assert!(!pane.is_busy());
+    }
+
+    #[test]
+    fn a_refused_call_shows_the_refusals_own_words() {
+        // The vertical slice's promise: a missing GitHub token reads in the
+        // transcript as the typed refusal, never a hang and never silence.
+        let mut pane = asked("Comment on #115");
+        pane.saw(ChatEvent::ToolCallStarted {
+            id: "call-1".to_owned(),
+            name: "github_comment".to_owned(),
+            arguments: "{}".to_owned(),
+        });
+
+        pane.saw(ChatEvent::ToolCallRefused {
+            id: "call-1".to_owned(),
+            error: "github_comment: no GitHub token: this needs one".to_owned(),
+        });
+
+        assert_eq!(
+            pane.turns().last(),
+            Some(&Turn::Tool {
+                name: "github_comment".to_owned(),
+                outcome: Outcome::Refused {
+                    error: "github_comment: no GitHub token: this needs one".to_owned()
+                },
+            })
+        );
+        assert!(
+            pane.is_busy(),
+            "the model still gets to say what it makes of it"
+        );
+    }
+
+    #[test]
+    fn two_calls_in_a_row_settle_each_their_own_line() {
+        let mut pane = asked("Both, please");
+        for (id, name) in [("call-1", "first"), ("call-2", "second")] {
+            pane.saw(ChatEvent::ToolCallStarted {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+            });
+            pane.saw(ChatEvent::ToolCallFinished {
+                id: id.to_owned(),
+                content: "{}".to_owned(),
+            });
+        }
+
+        let settled: Vec<_> = pane
+            .turns()
+            .iter()
+            .filter_map(|turn| match turn {
+                Turn::Tool { name, outcome } => Some((name.as_str(), outcome.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            settled,
+            [("first", Outcome::Finished), ("second", Outcome::Finished),]
+        );
     }
 
     #[test]
