@@ -31,6 +31,13 @@ pub const OVERRIDE_ENV: &str = "EPIK_API_KEY";
 ///
 /// A fixed name rather than a configured one, because Epik talks to one
 /// GitHub.
+///
+/// The account namespace is shared between entry kinds, so this name is
+/// reserved across all of them: a chat provider configured as `github`
+/// would share this entry — its `set` and [`set_github_token`] overwrite
+/// each other, and its `resolve` hands back the token.
+///
+/// [`set_github_token`]: Keys::set_github_token
 pub const GITHUB_ACCOUNT: &str = "github";
 
 /// The environment variable that outranks the keyring for the GitHub token,
