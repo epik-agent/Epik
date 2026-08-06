@@ -25,8 +25,10 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+
+pub mod tools;
 
 /// Where GitHub is. One value, because Epik talks to one GitHub; tests point
 /// [`GitHub::at`] somewhere else.
@@ -67,7 +69,9 @@ impl fmt::Display for Repo {
 ///
 /// REST spells these `open`/`closed` and GraphQL shouts `OPEN`/`CLOSED`;
 /// both spellings land here so the difference stays inside the module.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+/// Serialization — a tool result on its way to a model — always spells them
+/// the REST way.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum State {
     #[serde(rename = "open", alias = "OPEN")]
     Open,
@@ -76,7 +80,7 @@ pub enum State {
 }
 
 /// An issue, as Epik reads one.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Issue {
     pub number: u64,
     pub title: String,
@@ -88,7 +92,7 @@ pub struct Issue {
 }
 
 /// One end of a pull request: a branch name and the commit it points at.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Branch {
     #[serde(rename = "ref")]
     pub name: String,
@@ -97,7 +101,7 @@ pub struct Branch {
 
 /// A pull request, as Epik reads one. `head.sha` is what
 /// [`check_conclusions`](GitHub::check_conclusions) wants.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Pull {
     pub number: u64,
     pub title: String,
@@ -109,8 +113,10 @@ pub struct Pull {
     pub base: Branch,
 }
 
-/// How to merge a pull request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// How to merge a pull request. Deserializes from the same lowercase words
+/// GitHub's own UI uses, which is how a tool argument names one.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum Merge {
     Commit,
     Squash,
@@ -128,7 +134,7 @@ impl Merge {
 }
 
 /// One check run's verdict on a commit.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Check {
     pub name: String,
     /// `None` while the check is still running.
@@ -138,7 +144,7 @@ pub struct Check {
 /// How a finished check run ended. `Other` absorbs conclusions GitHub
 /// invents after this enum was written; an unmodelled verdict must not break
 /// decoding, and it is nobody's green.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Conclusion {
     Success,
@@ -155,7 +161,7 @@ pub enum Conclusion {
 
 /// An issue as it appears at the far end of an edge: enough to schedule
 /// against, not the whole issue.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Edge {
     pub number: u64,
     pub title: String,
@@ -163,8 +169,11 @@ pub struct Edge {
 }
 
 /// One issue and the edges around it: the children it decomposes into, and
-/// the issues it waits on. This is what the scheduler folds over.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// the issues it waits on.
+///
+/// This is what the scheduler folds over — and, as a tool result, what a
+/// model reads to answer for an issue's place in a plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct IssueGraph {
     pub issue: Issue,
     pub sub_issues: Vec<Edge>,

@@ -14,11 +14,12 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{ChatModel, Conversation, Keyed, Message, Reply, StopToken};
+use crate::chat::{ChatModel, Conversation, Keyed, Message, Reply, StopToken, ToolDeclaration};
 use crate::config::{Config, Provider};
 use crate::event::ChatEvent;
 use crate::keystore::{KeyStore, Keys, Resolved};
 use crate::logging::Log;
+use crate::tools::Registry;
 
 /// Whether there is a key to reach the provider with: the answer, never the
 /// key.
@@ -82,16 +83,22 @@ pub struct Session<M, S> {
     status: Status,
     conversation: Conversation<M>,
     keys: Keys<S>,
+    tools: Registry,
 }
 
 impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
-    /// A session on the active provider, with `build` making the model that
-    /// speaks to it.
+    /// A session on the active provider, with `tools` for the model to work
+    /// through and `build` making the model that speaks to it.
     ///
-    /// [`open`](Session::open) is this with the OpenAI-compatible client. A
-    /// native Anthropic client would arrive the same way, and so does the
-    /// scripted model in a test — which is the point of taking the constructor
-    /// rather than naming a type.
+    /// `build` is handed the tools' declarations so the model can be
+    /// constructed already offering them — a model with no way to offer
+    /// tools, like the scripted one in a test, simply ignores them. An empty
+    /// registry is a session that chats and nothing else.
+    ///
+    /// [`open`](Session::open) is this with the OpenAI-compatible client and
+    /// the GitHub verbs. A native Anthropic client would arrive the same
+    /// way, and so does the scripted model in a test — which is the point of
+    /// taking the constructor rather than naming a type.
     ///
     /// # Errors
     ///
@@ -102,7 +109,8 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
     pub fn with_model(
         config: &Config,
         keys: Keys<S>,
-        build: impl FnOnce(&Provider, Option<String>) -> M,
+        tools: Registry,
+        build: impl FnOnce(&Provider, Option<String>, Vec<ToolDeclaration>) -> M,
     ) -> Result<Self> {
         let (name, provider) = config.provider()?;
         let resolved = keys.resolve(name);
@@ -117,11 +125,12 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
                 },
             },
         };
-        let model = build(provider, resolved.key());
+        let model = build(provider, resolved.key(), tools.declarations());
         Ok(Self {
             status,
             conversation: Conversation::new(config.system_prompt.clone(), model),
             keys,
+            tools,
         })
     }
 
@@ -144,7 +153,10 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         self.conversation.model()
     }
 
-    /// One turn: see [`Conversation::send`].
+    /// One turn, run against the session's tools: see
+    /// [`Conversation::send_with_tools`]. A model that answers in plain text
+    /// makes it one round, exactly as a plain send; one that asks for tools
+    /// gets them run and the results resent until it answers.
     ///
     /// # Errors
     ///
@@ -157,7 +169,8 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         log: &mut dyn Log<ChatEvent>,
         stop: &StopToken,
     ) -> Result<Reply> {
-        self.conversation.send(text, log, stop)
+        self.conversation
+            .send_with_tools(text, &mut self.tools, log, stop)
     }
 
     /// Files `key` against the active provider and puts it into use at once.
@@ -190,13 +203,26 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
 #[cfg(feature = "native")]
 impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     /// A session on the active provider, over the OpenAI chat-completions
-    /// protocol: the whole of what starting a chat takes.
+    /// protocol, with the GitHub verbs registered as the model's tools: the
+    /// whole of what starting a chat takes.
+    ///
+    /// The GitHub token rides the keystore rails — `EPIK_GITHUB_TOKEN`, then
+    /// the keyring, then absent — and its absence opens the session anyway:
+    /// the registry builds tokenless, and the verbs that need one refuse at
+    /// call time with a typed refusal the model reads as a tool result.
     ///
     /// # Errors
     ///
     /// As [`with_model`](Session::with_model).
     pub fn open(config: &Config, keys: Keys<S>) -> Result<Self> {
-        Self::with_model(config, keys, crate::chat::OpenAiCompatible::new)
+        let github = crate::github::GitHub::new(keys.github_token().key());
+        let mut tools = Registry::new();
+        crate::github::tools::register(&mut tools, github);
+        Self::with_model(config, keys, tools, |provider, key, declarations| {
+            let mut model = crate::chat::OpenAiCompatible::new(provider, key);
+            model.use_tools(declarations);
+            model
+        })
     }
 }
 
@@ -225,12 +251,14 @@ mod tests {
         }
     }
 
-    /// A session on the scripted model, with an empty store and no override.
+    /// A session on the scripted model, with an empty store, no override,
+    /// and no tools.
     fn session(model: Scripted) -> Session<Scripted, InMemory> {
         Session::with_model(
             &config(),
             Keys::with_override(InMemory::default(), None),
-            |_, key| {
+            Registry::new(),
+            |_, key, _| {
                 let mut model = model;
                 model.use_key(key);
                 model
@@ -259,11 +287,16 @@ mod tests {
     fn a_stored_key_reaches_both_the_status_and_the_model() {
         let mut store = InMemory::default();
         store.set("local", "sk-already-there").unwrap();
-        let session = Session::with_model(&config(), Keys::with_override(store, None), |_, key| {
-            let mut model = Scripted::default();
-            model.use_key(key);
-            model
-        })
+        let session = Session::with_model(
+            &config(),
+            Keys::with_override(store, None),
+            Registry::new(),
+            |_, key, _| {
+                let mut model = Scripted::default();
+                model.use_key(key);
+                model
+            },
+        )
         .unwrap();
 
         assert_eq!(session.status().key, Key::Present);
@@ -291,13 +324,17 @@ mod tests {
         // true on a box with no secret service. A local model wants no key, and
         // a client that would not start for want of a keyring it never needed
         // has mistaken its own plumbing for the user's problem.
-        let mut session =
-            Session::with_model(&config(), Keys::with_override(Unplugged, None), |_, key| {
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_override(Unplugged, None),
+            Registry::new(),
+            |_, key, _| {
                 let mut model = Scripted::saying(["Hello, I'm Epik."]);
                 model.use_key(key);
                 model
-            })
-            .expect("an unreachable keyring is not a reason to refuse a session");
+            },
+        )
+        .expect("an unreachable keyring is not a reason to refuse a session");
 
         let Key::Unreachable { reason } = &session.status().key else {
             panic!("the session should say the keyring could not be reached");
@@ -315,11 +352,13 @@ mod tests {
 
     #[test]
     fn a_keyring_that_will_not_take_a_key_says_so_rather_than_pretending() {
-        let mut session =
-            Session::with_model(&config(), Keys::with_override(Unplugged, None), |_, _| {
-                Scripted::default()
-            })
-            .unwrap();
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_override(Unplugged, None),
+            Registry::new(),
+            |_, _, _| Scripted::default(),
+        )
+        .unwrap();
 
         let error = session
             .set_key("sk-pasted")
@@ -381,7 +420,8 @@ mod tests {
                 InMemory::default(),
                 Some("sk-from-the-environment".to_owned()),
             ),
-            |_, key| {
+            Registry::new(),
+            |_, key, _| {
                 let mut model = Scripted::default();
                 model.use_key(key);
                 model
@@ -399,6 +439,70 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_runs_through_the_sessions_tools() {
+        // The window's whole turn goes through here, so this is the seam
+        // that makes the vertical slice true: a model that asks for a tool
+        // gets the result resent, all inside one Session::send.
+        use crate::chat::ToolCall;
+        use crate::tools::Tool;
+
+        let mut tools = Registry::new();
+        tools.register(
+            Tool::new("echo", "Says the arguments back.", serde_json::json!({})),
+            |args: serde_json::Value| Ok::<_, std::convert::Infallible>(args),
+        );
+        let scripted = Scripted::saying(["Checking."])
+            .asking([ToolCall::new("call-1", "echo", r#"{"n":1}"#)])
+            .then_saying(["Done."]);
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_override(InMemory::default(), None),
+            tools,
+            |_, _, _| scripted,
+        )
+        .unwrap();
+
+        let reply = session.send("Go", &mut Silent, &StopToken::new()).unwrap();
+
+        assert_eq!(reply.text, "Done.");
+        assert!(
+            session
+                .messages()
+                .contains(&Message::tool_result("call-1", r#"{"n":1}"#)),
+            "the tool's answer is in the canonical transcript: {:?}",
+            session.messages()
+        );
+    }
+
+    #[test]
+    fn the_tools_declarations_reach_the_model_builder() {
+        use crate::tools::Tool;
+
+        let mut tools = Registry::new();
+        tools.register(
+            Tool::new("echo", "Says the arguments back.", serde_json::json!({})),
+            |args: serde_json::Value| Ok::<_, std::convert::Infallible>(args),
+        );
+        let mut offered = Vec::new();
+        Session::with_model(
+            &config(),
+            Keys::with_override(InMemory::default(), None),
+            tools,
+            |_, _, declarations| {
+                offered = declarations;
+                Scripted::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(offered.len(), 1);
+        assert_eq!(
+            offered[0].name, "echo",
+            "the model is built already offering what the registry holds"
+        );
+    }
+
+    #[test]
     fn a_config_naming_an_unlisted_provider_fails_to_open() {
         let config = Config {
             active: "nowhere".to_owned(),
@@ -408,7 +512,8 @@ mod tests {
         let error = Session::with_model(
             &config,
             Keys::with_override(InMemory::default(), None),
-            |_, _| Scripted::default(),
+            Registry::new(),
+            |_, _, _| Scripted::default(),
         )
         .expect_err("there is no provider to open on");
 

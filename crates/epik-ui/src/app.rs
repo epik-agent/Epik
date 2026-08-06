@@ -14,7 +14,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::bridge;
 use crate::markdown;
-use crate::pane::{Pane, Turn};
+use crate::pane::{Outcome, Pane, Turn};
 use crate::theme::Theme;
 
 /// The whole window: a header, a transcript, and somewhere to type.
@@ -260,6 +260,28 @@ fn TurnView(turn: Turn) -> impl IntoView {
             ></div>
         }
         .into_any(),
+        // A tool the model worked through: a modest line, deliberately — #97
+        // owns the rich version. A refusal shows its own words, because "no
+        // GitHub token" is an answer the user is owed.
+        Turn::Tool { name, outcome } => {
+            let (status, error) = match outcome {
+                Outcome::Running => ("running…", None),
+                Outcome::Finished => ("done", None),
+                Outcome::Refused { error } => ("refused", Some(error)),
+            };
+            view! {
+                <div class="rounded-md border border-edge bg-raised px-3 py-2 font-mono text-xs text-secondary">
+                    <p>{format!("⚙ {name} · {status}")}</p>
+                    {error
+                        .map(|error| {
+                            view! {
+                                <p class="mt-1 whitespace-pre-wrap text-warning">{error}</p>
+                            }
+                        })}
+                </div>
+            }
+            .into_any()
+        }
         // A streamed failure: an error card, sitting where the rest of the
         // answer would have been. Command errors look nothing like this.
         Turn::Failed { error } => view! {
