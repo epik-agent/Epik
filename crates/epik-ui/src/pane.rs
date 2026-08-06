@@ -98,6 +98,12 @@ impl Pane {
                 self.finish();
                 self.turns.push(Turn::Failed { error });
             }
+            // Tool activity mid-turn. How the pane renders it is #97's open
+            // question; until then the turn simply stays in flight, which is
+            // already what the streaming state says.
+            ChatEvent::ToolCallStarted { .. }
+            | ChatEvent::ToolCallFinished { .. }
+            | ChatEvent::ToolCallRefused { .. } => {}
         }
     }
 

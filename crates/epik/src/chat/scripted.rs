@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use anyhow::{Result, bail};
 
-use crate::chat::{ChatModel, Keyed, Message, Reply, StopToken};
+use crate::chat::{ChatModel, Keyed, Message, Reply, StopToken, ToolCall};
 use crate::event::{ChatEvent, Usage};
 use crate::logging::Log;
 
@@ -23,6 +23,7 @@ pub struct Scripted {
 enum Turn {
     Reply {
         deltas: Vec<String>,
+        tool_calls: Vec<ToolCall>,
         usage: Option<Usage>,
     },
     Failure(String),
@@ -46,8 +47,19 @@ impl Scripted {
     pub fn then_saying<S: Into<String>>(mut self, deltas: impl IntoIterator<Item = S>) -> Self {
         self.turns.push_back(Turn::Reply {
             deltas: deltas.into_iter().map(Into::into).collect(),
+            tool_calls: Vec::new(),
             usage: None,
         });
+        self
+    }
+
+    /// Makes the most recently queued reply end by asking for `calls`, as a
+    /// model that wants tools would.
+    #[must_use]
+    pub fn asking(mut self, calls: impl IntoIterator<Item = ToolCall>) -> Self {
+        if let Some(Turn::Reply { tool_calls, .. }) = self.turns.back_mut() {
+            *tool_calls = calls.into_iter().collect();
+        }
         self
     }
 
@@ -104,7 +116,11 @@ impl ChatModel for Scripted {
 
         match turn {
             Turn::Failure(error) => bail!(error),
-            Turn::Reply { deltas, usage } => {
+            Turn::Reply {
+                deltas,
+                tool_calls,
+                usage,
+            } => {
                 let mut reply = Reply::default();
                 for delta in deltas {
                     // Between deltas is exactly where a real model can stop.
@@ -115,6 +131,9 @@ impl ChatModel for Scripted {
                     reply.text.push_str(&delta);
                     log.emit(ChatEvent::Delta { text: delta });
                 }
+                // An interrupted reply carries no calls: on the wire the
+                // asks arrive at the end, so a cut-off turn never asked.
+                reply.tool_calls = tool_calls;
                 reply.usage = usage;
                 Ok(reply)
             }
