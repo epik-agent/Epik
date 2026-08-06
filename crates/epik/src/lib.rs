@@ -15,6 +15,9 @@
 pub mod chat;
 pub mod config;
 pub mod event;
+// A maker of requests through and through, so the whole module is native.
+#[cfg(feature = "native")]
+pub mod github;
 pub mod implementation;
 pub mod ipc;
 pub mod keystore;

@@ -25,3 +25,6 @@ ureq = { version = "3", features = ["json"], optional = true }
 [dev-dependencies]
 git2 = "0.20"
 tempfile = "3"
+# The GitHub mutation tier scaffolds branches over the raw git data API —
+# test plumbing that must not become a library verb.
+ureq = { version = "3", features = ["json"] }

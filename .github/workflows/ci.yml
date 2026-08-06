@@ -71,7 +71,15 @@ jobs:
 
       # The live tier skips here, which is the laptop rule doing its job: this
       # job has no model server. The `live` job is what makes it execute.
+      #
+      # The GitHub smoke is the opposite case: it reads this public repository
+      # unauthenticated, which a runner can always do, so here an unreachable
+      # GitHub is a failure rather than a tier that looks green forever. Rate
+      # limiting still skips — runners share addresses — and a classified rate
+      # limit is itself proof the client reached GitHub and read the refusal.
       - run: cargo test --workspace
+        env:
+          EPIK_REQUIRE_GITHUB: "1"
 
       - name: The library stays wasm-clean
         run: cargo clippy -p epik --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
