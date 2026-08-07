@@ -411,7 +411,7 @@ fn SecretCard(
                     class="rounded-md border border-edge px-3 py-2 text-xs font-medium text-primary hover:bg-hover"
                     on:click=move |_| store()
                 >
-                    "Keep it"
+                    "Ok"
                 </button>
             </div>
         </div>
