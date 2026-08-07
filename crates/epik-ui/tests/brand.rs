@@ -1,10 +1,5 @@
 //! `styles/tokens.css` is kept by hand and has to agree with
-//! `brand/brand.json`, this crate's copy of the palette source of truth.
-//!
-//! The copy is deliberate: this workspace references nothing outside
-//! itself, so the brand file rides along rather than being reached for at
-//! `website/brand/brand.json`. The two copies are kept in step by hand,
-//! like the palette itself — a retouch lands in both or has not landed.
+//! `website/brand/brand.json`, which is the palette source of truth.
 //!
 //! This test is what "derived from the brand" is allowed to mean for a file
 //! nothing generates: every palette value in the brand, in both themes, must
@@ -15,7 +10,7 @@
 use std::collections::BTreeMap;
 
 const TOKENS: &str = include_str!("../styles/tokens.css");
-const BRAND: &str = include_str!("../brand/brand.json");
+const BRAND: &str = include_str!("../../../website/brand/brand.json");
 
 /// The stylesheet with its comments removed. They group the tokens for a
 /// reader, and would otherwise attach themselves to the declaration that
