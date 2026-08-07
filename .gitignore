@@ -5,3 +5,5 @@
 /crates/epik-ui/dist
 # Permission schemas, regenerated from the plugin set on every build.
 /crates/epik-app/gen/schemas
+# Claude Code's session-local state: commands, worktrees, never the repo's.
+/.claude
