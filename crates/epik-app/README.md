@@ -51,6 +51,66 @@ it into the card the window shows: it goes to the OS keyring under the service
 `Epik`, and never into this file. `EPIK_API_KEY` overrides the keyring for one
 shell session, which is also the way in on a machine that has no keyring at all.
 
+## macOS: signing and the keychain
+
+The keychain recognises an app by its code signature. An unsigned build gets a
+fresh ad-hoc signature every rebuild, so every rebuild is a stranger to the
+keychain: each stored `Epik` item costs an access dialog again. Signed with a
+stable identity, the app is the same app across rebuilds — a dialog happens at
+most once per stored item, and never for items the app created itself, because
+the creator is on an item's access list from the start.
+
+The identity is supplied by the environment, never hardcoded in
+`tauri.conf.json`: `cargo tauri build` reads `APPLE_SIGNING_IDENTITY` and signs
+the bundle with whatever it names. A development certificate on a dev machine
+and Developer ID in the release job are then the same build path with a
+different value exported.
+
+### One-time setup on a dev machine
+
+Create a self-signed code-signing certificate in Keychain Access — Certificate
+Assistant → Create a Certificate, name it `Epik Development`, set Certificate
+Type to Code Signing — then export its name wherever your shell learns its
+environment:
+
+```sh
+export APPLE_SIGNING_IDENTITY="Epik Development"
+```
+
+`cargo tauri build` now produces a bundle the keychain will keep recognising.
+The dev-server path (`cargo tauri dev`, plain `cargo run`) still links an
+ad-hoc-signed binary whose identity changes per rebuild, so keyring dialogs
+there are expected — iterate with `EPIK_API_KEY`/`EPIK_GITHUB_TOKEN` exported,
+or use the signed bundle when the keychain is the thing being exercised.
+
+If pre-signing builds ever touched your keychain, their `Epik` items carry
+access lists naming identities that no longer exist, and the dialogs will not
+stop until those items go. Delete them once —
+
+```sh
+while security delete-generic-password -s Epik >/dev/null 2>&1; do :; done
+```
+
+— then re-paste keys through the app's own cards, which files them with the
+signed app on the access list.
+
+### Release
+
+The release job exports the same variable naming a `Developer ID Application:
+…` certificate, plus the notarization credentials Tauri's bundler reads:
+`APPLE_ID`, `APPLE_PASSWORD` (an app-specific password), and `APPLE_TEAM_ID` —
+or an App Store Connect API key via `APPLE_API_KEY`, `APPLE_API_ISSUER`, and
+`APPLE_API_KEY_PATH`. Same `cargo tauri build`, nothing forked.
+
+### Elsewhere
+
+This section is macOS-only on purpose. Linux's Secret Service and Windows's
+Credential Manager gate secrets per user, not per app: no access list names a
+binary, so signing never enters into secret access and no dialog interrupts a
+read. The launch discipline the library keeps — each secret read once — still
+holds everywhere; macOS is just the platform where each read can cost a
+dialog.
+
 ## When nothing streams
 
 If the window opens and the status bar names a model, but a question never gets
