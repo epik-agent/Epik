@@ -27,6 +27,13 @@ pub mod conformance;
 mod scripted;
 pub use scripted::Scripted;
 
+// A spawner of processes and threads through and through, so the whole
+// module is native; the vocabulary above stays wasm-clean.
+#[cfg(feature = "native")]
+mod claude_code;
+#[cfg(feature = "native")]
+pub use claude_code::ClaudeCode;
+
 /// What the harness wants done. Steps are data, not methods: a new agent
 /// implements one verb and inherits every kind, and a wrapper that
 /// special-cases a kind internally is invisible to the harness.
@@ -201,6 +208,10 @@ pub enum AgentError {
     /// [`Stop::Died`], but the run being unconductable. For [`Scripted`],
     /// a script with no finish left to play.
     Broken { error: String },
+    /// The agent's binary would not start: absent from the configured path
+    /// and from `PATH`, or present but unrunnable. Caught at spawn, before
+    /// any process exists.
+    Unstartable { binary: PathBuf, error: String },
 }
 
 impl fmt::Display for AgentError {
@@ -211,6 +222,9 @@ impl fmt::Display for AgentError {
                 "the budget caps {denomination}, which this agent never reports"
             ),
             Self::Broken { error } => write!(f, "{error}"),
+            Self::Unstartable { binary, error } => {
+                write!(f, "{} would not start: {error}", binary.display())
+            }
         }
     }
 }

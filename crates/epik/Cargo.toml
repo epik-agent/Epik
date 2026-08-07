@@ -13,6 +13,14 @@ default = ["native"]
 # The frontend depends on this crate with `default-features = false`.
 native = ["dep:keyring", "dep:ureq"]
 
+# A claude that is entirely script: the test double the ClaudeCode
+# conformance run spawns in place of the real binary. It lives with the
+# tests it serves; being a bin target is what lets `CARGO_BIN_EXE_` hand
+# the tests its compiled path.
+[[bin]]
+name = "stub-claude"
+path = "tests/bin/stub_claude.rs"
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
