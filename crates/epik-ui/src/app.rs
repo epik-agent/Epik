@@ -115,6 +115,10 @@ pub fn App() -> impl IntoView {
                     <Show when=move || pane.with(Pane::needs_key)>
                         <KeyCard pane=pane />
                     </Show>
+
+                    <Show when=move || pane.with(Pane::needs_github_token)>
+                        <PatCard pane=pane />
+                    </Show>
                 </div>
             </div>
 
@@ -362,6 +366,89 @@ fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
                     type="password"
                     class="min-w-0 flex-1 rounded-md border border-edge bg-input px-3 py-2 font-mono text-xs text-primary placeholder:text-faint focus:border-edge-strong focus:outline-none"
                     placeholder="Paste the key"
+                    autocomplete="off"
+                    prop:value=move || typed.get()
+                    on:input=move |event| typed.set(event_target_value(&event))
+                    on:keydown=move |event: KeyboardEvent| {
+                        if event.key() == "Enter" {
+                            event.prevent_default();
+                            store();
+                        }
+                    }
+                />
+                <button
+                    class="rounded-md border border-edge px-3 py-2 text-xs font-medium text-primary hover:bg-hover"
+                    on:click=move |_| store()
+                >
+                    "Keep it"
+                </button>
+            </div>
+        </div>
+    }
+}
+
+/// Somewhere to put a GitHub token, shown when a GitHub verb has refused for
+/// want of one — never sooner, because a chat that stays away from GitHub
+/// owes nobody a token.
+///
+/// The guidance names every source worth naming and no more: the one-click
+/// classic-PAT URL, the GitHub CLI's own credential, and the fine-grained
+/// shape for whoever wants the tighter scope. The pastes that cannot serve
+/// are refused by the library with their own sentence, which lands in the
+/// banner — guidance delivered only to the person who needs it.
+#[component]
+fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
+    let typed = RwSignal::new(String::new());
+
+    let store = move || {
+        let token = typed.with(|token| token.trim().to_owned());
+        if token.is_empty() {
+            return;
+        }
+        typed.set(String::new());
+        spawn_local(async move {
+            match bridge::set_github_token(&token).await {
+                Ok(status) => pane.update(|pane| pane.opened(status)),
+                Err(error) => pane.update(|pane| pane.refused(error)),
+            }
+        });
+    };
+
+    view! {
+        <div class="rounded-lg border border-edge bg-raised px-4 py-3.5">
+            <p class="text-sm font-medium">"GitHub needs a token"</p>
+            <p class="mt-1 text-xs text-secondary">
+                "Create one at "
+                <span class="select-all font-mono text-primary">
+                    "https://github.com/settings/tokens/new?scopes=repo&description=Epik"
+                </span>
+                " — the page arrives pre-scoped, so it is one Generate and a copy. If you use the GitHub CLI, "
+                <span class="font-mono text-primary">"gh auth token"</span>
+                " prints one. A fine-grained PAT with Issues, Pull requests, and Contents access works too."
+            </p>
+            <p class="mt-1 text-xs text-secondary">
+                "It goes into this computer's keyring, under the service "
+                <span class="font-mono text-primary">"Epik"</span>
+                ". Epik keeps a reference to it and never a copy."
+            </p>
+            <Show when=move || pane.with(|pane| pane.github_trouble().is_some())>
+                <p class="mt-2 text-xs text-warning">
+                    "This computer's keyring could not be reached, so a token pasted here works for this session but will not be kept: "
+                    <span class="font-mono">
+                        {move || {
+                            pane.with(|pane| pane.github_trouble().unwrap_or_default().to_owned())
+                        }}
+                    </span>
+                    ". Set "
+                    <span class="font-mono">"EPIK_GITHUB_TOKEN"</span>
+                    " to make it stick."
+                </p>
+            </Show>
+            <div class="mt-3 flex items-center gap-2">
+                <input
+                    type="password"
+                    class="min-w-0 flex-1 rounded-md border border-edge bg-input px-3 py-2 font-mono text-xs text-primary placeholder:text-faint focus:border-edge-strong focus:outline-none"
+                    placeholder="Paste the token"
                     autocomplete="off"
                     prop:value=move || typed.get()
                     on:input=move |event| typed.set(event_target_value(&event))

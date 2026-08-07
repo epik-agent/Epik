@@ -12,7 +12,7 @@
 //! there, so a retry is a plain resend, while here the question and the error
 //! card both stay on screen. Core owns truth; the pane owns a rendering of it.
 
-use epik::event::{ChatEvent, Usage};
+use epik::event::{ChatEvent, Remedy, Usage};
 use epik::session::Status;
 
 /// One entry in the transcript.
@@ -66,6 +66,13 @@ pub struct Pane {
     refusal: Option<String>,
     /// What the last turn cost, when the provider counted it.
     usage: Option<Usage>,
+    /// A GitHub verb has refused for want of a token. Sticky on purpose: the
+    /// card it summons goes away when the status says the token is Present,
+    /// not because the refusal scrolled by. The flag's known cost: a kept
+    /// token that later goes bad refuses as GitHub's 401, never as
+    /// `TokenAbsent`, so no card returns for it — replacing a bad token is
+    /// the override env or a restart until a settings surface exists.
+    github_asked: bool,
 }
 
 impl Pane {
@@ -133,7 +140,14 @@ impl Pane {
             // starts, so the running line is always the one being answered;
             // the id says nothing this fold does not already know.
             ChatEvent::ToolCallFinished { .. } => self.settle(Outcome::Finished),
-            ChatEvent::ToolCallRefused { error, .. } => self.settle(Outcome::Refused { error }),
+            ChatEvent::ToolCallRefused { error, remedy, .. } => {
+                // The remedy is the typed side of the refusal: the words go
+                // into the transcript, and the case summons the card.
+                if remedy == Some(Remedy::GithubToken) {
+                    self.github_asked = true;
+                }
+                self.settle(Outcome::Refused { error });
+            }
         }
     }
 
@@ -240,6 +254,29 @@ impl Pane {
     pub fn key_trouble(&self) -> Option<&str> {
         self.status.as_ref().and_then(|status| status.key.trouble())
     }
+
+    /// Whether to show the paste-your-PAT card: a GitHub verb has refused
+    /// for want of a token, and the host still reports none. Never sooner —
+    /// a chat that stays away from GitHub owes nobody a token — and it goes
+    /// away the moment a stored token comes back Present.
+    #[must_use]
+    pub fn needs_github_token(&self) -> bool {
+        self.github_asked
+            && self
+                .status
+                .as_ref()
+                .is_some_and(|status| status.github.wanted())
+    }
+
+    /// Why the keyring could not be consulted for the GitHub token, when it
+    /// could not be — [`key_trouble`](Self::key_trouble), on the token's own
+    /// rails.
+    #[must_use]
+    pub fn github_trouble(&self) -> Option<&str> {
+        self.status
+            .as_ref()
+            .and_then(|status| status.github.trouble())
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +290,26 @@ mod tests {
             provider: "ollama".to_owned(),
             model: "smollm2:135m".to_owned(),
             key,
+            // The ordinary state of a fresh install; the tests that care
+            // say otherwise through `github_status`.
+            github: Key::Absent,
+        }
+    }
+
+    /// A status whose chat key is settled, varying only the GitHub token.
+    fn github_status(github: Key) -> Status {
+        Status {
+            github,
+            ..status(Key::Present)
+        }
+    }
+
+    /// A GitHub verb refusing for want of a token, as the loop reports it.
+    fn token_refusal() -> ChatEvent {
+        ChatEvent::ToolCallRefused {
+            id: "call-1".to_owned(),
+            error: "github_comment: no GitHub token: this needs one".to_owned(),
+            remedy: Some(Remedy::GithubToken),
         }
     }
 
@@ -615,6 +672,7 @@ mod tests {
         pane.saw(ChatEvent::ToolCallRefused {
             id: "call-1".to_owned(),
             error: "github_comment: no GitHub token: this needs one".to_owned(),
+            remedy: Some(Remedy::GithubToken),
         });
 
         assert_eq!(
@@ -629,6 +687,78 @@ mod tests {
         assert!(
             pane.is_busy(),
             "the model still gets to say what it makes of it"
+        );
+    }
+
+    #[test]
+    fn a_token_refusal_summons_the_pat_card_once_the_status_agrees() {
+        let mut pane = Pane::default();
+        pane.opened(github_status(Key::Absent));
+        assert!(
+            !pane.needs_github_token(),
+            "no token alone is no card: a chat that stays away from GitHub owes nobody one"
+        );
+
+        assert!(pane.asked("Comment on #115"));
+        pane.saw(token_refusal());
+
+        assert!(
+            pane.needs_github_token(),
+            "the typed refusal is what puts the card on screen"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_refusal_summons_no_pat_card() {
+        let mut pane = Pane::default();
+        pane.opened(github_status(Key::Absent));
+        assert!(pane.asked("Go"));
+
+        pane.saw(ChatEvent::ToolCallRefused {
+            id: "call-1".to_owned(),
+            error: "github_issue_graph: the arguments do not fit".to_owned(),
+            remedy: None,
+        });
+
+        assert!(
+            !pane.needs_github_token(),
+            "a refusal with no remedy asks the user for nothing"
+        );
+    }
+
+    #[test]
+    fn a_kept_token_puts_the_pat_card_away() {
+        let mut pane = Pane::default();
+        pane.opened(github_status(Key::Absent));
+        pane.saw(token_refusal());
+        assert!(pane.needs_github_token());
+
+        // What the host answers once the paste has been stored and armed.
+        pane.opened(github_status(Key::Present));
+
+        assert!(
+            !pane.needs_github_token(),
+            "the card has served its purpose"
+        );
+    }
+
+    #[test]
+    fn a_keyring_that_will_not_answer_still_offers_the_pat_card_and_says_why() {
+        let mut pane = Pane::default();
+        pane.opened(github_status(Key::Unreachable {
+            reason: "no default store has been set".to_owned(),
+        }));
+        pane.saw(token_refusal());
+
+        assert!(
+            pane.needs_github_token(),
+            "somewhere to paste one is still the right offer"
+        );
+        assert_eq!(pane.github_trouble(), Some("no default store has been set"));
+        assert_eq!(
+            pane.key_trouble(),
+            None,
+            "the two troubles ride their own rails"
         );
     }
 

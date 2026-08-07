@@ -28,6 +28,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use crate::keystore::Credential;
+
 pub mod tools;
 
 /// Where GitHub is. One value, because Epik talks to one GitHub; tests point
@@ -224,7 +226,9 @@ impl std::error::Error for Error {}
 #[derive(Debug)]
 pub struct GitHub {
     api: String,
-    token: Option<String>,
+    /// Read on every request rather than held as a value, so a PAT pasted
+    /// mid-session reaches verbs registered before it arrived.
+    token: Credential,
     agent: ureq::Agent,
 }
 
@@ -250,9 +254,19 @@ impl GitHub {
             .into();
         Self {
             api: api.into().trim_end_matches('/').to_owned(),
-            token,
+            token: Credential::new(token),
             agent,
         }
+    }
+
+    /// The other end of this client's credential: a token told to it reaches
+    /// every verb at the next call. What [`Session::open`] keeps, and how a
+    /// pasted PAT takes effect with no restart.
+    ///
+    /// [`Session::open`]: crate::session::Session::open
+    #[must_use]
+    pub fn credential(&self) -> Credential {
+        self.token.clone()
     }
 
     // ----- the REST verbs -----
@@ -489,8 +503,8 @@ impl GitHub {
     /// The precondition of every verb that needs a token — the writes, and
     /// all of GraphQL — checked before any request goes out: a refusal for
     /// want of a token should cost nothing and change nothing.
-    const fn needs_token(&self) -> Result<(), Error> {
-        match self.token {
+    fn needs_token(&self) -> Result<(), Error> {
+        match self.token.token() {
             Some(_) => Ok(()),
             None => Err(Error::TokenAbsent),
         }
@@ -503,7 +517,7 @@ impl GitHub {
             .get(&url)
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", API_VERSION)
-            .bearer(self.token.as_deref())
+            .bearer(self.token.token().as_deref())
             .call();
         decode(&url, answer(&url, outcome)?)
     }
@@ -523,7 +537,7 @@ impl GitHub {
         let outcome = builder
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", API_VERSION)
-            .bearer(self.token.as_deref())
+            .bearer(self.token.token().as_deref())
             .send_json(body);
         decode(&url, answer(&url, outcome)?)
     }
@@ -538,7 +552,7 @@ impl GitHub {
         let outcome = self
             .agent
             .post(&url)
-            .bearer(self.token.as_deref())
+            .bearer(self.token.token().as_deref())
             .send_json(json!({ "query": query, "variables": variables }));
         graphql_data(answer(&url, outcome)?)
     }

@@ -721,6 +721,32 @@ mod tests {
     }
 
     #[test]
+    fn a_token_pasted_mid_session_reaches_verbs_already_registered() {
+        // The paste-your-PAT card's promise, at this layer: the registry was
+        // built tokenless, the closures were long since boxed, and the
+        // credential still re-credentials them all — no rebuild, no restart.
+        let (api, server) = serving(201, "{}");
+        let github = GitHub::at(&api, None);
+        let credential = github.credential();
+        let mut registry = Registry::new();
+        register(&mut registry, github);
+        let arguments = r#"{"owner": "epik-agent", "repo": "Epik", "number": 1, "body": "hi"}"#;
+
+        let refusal = registry.call("github_comment", arguments).unwrap_err();
+        let crate::tools::Error::Failed { error, .. } = &refusal else {
+            panic!("tokenless, the comment refuses: {refusal}");
+        };
+        assert_eq!(error.downcast_ref::<Error>(), Some(&Error::TokenAbsent));
+
+        credential.use_token(Some("ghp-pasted".to_owned()));
+
+        registry
+            .call("github_comment", arguments)
+            .expect("the same registry, now credentialed, reaches the wire");
+        server.join().unwrap();
+    }
+
+    #[test]
     fn reads_that_need_no_token_get_past_the_precondition_without_one() {
         // Tokenless, the read verbs go for the wire and fail there — proof
         // the precondition is per-verb, not a gate on the whole registry.

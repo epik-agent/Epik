@@ -38,6 +38,7 @@ fn main() -> tauri::Result<()> {
             host::status,
             host::send_message,
             host::set_api_key,
+            host::set_github_token,
         ])
         .run(tauri::generate_context!())
 }
