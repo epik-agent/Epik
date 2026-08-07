@@ -1,7 +1,7 @@
 [workspace]
 # `crates/epik-ui` is deliberately absent: it targets wasm32 and is built by
 # Trunk, so it carries its own workspace and lockfile.
-members = ["crates/epik", "crates/epik-app"]
+members = ["crates/epik", "crates/epik-app", "xtask"]
 exclude = ["crates/epik-ui"]
 resolver = "3"
 
