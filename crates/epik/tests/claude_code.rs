@@ -156,10 +156,12 @@ fn usd(micro_usd: u64) -> f64 {
 /// The acceptance gate: the wrapper around a real process answers the same
 /// gauntlet `Scripted` does — smuggled work, real silences, posthumous
 /// chatter, backsliding totals, a pre-set stop token. The stall scripts
-/// wait out genuine quiet (the suite's windows are tens of seconds), so
-/// this test costs a couple of real minutes: the price of testing a real
-/// `recv_timeout` instead of a simulated one.
+/// wait out genuine quiet, so this test costs several real seconds — the
+/// price of testing a real `recv_timeout` instead of a simulated one —
+/// which is over the bar for an ordinary `cargo test`. Ignored here,
+/// mandatory in CI: the workspace job runs it by name, every time.
 #[test]
+#[ignore = "waits out real stall windows (~8s); CI runs it explicitly"]
 fn claude_code_conforms() {
     conformance::conforms(staged);
 }

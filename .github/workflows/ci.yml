@@ -81,6 +81,14 @@ jobs:
         env:
           EPIK_REQUIRE_GITHUB: "1"
 
+      # Ignored on a laptop for taking seconds of real stall-window time,
+      # never skipped here: the conformance gauntlet against the stub claude
+      # is the contract's enforcement, so CI runs it by name. (`--ignored`
+      # runs only this tier; the claude_live target stays untouched — it
+      # needs a logged-in claude and spends real money.)
+      - name: ClaudeCode answers the conformance gauntlet
+        run: cargo test -p epik --test claude_code -- --ignored
+
       - name: The library stays wasm-clean
         run: cargo clippy -p epik --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
 
