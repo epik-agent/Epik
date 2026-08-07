@@ -8,6 +8,7 @@
 //! sensibly discard the result, so `#[must_use]` on each one is noise.
 #![allow(clippy::must_use_candidate)]
 
+use epik::session::Status;
 use leptos::ev::KeyboardEvent;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -309,63 +310,93 @@ fn Streaming(pane: RwSignal<Pane>) -> impl IntoView {
     }
 }
 
-/// Somewhere to put a key, shown when the configured provider has none.
-///
-/// The key goes to the operating system's keyring and Epik keeps a reference,
-/// never a value — which is worth saying on the card itself, since a window
-/// asking for a secret should say where it is about to put it.
+/// Which secret a card asks for: the one difference between the two cards'
+/// machinery, so it is the whole of what they pass around. Each case knows
+/// its own host command, its input's invitation, and where its keyring
+/// trouble is reported.
+#[derive(Clone, Copy)]
+enum Secret {
+    /// The active provider's chat key.
+    Key,
+    /// The GitHub token.
+    GithubToken,
+}
+
+impl Secret {
+    /// Files the paste with the host, answering with the session as it now
+    /// stands.
+    // As in `bridge`: a future that awaits JavaScript is never `Send`, and
+    // nothing here is ever moved off the web's one thread.
+    #[allow(clippy::future_not_send)]
+    async fn store(self, pasted: &str) -> Result<Status, String> {
+        match self {
+            Self::Key => bridge::set_api_key(pasted).await,
+            Self::GithubToken => bridge::set_github_token(pasted).await,
+        }
+    }
+
+    const fn placeholder(self) -> &'static str {
+        match self {
+            Self::Key => "Paste the key",
+            Self::GithubToken => "Paste the token",
+        }
+    }
+
+    /// The environment variable that answers for this secret when the
+    /// keyring cannot.
+    const fn env(self) -> &'static str {
+        match self {
+            Self::Key => "EPIK_API_KEY",
+            Self::GithubToken => "EPIK_GITHUB_TOKEN",
+        }
+    }
+
+    /// Why the keyring could not be consulted for this secret, when it
+    /// could not be.
+    fn trouble(self, pane: &Pane) -> Option<&str> {
+        match self {
+            Self::Key => pane.key_trouble(),
+            Self::GithubToken => pane.github_trouble(),
+        }
+    }
+}
+
+/// The shape both paste-a-secret cards share: a box that names what is
+/// wanted, takes one paste, and files it with the host — `opened` on
+/// success, the banner on refusal. The words are the children's business;
+/// the machinery lives once, here.
 #[component]
-fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
+fn SecretCard(
+    pane: RwSignal<Pane>,
+    secret: Secret,
+    title: impl IntoView + 'static,
+    children: Children,
+) -> impl IntoView {
     let typed = RwSignal::new(String::new());
 
     let store = move || {
-        let key = typed.with(|key| key.trim().to_owned());
-        if key.is_empty() {
+        let pasted = typed.with(|typed| typed.trim().to_owned());
+        if pasted.is_empty() {
             return;
         }
         typed.set(String::new());
         spawn_local(async move {
-            match bridge::set_api_key(&key).await {
+            match secret.store(&pasted).await {
                 Ok(status) => pane.update(|pane| pane.opened(status)),
                 Err(error) => pane.update(|pane| pane.refused(error)),
             }
         });
     };
 
-    let provider = move || {
-        pane.with(|pane| {
-            pane.status()
-                .map_or_else(String::new, |status| status.provider.clone())
-        })
-    };
-
     view! {
         <div class="rounded-lg border border-edge bg-raised px-4 py-3.5">
-            <p class="text-sm font-medium">{move || format!("{} needs a key", provider())}</p>
-            <p class="mt-1 text-xs text-secondary">
-                "It goes into this computer's keyring, under the service "
-                <span class="font-mono text-primary">"Epik"</span>
-                ". Epik keeps a reference to it and never a copy — not in its config file, not anywhere else."
-            </p>
-            // A keyring that cannot be reached did not stop the session from
-            // opening, but it will stop a key from being kept, and the moment to
-            // say so is before somebody pastes one.
-            <Show when=move || pane.with(|pane| pane.key_trouble().is_some())>
-                <p class="mt-2 text-xs text-warning">
-                    "This computer's keyring could not be reached, so a key pasted here will not be kept: "
-                    <span class="font-mono">
-                        {move || pane.with(|pane| pane.key_trouble().unwrap_or_default().to_owned())}
-                    </span>
-                    ". Set "
-                    <span class="font-mono">"EPIK_API_KEY"</span>
-                    " instead, or use a provider that wants no key."
-                </p>
-            </Show>
+            <p class="text-sm font-medium">{title}</p>
+            {children()}
             <div class="mt-3 flex items-center gap-2">
                 <input
                     type="password"
                     class="min-w-0 flex-1 rounded-md border border-edge bg-input px-3 py-2 font-mono text-xs text-primary placeholder:text-faint focus:border-edge-strong focus:outline-none"
-                    placeholder="Paste the key"
+                    placeholder=secret.placeholder()
                     autocomplete="off"
                     prop:value=move || typed.get()
                     on:input=move |event| typed.set(event_target_value(&event))
@@ -387,6 +418,72 @@ fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
     }
 }
 
+/// The keyring-unreachable warning, one sentence with a card-shaped hole in
+/// it. A keyring that cannot be reached did not stop the session from
+/// opening, but it changes what a paste means, and the moment to say so is
+/// before somebody pastes.
+#[component]
+fn Trouble(
+    pane: RwSignal<Pane>,
+    secret: Secret,
+    /// What pasting means on this machine, completing "could not be
+    /// reached, so …".
+    consequence: &'static str,
+    /// What setting the override variable gets, completing "Set VAR …".
+    remedy: &'static str,
+) -> impl IntoView {
+    view! {
+        <Show when=move || pane.with(|pane| secret.trouble(pane).is_some())>
+            <p class="mt-2 text-xs text-warning">
+                {format!("This computer's keyring could not be reached, so {consequence}: ")}
+                <span class="font-mono">
+                    {move || {
+                        pane.with(|pane| secret.trouble(pane).unwrap_or_default().to_owned())
+                    }}
+                </span>
+                ". Set "
+                <span class="font-mono">{secret.env()}</span>
+                {format!(" {remedy}.")}
+            </p>
+        </Show>
+    }
+}
+
+/// Somewhere to put a key, shown when the configured provider has none.
+///
+/// The key goes to the operating system's keyring and Epik keeps a reference,
+/// never a value — which is worth saying on the card itself, since a window
+/// asking for a secret should say where it is about to put it.
+#[component]
+fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
+    let provider = move || {
+        pane.with(|pane| {
+            pane.status()
+                .map_or_else(String::new, |status| status.provider.clone())
+        })
+    };
+
+    view! {
+        <SecretCard
+            pane=pane
+            secret=Secret::Key
+            title=move || format!("{} needs a key", provider())
+        >
+            <p class="mt-1 text-xs text-secondary">
+                "It goes into this computer's keyring, under the service "
+                <span class="font-mono text-primary">"Epik"</span>
+                ". Epik keeps a reference to it and never a copy — not in its config file, not anywhere else."
+            </p>
+            <Trouble
+                pane=pane
+                secret=Secret::Key
+                consequence="a key pasted here will not be kept"
+                remedy="instead, or use a provider that wants no key"
+            />
+        </SecretCard>
+    }
+}
+
 /// Somewhere to put a GitHub token, shown when a GitHub verb has refused for
 /// want of one — never sooner, because a chat that stays away from GitHub
 /// owes nobody a token.
@@ -398,25 +495,8 @@ fn KeyCard(pane: RwSignal<Pane>) -> impl IntoView {
 /// banner — guidance delivered only to the person who needs it.
 #[component]
 fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
-    let typed = RwSignal::new(String::new());
-
-    let store = move || {
-        let token = typed.with(|token| token.trim().to_owned());
-        if token.is_empty() {
-            return;
-        }
-        typed.set(String::new());
-        spawn_local(async move {
-            match bridge::set_github_token(&token).await {
-                Ok(status) => pane.update(|pane| pane.opened(status)),
-                Err(error) => pane.update(|pane| pane.refused(error)),
-            }
-        });
-    };
-
     view! {
-        <div class="rounded-lg border border-edge bg-raised px-4 py-3.5">
-            <p class="text-sm font-medium">"GitHub needs a token"</p>
+        <SecretCard pane=pane secret=Secret::GithubToken title="GitHub needs a token">
             <p class="mt-1 text-xs text-secondary">
                 "Create one at "
                 <span class="select-all font-mono text-primary">
@@ -431,42 +511,13 @@ fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
                 <span class="font-mono text-primary">"Epik"</span>
                 ". Epik keeps a reference to it and never a copy."
             </p>
-            <Show when=move || pane.with(|pane| pane.github_trouble().is_some())>
-                <p class="mt-2 text-xs text-warning">
-                    "This computer's keyring could not be reached, so a token pasted here works for this session but will not be kept: "
-                    <span class="font-mono">
-                        {move || {
-                            pane.with(|pane| pane.github_trouble().unwrap_or_default().to_owned())
-                        }}
-                    </span>
-                    ". Set "
-                    <span class="font-mono">"EPIK_GITHUB_TOKEN"</span>
-                    " to make it stick."
-                </p>
-            </Show>
-            <div class="mt-3 flex items-center gap-2">
-                <input
-                    type="password"
-                    class="min-w-0 flex-1 rounded-md border border-edge bg-input px-3 py-2 font-mono text-xs text-primary placeholder:text-faint focus:border-edge-strong focus:outline-none"
-                    placeholder="Paste the token"
-                    autocomplete="off"
-                    prop:value=move || typed.get()
-                    on:input=move |event| typed.set(event_target_value(&event))
-                    on:keydown=move |event: KeyboardEvent| {
-                        if event.key() == "Enter" {
-                            event.prevent_default();
-                            store();
-                        }
-                    }
-                />
-                <button
-                    class="rounded-md border border-edge px-3 py-2 text-xs font-medium text-primary hover:bg-hover"
-                    on:click=move |_| store()
-                >
-                    "Keep it"
-                </button>
-            </div>
-        </div>
+            <Trouble
+                pane=pane
+                secret=Secret::GithubToken
+                consequence="a token pasted here works for this session but will not be kept"
+                remedy="to make it stick"
+            />
+        </SecretCard>
     }
 }
 
