@@ -12,6 +12,7 @@
 //! uses it as a source of types. The parts that cannot exist there — an HTTP
 //! client, the OS keyring — sit behind the default `native` feature.
 
+pub mod agent;
 pub mod chat;
 pub mod config;
 pub mod event;

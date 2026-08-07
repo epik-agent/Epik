@@ -68,11 +68,98 @@ pub enum Remedy {
     GithubToken,
 }
 
-/// What a turn cost, as the provider counted it.
+/// What some work cost, as the provider counted it.
+///
+/// One vocabulary serves chat turns and agent runs alike: tokens are the base
+/// unit, always present, with cache reads distinguished when the provider
+/// distinguishes them. Money appears only when it was *reported* — a price
+/// table maintained in Epik would be a lie waiting to go stale, so a provider
+/// that names no price yields `None`, honestly. In an agent run the readings
+/// are cumulative and monotone nondecreasing — a conformance assertion — with
+/// the last reading before `Finished` authoritative.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Tokens served from cache, when the provider tells them apart. Absent
+    /// from the wire when there is nothing to say, so the shape providers
+    /// already speak is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tokens: Option<u32>,
+    /// What the provider says the work cost. Reported, never synthesized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Money>,
+}
+
+impl Usage {
+    /// Token counts alone — the fields every provider reports.
+    #[must_use]
+    pub const fn tokens(prompt: u32, completion: u32) -> Self {
+        Self {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cache_tokens: None,
+            cost: None,
+        }
+    }
+
+    /// Every token in one number: what a ceiling denominated in tokens is
+    /// compared against.
+    #[must_use]
+    pub fn total_tokens(&self) -> u64 {
+        u64::from(self.prompt_tokens)
+            + u64::from(self.completion_tokens)
+            + u64::from(self.cache_tokens.unwrap_or(0))
+    }
+
+    /// The componentwise sum: how a turn that made several requests bills for
+    /// all of them. A count reported by either side is kept; only two absent
+    /// counts stay absent, so summing never invents a zero reading.
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            prompt_tokens: self.prompt_tokens + other.prompt_tokens,
+            completion_tokens: self.completion_tokens + other.completion_tokens,
+            cache_tokens: join(self.cache_tokens, other.cache_tokens, |a, b| a + b),
+            cost: join(self.cost, other.cost, |a, b| Money {
+                micro_usd: a.micro_usd + b.micro_usd,
+            }),
+        }
+    }
+
+    /// The componentwise maximum: how a wrapper keeps its cumulative totals
+    /// monotone when the process under it claims a total lower than one it
+    /// already claimed. Totals never run backward, whatever the feed says.
+    #[must_use]
+    pub fn max(self, other: Self) -> Self {
+        Self {
+            prompt_tokens: self.prompt_tokens.max(other.prompt_tokens),
+            completion_tokens: self.completion_tokens.max(other.completion_tokens),
+            cache_tokens: join(self.cache_tokens, other.cache_tokens, u32::max),
+            cost: join(self.cost, other.cost, Money::max),
+        }
+    }
+}
+
+/// Combines two optional readings: both present combine, one present stands,
+/// none stays none.
+fn join<T>(a: Option<T>, b: Option<T>, both: impl FnOnce(T, T) -> T) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(both(a, b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Money as a provider reported it: millionths of a US dollar, fixed-point.
+///
+/// Fixed-point because billing arithmetic in `f64` accumulates dust nobody
+/// can audit; US dollars because that is the only currency any wrapped
+/// provider reports in. A `Money` exists only where a cost was actually
+/// stated — see [`Usage::cost`].
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct Money {
+    /// Millionths of a dollar: $3.50 is `3_500_000`.
+    pub micro_usd: u64,
 }
 
 /// Which conversation something happened in.
@@ -119,6 +206,35 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: ChatEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back, "the typed case survives the boundary");
+    }
+
+    #[test]
+    fn usage_on_the_wire_is_unchanged_until_there_is_something_new_to_say() {
+        // What every provider already sends still deserializes ...
+        let old: Usage = serde_json::from_str(r#"{"prompt_tokens":18,"completion_tokens":6}"#)
+            .expect("yesterday's wire shape still reads");
+        assert_eq!(old, Usage::tokens(18, 6));
+        // ... and a count with nothing new to say serializes without the new
+        // keys, so yesterday's readers keep reading.
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"prompt_tokens":18,"completion_tokens":6}"#
+        );
+    }
+
+    #[test]
+    fn a_reported_cost_rides_along_as_fixed_point() {
+        let usage = Usage {
+            cache_tokens: Some(4),
+            cost: Some(Money {
+                micro_usd: 3_500_000,
+            }),
+            ..Usage::tokens(18, 6)
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(json.contains(r#""micro_usd":3500000"#), "{json}");
+        let back: Usage = serde_json::from_str(&json).unwrap();
+        assert_eq!(usage, back);
     }
 
     #[test]
