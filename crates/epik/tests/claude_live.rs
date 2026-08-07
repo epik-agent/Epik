@@ -15,6 +15,8 @@
 //! narrates, bills cumulatively, finishes exactly once with `Completed`,
 //! and the work — one file, stated exactly — is really on disk.
 
+// ClaudeCode is unix-only by decision; so, therefore, is its live run.
+#![cfg(unix)]
 // Tests are entitled to panic. The allow-unwrap-in-tests clippy setting only
 // covers #[test] functions, not the helpers here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -28,10 +28,12 @@ mod scripted;
 pub use scripted::Scripted;
 
 // A spawner of processes and threads through and through, so the whole
-// module is native; the vocabulary above stays wasm-clean.
-#[cfg(feature = "native")]
+// module is native; the vocabulary above stays wasm-clean. Unix besides:
+// its governance is the group kill, and a platform without one gets no
+// half-governed ClaudeCode — see the module doc.
+#[cfg(all(feature = "native", unix))]
 mod claude_code;
-#[cfg(feature = "native")]
+#[cfg(all(feature = "native", unix))]
 pub use claude_code::ClaudeCode;
 
 /// What the harness wants done. Steps are data, not methods: a new agent
@@ -230,6 +232,15 @@ impl fmt::Display for AgentError {
 }
 
 impl std::error::Error for AgentError {}
+
+/// The one way out of a run: every exit emits `Finished` and returns the
+/// same stop, which is how "nothing after `Finished`" and "the return
+/// agrees with the event" hold by construction in every implementation
+/// that funnels through it.
+pub(crate) fn finish(sink: &mut dyn FnMut(AgentEvent), stop: Stop) -> Stop {
+    sink(AgentEvent::Finished(stop.clone()));
+    stop
+}
 
 /// A coding agent, as Epik needs one: a provisioned task in, a stream of
 /// events out, one verb.

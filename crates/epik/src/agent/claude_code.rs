@@ -12,17 +12,22 @@
 //! cancellation kills the whole process group — Claude Code spawns children,
 //! and a budget that stops the parent while the children keep billing is no
 //! budget — before `Finished` reports the corresponding [`Stop`].
+//!
+//! Unix only, by decision: the group kill *is* the governance, and a port
+//! without it (Windows would need Job Objects) would be silently
+//! half-governed — the exact failure this module exists to prevent. CI
+//! covers Linux and macOS; elsewhere the type honestly does not exist.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::agent::{AgentError, AgentEvent, CodingAgent, Stop, Task};
+use crate::agent::{AgentError, AgentEvent, CodingAgent, Stop, Task, finish};
 use crate::chat::StopToken;
 use crate::event::{Money, Usage};
 
@@ -30,6 +35,11 @@ use crate::event::{Money, Usage};
 /// ceiling on cancellation latency. Invisible to the stall clock, which
 /// measures real elapsed time rather than counting wakes.
 const GLANCE: Duration = Duration::from_millis(100);
+
+/// How long [`died`] waits for the stderr gatherer after the group kill.
+/// Everything holding the pipe is dead, so EOF is imminent — but a bounded
+/// wait cannot hang a run past every budget, and the paranoia is free.
+const GRACE: Duration = Duration::from_secs(2);
 
 /// Claude Code, as configuration: which binary, and which tools it may use.
 #[derive(Clone, Debug)]
@@ -99,7 +109,6 @@ impl ClaudeCode {
         }
         // Its own process group, so that ending the run ends the children
         // Claude Code spawned along with it.
-        #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         command
     }
@@ -112,15 +121,11 @@ impl CodingAgent for ClaudeCode {
         sink: &mut dyn FnMut(AgentEvent),
         stop: &StopToken,
     ) -> Result<Stop, AgentError> {
-        // `Started` carries the wrapper's version: the binary's own is
-        // unknown until its init line arrives, and the first event cannot
-        // wait on a process that may never speak. The init line, Claude's
-        // version included, passes through `Detail` when it does.
-        sink(AgentEvent::Started {
-            agent: "claude-code".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        });
+        // A run canceled before anything was spawned still has its shape:
+        // `Started`, then the one `Finished` — and no process to show for
+        // either.
         if stop.is_stopped() {
+            sink(started());
             return Ok(finish(sink, Stop::Canceled));
         }
         let mut child = self
@@ -130,81 +135,116 @@ impl CodingAgent for ClaudeCode {
                 binary: self.binary.clone(),
                 error: error.to_string(),
             })?;
-        let lines = lines(child.stdout.take());
-        let mut noise = child.stderr.take().map(gather);
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            // `Stdio::piped` above makes this unreachable; a typed refusal
+            // beats a panic all the same, and an errored run emits nothing.
+            reap(child);
+            return Err(AgentError::Broken {
+                error: "the spawned claude arrived without its pipes".to_owned(),
+            });
+        };
+        // `Started` is emitted only for a process that actually started —
+        // an `Unstartable` run streams no events at all — and carries the
+        // wrapper's version: the binary's own is unknown until its init
+        // line arrives, and the first event cannot wait on a process that
+        // may never speak. The init line, Claude's version included, passes
+        // through `Detail` when it does.
+        sink(started());
+        let lines = lines(stdout);
+        let noise = gather(stderr);
         let mut fold = Fold::default();
         let mut heartbeat = Instant::now();
-        let stopped = loop {
+        // `None`: stdout closed with no result line — the process is gone,
+        // and the account is settled once the reap returns its status.
+        let ended = loop {
             if stop.is_stopped() {
-                break Stop::Canceled;
+                break Some(Stop::Canceled);
             }
             let Some(patience) = task.budget.stall.checked_sub(heartbeat.elapsed()) else {
-                break Stop::Stalled;
+                break Some(Stop::Stalled);
             };
             match lines.recv_timeout(patience.min(GLANCE)) {
                 Err(RecvTimeoutError::Timeout) => {}
-                // stdout closed with no result line: the process is gone.
-                Err(RecvTimeoutError::Disconnected) => break died(&mut child, noise.take()),
+                Err(RecvTimeoutError::Disconnected) => break None,
                 Ok(line) => {
                     heartbeat = Instant::now();
-                    if let Some(ended) = fold.line(&line, sink) {
-                        break ended;
-                    }
+                    let resulted = fold.line(&line, sink);
+                    // The budget outranks the result: real claude states
+                    // its cost only on the result line, and a final
+                    // reading over the ceiling is a breach, not a finish.
                     if task.budget.spent(&fold.total) {
-                        break Stop::Spent;
+                        break Some(Stop::Spent);
+                    }
+                    if let Some(stop) = resulted {
+                        break Some(stop);
                     }
                 }
             }
         };
-        reap(&mut child);
+        // The one reap: `reap` consumes the child, so no exit path can
+        // kill a pid the OS may have reissued.
+        let status = reap(child);
+        let stopped = ended.unwrap_or_else(|| died(status, &noise));
         Ok(finish(sink, stopped))
     }
 }
 
-/// The one way out: every exit emits `Finished` and returns the same stop,
-/// which is how "nothing after `Finished`" holds by construction.
-fn finish(sink: &mut dyn FnMut(AgentEvent), stop: Stop) -> Stop {
-    sink(AgentEvent::Finished(stop.clone()));
-    stop
+/// The wrapper naming itself; always the run's first event.
+fn started() -> AgentEvent {
+    AgentEvent::Started {
+        agent: "claude-code".to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
 }
 
 /// The private reader: stdout lines into a channel, so the run loop can
-/// wait with a timeout — which is the whole stall mechanism. Ends at EOF,
-/// or when the run stops listening.
-fn lines(stdout: Option<ChildStdout>) -> Receiver<String> {
+/// wait with a timeout — which is the whole stall mechanism. Bytes are
+/// decoded lossily, because one mangled byte must not read as the whole
+/// process dying; only genuine EOF — or a read error, after which nothing
+/// more will ever arrive — ends the stream.
+fn lines(stdout: ChildStdout) -> Receiver<String> {
     let (sender, receiver) = mpsc::channel();
-    if let Some(stdout) = stdout {
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { return };
-                if sender.send(line).is_err() {
-                    return;
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buffer).trim_end().to_owned();
+                    if sender.send(line).is_err() {
+                        return;
+                    }
                 }
             }
-        });
-    }
+        }
+    });
     receiver
 }
 
 /// Collects stderr off-thread: an unread pipe would wedge a chatty child,
 /// and what a dying claude says there is the best account of why it died.
-fn gather(stderr: ChildStderr) -> JoinHandle<String> {
+/// A channel rather than a join handle, so the one reader ([`died`]) can
+/// bound its wait.
+fn gather(stderr: ChildStderr) -> Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut text = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut text);
-        text
-    })
+        let _ = sender.send(text);
+    });
+    receiver
 }
 
-/// The process ended on its own terms without a result line.
-fn died(child: &mut Child, noise: Option<JoinHandle<String>>) -> Stop {
-    let ended = reap(child).map_or_else(
+/// The process ended on its own terms without a result line. Composed after
+/// the reap, from the status it returned and whatever stderr held.
+fn died(status: Option<ExitStatus>, noise: &Receiver<String>) -> Stop {
+    let ended = status.map_or_else(
         || "claude ended without a result".to_owned(),
         |status| format!("claude ended without a result ({status})"),
     );
-    let noise = noise
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
+    let noise = noise.recv_timeout(GRACE).unwrap_or_default();
     let noise = noise.trim();
     Stop::Died {
         error: if noise.is_empty() {
@@ -215,13 +255,14 @@ fn died(child: &mut Child, noise: Option<JoinHandle<String>>) -> Stop {
     }
 }
 
-/// Kills the whole process group and reaps the child. Harmless on a process
-/// that already exited: the kill misses, the wait returns the stored status.
-fn reap(child: &mut Child) -> Option<ExitStatus> {
+/// Kills the whole process group and reaps the child — consuming it, so a
+/// second reap of the same run cannot typecheck, let alone signal a pid the
+/// OS has reissued. Harmless on a process that already exited: the kill
+/// misses, the wait returns the stored status.
+fn reap(mut child: Child) -> Option<ExitStatus> {
     // The group, not the child — see the module doc. `kill(1)` rather than
     // libc, to stay dependency-free; `--` because a negative pid reads like
     // a flag.
-    #[cfg(unix)]
     let _ = Command::new("kill")
         .args(["-9", "--", &format!("-{}", child.id())])
         .stderr(Stdio::null())

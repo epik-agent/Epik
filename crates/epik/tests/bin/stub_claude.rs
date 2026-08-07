@@ -15,10 +15,16 @@
 
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+/// A feed line spelled exactly so is performed as raw bytes that are not
+/// UTF-8 — JSON strings cannot carry the real thing. Its twin lives in
+/// `tests/claude_code.rs`.
+const MANGLED: &str = "<mangled-utf8>";
 
 fn main() -> Result<()> {
     let stub = env::current_exe().context("locating the stub")?;
@@ -41,7 +47,13 @@ fn main() -> Result<()> {
 
     for (pause, line) in beats {
         thread::sleep(Duration::from_millis(pause));
-        println!("{line}");
+        if line == MANGLED {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(b"\xff{ not utf-8 }\xff\n")?;
+            stdout.flush()?;
+        } else {
+            println!("{line}");
+        }
     }
     Ok(())
 }

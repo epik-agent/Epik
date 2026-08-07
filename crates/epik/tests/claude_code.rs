@@ -9,12 +9,15 @@
 //! events the gauntlet judges all come out of the real wrapper: the real
 //! spawn, the real reader thread, the real `recv_timeout`, the real kill.
 
+// ClaudeCode is unix-only by decision; so, therefore, is its gauntlet.
+#![cfg(unix)]
 // Tests are entitled to panic. The allow-unwrap-in-tests clippy setting only
 // covers #[test] functions, not the helpers here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use epik::agent::{
@@ -22,25 +25,44 @@ use epik::agent::{
     conformance,
 };
 use epik::chat::StopToken;
-use epik::event::Usage;
+use epik::event::{Money, Usage};
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
-/// Stages `script` as a fake claude: a feed file and a copy of the stub
-/// binary in a fresh directory, and a `ClaudeCode` pointed at the copy. The
-/// copy is what lets the stub find its feed — beside its own executable —
-/// with no environment variable smuggled past the task. The directory
-/// outlives the builder (`keep`) because the agent runs later.
-#[allow(clippy::needless_pass_by_value)] // the conformance suite's builder signature
-fn staged(script: Script) -> ClaudeCode {
-    let dir = tempfile::tempdir().unwrap().keep();
+/// The stub performs a line spelled exactly so as raw bytes that are not
+/// UTF-8. Its twin lives in `tests/bin/stub_claude.rs`.
+const MANGLED: &str = "<mangled-utf8>";
+
+/// The staging directories, alive for the whole test process: the agents
+/// staged in them run long after the builder returns, and a `TempDir`
+/// dropped early would pull the feed out from under a live stub.
+static STAGES: Mutex<Vec<TempDir>> = Mutex::new(Vec::new());
+
+/// Stages a raw feed as a fake claude: the beats beside a hard link to the
+/// stub binary in a fresh directory, and a `ClaudeCode` pointed at the
+/// link. The link is what lets the stub find its feed — beside its own
+/// executable — with no environment variable smuggled past the task; it is
+/// a link rather than a copy because the directories live for the whole
+/// process, and they hang off `CARGO_TARGET_TMPDIR` so the link stays on
+/// the stub's own filesystem and `cargo clean` sweeps the lot.
+fn staged_feed(beats: &[(u64, String)]) -> ClaudeCode {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     fs::write(
-        dir.join("feed.json"),
-        serde_json::to_string(&feed(&script)).unwrap(),
+        dir.path().join("feed.json"),
+        serde_json::to_string(beats).unwrap(),
     )
     .unwrap();
-    let binary = dir.join("claude");
-    fs::copy(env!("CARGO_BIN_EXE_stub-claude"), &binary).unwrap();
-    ClaudeCode::at(binary)
+    let binary = dir.path().join("claude");
+    fs::hard_link(env!("CARGO_BIN_EXE_stub-claude"), &binary).unwrap();
+    let agent = ClaudeCode::at(binary);
+    STAGES.lock().unwrap().push(dir);
+    agent
+}
+
+/// [`staged_feed`], from a conformance script.
+#[allow(clippy::needless_pass_by_value)] // the conformance suite's builder signature
+fn staged(script: Script) -> ClaudeCode {
+    staged_feed(&feed(&script))
 }
 
 /// What a claude playing `script` would print: each beat a pause and a
@@ -176,10 +198,71 @@ fn a_missing_binary_is_a_typed_refusal() {
         other => panic!("a binary that is not there is a typed refusal, got {other:?}"),
     }
     assert!(
-        !events
+        events.is_empty(),
+        "a run that never started streams nothing at all: {events:?}"
+    );
+}
+
+/// Real claude states `total_cost_usd` only on its result line, so this is
+/// the shape a real overspend arrives in — and the budget must outrank the
+/// result's own stop.
+#[test]
+fn a_cost_stated_only_on_the_result_line_still_breaches_the_budget() {
+    let result_line = json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "",
+        "usage": {"input_tokens": 10, "output_tokens": 10},
+        "total_cost_usd": 2.0,
+    });
+    let agent = staged_feed(&[(0, result_line.to_string())]);
+    let over = Task {
+        budget: Budget {
+            max_tokens: None,
+            max_cost: Some(Money {
+                micro_usd: 1_000_000,
+            }),
+            stall: Duration::from_secs(30),
+        },
+        ..task()
+    };
+
+    let (events, result) = run(&agent, &over);
+
+    assert_eq!(
+        result.unwrap(),
+        Stop::Spent,
+        "$2 on the result line against a cap of $1"
+    );
+    assert_eq!(events.last(), Some(&AgentEvent::Finished(Stop::Spent)));
+}
+
+/// One line of bytes that are not UTF-8, mid-stream: noise to skip, never
+/// a reason to write the whole process off.
+#[test]
+fn a_mangled_line_mid_stream_does_not_end_the_run() {
+    let narrate =
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "before"}]}});
+    let result_line = json!({"type": "result", "subtype": "success", "is_error": false, "result": "", "usage": {}});
+    let agent = staged_feed(&[
+        (0, narrate.to_string()),
+        (0, MANGLED.to_owned()),
+        (0, result_line.to_string()),
+    ]);
+
+    let (events, result) = run(&agent, &task());
+
+    assert_eq!(
+        result.unwrap(),
+        Stop::Completed,
+        "one mangled byte is not a death: {events:?}"
+    );
+    assert!(
+        events
             .iter()
-            .any(|event| matches!(event, AgentEvent::Finished(_))),
-        "a run that errored never finished: {events:?}"
+            .any(|event| matches!(event, AgentEvent::Progress(text) if text == "before")),
+        "the stream before the mangled line stands: {events:?}"
     );
 }
 
@@ -207,10 +290,10 @@ fn a_claude_that_exits_without_a_result_died() {
 /// provisioned is read back out of the process it provisioned.
 #[test]
 fn the_wrapper_provisions_the_process_it_promised() {
-    let worktree = tempfile::tempdir().unwrap().keep();
+    let worktree = tempfile::tempdir().unwrap();
     let agent = staged(vec![Play::Finish(Stop::Completed)]).allowing(["Bash", "Edit"]);
     let provisioned = Task {
-        worktree: worktree.clone(),
+        worktree: worktree.path().to_owned(),
         env: vec![("EPIK_STUB_PROBE".to_owned(), "injected".to_owned())],
         ..task()
     };
@@ -230,7 +313,7 @@ fn the_wrapper_provisions_the_process_it_promised() {
     let cwd = PathBuf::from(init["cwd"].as_str().unwrap());
     assert_eq!(
         cwd.canonicalize().unwrap(),
-        worktree.canonicalize().unwrap(),
+        worktree.path().canonicalize().unwrap(),
         "the process runs in the task's worktree"
     );
     assert_eq!(

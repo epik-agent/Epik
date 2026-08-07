@@ -967,6 +967,7 @@ name = "epik"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "epik",
  "git2",
  "keyring",
  "serde",

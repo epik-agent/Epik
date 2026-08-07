@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::agent::{AgentError, AgentEvent, CodingAgent, Play, Script, Stop, Task};
+use crate::agent::{AgentError, AgentEvent, CodingAgent, Play, Script, Stop, Task, finish};
 use crate::chat::StopToken;
 use crate::event::Usage;
 
@@ -84,13 +84,6 @@ impl CodingAgent for Scripted {
             error: "the script ended without finishing".to_owned(),
         })
     }
-}
-
-/// The one way out: every exit emits `Finished` and returns the same stop,
-/// which is how "nothing after `Finished`" holds by construction.
-fn finish(sink: &mut dyn FnMut(AgentEvent), stop: Stop) -> Stop {
-    sink(AgentEvent::Finished(stop.clone()));
-    stop
 }
 
 #[cfg(test)]
