@@ -166,6 +166,41 @@ impl KeyStore for Unplugged {
     }
 }
 
+/// An [`InMemory`] that counts its reads, per account, through a handle the
+/// test keeps after the session takes the store. On macOS a keyring read can
+/// be a permission dialog, so "launch reads each secret once" is a promise
+/// worth a test — and this is what makes it observable.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Counting {
+    store: InMemory,
+    reads: std::rc::Rc<std::cell::RefCell<BTreeMap<String, usize>>>,
+}
+
+#[cfg(test)]
+impl Counting {
+    /// The read counts, keyed by account, live as the store is used.
+    pub(crate) fn reads(&self) -> std::rc::Rc<std::cell::RefCell<BTreeMap<String, usize>>> {
+        std::rc::Rc::clone(&self.reads)
+    }
+}
+
+#[cfg(test)]
+impl KeyStore for Counting {
+    fn get(&self, provider: &str) -> Result<Option<String>> {
+        *self
+            .reads
+            .borrow_mut()
+            .entry(provider.to_owned())
+            .or_default() += 1;
+        self.store.get(provider)
+    }
+
+    fn set(&mut self, provider: &str, key: &str) -> Result<()> {
+        self.store.set(provider, key)
+    }
+}
+
 /// The operating system's own secret holder.
 #[cfg(feature = "native")]
 #[derive(Debug, Default)]

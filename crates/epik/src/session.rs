@@ -134,13 +134,31 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         tools: Registry,
         build: impl FnOnce(&Provider, Option<String>, Vec<ToolDeclaration>) -> M,
     ) -> Result<Self> {
+        let github = keys.github_token();
+        Self::with_github(config, keys, &github, tools, build)
+    }
+
+    /// [`with_model`](Session::with_model) with the GitHub token already
+    /// resolved. This is the seam that keeps launch to one keyring read per
+    /// secret: [`open`](Session::open) needs the token before the session
+    /// exists — its GitHub client is built first — so it resolves once and
+    /// hands the result here rather than having [`Status`] ask again. On
+    /// macOS every read is potentially a dialog, which makes the count part
+    /// of the interface rather than a nicety.
+    fn with_github(
+        config: &Config,
+        keys: Keys<S>,
+        github: &Resolved,
+        tools: Registry,
+        build: impl FnOnce(&Provider, Option<String>, Vec<ToolDeclaration>) -> M,
+    ) -> Result<Self> {
         let (name, provider) = config.provider()?;
         let resolved = keys.resolve(name);
         let status = Status {
             provider: name.to_owned(),
             model: provider.model.clone(),
             key: (&resolved).into(),
-            github: (&keys.github_token()).into(),
+            github: github.into(),
         };
         let model = build(provider, resolved.key(), tools.declarations());
         Ok(Self {
@@ -285,19 +303,31 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     /// the registry builds tokenless, and the verbs that need one refuse at
     /// call time with a typed refusal the model reads as a tool result.
     ///
+    /// Each secret is read from the store once: the token resolved for the
+    /// GitHub client is the same resolution [`Status`] reports. On macOS a
+    /// keyring read can be a permission dialog, so launch asks each question
+    /// exactly one time.
+    ///
     /// # Errors
     ///
     /// As [`with_model`](Session::with_model).
     pub fn open(config: &Config, keys: Keys<S>) -> Result<Self> {
-        let github = crate::github::GitHub::new(keys.github_token().key());
+        let token = keys.github_token();
+        let github = crate::github::GitHub::new(token.clone().key());
         let credential = github.credential();
         let mut tools = Registry::new();
         crate::github::tools::register(&mut tools, github);
-        let mut session = Self::with_model(config, keys, tools, |provider, key, declarations| {
-            let mut model = crate::chat::OpenAiCompatible::new(provider, key);
-            model.use_tools(declarations);
-            model
-        })?;
+        let mut session = Self::with_github(
+            config,
+            keys,
+            &token,
+            tools,
+            |provider, key, declarations| {
+                let mut model = crate::chat::OpenAiCompatible::new(provider, key);
+                model.use_tools(declarations);
+                model
+            },
+        )?;
         // The same cell the registered verbs read: this is what makes
         // `set_github_token` reach them.
         session.github = credential;
@@ -344,6 +374,27 @@ mod tests {
             },
         )
         .expect("the config names a provider it lists")
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn open_reads_each_secret_from_the_store_exactly_once() {
+        use crate::keystore::{Counting, GITHUB_ACCOUNT};
+
+        let mut store = Counting::default();
+        store.set("local", "sk-kept").unwrap();
+        store.set(GITHUB_ACCOUNT, "ghp-kept").unwrap();
+        let reads = store.reads();
+
+        Session::open(&config(), Keys::with_overrides(store, None, None))
+            .expect("the config names a provider it lists");
+
+        assert_eq!(
+            *reads.borrow(),
+            BTreeMap::from([(GITHUB_ACCOUNT.to_owned(), 1), ("local".to_owned(), 1)]),
+            "on macOS every keyring read is potentially a dialog, so launch \
+             asks each question once"
+        );
     }
 
     #[test]
