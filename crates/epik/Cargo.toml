@@ -12,6 +12,19 @@ default = ["native"]
 # types rather than a maker of requests: the HTTP client and the OS keyring.
 # The frontend depends on this crate with `default-features = false`.
 native = ["dep:keyring", "dep:ureq"]
+# Builds the stub claude below. Off by default and switched on only by this
+# crate's dev-dependency on itself, so `cargo test` always has the stub and
+# an ordinary or release build never ships a fake claude.
+stub-claude = []
+
+# A claude that is entirely script: the test double the ClaudeCode
+# conformance run spawns in place of the real binary. It lives with the
+# tests it serves; being a bin target is what lets `CARGO_BIN_EXE_` hand
+# the tests its compiled path.
+[[bin]]
+name = "stub-claude"
+path = "tests/bin/stub_claude.rs"
+required-features = ["stub-claude"]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,6 +36,10 @@ keyring = { version = "4", optional = true }
 ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]
+# The crate itself, with the test-only feature on: how the stub claude gets
+# built for `cargo test` without ever being part of a real build.
+epik = { workspace = true, features = ["stub-claude"] }
+
 git2 = "0.20"
 tempfile = "3"
 # The GitHub mutation tier scaffolds branches over the raw git data API —
