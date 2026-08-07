@@ -4,9 +4,9 @@
 //! This module exists because of the invariant: anything the app can do must
 //! be achievable through calls into this crate alone. Without it, the wiring
 //! between [`Config`], [`Keys`] and a [`ChatModel`] would live in the Tauri
-//! host, and the daemon would have to reinvent it. With it, a host is three
-//! commands over three library calls, and every future thin client opens a
-//! chat the same way.
+//! host, and the daemon would have to reinvent it. With it, a host is a
+//! handful of commands over as many library calls, and every future thin
+//! client opens a chat the same way.
 //!
 //! [`Status`] is the part that crosses IPC: what the status bar names, and
 //! whether there is a key to reach it with. Never the key itself.
