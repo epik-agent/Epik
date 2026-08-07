@@ -5123,6 +5123,9 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "ureq",
+]
 
 [[package]]
 name = "yoke"
