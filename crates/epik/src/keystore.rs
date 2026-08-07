@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use anyhow::Result;
 
@@ -46,6 +47,42 @@ pub const GITHUB_ACCOUNT: &str = "github";
 /// The two override envs are strangers by design: [`OVERRIDE_ENV`] never
 /// speaks for GitHub, and this one never speaks for a chat provider.
 pub const GITHUB_OVERRIDE_ENV: &str = "EPIK_GITHUB_TOKEN";
+
+/// A key in hand, behind a shared handle: every clone reads the same cell,
+/// so a key pasted mid-session reaches a client that was built before it
+/// arrived.
+///
+/// This is the counterpart of [`Keys`], not a rival: the store is where a
+/// key is *kept*, and this is a key *in use*. The GitHub client holds one
+/// end and the session the other, which is what lets
+/// `Session::set_github_token` re-credential verbs already registered
+/// without rebuilding anything.
+#[derive(Clone, Debug, Default)]
+pub struct Credential(Arc<RwLock<Option<String>>>);
+
+impl Credential {
+    /// A credential holding `token` — or holding nothing, ready to be told
+    /// one later.
+    #[must_use]
+    pub fn new(token: Option<String>) -> Self {
+        Self(Arc::new(RwLock::new(token)))
+    }
+
+    /// Replaces the token for every holder of this handle at once.
+    pub fn use_token(&self, token: Option<String>) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = token;
+    }
+
+    /// The token as it stands. A poisoned lock is read through rather than
+    /// raised: the cell holds a plain value, so whatever is in it is intact.
+    #[must_use]
+    pub fn token(&self) -> Option<String> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
 
 /// Somewhere a provider's key can be kept and found again.
 pub trait KeyStore {
@@ -441,6 +478,22 @@ mod tests {
             Resolved::Found("ghp-override".to_owned()),
             "a machine with no keyring can still be told a token"
         );
+    }
+
+    #[test]
+    fn every_clone_of_a_credential_reads_the_same_cell() {
+        let held = Credential::new(None);
+        let other_end = held.clone();
+
+        held.use_token(Some("ghp-pasted".to_owned()));
+
+        assert_eq!(
+            other_end.token().as_deref(),
+            Some("ghp-pasted"),
+            "a token told to one end is in hand at the other"
+        );
+        other_end.use_token(None);
+        assert_eq!(held.token(), None, "and taking it back works the same way");
     }
 
     #[test]

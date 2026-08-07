@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::chat::{ChatModel, Conversation, Keyed, Message, Reply, StopToken, ToolDeclaration};
 use crate::config::{Config, Provider};
 use crate::event::ChatEvent;
-use crate::keystore::{KeyStore, Keys, Resolved};
+use crate::keystore::{Credential, KeyStore, Keys, Resolved};
 use crate::logging::Log;
 use crate::tools::Registry;
 
@@ -56,6 +56,19 @@ impl Key {
     }
 }
 
+/// Where resolution got to, as a client is allowed to know it.
+impl From<&Resolved> for Key {
+    fn from(resolved: &Resolved) -> Self {
+        match resolved {
+            Resolved::Found(_) => Self::Present,
+            Resolved::Absent => Self::Absent,
+            Resolved::Unreachable(reason) => Self::Unreachable {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
 /// What a client needs to know about the session it is in.
 ///
 /// A plain serde type, because it crosses the IPC boundary: the status bar
@@ -70,6 +83,9 @@ pub struct Status {
     pub model: String,
     /// Where the key for it stands.
     pub key: Key,
+    /// Where the GitHub token stands, on its own rails. This is what puts
+    /// the paste-your-PAT card away once a pasted token has been kept.
+    pub github: Key,
 }
 
 /// A live chat session.
@@ -84,6 +100,12 @@ pub struct Session<M, S> {
     conversation: Conversation<M>,
     keys: Keys<S>,
     tools: Registry,
+    /// The GitHub client's credential, shared with the verbs in `tools`:
+    /// [`set_github_token`](Self::set_github_token) writes here and every
+    /// registered verb reads it. A session built without GitHub — a test on
+    /// a scripted model — holds an unshared cell, and writing to it is
+    /// simply true and unread.
+    github: Credential,
 }
 
 impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
@@ -117,13 +139,8 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         let status = Status {
             provider: name.to_owned(),
             model: provider.model.clone(),
-            key: match &resolved {
-                Resolved::Found(_) => Key::Present,
-                Resolved::Absent => Key::Absent,
-                Resolved::Unreachable(reason) => Key::Unreachable {
-                    reason: reason.clone(),
-                },
-            },
+            key: (&resolved).into(),
+            github: (&keys.github_token()).into(),
         };
         let model = build(provider, resolved.key(), tools.declarations());
         Ok(Self {
@@ -131,6 +148,7 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
             conversation: Conversation::new(config.system_prompt.clone(), model),
             keys,
             tools,
+            github: Credential::default(),
         })
     }
 
@@ -198,6 +216,51 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         self.conversation.model_mut().use_key(resolved);
         Ok(&self.status)
     }
+
+    /// Files the GitHub token and puts it into use at once:
+    /// [`set_key`](Self::set_key)'s sibling, and what the paste-your-PAT
+    /// card calls. The verbs already registered read the token through the
+    /// shared credential, so the very next call succeeds with no restart.
+    ///
+    /// The token is read back through resolution rather than used as
+    /// pasted, for [`set_key`](Self::set_key)'s reason: an
+    /// `EPIK_GITHUB_TOKEN` override outranks the store and keeps winning
+    /// for this process, while the paste is kept for the next one.
+    ///
+    /// # Errors
+    ///
+    /// Turns away a paste that is certain to strand the user — a GitHub
+    /// App's hour-long token, a chat key in the wrong box — before anything
+    /// is stored, and returns an error when the store would not take it.
+    pub fn set_github_token(&mut self, token: &str) -> Result<&Status> {
+        if let Some(reason) = unfit(token) {
+            anyhow::bail!("{reason}");
+        }
+        self.keys.set_github_token(token)?;
+        let resolved = self.keys.github_token();
+        self.status.github = (&resolved).into();
+        self.github.use_token(resolved.key());
+        Ok(&self.status)
+    }
+}
+
+/// Why a pasted token cannot serve, when it cannot.
+///
+/// Only certainties are turned away, each with the sentence the card shows.
+/// An unrecognized prefix passes: GitHub has minted new shapes before, and
+/// refusing a working token is worse than keeping a dud — a dud refuses
+/// loudly on its first call anyway.
+fn unfit(token: &str) -> Option<&'static str> {
+    if token.starts_with("ghs_") || token.starts_with("ghu_") {
+        Some(
+            "that is a GitHub App token, which expires within the hour — \
+             paste a personal access token instead",
+        )
+    } else if token.starts_with("sk-") {
+        Some("that is a chat-provider key, not a GitHub token — it belongs on the other card")
+    } else {
+        None
+    }
 }
 
 #[cfg(feature = "native")]
@@ -216,13 +279,18 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     /// As [`with_model`](Session::with_model).
     pub fn open(config: &Config, keys: Keys<S>) -> Result<Self> {
         let github = crate::github::GitHub::new(keys.github_token().key());
+        let credential = github.credential();
         let mut tools = Registry::new();
         crate::github::tools::register(&mut tools, github);
-        Self::with_model(config, keys, tools, |provider, key, declarations| {
+        let mut session = Self::with_model(config, keys, tools, |provider, key, declarations| {
             let mut model = crate::chat::OpenAiCompatible::new(provider, key);
             model.use_tools(declarations);
             model
-        })
+        })?;
+        // The same cell the registered verbs read: this is what makes
+        // `set_github_token` reach them.
+        session.github = credential;
+        Ok(session)
     }
 }
 
@@ -436,6 +504,90 @@ mod tests {
             Some("sk-from-the-environment"),
             "the session uses what resolves, not what was typed"
         );
+    }
+
+    #[test]
+    fn a_pasted_github_token_arms_the_credential_and_flips_the_status() {
+        let mut session = session(Scripted::default());
+        assert_eq!(
+            session.status().github,
+            Key::Absent,
+            "a fresh store has no token, and that is a state, not a fault"
+        );
+
+        let status = session
+            .set_github_token("ghp-pasted")
+            .expect("the store takes it");
+
+        assert_eq!(status.github, Key::Present, "the card can go");
+        assert_eq!(
+            session.github.token().as_deref(),
+            Some("ghp-pasted"),
+            "the credential is armed: every verb sharing it sees the token now"
+        );
+    }
+
+    #[test]
+    fn a_github_override_in_force_still_outranks_a_pasted_token() {
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_overrides(
+                InMemory::default(),
+                None,
+                Some("ghp-from-the-environment".to_owned()),
+            ),
+            Registry::new(),
+            |_, _, _| Scripted::default(),
+        )
+        .unwrap();
+
+        session.set_github_token("ghp-pasted").unwrap();
+
+        assert_eq!(
+            session.github.token().as_deref(),
+            Some("ghp-from-the-environment"),
+            "the session uses what resolves, not what was typed"
+        );
+    }
+
+    #[test]
+    fn a_paste_that_cannot_serve_is_turned_away_before_it_is_stored() {
+        let mut session = session(Scripted::default());
+
+        for (token, tell) in [
+            ("ghs_installation", "GitHub App token"),
+            ("ghu_user_to_server", "GitHub App token"),
+            ("sk-chat-key", "chat-provider key"),
+        ] {
+            let error = session
+                .set_github_token(token)
+                .expect_err("a paste certain to strand the user is refused");
+            assert!(format!("{error:#}").contains(tell), "{token}: {error:#}");
+            assert_eq!(
+                session.status().github,
+                Key::Absent,
+                "{token}: nothing was stored"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_prefix_is_kept_rather_than_second_guessed() {
+        // GitHub has minted new token shapes before; only certainties are
+        // turned away. `github_pat_` and `gho_` are the shapes the card's
+        // own guidance produces.
+        for token in [
+            "github_pat_fine_grained",
+            "ghp_classic",
+            "gho_from_gh",
+            "odd",
+        ] {
+            let mut session = session(Scripted::default());
+            session
+                .set_github_token(token)
+                .expect("an unfamiliar shape is not a refusal");
+            assert_eq!(session.status().github, Key::Present, "{token}");
+        }
     }
 
     #[test]

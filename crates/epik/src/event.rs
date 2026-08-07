@@ -46,7 +46,26 @@ pub enum ChatEvent {
     /// The call refused — an unknown tool, arguments that do not fit, or the
     /// tool's own failure — rendered from the typed error. The model reads
     /// the same words as a tool result, which is how it gets to try again.
-    ToolCallRefused { id: String, error: String },
+    /// `remedy` names what the user could do about it, when the loop can
+    /// tell — the typed case beside the rendered words, so a window acts on
+    /// a value rather than scraping the prose.
+    ToolCallRefused {
+        id: String,
+        error: String,
+        remedy: Option<Remedy>,
+    },
+}
+
+/// What the user could do about a refusal, when the library knows.
+///
+/// The model already gets the refusal's words as a tool result; this is the
+/// same fact in the shape a window can act on. One case so far: a GitHub
+/// verb refused for want of a token, which the window answers with the
+/// paste-your-PAT card.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Remedy {
+    /// Supply a GitHub token: paste a PAT, or set `EPIK_GITHUB_TOKEN`.
+    GithubToken,
 }
 
 /// What a turn cost, as the provider counted it.
@@ -88,6 +107,18 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn a_refusal_carries_its_remedy_through_json() {
+        let event = ChatEvent::ToolCallRefused {
+            id: "call-1".to_owned(),
+            error: "no GitHub token".to_owned(),
+            remedy: Some(Remedy::GithubToken),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: ChatEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back, "the typed case survives the boundary");
     }
 
     #[test]

@@ -201,6 +201,29 @@ pub async fn set_api_key(window: State<'_, Window>, key: String) -> Result<Statu
     .await
 }
 
+/// Files the GitHub token on its own rails and puts it into use.
+///
+/// Answers with the session as it now stands, so the pane can put the
+/// paste-your-PAT card away — and the verbs already registered see the token
+/// on their very next call, with no restart.
+///
+/// # Errors
+///
+/// Returns the library's refusal when the paste cannot serve or the keyring
+/// would not take it, and the reason the session could not be opened when it
+/// could not be.
+#[tauri::command]
+pub async fn set_github_token(window: State<'_, Window>, token: String) -> Result<Status, String> {
+    let session = window.host()?.chat();
+    on_the_session(session, move |session| {
+        session
+            .set_github_token(&token)
+            .cloned()
+            .map_err(|error| problem(&error))
+    })
+    .await
+}
+
 /// Carries the library's event stream to the webview.
 ///
 /// One thread, one channel, and the only place in Epik that knows both a
@@ -229,9 +252,11 @@ mod tests {
         let _ = status;
         let _ = send_message;
         let _ = set_api_key;
+        let _ = set_github_token;
 
         assert_eq!(ipc::command::STATUS, "status");
         assert_eq!(ipc::command::SEND_MESSAGE, "send_message");
         assert_eq!(ipc::command::SET_API_KEY, "set_api_key");
+        assert_eq!(ipc::command::SET_GITHUB_TOKEN, "set_github_token");
     }
 }

@@ -30,4 +30,8 @@ pub mod command {
 
     /// A key for the active provider, to be filed and put into use at once.
     pub const SET_API_KEY: &str = "set_api_key";
+
+    /// A GitHub token, to be filed on its own rails and put into use at
+    /// once. The paste-your-PAT card's one call.
+    pub const SET_GITHUB_TOKEN: &str = "set_github_token";
 }

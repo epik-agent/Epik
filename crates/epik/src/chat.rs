@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{ChatEvent, Usage};
+use crate::event::{ChatEvent, Remedy, Usage};
 use crate::logging::Log;
 use crate::tools::Registry;
 
@@ -489,6 +489,7 @@ impl<M: ChatModel> Conversation<M> {
                     log.emit(ChatEvent::ToolCallRefused {
                         id: call.id.clone(),
                         error: content.clone(),
+                        remedy: remedy(&refusal),
                     });
                     content
                 }
@@ -519,6 +520,29 @@ impl<M: ChatModel> Conversation<M> {
         log.emit(ChatEvent::TurnFinished { usage: reply.usage });
         reply
     }
+}
+
+/// What a refusal invites the user to do. The one case the loop recognizes
+/// is the GitHub client's want of a token, read out of the typed error the
+/// registry preserved — the window answers it with the paste-your-PAT card.
+#[cfg(feature = "native")]
+fn remedy(refusal: &crate::tools::Error) -> Option<Remedy> {
+    match refusal {
+        crate::tools::Error::Failed { error, .. }
+            if error.downcast_ref::<crate::github::Error>()
+                == Some(&crate::github::Error::TokenAbsent) =>
+        {
+            Some(Remedy::GithubToken)
+        }
+        _ => None,
+    }
+}
+
+/// On wasm this crate supplies types rather than tools, so no refusal here
+/// ever has a remedy to name.
+#[cfg(not(feature = "native"))]
+const fn remedy(_: &crate::tools::Error) -> Option<Remedy> {
+    None
 }
 
 #[cfg(test)]
@@ -858,8 +882,40 @@ mod tests {
             watcher.events.contains(&ChatEvent::ToolCallRefused {
                 id: "call-1".to_owned(),
                 error: refusal.to_owned(),
+                remedy: None,
             }),
-            "the refusal narrates too"
+            "the refusal narrates too, and grumpiness has no remedy"
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_want_of_a_github_token_names_its_remedy() {
+        let mut tools = Registry::new();
+        tools.register(
+            Tool::new("github_comment", "Comments.", json!({ "type": "object" })),
+            |_: Value| Err::<Value, _>(crate::github::Error::TokenAbsent),
+        );
+        let mut chat = Conversation::new(
+            PERSONA,
+            Scripted::saying(["Commenting."])
+                .asking([ToolCall::new("call-1", "github_comment", "{}")])
+                .then_saying(["There is no token."]),
+        );
+        let mut watcher = Watcher::default();
+
+        chat.send_with_tools("Comment", &mut tools, &mut watcher, &StopToken::new())
+            .expect("a refused call is not the turn's failure");
+
+        assert!(
+            watcher.events.iter().any(|event| matches!(
+                event,
+                ChatEvent::ToolCallRefused {
+                    remedy: Some(Remedy::GithubToken),
+                    ..
+                }
+            )),
+            "the typed refusal reaches the window as the case it is: {:?}",
+            watcher.events
         );
     }
 

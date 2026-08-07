@@ -47,6 +47,11 @@ struct Key<'a> {
     key: &'a str,
 }
 
+#[derive(Serialize)]
+struct Token<'a> {
+    token: &'a str,
+}
+
 /// Who is answering, and whether there is a key to reach them with.
 ///
 /// # Errors
@@ -74,6 +79,17 @@ pub async fn send_message(text: &str) -> Result<(), String> {
 /// Returns the host's own words when the key could not be stored.
 pub async fn set_api_key(key: &str) -> Result<Status, String> {
     call(ipc::command::SET_API_KEY, &Key { key }).await
+}
+
+/// Files the GitHub token on its own rails and puts it into use, answering
+/// with the session as it now stands.
+///
+/// # Errors
+///
+/// Returns the host's own words when the paste cannot serve or could not be
+/// stored.
+pub async fn set_github_token(token: &str) -> Result<Status, String> {
+    call(ipc::command::SET_GITHUB_TOKEN, &Token { token }).await
 }
 
 /// Calls `saw` for every chat event the host emits, for as long as the window
