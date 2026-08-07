@@ -28,6 +28,7 @@ pub mod ipc;
 pub mod keystore;
 pub mod logging;
 pub mod repository;
+pub mod run;
 pub mod session;
 pub mod tools;
 pub mod tree;

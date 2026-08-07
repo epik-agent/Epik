@@ -116,6 +116,12 @@ impl Git {
         if !bare.is_dir() {
             self.cloned(repo, url)?;
         }
+        // `url` is authoritative on every call: a clone made against
+        // yesterday's URL — or a bad one — is re-aimed rather than trusted,
+        // so one wrong call can never poison the cache for every good one
+        // after it. Read before write, so the steady state touches no
+        // config lock for concurrent fetches to contend on.
+        aimed(&bare, url)?;
         let fetched = || {
             run(
                 Command::new("git")
@@ -227,6 +233,20 @@ impl Git {
             bare: clone,
         })
     }
+
+    /// The worktree a previous run left at `issue`'s path, when one is
+    /// there: the handle by which retained forensics are inspected and
+    /// eventually dismissed. `branch` is the caller's naming, exactly as in
+    /// [`checkout`](Self::checkout) — a worktree is never asked what it is.
+    #[must_use]
+    pub fn retained(&self, repo: &Repo, issue: u64, branch: &str) -> Option<Worktree> {
+        let path = self.worktree(repo, issue);
+        path.is_dir().then(|| Worktree {
+            path,
+            branch: branch.to_owned(),
+            bare: self.bare(repo),
+        })
+    }
 }
 
 /// A checked-out worktree: the agent's whole world on disk, and the value
@@ -250,6 +270,29 @@ impl Worktree {
     #[must_use]
     pub fn branch(&self) -> &str {
         &self.branch
+    }
+
+    /// The commit this worktree stands on — what binds a verified pull
+    /// request to this run's work rather than a predecessor's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when git cannot say: a worktree already wiped out
+    /// from under the cache, chiefly.
+    pub fn head(&self) -> Result<String, Error> {
+        let output = output(
+            Command::new("git")
+                .current_dir(&self.path)
+                .args(["rev-parse", "HEAD"]),
+        )?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        } else {
+            Err(Error::Refused {
+                verb: "rev-parse",
+                said: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            })
+        }
     }
 
     /// The retention policy, applied: a succeeded run's worktree and branch
@@ -405,6 +448,24 @@ fn run(command: &mut Command, verb: &'static str) -> Result<(), Error> {
     }
 }
 
+/// Points the clone's origin at `url` when it is not already there.
+fn aimed(bare: &Path, url: &str) -> Result<(), Error> {
+    let current = output(
+        Command::new("git")
+            .current_dir(bare)
+            .args(["remote", "get-url", "origin"]),
+    )?;
+    if current.status.success() && String::from_utf8_lossy(&current.stdout).trim() == url {
+        return Ok(());
+    }
+    run(
+        Command::new("git")
+            .current_dir(bare)
+            .args(["remote", "set-url", "origin", url]),
+        "remote set-url",
+    )
+}
+
 /// One hermetic, headless git spawn. A missing working directory is named
 /// as the cache problem it is — spawning there would misreport a broken
 /// git — and no prompt can hang a harness with nobody at the keyboard: not
@@ -429,17 +490,34 @@ fn output(command: &mut Command) -> Result<Output, Error> {
     })
 }
 
+/// Hermetic git scaffolding shared by this module's tests and the run
+/// state machine's, so the policy — no user configuration, a fixed
+/// identity — lives once.
 #[cfg(test)]
-mod tests {
-    use super::*;
+// Test scaffolding is entitled to panic, and skips the API-doc ceremony a
+// real surface owes.
+#[allow(
+    missing_debug_implementations,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::new_without_default,
+    clippy::too_long_first_doc_paragraph
+)]
+pub mod testing {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
 
     use tempfile::TempDir;
+
+    use super::{Git, REPOS, WORK};
+    use crate::github::Repo;
 
     /// Runs git in `dir`, insisting it succeed: origin-side scaffolding,
     /// where the module's own verbs must not be trusted to build the world
     /// they are tested against. Hermetic like the module's own spawns, with
     /// a fixed identity so commits need no configuration at all.
-    fn sh(dir: &Path, args: &[&str]) -> Output {
+    pub fn sh(dir: &Path, args: &[&str]) -> Output {
         let output = Command::new("git")
             .current_dir(dir)
             .args(args)
@@ -460,16 +538,56 @@ mod tests {
     }
 
     /// Writes `file` and commits it.
-    fn commit(dir: &Path, file: &str, text: &str) {
+    pub fn commit(dir: &Path, file: &str, text: &str) {
         fs::write(dir.join(file), text).unwrap();
         sh(dir, &["add", "."]);
         sh(dir, &["commit", "-m", file]);
     }
 
-    fn rev(dir: &Path, name: &str) -> String {
+    pub fn rev(dir: &Path, name: &str) -> String {
         let output = sh(dir, &["rev-parse", name]);
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
+
+    /// A little GitHub: a local origin with one commit, and a cache rooted
+    /// beside it in the same temp directory.
+    pub struct World {
+        pub root: TempDir,
+        pub origin: PathBuf,
+        pub git: Git,
+        pub repo: Repo,
+    }
+
+    impl World {
+        pub fn new() -> Self {
+            let root = TempDir::new().unwrap();
+            let origin = root.path().join("github");
+            fs::create_dir_all(&origin).unwrap();
+            sh(&origin, &["init", "-b", "main"]);
+            commit(&origin, "README.md", "hello");
+            let git = Git::rooted(root.path().join(REPOS), root.path().join(WORK));
+            Self {
+                root,
+                origin,
+                git,
+                repo: Repo::new("epik-agent", "Epik"),
+            }
+        }
+
+        pub fn url(&self) -> String {
+            self.origin.display().to_string()
+        }
+
+        pub fn wipe(&self, root: &str) {
+            fs::remove_dir_all(self.root.path().join(root)).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{World, commit, rev, sh};
+    use super::*;
 
     fn has_ref(dir: &Path, name: &str) -> bool {
         Command::new("git")
@@ -486,40 +604,6 @@ mod tests {
     fn heads(dir: &Path) -> String {
         let output = sh(dir, &["for-each-ref", "refs/heads"]);
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    }
-
-    /// A little GitHub: a local origin with one commit, and a cache rooted
-    /// beside it in the same temp directory.
-    struct World {
-        root: TempDir,
-        origin: PathBuf,
-        git: Git,
-        repo: Repo,
-    }
-
-    impl World {
-        fn new() -> Self {
-            let root = TempDir::new().unwrap();
-            let origin = root.path().join("github");
-            fs::create_dir_all(&origin).unwrap();
-            sh(&origin, &["init", "-b", "main"]);
-            commit(&origin, "README.md", "hello");
-            let git = Git::rooted(root.path().join(REPOS), root.path().join(WORK));
-            Self {
-                root,
-                origin,
-                git,
-                repo: Repo::new("epik-agent", "Epik"),
-            }
-        }
-
-        fn url(&self) -> String {
-            self.origin.display().to_string()
-        }
-
-        fn wipe(&self, root: &str) {
-            fs::remove_dir_all(self.root.path().join(root)).unwrap();
-        }
     }
 
     #[test]
@@ -660,6 +744,55 @@ mod tests {
             rev(&w.origin, "main"),
             "the race's loser lost nothing: the winner's clone is the same clone"
         );
+    }
+
+    #[test]
+    fn the_url_argument_is_authoritative_on_every_fetch() {
+        let w = World::new();
+        let nowhere = w.root.path().join("no-such-origin").display().to_string();
+
+        // The bad call lands a clone aimed nowhere, and fails...
+        assert!(w.git.fetch(&w.repo, &nowhere).is_err());
+
+        // ...but does not poison the cache: the next fetch re-aims the
+        // existing clone at the URL it was actually given.
+        w.git.fetch(&w.repo, &w.url()).unwrap();
+
+        assert_eq!(
+            rev(&w.git.bare(&w.repo), "origin/main"),
+            rev(&w.origin, "main")
+        );
+    }
+
+    #[test]
+    fn a_retained_worktree_is_reconstructible_by_its_address() {
+        let w = World::new();
+        w.git.fetch(&w.repo, &w.url()).unwrap();
+        drop(w.git.checkout(&w.repo, 11, "issue-11", "main").unwrap());
+
+        let handle = w.git.retained(&w.repo, 11, "issue-11").unwrap();
+        handle.dismiss().unwrap();
+
+        assert!(!w.git.worktree(&w.repo, 11).exists());
+        assert_eq!(
+            w.git.retained(&w.repo, 11, "issue-11"),
+            None,
+            "nothing retained, no handle"
+        );
+    }
+
+    #[test]
+    fn a_worktree_knows_the_commit_it_stands_on() {
+        let w = World::new();
+        w.git.fetch(&w.repo, &w.url()).unwrap();
+        let worktree = w.git.checkout(&w.repo, 12, "issue-12", "main").unwrap();
+
+        assert_eq!(worktree.head().unwrap(), rev(&w.origin, "main"));
+
+        commit(worktree.path(), "delta.md", "the work");
+
+        assert_eq!(worktree.head().unwrap(), rev(worktree.path(), "HEAD"));
+        assert_ne!(worktree.head().unwrap(), rev(&w.origin, "main"));
     }
 
     #[test]

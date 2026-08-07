@@ -178,10 +178,10 @@ pub struct ConversationId(pub u64);
 
 /// An event, and where it came from.
 ///
-/// Generic over the vocabulary, so the run cockpit's events will travel in
-/// this same envelope down this same channel rather than needing one of their
-/// own. The sink that does the wrapping is
-/// [`Enveloping`](crate::logging::Enveloping).
+/// Generic over the vocabulary, so the run cockpit's events
+/// ([`RunEvent`](crate::run::RunEvent)) travel in this same envelope down
+/// this same channel rather than needing one of their own. The sink that does
+/// the wrapping is [`Enveloping`](crate::logging::Enveloping).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Envelope<E> {
     pub conversation: ConversationId,
