@@ -68,7 +68,10 @@ pub struct Pane {
     usage: Option<Usage>,
     /// A GitHub verb has refused for want of a token. Sticky on purpose: the
     /// card it summons goes away when the status says the token is Present,
-    /// not because the refusal scrolled by.
+    /// not because the refusal scrolled by. The flag's known cost: a kept
+    /// token that later goes bad refuses as GitHub's 401, never as
+    /// `TokenAbsent`, so no card returns for it — replacing a bad token is
+    /// the override env or a restart until a settings surface exists.
     github_asked: bool,
 }
 

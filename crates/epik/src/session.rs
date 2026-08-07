@@ -227,17 +227,28 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
     /// `EPIK_GITHUB_TOKEN` override outranks the store and keeps winning
     /// for this process, while the paste is kept for the next one.
     ///
+    /// A store that will not take the token does not un-take the paste. The
+    /// token is in hand, so it is used now and simply not kept — which is
+    /// what the card's warning promised on exactly that machine — and the
+    /// next launch resolves to wherever things truly stand.
+    ///
     /// # Errors
     ///
     /// Turns away a paste that is certain to strand the user — a GitHub
     /// App's hour-long token, a chat key in the wrong box — before anything
-    /// is stored, and returns an error when the store would not take it.
+    /// is stored.
     pub fn set_github_token(&mut self, token: &str) -> Result<&Status> {
         if let Some(reason) = unfit(token) {
             anyhow::bail!("{reason}");
         }
-        self.keys.set_github_token(token)?;
-        let resolved = self.keys.github_token();
+        // The write's failure is not raised: the card warned it would not
+        // be kept, and refusing to *use* what the user just handed over
+        // would make the card a dead end on a machine with no keyring.
+        let kept = self.keys.set_github_token(token);
+        let resolved = match self.keys.github_token() {
+            Resolved::Unreachable(_) if kept.is_err() => Resolved::Found(token.to_owned()),
+            resolved => resolved,
+        };
         self.status.github = (&resolved).into();
         self.github.use_token(resolved.key());
         Ok(&self.status)
@@ -503,6 +514,36 @@ mod tests {
             session.model().key(),
             Some("sk-from-the-environment"),
             "the session uses what resolves, not what was typed"
+        );
+    }
+
+    #[test]
+    fn a_paste_onto_a_machine_with_no_keyring_is_used_now_and_not_kept() {
+        // The card's warning on that machine says exactly this: the token
+        // will not be kept — not that pasting is futile. A dead-end card on
+        // the one machine that warns about itself would be worse than none.
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_override(Unplugged, None),
+            Registry::new(),
+            |_, _, _| Scripted::default(),
+        )
+        .unwrap();
+        assert!(matches!(session.status().github, Key::Unreachable { .. }));
+
+        let status = session
+            .set_github_token("ghp-pasted")
+            .expect("a store that will not keep the token does not un-take the paste");
+
+        assert_eq!(
+            status.github,
+            Key::Present,
+            "in use is the truth of this session"
+        );
+        assert_eq!(
+            session.github.token().as_deref(),
+            Some("ghp-pasted"),
+            "the credential is armed from the hand, not the store"
         );
     }
 

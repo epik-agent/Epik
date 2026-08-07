@@ -420,9 +420,9 @@ fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
             <p class="mt-1 text-xs text-secondary">
                 "Create one at "
                 <span class="select-all font-mono text-primary">
-                    "github.com/settings/tokens/new?scopes=repo&description=Epik"
+                    "https://github.com/settings/tokens/new?scopes=repo&description=Epik"
                 </span>
-                " — one click, then copy. If you use the GitHub CLI, "
+                " — the page arrives pre-scoped, so it is one Generate and a copy. If you use the GitHub CLI, "
                 <span class="font-mono text-primary">"gh auth token"</span>
                 " prints one. A fine-grained PAT with Issues, Pull requests, and Contents access works too."
             </p>
@@ -433,7 +433,7 @@ fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
             </p>
             <Show when=move || pane.with(|pane| pane.github_trouble().is_some())>
                 <p class="mt-2 text-xs text-warning">
-                    "This computer's keyring could not be reached, so a token pasted here will not be kept: "
+                    "This computer's keyring could not be reached, so a token pasted here works for this session but will not be kept: "
                     <span class="font-mono">
                         {move || {
                             pane.with(|pane| pane.github_trouble().unwrap_or_default().to_owned())
@@ -441,7 +441,7 @@ fn PatCard(pane: RwSignal<Pane>) -> impl IntoView {
                     </span>
                     ". Set "
                     <span class="font-mono">"EPIK_GITHUB_TOKEN"</span>
-                    " instead."
+                    " to make it stick."
                 </p>
             </Show>
             <div class="mt-3 flex items-center gap-2">

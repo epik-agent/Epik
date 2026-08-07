@@ -209,9 +209,10 @@ pub async fn set_api_key(window: State<'_, Window>, key: String) -> Result<Statu
 ///
 /// # Errors
 ///
-/// Returns the library's refusal when the paste cannot serve or the keyring
-/// would not take it, and the reason the session could not be opened when it
-/// could not be.
+/// Returns the library's refusal when the paste cannot serve, and the reason
+/// the session could not be opened when it could not be. A keyring that
+/// would not keep the token is not an error: the token is used for this
+/// session, exactly as the card's warning said it would be.
 #[tauri::command]
 pub async fn set_github_token(window: State<'_, Window>, token: String) -> Result<Status, String> {
     let session = window.host()?.chat();
