@@ -311,7 +311,7 @@ mod tests {
 
     use super::*;
     use crate::chat::Scripted;
-    use crate::keystore::InMemory;
+    use crate::keystore::{InMemory, Unplugged};
     use crate::logging::Silent;
 
     const PERSONA: &str = "You are Epik.";
@@ -380,21 +380,6 @@ mod tests {
 
         assert_eq!(session.status().key, Key::Present);
         assert_eq!(session.model().key(), Some("sk-already-there"));
-    }
-
-    /// A machine with no secret service: a container, a headless Linux box, a
-    /// CI runner. The keyring is not merely empty, it will not answer at all.
-    #[derive(Debug)]
-    struct Unplugged;
-
-    impl KeyStore for Unplugged {
-        fn get(&self, _: &str) -> Result<Option<String>> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
-
-        fn set(&mut self, _: &str, _: &str) -> Result<()> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
     }
 
     #[test]

@@ -146,6 +146,26 @@ impl KeyStore for InMemory {
     }
 }
 
+/// A store that has broken down rather than one that is merely empty: the
+/// machine with no secret service — a container, a headless Linux box, a CI
+/// runner. The unit tests here and in `session` unplug it to show the
+/// library coping, which is why it lives beside [`InMemory`] instead of
+/// twice over.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Unplugged;
+
+#[cfg(test)]
+impl KeyStore for Unplugged {
+    fn get(&self, _: &str) -> Result<Option<String>> {
+        Err(anyhow::anyhow!("no default store has been set"))
+    }
+
+    fn set(&mut self, _: &str, _: &str) -> Result<()> {
+        Err(anyhow::anyhow!("no default store has been set"))
+    }
+}
+
 /// The operating system's own secret holder.
 #[cfg(feature = "native")]
 #[derive(Debug, Default)]
@@ -345,20 +365,6 @@ mod tests {
             keys.get("never-configured").unwrap().as_deref(),
             Some("sk-override")
         );
-    }
-
-    /// A store that has broken down rather than one that is merely empty.
-    #[derive(Debug)]
-    struct Unplugged;
-
-    impl KeyStore for Unplugged {
-        fn get(&self, _: &str) -> Result<Option<String>> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
-
-        fn set(&mut self, _: &str, _: &str) -> Result<()> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
     }
 
     #[test]
