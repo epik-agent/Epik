@@ -2,10 +2,7 @@
 name = "xtask"
 version.workspace = true
 edition.workspace = true
-description = "Chores a cargo alias cannot say alone: clean, brand-sync"
+description = "Chores a cargo alias cannot say alone: cargo clean-all"
 
 [lints]
 workspace = true
-
-[dependencies]
-ureq = "3"
