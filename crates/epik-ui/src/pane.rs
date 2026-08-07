@@ -575,10 +575,7 @@ mod tests {
     fn usage_is_kept_when_the_provider_reports_it_and_not_invented_when_it_does_not() {
         let mut pane = asked("Hi");
         pane.saw(delta("hello"));
-        let counted = Usage {
-            prompt_tokens: 18,
-            completion_tokens: 6,
-        };
+        let counted = Usage::tokens(18, 6);
 
         pane.saw(ChatEvent::TurnFinished {
             usage: Some(counted),

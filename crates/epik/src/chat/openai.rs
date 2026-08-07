@@ -375,13 +375,7 @@ mod tests {
     fn an_ollama_stream_decodes() {
         let reply = replay(OLLAMA).unwrap();
         assert_eq!(reply.text, "Hello! How can I");
-        assert_eq!(
-            reply.usage,
-            Some(Usage {
-                prompt_tokens: 20,
-                completion_tokens: 5,
-            })
-        );
+        assert_eq!(reply.usage, Some(Usage::tokens(20, 5)));
         assert!(
             reply.tool_calls.is_empty(),
             "a stream with no tool traffic decodes exactly as before"
@@ -392,13 +386,7 @@ mod tests {
     fn an_openai_stream_decodes() {
         let reply = replay(OPENAI).unwrap();
         assert_eq!(reply.text, "Hello, I'm Epik.");
-        assert_eq!(
-            reply.usage,
-            Some(Usage {
-                prompt_tokens: 18,
-                completion_tokens: 6,
-            })
-        );
+        assert_eq!(reply.usage, Some(Usage::tokens(18, 6)));
         assert!(
             reply.tool_calls.is_empty(),
             "a stream with no tool traffic decodes exactly as before"
@@ -421,13 +409,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&call.function.arguments)
                 .expect("the reassembled arguments are intact JSON");
         }
-        assert_eq!(
-            reply.usage,
-            Some(Usage {
-                prompt_tokens: 61,
-                completion_tokens: 42,
-            })
-        );
+        assert_eq!(reply.usage, Some(Usage::tokens(61, 42)));
     }
 
     #[test]

@@ -278,10 +278,7 @@ impl std::error::Error for StillCalling {}
 /// multi-round turn bills for every request it made.
 fn spend(total: Option<Usage>, round: Option<Usage>) -> Option<Usage> {
     match (total, round) {
-        (Some(total), Some(round)) => Some(Usage {
-            prompt_tokens: total.prompt_tokens + round.prompt_tokens,
-            completion_tokens: total.completion_tokens + round.completion_tokens,
-        }),
+        (Some(total), Some(round)) => Some(total.plus(round)),
         (total, round) => total.or(round),
     }
 }
@@ -633,10 +630,7 @@ mod tests {
 
     #[test]
     fn usage_reaches_the_finished_event_when_the_provider_reports_it() {
-        let usage = Usage {
-            prompt_tokens: 11,
-            completion_tokens: 3,
-        };
+        let usage = Usage::tokens(11, 3);
         let mut chat = Conversation::new(PERSONA, Scripted::saying(["hi"]).reporting(usage));
         let mut watcher = Watcher::default();
 
@@ -1087,15 +1081,9 @@ mod tests {
             PERSONA,
             Scripted::saying(["Checking."])
                 .asking([ToolCall::new("call-1", "echo", r#"{"text":"hi"}"#)])
-                .reporting(Usage {
-                    prompt_tokens: 10,
-                    completion_tokens: 2,
-                })
+                .reporting(Usage::tokens(10, 2))
                 .then_saying(["Done."])
-                .reporting(Usage {
-                    prompt_tokens: 20,
-                    completion_tokens: 3,
-                }),
+                .reporting(Usage::tokens(20, 3)),
         );
         let mut watcher = Watcher::default();
 
@@ -1105,10 +1093,7 @@ mod tests {
         assert_eq!(
             watcher.events.last(),
             Some(&ChatEvent::TurnFinished {
-                usage: Some(Usage {
-                    prompt_tokens: 30,
-                    completion_tokens: 5,
-                })
+                usage: Some(Usage::tokens(30, 5))
             }),
             "the whole turn bills for every request it made"
         );
