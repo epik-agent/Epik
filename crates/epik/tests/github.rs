@@ -120,6 +120,27 @@ fn a_merged_pull_reads_with_its_whole_anatomy() {
 }
 
 #[test]
+fn a_pull_is_findable_by_its_head_branch_alone() {
+    let Some(github) = smoke() else { return };
+    // The head that merged PR #91; heads keep their pull request history,
+    // so this branch always finds at least one, newest first.
+    let Some(found) = tolerating(github.pull_for(&epik(), "local-client-greenfield")) else {
+        return;
+    };
+    let pull = found.expect("local-client-greenfield has produced pull requests");
+    assert_eq!(pull.head.name, "local-client-greenfield");
+    assert_eq!(pull.head.sha.len(), 40, "{}", pull.head.sha);
+
+    let Some(none) = tolerating(github.pull_for(&epik(), "no-such-branch-ever")) else {
+        return;
+    };
+    assert_eq!(
+        none, None,
+        "a branch with no pull request is a None, not an error"
+    );
+}
+
+#[test]
 fn checks_concluded_on_the_default_branch() {
     let Some(github) = smoke() else { return };
     let repo = epik();

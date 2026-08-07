@@ -401,6 +401,33 @@ impl GitHub {
         self.get(&format!("repos/{repo}/pulls/{number}"))
     }
 
+    /// The pull request `head` most recently produced, whatever state it is
+    /// in — how the harness finds the pull request an agent opened without
+    /// trusting the agent to report a number. `None` when the branch never
+    /// produced one.
+    ///
+    /// The list endpoint answers newest first and omits `merged`, so the
+    /// found number is re-read through [`pull`](Self::pull) for the whole
+    /// anatomy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn pull_for(&self, repo: &Repo, head: &str) -> Result<Option<Pull>, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            number: u64,
+        }
+        let pulls: Vec<Wire> = self.get(&format!(
+            "repos/{repo}/pulls?state=all&head={}:{head}",
+            repo.owner
+        ))?;
+        pulls
+            .first()
+            .map(|wire| self.pull(repo, wire.number))
+            .transpose()
+    }
+
     /// Merges a pull request. A branch that is not mergeable — red checks, a
     /// ruleset, a conflict — comes back as [`Error::Refused`] in GitHub's
     /// own words.
