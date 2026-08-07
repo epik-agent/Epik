@@ -16,6 +16,10 @@ pub mod agent;
 pub mod chat;
 pub mod config;
 pub mod event;
+// A spawner of the git binary through and through, so the whole module is
+// native.
+#[cfg(feature = "native")]
+pub mod git;
 // A maker of requests through and through, so the whole module is native.
 #[cfg(feature = "native")]
 pub mod github;
