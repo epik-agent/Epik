@@ -161,6 +161,33 @@ pub enum Conclusion {
     Other,
 }
 
+impl Conclusion {
+    /// Green as GitHub's own merge gate reads it: success, and the two
+    /// conclusions a required check waves through — neutral and skipped.
+    /// Everything else — [`Other`](Self::Other), the verdict invented
+    /// after this enum was written, included — is nobody's green.
+    #[must_use]
+    pub const fn green(self) -> bool {
+        matches!(self, Self::Success | Self::Neutral | Self::Skipped)
+    }
+}
+
+impl Check {
+    /// Still running: nothing concluded yet, so the check is
+    /// not-yet-judgeable — neither green nor [`red`](Self::red).
+    #[must_use]
+    pub const fn pending(&self) -> bool {
+        self.conclusion.is_none()
+    }
+
+    /// Concluded, and not [green](Conclusion::green).
+    #[must_use]
+    pub fn red(&self) -> bool {
+        self.conclusion
+            .is_some_and(|conclusion| !conclusion.green())
+    }
+}
+
 /// An issue as it appears at the far end of an edge: enough to schedule
 /// against, not the whole issue.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -406,8 +433,9 @@ impl GitHub {
     /// trusting the agent to report a number. `None` when the branch never
     /// produced one.
     ///
-    /// The list endpoint answers newest first and omits `merged`, so the
-    /// found number is re-read through [`pull`](Self::pull) for the whole
+    /// The list endpoint answers newest first and omits `merged`, so one
+    /// result is asked for — the newest is the one the harness wants — and
+    /// its number is re-read through [`pull`](Self::pull) for the whole
     /// anatomy.
     ///
     /// # Errors
@@ -419,8 +447,9 @@ impl GitHub {
             number: u64,
         }
         let pulls: Vec<Wire> = self.get(&format!(
-            "repos/{repo}/pulls?state=all&head={}:{head}",
-            repo.owner
+            "repos/{repo}/pulls?state=all&per_page=1&head={}:{}",
+            encoded(&repo.owner),
+            encoded(head)
         ))?;
         pulls
             .first()
@@ -465,7 +494,8 @@ impl GitHub {
             check_runs: Vec<Check>,
         }
         let wire: Wire = self.get(&format!(
-            "repos/{repo}/commits/{git_ref}/check-runs?per_page=100"
+            "repos/{repo}/commits/{}/check-runs?per_page=100",
+            encoded(git_ref)
         ))?;
         Ok(wire.check_runs)
     }
@@ -766,6 +796,27 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
     })
 }
 
+/// Percent-encodes one URL value — a query parameter, a path segment —
+/// byte by byte: everything but RFC 3986's unreserved characters. Branch
+/// names are user-written and legally contain `#`, `+`, and `/`, none of
+/// which may reach a URL raw.
+fn encoded(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(char::from(byte));
+            }
+            // Writing into a String cannot fail.
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
 fn decode<T: DeserializeOwned>(what: &str, value: Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(|error| Error::Wire(format!("decoding {what}: {error}")))
 }
@@ -897,6 +948,49 @@ mod tests {
         let payload = r#"{"name": "CI", "conclusion": "quantum_flaked"}"#;
         let check: Check = decode("a check", value(payload)).unwrap();
         assert_eq!(check.conclusion, Some(Conclusion::Other));
+    }
+
+    #[test]
+    fn green_is_what_githubs_own_merge_gate_waves_through() {
+        for conclusion in [
+            Conclusion::Success,
+            Conclusion::Neutral,
+            Conclusion::Skipped,
+        ] {
+            assert!(conclusion.green(), "{conclusion:?}");
+        }
+        for conclusion in [
+            Conclusion::Failure,
+            Conclusion::Cancelled,
+            Conclusion::Stale,
+            Conclusion::TimedOut,
+            Conclusion::ActionRequired,
+            Conclusion::Other,
+        ] {
+            assert!(!conclusion.green(), "{conclusion:?}");
+        }
+        let running = Check {
+            name: "CI".to_owned(),
+            conclusion: None,
+        };
+        assert!(
+            running.pending() && !running.red(),
+            "a check still running is not-yet-judgeable, neither green nor red"
+        );
+        let failed = Check {
+            name: "CI".to_owned(),
+            conclusion: Some(Conclusion::Failure),
+        };
+        assert!(!failed.pending() && failed.red());
+    }
+
+    #[test]
+    fn url_values_are_percent_encoded_byte_by_byte() {
+        assert_eq!(
+            encoded("local-client-greenfield"),
+            "local-client-greenfield"
+        );
+        assert_eq!(encoded("fix/#7+more"), "fix%2F%237%2Bmore");
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::agent::AgentEvent;
 #[cfg(feature = "native")]
 mod issue;
 #[cfg(feature = "native")]
-pub use issue::{Concluded, Evidence, IssueRun};
+pub use issue::{Concluded, Evidence, IssueRun, Retained};
 
 /// The states of an issue run, in the order a clean run enters them: the
 /// old `epik:issue` loop as code structure.
