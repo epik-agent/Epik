@@ -185,7 +185,12 @@ fn stops_spent_when_money_runs_out<A: CodingAgent>(implementation: &impl Fn(Scri
 fn stalls_past_the_window_and_shrugs_off_shorter_silence<A: CodingAgent>(
     implementation: &impl Fn(Script) -> A,
 ) {
-    let window = Duration::from_secs(30);
+    // Two seconds, not thirty: an implementation that lives these silences
+    // for real pays about four windows here, and the margin between a
+    // staged gap (two-thirds of a window) and the window itself still dwarfs
+    // any scheduling jitter, so a busy machine cannot stall a script that
+    // should complete.
+    let window = Duration::from_secs(2);
     let budget = Budget {
         stall: window,
         ..roomy()
