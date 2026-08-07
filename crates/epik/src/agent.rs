@@ -157,6 +157,35 @@ pub enum Stop {
     Died { error: String },
 }
 
+/// One beat of the raw feed a wrapper reads off its agent.
+///
+/// This is the input side of the contract, which is why it lives beside
+/// [`Task`] rather than inside the gauntlet that uses it: [`Scripted`] plays
+/// a script directly, and the [`conformance`] suite feeds hostile ones to
+/// every implementation. Beats include what no well-behaved agent would
+/// produce — that is the point; the wrapper must impose the contract on a
+/// feed that flouts it.
+#[derive(Clone, Debug)]
+pub enum Play {
+    /// The agent narrates.
+    Progress(String),
+    /// The agent claims cumulative totals. Claims: a hostile feed runs them
+    /// backward, and the wrapper's emitted totals must not.
+    Usage(Usage),
+    /// The agent says something only it understands.
+    Detail(serde_json::Value),
+    /// One contiguous quiet gap since the previous beat. Consecutive gaps
+    /// accumulate into a single silence; any other beat is a sign of life
+    /// and resets the stall clock — exactly what a reader blocking in
+    /// `recv_timeout` experiences. Simulated, so nobody actually sleeps.
+    Silence(Duration),
+    /// The agent ends its run, honestly reporting how.
+    Finish(Stop),
+}
+
+/// A feed, in order.
+pub type Script = Vec<Play>;
+
 /// Why a run could not be conducted at all.
 ///
 /// An agent that started and came to grief is a [`Stop`]; this is the

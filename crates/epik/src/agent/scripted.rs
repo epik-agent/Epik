@@ -1,7 +1,8 @@
 //! The zeroth [`CodingAgent`]: no key, no network, no external binary.
 
-use crate::agent::conformance::{Play, Script};
-use crate::agent::{AgentError, AgentEvent, CodingAgent, Stop, Task};
+use std::time::Duration;
+
+use crate::agent::{AgentError, AgentEvent, CodingAgent, Play, Script, Stop, Task};
 use crate::chat::StopToken;
 use crate::event::Usage;
 
@@ -39,8 +40,12 @@ impl CodingAgent for Scripted {
             version: env!("CARGO_PKG_VERSION").to_owned(),
         });
         // Governance state: the wrapper's own totals, fed by the script's
-        // claims but never run backward by them.
+        // claims but never run backward by them, and the stall clock —
+        // quiet accumulated since the last sign of life, as a reader
+        // blocking in `recv_timeout` would accumulate it. Simulated, so the
+        // suite runs in microseconds.
         let mut total = Usage::default();
+        let mut quiet = Duration::ZERO;
         for play in &self.plays {
             // Between beats is exactly where a real wrapper can notice the
             // token: its reader thread wakes per line or per timeout.
@@ -48,16 +53,22 @@ impl CodingAgent for Scripted {
                 return Ok(finish(sink, Stop::Canceled));
             }
             match play {
-                Play::Progress(text) => sink(AgentEvent::Progress(text.clone())),
-                Play::Detail(value) => sink(AgentEvent::Detail(value.clone())),
-                Play::Silence(quiet) => {
-                    // Simulated, so the suite runs in microseconds: a real
-                    // wrapper lives this span in `recv_timeout`.
-                    if *quiet >= task.budget.stall {
+                Play::Progress(text) => {
+                    quiet = Duration::ZERO;
+                    sink(AgentEvent::Progress(text.clone()));
+                }
+                Play::Detail(value) => {
+                    quiet = Duration::ZERO;
+                    sink(AgentEvent::Detail(value.clone()));
+                }
+                Play::Silence(gap) => {
+                    quiet = quiet.saturating_add(*gap);
+                    if quiet >= task.budget.stall {
                         return Ok(finish(sink, Stop::Stalled));
                     }
                 }
                 Play::Usage(claimed) => {
+                    quiet = Duration::ZERO;
                     total = total.max(*claimed);
                     sink(AgentEvent::Usage(total));
                     if task.budget.spent(&total) {

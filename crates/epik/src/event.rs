@@ -114,15 +114,19 @@ impl Usage {
 
     /// The componentwise sum: how a turn that made several requests bills for
     /// all of them. A count reported by either side is kept; only two absent
-    /// counts stay absent, so summing never invents a zero reading.
+    /// counts stay absent, so summing never invents a zero reading. The sums
+    /// saturate — a counter pinned at its ceiling beats a panic in billing
+    /// arithmetic.
     #[must_use]
     pub fn plus(self, other: Self) -> Self {
         Self {
-            prompt_tokens: self.prompt_tokens + other.prompt_tokens,
-            completion_tokens: self.completion_tokens + other.completion_tokens,
-            cache_tokens: join(self.cache_tokens, other.cache_tokens, |a, b| a + b),
+            prompt_tokens: self.prompt_tokens.saturating_add(other.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_add(other.completion_tokens),
+            cache_tokens: join(self.cache_tokens, other.cache_tokens, u32::saturating_add),
             cost: join(self.cost, other.cost, |a, b| Money {
-                micro_usd: a.micro_usd + b.micro_usd,
+                micro_usd: a.micro_usd.saturating_add(b.micro_usd),
             }),
         }
     }

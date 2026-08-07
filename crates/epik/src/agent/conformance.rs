@@ -6,40 +6,17 @@
 //! wrapper to the budget, the stall window, and the terminal `Finished`.
 //! This module is that test, `pub` so the next implementation runs the same
 //! gauntlet: a wrapper around a real binary conforms by translating each
-//! [`Play`] into the feed its agent reads. CI runs [`conforms`] against
+//! [`Play`](crate::agent::Play) into the feed its agent reads. CI runs
+//! [`conforms`] against
 //! every implementation, permanently; the contract is machinery, not review
 //! vigilance.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::agent::{AgentEvent, Budget, CodingAgent, Stop, Task, TaskKind};
+use crate::agent::{AgentEvent, Budget, CodingAgent, Play, Script, Stop, Task, TaskKind};
 use crate::chat::StopToken;
 use crate::event::{Money, Usage};
-
-/// One beat of the raw feed a wrapper reads off its agent.
-///
-/// Beats include what no well-behaved agent would produce, and that is the
-/// point: the wrapper under test must impose the contract on a feed that
-/// flouts it.
-#[derive(Clone, Debug)]
-pub enum Play {
-    /// The agent narrates.
-    Progress(String),
-    /// The agent claims cumulative totals. Claims: a hostile feed runs them
-    /// backward, and the wrapper's emitted totals must not.
-    Usage(Usage),
-    /// The agent says something only it understands.
-    Detail(serde_json::Value),
-    /// The agent goes quiet for this long. Simulated silence — the wrapper
-    /// holds it against the stall window; nobody actually sleeps.
-    Silence(Duration),
-    /// The agent ends its run, honestly reporting how.
-    Finish(Stop),
-}
-
-/// A feed, in order.
-pub type Script = Vec<Play>;
 
 /// A minute of everything: roomy enough that no benign script trips it, so
 /// each check tightens exactly the ceiling it is about.
@@ -238,6 +215,31 @@ fn stalls_past_the_window_and_shrugs_off_shorter_silence<A: CodingAgent>(
         Stop::Completed,
         "silence inside the window is just an agent thinking"
     );
+
+    let accumulating = implementation(vec![
+        Play::Silence(window * 2 / 3),
+        Play::Silence(window * 2 / 3),
+        Play::Finish(Stop::Completed),
+    ]);
+    let (_, stopped) = run(&accumulating, &task(budget), &StopToken::new());
+    assert_eq!(
+        stopped,
+        Stop::Stalled,
+        "gaps with no sign of life between them are one silence"
+    );
+
+    let resurfacing = implementation(vec![
+        Play::Silence(window * 2 / 3),
+        Play::Progress("still here".to_owned()),
+        Play::Silence(window * 2 / 3),
+        Play::Finish(Stop::Completed),
+    ]);
+    let (_, stopped) = run(&resurfacing, &task(budget), &StopToken::new());
+    assert_eq!(
+        stopped,
+        Stop::Completed,
+        "any beat is a sign of life, and resets the stall clock"
+    );
 }
 
 fn emits_nothing_after_finished<A: CodingAgent>(implementation: &impl Fn(Script) -> A) {
@@ -275,14 +277,22 @@ fn keeps_usage_monotone_over_a_backsliding_feed<A: CodingAgent>(
         Play::Usage(priced(120, 12, 500)),
         Play::Finish(Stop::Completed),
     ]);
-    // `run` asserts monotonicity on every emitted reading.
+    // `run` asserts monotonicity on every emitted reading. How many
+    // readings there are is the wrapper's business — suppressing a repeated
+    // total conforms — so what is pinned here is the reading that matters:
+    // the final one, authoritative by contract, must be the clamped maximum
+    // of everything the feed claimed.
     let (events, stopped) = run(&agent, &task(roomy()), &StopToken::new());
     assert_eq!(stopped, Stop::Completed);
-    let readings = events
-        .iter()
-        .filter(|event| matches!(event, AgentEvent::Usage(_)))
-        .count();
-    assert_eq!(readings, 3, "every claim yields a (clamped) reading");
+    let last = events.iter().rev().find_map(|event| match event {
+        AgentEvent::Usage(usage) => Some(*usage),
+        _ => None,
+    });
+    assert_eq!(
+        last,
+        Some(priced(120, 12, 500)),
+        "the authoritative final reading is the high-water mark of the claims"
+    );
 }
 
 fn honors_the_stop_token<A: CodingAgent>(implementation: &impl Fn(Script) -> A) {
