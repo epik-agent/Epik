@@ -57,8 +57,9 @@ The keychain recognises an app by its code signature. An unsigned build gets a
 fresh ad-hoc signature every rebuild, so every rebuild is a stranger to the
 keychain: each stored `Epik` item costs an access dialog again. Signed with a
 stable identity, the app is the same app across rebuilds — a dialog happens at
-most once per stored item, and never for items the app created itself, because
-the creator is on an item's access list from the start.
+most once per stored item, because answering it Always Allow now names an
+identity that survives the next build — and never for items the app created
+itself, because the creator is on an item's access list from the start.
 
 The identity is supplied by the environment, never hardcoded in
 `tauri.conf.json`: `cargo tauri build` reads `APPLE_SIGNING_IDENTITY` and signs
@@ -106,10 +107,11 @@ or an App Store Connect API key via `APPLE_API_KEY`, `APPLE_API_ISSUER`, and
 
 This section is macOS-only on purpose. Linux's Secret Service and Windows's
 Credential Manager gate secrets per user, not per app: no access list names a
-binary, so signing never enters into secret access and no dialog interrupts a
-read. The launch discipline the library keeps — each secret read once — still
-holds everywhere; macOS is just the platform where each read can cost a
-dialog.
+binary, so signing never enters into secret access, and the only prompt Linux
+can raise — unlocking a locked collection — asks about the user's keyring,
+never about which app is asking. The launch discipline the library keeps —
+each secret read once — still holds everywhere; macOS is just the platform
+where each read can cost a dialog.
 
 ## When nothing streams
 
