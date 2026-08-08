@@ -241,7 +241,7 @@ mod worker {
         );
         // Credentials injected, never discovered — the same injection the
         // launch tool makes, in one place.
-        let env = epik::launch::credentialed(token);
+        let env = epik::run::credentialed(token);
         // GitHub is the only rendezvous, so the clone URL defaults to the
         // repo's own address — never a spelling with a token in it; the
         // token rides the cache's askpass rails instead.

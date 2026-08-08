@@ -26,6 +26,28 @@ pub use feature::{FeatureRun, Machinery, ready};
 #[cfg(feature = "native")]
 pub use issue::{Concluded, Evidence, IssueRun, Retained};
 
+/// Credentials injected, never discovered: what a run's agent gets in its
+/// `env` — the one injection every host makes.
+///
+/// The wide prompt's agent conducts the pull-request ceremony through gh,
+/// which answers to either spelling — and commits as Epik, so a box with
+/// no ~/.gitconfig never burns agent time on "tell me who you are".
+#[cfg(feature = "native")]
+#[must_use]
+pub fn credentialed(token: &str) -> Vec<(String, String)> {
+    vec![
+        ("GH_TOKEN".to_owned(), token.to_owned()),
+        ("GITHUB_TOKEN".to_owned(), token.to_owned()),
+        ("GIT_AUTHOR_NAME".to_owned(), "Epik".to_owned()),
+        ("GIT_AUTHOR_EMAIL".to_owned(), "epik@localhost".to_owned()),
+        ("GIT_COMMITTER_NAME".to_owned(), "Epik".to_owned()),
+        (
+            "GIT_COMMITTER_EMAIL".to_owned(),
+            "epik@localhost".to_owned(),
+        ),
+    ]
+}
+
 /// The states of an issue run, in the order a clean run enters them: the
 /// old `epik:issue` loop as code structure.
 ///

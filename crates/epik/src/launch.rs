@@ -32,14 +32,14 @@ use crate::github::Repo;
 use crate::keystore::KeyStore;
 use crate::logs::{Kind, Logs};
 use crate::preflight::{self, CapabilityStatus};
-use crate::run::{FeatureRun, Machinery};
+use crate::run::{FeatureRun, Machinery, credentialed};
 use crate::tools::{Registry, Tool};
 
 /// What every launched feature shares, handed in once — the
 /// [`FeatureRun`] fields that do not depend on which issue, plus the
 /// host's read of the token override. Everything handed in, nothing
 /// discovered.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct Launch {
     pub repo: Repo,
     /// Where the repository is cloned from.
@@ -53,6 +53,25 @@ pub struct Launch {
     /// Outranks the keystore for the GitHub token: `$EPIK_GITHUB_TOKEN`,
     /// read by the host and handed in — never read here.
     pub token_override: Option<String>,
+}
+
+/// Hand-written to keep the secret out: the token override is named as
+/// present or absent, never spelled — a `{:?}` must land in no log with a
+/// credential in it.
+impl fmt::Debug for Launch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Launch")
+            .field("repo", &self.repo)
+            .field("url", &self.url)
+            .field("base", &self.base)
+            .field("budget", &self.budget)
+            .field("patience", &self.patience)
+            .field(
+                "token_override",
+                &self.token_override.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// The launch machinery: the collaborators a run is provisioned from, and
@@ -79,7 +98,20 @@ pub struct Launcher {
 struct InFlight {
     run: String,
     stop: StopToken,
-    handle: JoinHandle<()>,
+    /// The conducting thread — `None` while the launch is still
+    /// provisioning, because the slot is claimed before the preflight and
+    /// the thread arrives when provisioning ends.
+    handle: Option<JoinHandle<()>>,
+}
+
+impl InFlight {
+    /// Still in flight: provisioning, or a thread not yet finished. Only a
+    /// finished thread frees the slot.
+    fn conducting(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_none_or(|handle| !handle.is_finished())
+    }
 }
 
 /// The slot, locked. The state is a plain value, intact whatever became
@@ -129,17 +161,49 @@ impl Launcher {
     /// preflight cannot stand; [`Error::Log`] when the run's log cannot be
     /// created, because a run whose narration has nowhere durable to land
     /// must not start.
-    // The guard is deliberately held across the whole launch: two rival
-    // launches must not both pass the in-flight check, so the slot stays
-    // locked from that check until the started run is in it.
-    #[allow(clippy::significant_drop_tightening)]
     pub fn launch(&self, number: u64) -> Result<Launched, Error> {
-        let mut running = slot(&self.running);
-        if let Some(inflight) = running.as_ref().filter(|it| !it.handle.is_finished()) {
-            return Err(Error::InFlight {
-                running: inflight.run.clone(),
+        // Credentials arrive only after the preflight vouches for them;
+        // everything else the run needs is in hand now, and the claim
+        // below wants the run's own name.
+        let run = FeatureRun {
+            repo: self.launch.repo.clone(),
+            url: self.launch.url.clone(),
+            base: self.launch.base.clone(),
+            number,
+            env: Vec::new(),
+            budget: self.launch.budget,
+            patience: self.launch.patience,
+        };
+        let stop = StopToken::new();
+        // The claim, brief: the preflight can spawn processes and consult
+        // the keyring — a dialog, on macOS — so the lock covers only the
+        // in-flight check and the slot's taking. A claimed slot with no
+        // thread yet is a launch mid-provisioning, and it refuses rivals
+        // like any conducting run.
+        {
+            let mut running = slot(&self.running);
+            if let Some(inflight) = running.as_ref().filter(|it| it.conducting()) {
+                return Err(Error::InFlight {
+                    running: inflight.run.clone(),
+                });
+            }
+            *running = Some(InFlight {
+                run: run.branch(),
+                stop: stop.clone(),
+                handle: None,
             });
         }
+        self.provisioned(run, stop).inspect_err(|_| {
+            // A refused launch frees the slot on its way out — no rival
+            // could have taken it while the claim stood.
+            *slot(&self.running) = None;
+        })
+    }
+
+    /// The expensive middle of a launch, outside the slot's lock: the
+    /// preflight, the log's creation, and the conducting thread's start.
+    /// The claim already stands; the thread lands in it on success.
+    fn provisioned(&self, run: FeatureRun, stop: StopToken) -> Result<Launched, Error> {
         let token = preflight::manifest(
             &self.agent.binaries(),
             self.launch.token_override.clone(),
@@ -148,37 +212,28 @@ impl Launcher {
         .map_err(|refusals| Error::Refused { refusals })?;
         let (log, sink) = self
             .logs
-            .create(&self.launch.repo, Kind::Feature, number)
+            .create(&run.repo, Kind::Feature, run.number)
             .map_err(|error| Error::Log { error })?;
+        let name = run.branch();
         let run = FeatureRun {
-            repo: self.launch.repo.clone(),
-            url: self.launch.url.clone(),
-            base: self.launch.base.clone(),
-            number,
             env: credentialed(&token),
-            budget: self.launch.budget,
-            patience: self.launch.patience,
+            ..run
         };
-        let name = format!("feature-{number}");
         // The vouched-for token, offered onward to git for the fetches,
         // through the askpass rails.
         let git = self.git.clone().authenticated(token);
         let agent = Arc::clone(&self.agent);
         let machinery = Arc::clone(&self.machinery);
-        let stop = StopToken::new();
-        let winds = stop.clone();
         let handle = thread::spawn(move || {
             // The verdict is the log's last word, and GitHub's record
             // stands beside it; a conduct is infallible, so the thread has
             // nothing to answer for.
             let mut sink = sink;
-            run.conduct(&git, machinery.as_ref(), agent.as_ref(), &mut sink, &winds);
+            run.conduct(&git, machinery.as_ref(), agent.as_ref(), &mut sink, &stop);
         });
-        *running = Some(InFlight {
-            run: name.clone(),
-            stop,
-            handle,
-        });
+        if let Some(inflight) = slot(&self.running).as_mut() {
+            inflight.handle = Some(handle);
+        }
         Ok(Launched { run: name, log })
     }
 
@@ -188,7 +243,7 @@ impl Launcher {
     pub fn running(&self) -> Option<String> {
         slot(&self.running)
             .as_ref()
-            .filter(|inflight| !inflight.handle.is_finished())
+            .filter(|inflight| inflight.conducting())
             .map(|inflight| inflight.run.clone())
     }
 
@@ -210,28 +265,8 @@ impl fmt::Debug for Launcher {
     }
 }
 
-/// Credentials injected, never discovered: what a run's agent gets.
-///
-/// The wide prompt's agent conducts the pull-request ceremony through gh,
-/// which answers to either spelling — and commits as Epik, so a box with
-/// no ~/.gitconfig never burns agent time on "tell me who you are".
-#[must_use]
-pub fn credentialed(token: &str) -> Vec<(String, String)> {
-    vec![
-        ("GH_TOKEN".to_owned(), token.to_owned()),
-        ("GITHUB_TOKEN".to_owned(), token.to_owned()),
-        ("GIT_AUTHOR_NAME".to_owned(), "Epik".to_owned()),
-        ("GIT_AUTHOR_EMAIL".to_owned(), "epik@localhost".to_owned()),
-        ("GIT_COMMITTER_NAME".to_owned(), "Epik".to_owned()),
-        (
-            "GIT_COMMITTER_EMAIL".to_owned(),
-            "epik@localhost".to_owned(),
-        ),
-    ]
-}
-
 /// The tool's answer: the run is started, and this is where to find it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Launched {
     /// The run's name: "feature-7".
     pub run: String,
@@ -549,6 +584,38 @@ mod tests {
         assert!(
             !root.path().join(&w.repo.owner).exists(),
             "a refused launch leaves no log file saying otherwise"
+        );
+        let again = launcher.launch(7).unwrap_err();
+        assert!(
+            matches!(again, Error::Refused { .. }),
+            "a refused launch frees the slot rather than wedging it: {again:?}"
+        );
+    }
+
+    #[test]
+    fn debugging_a_launcher_never_spells_the_token() {
+        let launch = Launch {
+            repo: Repo::new("epik-agent", "Epik"),
+            url: "https://github.com/epik-agent/Epik.git".to_owned(),
+            base: "main".to_owned(),
+            budget: Budget {
+                max_tokens: None,
+                max_cost: None,
+                stall: Duration::from_mins(1),
+            },
+            patience: Duration::ZERO,
+            token_override: Some("ghp-secret".to_owned()),
+        };
+
+        let debugged = format!("{launch:?}");
+
+        assert!(
+            !debugged.contains("ghp-secret"),
+            "the secret must land in no log: {debugged}"
+        );
+        assert!(
+            debugged.contains("token_override: Some"),
+            "presence is still said, value never: {debugged}"
         );
     }
 
