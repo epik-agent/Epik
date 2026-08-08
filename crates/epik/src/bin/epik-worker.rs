@@ -55,7 +55,7 @@ mod worker {
     use epik::chat::StopToken;
     use epik::config::{self, Config, Worker};
     use epik::git::Git;
-    use epik::github::{GitHub, Repo};
+    use epik::github::Repo;
     use epik::keystore::{GITHUB_OVERRIDE_ENV, OsKeyring};
     use epik::logging::{Both, JsonLines, Log};
     use epik::logs::{Kind, Logs};
@@ -194,21 +194,22 @@ mod worker {
         Ok(())
     }
 
-    /// Boot integrity: the home made writable, the config read whole. The
-    /// only failures fatal at startup — capability absences refuse and
-    /// report instead.
+    /// Boot integrity: the home made writable, the config read whole and
+    /// carrying a `[worker]`. The only failures fatal at startup —
+    /// capability absences refuse and report instead. A config without a
+    /// `[worker]` is a config to finish, never a default repository to
+    /// reach for: a run aimed at a repository nobody named must be
+    /// unrepresentable.
     fn booted() -> Result<(Worker, Repo, Git)> {
         let home = config::home()?;
         fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         let config = Config::load()?;
-        let repo = Repo::parse(&config.worker.repo).ok_or_else(|| {
-            anyhow!(
-                "worker.repo {:?} is not an owner/name repository",
-                config.worker.repo
-            )
-        })?;
+        let worker = config
+            .worker
+            .ok_or_else(|| anyhow!("no [worker] in the config: say which repository to run for"))?;
+        let repo = worker.repository()?;
         let git = Git::new()?;
-        Ok((config.worker, repo, git))
+        Ok((worker, repo, git))
     }
 
     /// Provisions the requested run and conducts it to its verdict.
@@ -221,20 +222,13 @@ mod worker {
         token: &str,
         stop: &StopToken,
     ) -> ExitCode {
-        let github = worker.api.as_ref().map_or_else(
-            || GitHub::new(Some(token.to_owned())),
-            |api| GitHub::at(api, Some(token.to_owned())),
-        );
+        // The worker's derivations are the config's own — the same three
+        // verbs the window's launcher provisions from.
+        let github = worker.github(Some(token.to_owned()));
         // Credentials injected, never discovered — the same injection the
         // launch tool makes, in one place.
         let env = epik::run::credentialed(token);
-        // GitHub is the only rendezvous, so the clone URL defaults to the
-        // repo's own address — never a spelling with a token in it; the
-        // token rides the cache's askpass rails instead.
-        let url = worker
-            .url
-            .clone()
-            .unwrap_or_else(|| format!("https://github.com/{repo}.git"));
+        let url = worker.clone_url(repo);
         match cli.job {
             Kind::Feature => {
                 // No prefetch: a feature run reads its own graph, one

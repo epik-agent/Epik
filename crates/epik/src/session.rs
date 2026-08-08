@@ -310,12 +310,16 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     /// the registry builds tokenless, and the verbs that need one refuse at
     /// call time with a typed refusal the model reads as a tool result.
     ///
-    /// On unix, the launch verb ([`crate::launch`]) stands beside them:
-    /// asked to build a feature, the model dispatches the run machinery and
-    /// answers at once, while the run narrates into its log and its residue
-    /// lands on GitHub — where the same GitHub verbs report on it. The
-    /// verb's collaborators are provisioned from the `[worker]` config, so
-    /// the window conducts the same run the worker would.
+    /// On unix, with a `[worker]` stated, the launch verb
+    /// ([`crate::launch`]) stands beside them: asked to build a feature,
+    /// the model dispatches the run machinery and answers at once, while
+    /// the run narrates into its log and its residue lands on GitHub —
+    /// where the same GitHub verbs report on it. The verb is provisioned
+    /// from the same `[worker]` table the worker reads, and each run
+    /// conducts with the token its own preflight vouches for, so the
+    /// window conducts the same run the worker would. No `[worker]`, no
+    /// launch verb: nothing can conduct a run against a repository nobody
+    /// named.
     ///
     /// Each secret is read from the store once: the token resolved for the
     /// GitHub client is the same resolution [`Status`] reports. On macOS a
@@ -324,18 +328,18 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     ///
     /// # Errors
     ///
-    /// As [`with_model`](Session::with_model).
+    /// As [`with_model`](Session::with_model) — and when a stated
+    /// `[worker]` is one this host cannot conduct for: a repo that is not
+    /// `owner/name`, or no discoverable home for the git cache and the run
+    /// logs. A capability the user configured must not vanish silently.
     pub fn open(config: &Config, keys: Keys<S>) -> Result<Self> {
         let token = keys.github_token();
         let github = crate::github::GitHub::new(token.clone().key());
         let credential = github.credential();
         let mut tools = Registry::new();
-        // The launcher's machinery is a clone of the session's own client:
-        // one GitHub, one credential — a token pasted mid-chat reaches a
-        // run launched after it.
         #[cfg(unix)]
-        if let Some(launcher) = launcher(config, github.clone(), keys.github_override()) {
-            crate::launch::register(&mut tools, launcher);
+        if let Some(worker) = &config.worker {
+            crate::launch::register(&mut tools, launcher(worker, keys.github_override())?);
         }
         crate::github::tools::register(&mut tools, github);
         let mut session = Self::with_github(
@@ -357,34 +361,33 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
 }
 
 /// The window's launcher: the same run the worker conducts, provisioned the
-/// same way — the `[worker]` repository and agent, the shared
-/// [`BUDGET`](crate::run::BUDGET) and [`PATIENCE`](crate::run::PATIENCE),
-/// the clone URL defaulting to GitHub's own address. The base is left
-/// unstated — the window has no `--target` flag — so a launch merges into
-/// the repository's default branch, read at launch.
+/// same way — [`Worker`](crate::config::Worker)'s own derivations for the
+/// repository, the clone URL, and the API host, with the shared
+/// [`BUDGET`](crate::run::BUDGET) and [`PATIENCE`](crate::run::PATIENCE).
+/// The base is left unstated — the window has no `--target` flag — so a
+/// launch merges into the repository's default branch, resolved on the
+/// run's own thread.
 ///
-/// `None` when this host cannot conduct at all: a `worker.repo` that is not
-/// `owner/name`, or no discoverable home for the clone cache and the run
-/// logs. The session opens regardless, without the verb — chat and the
-/// GitHub verbs owe nothing to the run machinery.
+/// The rig is handed over uncredentialed: every launch preflights and
+/// conducts with the token vouched for at that moment, so a PAT pasted
+/// mid-chat — kept in the keyring — is found by the very next launch. The
+/// preflight's keystore is [`OsKeyring`](crate::keystore::OsKeyring): the
+/// machine has one secret service, so a fresh value is the same store the
+/// session's keys read.
 ///
-/// The preflight's keystore is [`OsKeyring`](crate::keystore::OsKeyring):
-/// the machine has one secret service, so a fresh value is the same store
-/// the session's keys read — and a token pasted mid-chat, kept there, is
-/// found by the next launch.
+/// # Errors
+///
+/// Returns an error when the stated `[worker]` cannot be conducted for: a
+/// repo that is not `owner/name`, or no discoverable home for the git
+/// cache and the run logs.
 #[cfg(all(feature = "native", unix))]
 fn launcher(
-    config: &Config,
-    machinery: crate::github::GitHub,
+    worker: &crate::config::Worker,
     token_override: Option<String>,
-) -> Option<crate::launch::Launcher> {
-    let repo = crate::github::Repo::parse(&config.worker.repo)?;
-    let url = config
-        .worker
-        .url
-        .clone()
-        .unwrap_or_else(|| format!("https://github.com/{repo}.git"));
-    Some(crate::launch::Launcher::new(
+) -> Result<crate::launch::Launcher> {
+    let repo = worker.repository()?;
+    let url = worker.clone_url(&repo);
+    Ok(crate::launch::Launcher::new(
         crate::launch::Launch {
             repo,
             url,
@@ -393,10 +396,10 @@ fn launcher(
             patience: crate::run::PATIENCE,
             token_override,
         },
-        crate::agent::ClaudeCode::at(&config.worker.agent),
-        machinery,
-        crate::git::Git::new().ok()?,
-        crate::logs::Logs::new().ok()?,
+        crate::agent::ClaudeCode::at(&worker.agent),
+        worker.github(None),
+        crate::git::Git::new()?,
+        crate::logs::Logs::new()?,
         crate::keystore::OsKeyring,
     ))
 }
@@ -423,7 +426,18 @@ mod tests {
                     model: "smollm2:135m".to_owned(),
                 },
             )]),
-            worker: crate::config::Worker::default(),
+            worker: None,
+        }
+    }
+
+    /// A stated `[worker]`, aimed at a repository the test names.
+    #[cfg(all(feature = "native", unix))]
+    fn worker(repo: &str) -> crate::config::Worker {
+        crate::config::Worker {
+            repo: repo.to_owned(),
+            agent: "claude".to_owned(),
+            url: None,
+            api: None,
         }
     }
 
@@ -466,9 +480,14 @@ mod tests {
 
     #[cfg(all(feature = "native", unix))]
     #[test]
-    fn open_offers_the_launch_verb_beside_the_github_ones() {
+    fn a_stated_worker_puts_the_launch_verb_beside_the_github_ones() {
+        let config = Config {
+            worker: Some(worker("wpm/epik-scratch")),
+            ..config()
+        };
+
         let session = Session::open(
-            &config(),
+            &config,
             Keys::with_overrides(InMemory::default(), None, None),
         )
         .expect("the config names a provider it lists");
@@ -483,72 +502,45 @@ mod tests {
         assert!(names.contains(&"github_default_branch"), "{names:?}");
     }
 
-    /// A graph read that blocks until the test says, holding a launched
-    /// run in flight across scripted turns. Every other verb is
-    /// unreachable: a sub-issueless feature fails straight after its graph.
     #[cfg(feature = "native")]
-    struct Gated(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+    #[test]
+    fn no_worker_is_a_session_with_no_launch_verb() {
+        let session = Session::open(
+            &config(),
+            Keys::with_overrides(InMemory::default(), None, None),
+        )
+        .expect("no [worker] is the ordinary state, not a fault");
 
-    #[cfg(feature = "native")]
-    mod gated {
-        use std::sync::PoisonError;
+        let names: Vec<&str> = session
+            .tools()
+            .tools()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(
+            !names.contains(&"launch_feature"),
+            "nothing may conduct a run against a repository nobody named: {names:?}"
+        );
+        assert!(names.contains(&"github_issue_graph"), "{names:?}");
+    }
 
-        use super::Gated;
-        use crate::github::{self, Check, Issue, IssueGraph, Pull, Repo, State};
-        use crate::run::{Evidence, Machinery};
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn a_worker_epik_cannot_conduct_for_fails_open_rather_than_dropping_the_verb() {
+        let config = Config {
+            worker: Some(worker("not-a-repository")),
+            ..config()
+        };
 
-        impl Evidence for Gated {
-            fn pull(&self, _: &Repo, _: &str) -> Result<Option<Pull>, github::Error> {
-                unimplemented!("a sub-issueless feature run never consults evidence")
-            }
+        let error = Session::open(
+            &config,
+            Keys::with_overrides(InMemory::default(), None, None),
+        )
+        .expect_err("a stated capability must not vanish silently");
 
-            fn checks(&self, _: &Repo, _: &str) -> Result<Vec<Check>, github::Error> {
-                unimplemented!("a sub-issueless feature run never consults evidence")
-            }
-
-            fn issue(&self, _: &Repo, _: u64) -> Result<Issue, github::Error> {
-                unimplemented!("a sub-issueless feature run never consults evidence")
-            }
-        }
-
-        impl Machinery for Gated {
-            fn default_branch(&self, _: &Repo) -> Result<String, github::Error> {
-                unimplemented!("a stated base is never resolved")
-            }
-
-            fn graph(&self, _: &Repo, number: u64) -> Result<IssueGraph, github::Error> {
-                let _ = self.0.lock().unwrap_or_else(PoisonError::into_inner).recv();
-                Ok(IssueGraph {
-                    issue: Issue {
-                        number,
-                        title: format!("feature {number}"),
-                        body: "the plan".to_owned(),
-                        state: State::Open,
-                    },
-                    sub_issues: Vec::new(),
-                    blocked_by: Vec::new(),
-                })
-            }
-
-            fn branch(&self, _: &Repo, _: &str) -> Result<Option<String>, github::Error> {
-                unimplemented!("a sub-issueless feature fails before the branch phase")
-            }
-
-            fn create_branch(&self, _: &Repo, _: &str, _: &str) -> Result<(), github::Error> {
-                unimplemented!("a sub-issueless feature fails before the branch phase")
-            }
-
-            fn open_pull(
-                &self,
-                _: &Repo,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<Pull, github::Error> {
-                unimplemented!("a sub-issueless feature fails before the review phase")
-            }
-        }
+        assert!(
+            format!("{error:#}").contains("owner/name"),
+            "the error names the config to fix: {error:#}"
+        );
     }
 
     /// The window's whole conversation, one seam down: a scripted model
@@ -559,8 +551,7 @@ mod tests {
     #[cfg(feature = "native")]
     #[test]
     fn a_launch_answers_at_once_and_a_rival_turn_relays_the_typed_refusal() {
-        use std::sync::{Mutex, mpsc};
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         use tempfile::TempDir;
 
@@ -568,11 +559,12 @@ mod tests {
         use crate::chat::ToolCall;
         use crate::git::Git;
         use crate::github::Repo;
+        use crate::launch::testing::{Fake, finished};
         use crate::launch::{Launch, Launcher};
         use crate::logs::Logs;
 
         let root = TempDir::new().expect("a temp root");
-        let (open, gate) = mpsc::channel();
+        let (fake, open) = Fake::gated();
         let launcher = Launcher::new(
             Launch {
                 repo: Repo::new("epik-agent", "Epik"),
@@ -587,7 +579,7 @@ mod tests {
                 token_override: Some("ghp-test".to_owned()),
             },
             ScriptedAgent::playing(Vec::new()),
-            Gated(Mutex::new(gate)),
+            fake,
             Git::rooted(root.path().join("repos"), root.path().join("work")),
             Logs::rooted(root.path().join("logs")),
             InMemory::default(),
@@ -644,11 +636,7 @@ mod tests {
 
         // The run outlives both turns; wind it up before the root goes.
         open.send(()).expect("the run is still at the gate");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while launcher.running().is_some() {
-            assert!(Instant::now() < deadline, "the run never finished");
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        finished(&launcher);
     }
 
     /// The tool result answering `id`, as the model read it.

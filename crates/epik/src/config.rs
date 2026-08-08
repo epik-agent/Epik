@@ -3,8 +3,11 @@
 //! The file lives at `~/.epik/config.toml` and is edited by hand: there is no
 //! settings UI, by decision — edit and restart, and the status bar names the
 //! active model so you can see which one took. It lists providers, says which
-//! is active, and carries the system prompt. The `[worker]` table says what
-//! `epik-worker` runs: which repository, and which coding-agent binary.
+//! is active, and carries the system prompt. The `[worker]` table is opt-in
+//! and says what the run machinery conducts: which repository — its one
+//! required field — and which coding-agent binary. Without the table there
+//! is no worker and no launch verb, because a run aimed at a repository
+//! nobody named must be unrepresentable.
 //!
 //! It never carries a key. Keys live where the operating system keeps
 //! secrets; see [`crate::keystore`]. A key written into this file is not read
@@ -66,38 +69,80 @@ pub struct Config {
     pub active: String,
     pub system_prompt: String,
     // Tables last: TOML requires every scalar to be emitted before any table.
-    pub worker: Worker,
+    /// The run machinery's aim, when the user has stated one. `None` is a
+    /// config with no worker and no launch verb — never a default
+    /// repository reached for on the user's behalf.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<Worker>,
     pub providers: BTreeMap<String, Provider>,
 }
 
-/// What `epik-worker` runs, and with what.
+/// What the run machinery conducts, and with what: `epik-worker`'s job, and
+/// the window's launch verb, provisioned identically from this one table.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
 pub struct Worker {
-    /// The repository whose issues the worker implements, spelled
-    /// `owner/name` the way GitHub spells it.
+    /// The repository whose issues get implemented, spelled `owner/name`
+    /// the way GitHub spells it. The section's one required field: runs
+    /// mutate this repository, so it is always the user's own word.
     pub repo: String,
     /// The coding agent's binary. An explicit path is the reliable spelling
     /// — launchd's `PATH` is not a login shell's — and a bare name falls
     /// back to `PATH` resolution.
+    #[serde(default = "claude")]
     pub agent: String,
     /// Where the repository is cloned from, when it is not GitHub's own
     /// address for `repo` — an enterprise host, a mirror, a test's local
     /// origin.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Where the GitHub API answers, when it is not `api.github.com`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
 }
 
-impl Default for Worker {
-    fn default() -> Self {
-        Self {
-            repo: "epik-agent/Epik".to_owned(),
-            agent: "claude".to_owned(),
-            url: None,
-            api: None,
+/// The unstated agent: `claude` off `PATH`.
+fn claude() -> String {
+    "claude".to_owned()
+}
+
+/// The derivations both run hosts make from the table, in one place: the
+/// worker binary and the window's launcher provision the same run the same
+/// way because they call the same three verbs.
+#[cfg(feature = "native")]
+impl Worker {
+    /// The repository, parsed from its `owner/name` spelling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `repo` is not `owner/name` — a config to fix,
+    /// never one to guess at.
+    pub fn repository(&self) -> Result<crate::github::Repo> {
+        crate::github::Repo::parse(&self.repo).ok_or_else(|| {
+            anyhow!(
+                "worker.repo {:?} is not an owner/name repository",
+                self.repo
+            )
+        })
+    }
+
+    /// Where the repository is cloned from: the stated `url`, or GitHub's
+    /// own address for `repo`. GitHub is the only rendezvous, so the
+    /// default is the repository's own address — never a spelling with a
+    /// token in it; the token rides the git cache's askpass rails instead.
+    #[must_use]
+    pub fn clone_url(&self, repo: &crate::github::Repo) -> String {
+        self.url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{repo}.git"))
+    }
+
+    /// The GitHub client runs speak through: the stated `api` — an
+    /// enterprise host, a test's loopback — or GitHub itself.
+    #[must_use]
+    pub fn github(&self, token: Option<String>) -> crate::github::GitHub {
+        match &self.api {
+            Some(api) => crate::github::GitHub::at(api, token),
+            None => crate::github::GitHub::new(token),
         }
     }
 }
@@ -126,7 +171,7 @@ impl Default for Config {
                     },
                 ),
             ]),
-            worker: Worker::default(),
+            worker: None,
         }
     }
 }
@@ -273,17 +318,71 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_worker_section_keeps_the_unstated_defaults() {
+    fn no_worker_section_is_no_worker_rather_than_somebody_elses_repository() {
+        assert_eq!(
+            Config::default().worker,
+            None,
+            "a run aimed at a repository nobody named must be unrepresentable"
+        );
+    }
+
+    #[test]
+    fn a_worker_section_names_its_repository_and_the_agent_defaults() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "[worker]\nagent = \"/opt/claude/claude\"\n").unwrap();
+        std::fs::write(file.path(), "[worker]\nrepo = \"wpm/epik-scratch\"\n").unwrap();
 
         let config = Config::read(file.path()).unwrap();
 
-        assert_eq!(config.worker.agent, "/opt/claude/claude");
+        let worker = config.worker.expect("the section was stated");
+        assert_eq!(worker.repo, "wpm/epik-scratch");
+        assert_eq!(worker.agent, "claude", "an unstated agent is the default");
+        assert_eq!(worker.url, None);
+        assert_eq!(worker.api, None);
+    }
+
+    #[test]
+    fn a_worker_section_without_a_repository_is_reported_rather_than_aimed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "[worker]\nagent = \"/opt/claude/claude\"\n").unwrap();
+
+        let error = Config::read(file.path()).expect_err("repo is the one required field");
+
+        assert!(format!("{error:#}").contains("repo"), "{error:#}");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_worker_derivations_are_the_same_for_every_host() {
+        let worker = Worker {
+            repo: "wpm/epik-scratch".to_owned(),
+            agent: "claude".to_owned(),
+            url: None,
+            api: None,
+        };
+
+        let repo = worker.repository().unwrap();
+        assert_eq!(repo.to_string(), "wpm/epik-scratch");
         assert_eq!(
-            config.worker.repo, "epik-agent/Epik",
-            "an unstated repo is the default, not nothing"
+            worker.clone_url(&repo),
+            "https://github.com/wpm/epik-scratch.git",
+            "GitHub is the only rendezvous, so its address is the default"
         );
+
+        let stated = Worker {
+            url: Some("https://mirror.example/scratch.git".to_owned()),
+            ..worker.clone()
+        };
+        assert_eq!(
+            stated.clone_url(&repo),
+            "https://mirror.example/scratch.git"
+        );
+
+        let bad = Worker {
+            repo: "not-a-repository".to_owned(),
+            ..worker
+        };
+        let error = bad.repository().expect_err("a typo is a config to fix");
+        assert!(error.to_string().contains("owner/name"), "{error}");
     }
 
     #[test]
@@ -321,5 +420,17 @@ mod tests {
         let config = Config::default();
         let rendered = toml::to_string_pretty(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&rendered).unwrap(), config);
+
+        let with_worker = Config {
+            worker: Some(Worker {
+                repo: "wpm/epik-scratch".to_owned(),
+                agent: "claude".to_owned(),
+                url: None,
+                api: None,
+            }),
+            ..config
+        };
+        let rendered = toml::to_string_pretty(&with_worker).unwrap();
+        assert_eq!(toml::from_str::<Config>(&rendered).unwrap(), with_worker);
     }
 }

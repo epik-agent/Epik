@@ -59,16 +59,6 @@ pub fn ready(graphs: &[IssueGraph]) -> Vec<&IssueGraph> {
 /// the seam has no verb for merging, so no feature run can merge what it
 /// opened.
 pub trait Machinery: Evidence {
-    /// The branch pull requests merge into by default — what a launcher
-    /// resolves an unstated base to. The run itself never asks: its base
-    /// is handed in, like everything else.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`github::Error`] when GitHub cannot be asked or answers
-    /// no.
-    fn default_branch(&self, repo: &Repo) -> Result<String, github::Error>;
-
     /// One issue and the edges around it, read back.
     ///
     /// # Errors
@@ -111,11 +101,6 @@ pub trait Machinery: Evidence {
 }
 
 impl Machinery for GitHub {
-    fn default_branch(&self, repo: &Repo) -> Result<String, github::Error> {
-        // The inherent verb: inherent methods win the name over this trait's.
-        Self::default_branch(self, repo)
-    }
-
     fn graph(&self, repo: &Repo, number: u64) -> Result<IssueGraph, github::Error> {
         self.issue_graph(repo, number)
     }
@@ -644,10 +629,6 @@ mod tests {
     }
 
     impl Machinery for Fake {
-        fn default_branch(&self, _: &Repo) -> Result<String, github::Error> {
-            unimplemented!("a run's base is handed in, never resolved here")
-        }
-
         fn graph(&self, _: &Repo, number: u64) -> Result<IssueGraph, github::Error> {
             if number == self.feature.number {
                 let nodes = self.nodes.borrow();
