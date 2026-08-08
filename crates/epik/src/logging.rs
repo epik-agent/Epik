@@ -49,6 +49,32 @@ impl<E> Log<E> for Vec<E> {
     }
 }
 
+/// Maps every event on its way to `inner`: how one vocabulary rides inside
+/// another — an issue run's events stamped into a feature run's, say —
+/// without the observed work knowing whose log it was lent.
+///
+/// [`Enveloping`] is the shape's named cousin, not a redundancy: a closure
+/// pins one input vocabulary, while an `Enveloping` value stays generic
+/// over every vocabulary its inner sink can carry.
+#[derive(Debug)]
+pub struct Mapping<L, F> {
+    inner: L,
+    map: F,
+}
+
+impl<L, F> Mapping<L, F> {
+    pub const fn new(inner: L, map: F) -> Self {
+        Self { inner, map }
+    }
+}
+
+impl<E, T, L: Log<T>, F: FnMut(E) -> T> Log<E> for Mapping<L, F> {
+    fn emit(&mut self, event: E) {
+        let event = (self.map)(event);
+        self.inner.emit(event);
+    }
+}
+
 /// Puts every event into an [`Envelope`] on its way to `inner`: the sink an
 /// IPC layer logs through.
 ///
@@ -154,6 +180,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn mapping_carries_one_vocabulary_inside_another() {
+        // Something that speaks only Event, lent a log that wants Noise.
+        fn observed(log: &mut dyn Log<Event>) {
+            log.emit(Event::IssueStarted { id: 4 });
+        }
+
+        let mut collected: Vec<Noise> = Vec::new();
+        observed(&mut Mapping::new(&mut collected, |_: Event| Noise::Hum));
+
+        assert!(matches!(collected.as_slice(), [Noise::Hum]));
     }
 
     #[test]

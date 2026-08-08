@@ -475,6 +475,48 @@ impl GitHub {
         Ok(())
     }
 
+    /// The commit `branch` stands on, or `None` when there is no such
+    /// branch — which is a fact about the repository, not a refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn branch_sha(&self, repo: &Repo, branch: &str) -> Result<Option<String>, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            object: Object,
+        }
+        #[derive(Deserialize)]
+        struct Object {
+            sha: String,
+        }
+        let asked: Result<Wire, Error> =
+            self.get(&format!("repos/{repo}/git/ref/heads/{}", encoded(branch)));
+        match asked {
+            Ok(wire) => Ok(Some(wire.object.sha)),
+            Err(Error::Refused { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates `branch` at `sha` — how a feature branch comes to exist at
+    /// the remote without any local git at all.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
+    /// an [`Error`] when GitHub cannot be asked or answers no — a branch
+    /// that already exists, chiefly.
+    pub fn create_branch(&self, repo: &Repo, branch: &str, sha: &str) -> Result<(), Error> {
+        self.needs_token()?;
+        self.send::<Value>(
+            Method::Post,
+            &format!("repos/{repo}/git/refs"),
+            &json!({ "ref": format!("refs/heads/{branch}"), "sha": sha }),
+        )?;
+        Ok(())
+    }
+
     /// Every check run's verdict on `git_ref` — a branch name, a tag, or a
     /// commit SHA. "Is this green" is a fold over the result; a run still
     /// executing has no conclusion yet.
@@ -1110,6 +1152,7 @@ mod tests {
             github.close_issue(&repo, 1).map(drop),
             github.open_pull(&repo, "t", "h", "b", "").map(drop),
             github.merge_pull(&repo, 1, Merge::Squash),
+            github.create_branch(&repo, "feature-1", &"a".repeat(40)),
             github.issue_graph(&repo, 1).map(drop),
             github.add_sub_issue(&repo, 1, 2),
             github.remove_sub_issue(&repo, 1, 2),
