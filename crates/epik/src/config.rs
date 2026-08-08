@@ -3,7 +3,8 @@
 //! The file lives at `~/.epik/config.toml` and is edited by hand: there is no
 //! settings UI, by decision — edit and restart, and the status bar names the
 //! active model so you can see which one took. It lists providers, says which
-//! is active, and carries the system prompt.
+//! is active, and carries the system prompt. The `[worker]` table says what
+//! `epik-worker` runs: which repository, and which coding-agent binary.
 //!
 //! It never carries a key. Keys live where the operating system keeps
 //! secrets; see [`crate::keystore`]. A key written into this file is not read
@@ -64,8 +65,31 @@ pub struct Config {
     /// Which entry of `providers` to talk to.
     pub active: String,
     pub system_prompt: String,
-    // Last: TOML requires every scalar to be emitted before any table.
+    // Tables last: TOML requires every scalar to be emitted before any table.
+    pub worker: Worker,
     pub providers: BTreeMap<String, Provider>,
+}
+
+/// What `epik-worker` runs, and with what.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct Worker {
+    /// The repository whose issues the worker implements, spelled
+    /// `owner/name` the way GitHub spells it.
+    pub repo: String,
+    /// The coding agent's binary. An explicit path is the reliable spelling
+    /// — launchd's `PATH` is not a login shell's — and a bare name falls
+    /// back to `PATH` resolution.
+    pub agent: String,
+}
+
+impl Default for Worker {
+    fn default() -> Self {
+        Self {
+            repo: "epik-agent/Epik".to_owned(),
+            agent: "claude".to_owned(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -92,6 +116,7 @@ impl Default for Config {
                     },
                 ),
             ]),
+            worker: Worker::default(),
         }
     }
 }
@@ -235,6 +260,20 @@ mod tests {
             "an unstated system prompt is the persona, not nothing"
         );
         assert_eq!(config.provider().unwrap().1.model, "smollm2:135m");
+    }
+
+    #[test]
+    fn a_partial_worker_section_keeps_the_unstated_defaults() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "[worker]\nagent = \"/opt/claude/claude\"\n").unwrap();
+
+        let config = Config::read(file.path()).unwrap();
+
+        assert_eq!(config.worker.agent, "/opt/claude/claude");
+        assert_eq!(
+            config.worker.repo, "epik-agent/Epik",
+            "an unstated repo is the default, not nothing"
+        );
     }
 
     #[test]

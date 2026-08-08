@@ -115,6 +115,14 @@ impl ClaudeCode {
 }
 
 impl CodingAgent for ClaudeCode {
+    /// The declaration the preflight resolves: this wrapper's own binary,
+    /// and `gh` — the wide v1 prompt has the agent conduct the pull-request
+    /// ceremony itself, so `gh` retires from here with that taper. git is
+    /// Epik's own manifest layer, not re-declared per agent.
+    fn binaries(&self) -> Vec<PathBuf> {
+        vec![self.binary.clone(), PathBuf::from("gh")]
+    }
+
     fn run(
         &self,
         task: &Task,
@@ -437,6 +445,16 @@ mod tests {
             }
         }
         (events, ended)
+    }
+
+    #[test]
+    fn the_wrapper_declares_its_binary_and_gh() {
+        let agent = ClaudeCode::at("/opt/claude/claude");
+        assert_eq!(
+            agent.binaries(),
+            [PathBuf::from("/opt/claude/claude"), PathBuf::from("gh")],
+            "the per-agent preflight layer is the wrapper's own declaration"
+        );
     }
 
     #[test]

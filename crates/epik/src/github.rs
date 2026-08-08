@@ -59,6 +59,15 @@ impl Repo {
             name: name.into(),
         }
     }
+
+    /// The `owner/name` spelling read back — what config carries. `None`
+    /// when `spec` is not exactly two nonempty parts.
+    #[must_use]
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (owner, name) = spec.split_once('/')?;
+        (!owner.is_empty() && !name.is_empty() && !name.contains('/'))
+            .then(|| Self::new(owner, name))
+    }
 }
 
 impl fmt::Display for Repo {
@@ -918,6 +927,14 @@ mod tests {
 
     fn epik() -> Repo {
         Repo::new("epik-agent", "Epik")
+    }
+
+    #[test]
+    fn the_owner_name_spelling_parses_and_anything_else_does_not() {
+        assert_eq!(Repo::parse("epik-agent/Epik"), Some(epik()));
+        for wrong in ["", "Epik", "/Epik", "epik-agent/", "a/b/c"] {
+            assert_eq!(Repo::parse(wrong), None, "{wrong:?}");
+        }
     }
 
     #[test]

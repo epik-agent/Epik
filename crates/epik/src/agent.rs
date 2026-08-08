@@ -264,6 +264,14 @@ pub trait CodingAgent {
         sink: &mut dyn FnMut(AgentEvent),
         stop: &StopToken,
     ) -> Result<Stop, AgentError>;
+
+    /// The external binaries a run spawns, in the wrapper's own configured
+    /// spellings: the per-agent layer of the preflight manifest
+    /// ([`crate::preflight`]). The wrapper declares, launch code resolves;
+    /// an agent that spawns nothing declares nothing.
+    fn binaries(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +297,14 @@ mod tests {
             let back: AgentEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(event, back);
         }
+    }
+
+    #[test]
+    fn an_agent_that_spawns_nothing_declares_nothing() {
+        assert!(
+            Scripted::playing(Vec::new()).binaries().is_empty(),
+            "the per-agent preflight layer defaults to empty"
+        );
     }
 
     #[test]
