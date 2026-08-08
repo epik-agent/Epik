@@ -11,6 +11,8 @@
 //! else up here, which keeps the vocabulary wasm-clean; the machines that
 //! emit it — [`IssueRun`] and [`FeatureRun`] — are native.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentEvent;
@@ -93,6 +95,11 @@ pub enum FeaturePhase {
     /// The harness reads the feature's sub-issue graph through the seam:
     /// which issues, waiting on what.
     Graph,
+    /// The harness ensures the feature branch exists at the remote — cut
+    /// from the base branch's tip when absent — so every issue run has a
+    /// base to check out and merge into. Machinery, never an agent's
+    /// errand.
+    Branch,
     /// One scheduling round: the pure fold picks the ready set, and an
     /// issue run is conducted for each. Entered once per round, so the log
     /// shows the graph draining.
@@ -114,6 +121,15 @@ pub enum FeatureEvent {
     /// A sub-issue's run speaks: its stream rides within, stamped with the
     /// issue it belongs to, so a console can fold per-issue lanes.
     Issue { number: u64, event: RunEvent },
+    /// A sub-issue run's worktree outlived the run. Deliberate when the
+    /// run failed — forensics at `path`, until dismissed — and accidental
+    /// when a verified success could not delete it, in which case `error`
+    /// explains.
+    Retained {
+        number: u64,
+        path: PathBuf,
+        error: Option<String>,
+    },
     /// The run is over. Terminal.
     Finished(FeatureVerdict),
 }
@@ -167,10 +183,16 @@ mod tests {
     fn feature_events_round_trip_through_json() {
         let events = [
             FeatureEvent::Entered(FeaturePhase::Graph),
+            FeatureEvent::Entered(FeaturePhase::Branch),
             FeatureEvent::Entered(FeaturePhase::Schedule),
             FeatureEvent::Issue {
                 number: 7,
                 event: RunEvent::Agent(AgentEvent::Progress("compiling".to_owned())),
+            },
+            FeatureEvent::Retained {
+                number: 7,
+                path: PathBuf::from("work/epik-agent/Epik/issue-7"),
+                error: None,
             },
             FeatureEvent::Entered(FeaturePhase::Review),
             FeatureEvent::Finished(FeatureVerdict::Done { review: 41 }),
