@@ -136,9 +136,10 @@ pub struct FeatureRun {
     pub url: String,
     /// The branch the review pull request merges into.
     pub base: String,
-    /// The feature issue: its graph names the sub-issues, and the review
-    /// pull request is titled for it.
-    pub issue: Issue,
+    /// The feature issue's number. The issue itself is read in the Graph
+    /// phase along with its edges — one snapshot serving the whole run,
+    /// never a second prefetch that could disagree with it.
+    pub number: u64,
     /// Credentials injected, never discovered — passed through to every
     /// issue run.
     pub env: Vec<(String, String)>,
@@ -154,7 +155,7 @@ impl FeatureRun {
     /// precedent.
     #[must_use]
     pub fn branch(&self) -> String {
-        format!("feature-{}", self.issue.number)
+        format!("feature-{}", self.number)
     }
 
     /// Runs the whole feature to a verdict, narrating every state into
@@ -193,9 +194,9 @@ impl FeatureRun {
         stop: &StopToken,
     ) -> Result<u64, String> {
         log.emit(FeatureEvent::Entered(FeaturePhase::Graph));
-        let feature = self.graph(machinery, self.issue.number)?;
+        let feature = self.graph(machinery, self.number)?;
         if feature.sub_issues.is_empty() {
-            return Err(format!("feature #{} has no sub-issues", self.issue.number));
+            return Err(format!("feature #{} has no sub-issues", self.number));
         }
         log.emit(FeatureEvent::Entered(FeaturePhase::Branch));
         self.branched(machinery)?;
@@ -238,10 +239,10 @@ impl FeatureRun {
             }
             // One re-read per round, for what this run cannot know on its
             // own: a sub-issue closed — or added — from outside.
-            edges = self.graph(machinery, self.issue.number)?.sub_issues;
+            edges = self.graph(machinery, self.number)?.sub_issues;
         }
         log.emit(FeatureEvent::Entered(FeaturePhase::Review));
-        self.reviewed(machinery)
+        self.reviewed(machinery, &feature.issue)
     }
 
     fn graph(&self, machinery: &dyn Machinery, number: u64) -> Result<IssueGraph, String> {
@@ -326,9 +327,10 @@ impl FeatureRun {
     }
 
     /// The endpoint, as machinery: the review pull request from the feature
-    /// branch into the base, titled for the feature issue, closing it on
-    /// merge — and nothing here merges anything.
-    fn reviewed(&self, machinery: &dyn Machinery) -> Result<u64, String> {
+    /// branch into the base, titled for the feature issue — as the Graph
+    /// phase read it — closing it on merge, and nothing here merges
+    /// anything.
+    fn reviewed(&self, machinery: &dyn Machinery, issue: &Issue) -> Result<u64, String> {
         let head = self.branch();
         // Standing: open, or already merged — a rerun of a feature whose
         // review merged links where the review happened. Closed without
@@ -344,10 +346,10 @@ impl FeatureRun {
         let pull = machinery
             .open_pull(
                 &self.repo,
-                &self.issue.title,
+                &issue.title,
                 &head,
                 &self.base,
-                &format!("Closes #{}", self.issue.number),
+                &format!("Closes #{}", self.number),
             )
             .map_err(|error| error.to_string())?;
         Ok(pull.number)
@@ -689,7 +691,7 @@ mod tests {
             repo: world.repo.clone(),
             url: world.url(),
             base: "main".to_owned(),
-            issue: issue(number, Open),
+            number,
             env: Vec::new(),
             budget: Budget {
                 max_tokens: None,
@@ -810,7 +812,10 @@ mod tests {
         let [(title, head, base, body)] = opened.as_slice() else {
             panic!("exactly one review pull request: {opened:?}");
         };
-        assert_eq!(title, &r.issue.title, "titled for the feature issue");
+        assert_eq!(
+            title, "issue 104",
+            "titled for the feature issue, as the graph read it"
+        );
         assert_eq!(head, "feature-104");
         assert_eq!(base, "main");
         assert!(body.contains("Closes #104"), "{body}");

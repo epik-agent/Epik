@@ -202,8 +202,12 @@ pub fn github_token(
     let (standing, token) = match token_override.filter(|token| !token.is_empty()) {
         Some(token) => (Standing::Present { at: env_stop }, Some(token)),
         None => match store.get(GITHUB_ACCOUNT) {
-            Ok(Some(token)) => (Standing::Present { at: keyring }, Some(token)),
-            Ok(None) => (
+            // An empty entry is filtered like the empty override: a token
+            // that is no token refuses here, never as a 401 mid-run.
+            Ok(Some(token)) if !token.is_empty() => {
+                (Standing::Present { at: keyring }, Some(token))
+            }
+            Ok(_) => (
                 Standing::Absent {
                     searched: vec![env_stop, keyring],
                 },
@@ -241,7 +245,10 @@ fn hunted(spelling: &Path, path: &OsStr) -> (Vec<String>, Option<PathBuf>) {
         );
     }
     let mut searched = Vec::new();
-    for dir in env::split_paths(path) {
+    // An empty component never degrades the hunt to the cwd: an unset or
+    // empty `PATH` — the launchd case — searches nowhere, and the refusal
+    // says so.
+    for dir in env::split_paths(path).filter(|dir| !dir.as_os_str().is_empty()) {
         let candidate = dir.join(spelling);
         if runnable(&candidate) {
             return (searched, Some(candidate));
@@ -251,15 +258,14 @@ fn hunted(spelling: &Path, path: &OsStr) -> (Vec<String>, Option<PathBuf>) {
     (searched, None)
 }
 
-/// Whether a file at `path` could be spawned: present, a file, and — where
-/// the platform says so — executable.
+/// Whether a file at `path` could be spawned: a file this process may
+/// execute — the kernel's own `access(X_OK)` answer, the question execvp
+/// asks — so the hunt walks past what execvp would walk past.
 #[cfg(feature = "native")]
 fn runnable(path: &Path) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        path.is_file() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
     }
     #[cfg(not(unix))]
     {
@@ -502,6 +508,37 @@ mod native_tests {
         assert_eq!(found, None, "presence is runnability, not existence");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn execute_permission_is_the_invoking_users_and_the_hunt_walks_past_it() {
+        use std::os::unix::fs::PermissionsExt;
+        // Executable by group and other but not by owner: `mode & 0o111` is
+        // nonzero, yet execvp — and access(X_OK) — would refuse it for us.
+        let decoys = TempDir::new().unwrap();
+        let untouchable = decoys.path().join("tool");
+        fs::write(&untouchable, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&untouchable, fs::Permissions::from_mode(0o055)).unwrap();
+        let tools = TempDir::new().unwrap();
+        let real = tool(&tools, "tool");
+        let path = env::join_paths([decoys.path(), tools.path()]).unwrap();
+
+        let (searched, found) = hunted(Path::new("tool"), &path);
+
+        assert_eq!(found, Some(real), "the hunt continues where execvp would");
+        assert_eq!(searched, [untouchable.display().to_string()]);
+    }
+
+    #[test]
+    fn an_unset_or_empty_path_searches_nowhere_never_the_cwd() {
+        let (searched, found) = hunted(Path::new("git"), OsStr::new(""));
+        assert_eq!(found, None);
+        assert_eq!(
+            searched,
+            Vec::<String>::new(),
+            "an empty PATH component is not the cwd"
+        );
+    }
+
     #[test]
     fn the_token_rails_name_where_they_looked_and_hand_over_what_they_found() {
         // The environment answers first, and the store is never touched —
@@ -543,6 +580,17 @@ mod native_tests {
         let (status, token) = github_token(Some(String::new()), &InMemory::default());
         assert_eq!(token, None);
         assert!(matches!(status.standing, Standing::Absent { .. }));
+
+        // An empty keyring entry is no token either: absent, the keyring
+        // named among the places searched.
+        let mut hollow = InMemory::default();
+        hollow.set("github", "").unwrap();
+        let (status, token) = github_token(None, &hollow);
+        assert_eq!(token, None);
+        let Standing::Absent { searched } = &status.standing else {
+            panic!("an empty entry is absence, not presence: {status:?}");
+        };
+        assert!(searched.iter().any(|stop| stop.contains("Epik/github")));
 
         // A keyring that will not answer is unfit, not absent.
         let (status, token) = github_token(None, &Unplugged);

@@ -10,9 +10,12 @@
 //!
 //! Before any run, the preflight resolves the config-derived manifest
 //! ([`epik::preflight`]) and refuses with rendered `CapabilityStatus`es —
-//! nothing on stdout, no backtrace, no worktree. Boot-integrity failures
-//! (unparseable config, an unwritable Epik home) are the only
-//! fatal-at-startup class, and the exit code tells every class apart:
+//! nothing on stdout, no backtrace, no worktree. SIGINT and SIGTERM are
+//! wired to the run's stop token, so cancellation winds the run up through
+//! the governed agent's own group kill — never an orphaned, credentialed
+//! claude outliving its harness. Boot-integrity failures (unparseable
+//! config, an unwritable Epik home) are the only fatal-at-startup class,
+//! and the exit code tells every class apart:
 //!
 //! - 0 — the run's verdict is done
 //! - 1 — the run failed: the verdict's report, or a run that could not be
@@ -172,7 +175,32 @@ mod worker {
                 return ExitCode::from(REFUSED);
             }
         };
-        conducted(&cli, &repo, &git, &agent, token)
+        let stop = StopToken::new();
+        if let Err(error) = canceling(&stop) {
+            eprintln!("epik-worker: wiring cancellation: {error}");
+            return ExitCode::from(BROKEN);
+        }
+        // The vouched-for token, offered onward: to git for the fetches,
+        // through the askpass rails.
+        let git = git.authenticated(token.clone());
+        conducted(&cli, &worker, &repo, &git, &agent, token, &stop)
+    }
+
+    /// Wires SIGINT and SIGTERM to the run's stop token. A signal asks the
+    /// run to wind up: the governed agent answers within its glance, kills
+    /// its whole process group, and the worker exits by the verdict — a
+    /// cancelled worker never leaves an orphaned, credentialed claude
+    /// running past its harness.
+    fn canceling(stop: &StopToken) -> std::io::Result<()> {
+        use signal_hook::consts::{SIGINT, SIGTERM};
+        let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])?;
+        let stop = stop.clone();
+        thread::spawn(move || {
+            for _ in signals.forever() {
+                stop.stop();
+            }
+        });
+        Ok(())
     }
 
     /// Boot integrity: the home made writable, the config read whole. The
@@ -193,38 +221,55 @@ mod worker {
     }
 
     /// Provisions the requested run and conducts it to its verdict.
-    fn conducted(cli: &Cli, repo: &Repo, git: &Git, agent: &ClaudeCode, token: String) -> ExitCode {
-        let github = GitHub::new(Some(token.clone()));
+    fn conducted(
+        cli: &Cli,
+        worker: &Worker,
+        repo: &Repo,
+        git: &Git,
+        agent: &ClaudeCode,
+        token: String,
+        stop: &StopToken,
+    ) -> ExitCode {
+        let github = worker.api.as_ref().map_or_else(
+            || GitHub::new(Some(token.clone())),
+            |api| GitHub::at(api, Some(token.clone())),
+        );
         // Credentials injected, never discovered: the wide prompt's agent
         // conducts the pull-request ceremony through gh, which answers to
-        // either spelling.
+        // either spelling — and commits as Epik, so a box with no
+        // ~/.gitconfig never burns agent time on "tell me who you are".
         let env = vec![
             ("GH_TOKEN".to_owned(), token.clone()),
             ("GITHUB_TOKEN".to_owned(), token),
+            ("GIT_AUTHOR_NAME".to_owned(), "Epik".to_owned()),
+            ("GIT_AUTHOR_EMAIL".to_owned(), "epik@localhost".to_owned()),
+            ("GIT_COMMITTER_NAME".to_owned(), "Epik".to_owned()),
+            (
+                "GIT_COMMITTER_EMAIL".to_owned(),
+                "epik@localhost".to_owned(),
+            ),
         ];
-        let issue = match github.issue(repo, cli.number) {
-            Ok(issue) => issue,
-            Err(error) => {
-                eprintln!("epik-worker: reading issue #{}: {error}", cli.number);
-                return ExitCode::from(FAILED);
-            }
-        };
-        // GitHub is the only rendezvous, so the clone URL is the repo's own
-        // address — never a spelling with a token in it.
-        let url = format!("https://github.com/{repo}.git");
-        let stop = StopToken::new();
+        // GitHub is the only rendezvous, so the clone URL defaults to the
+        // repo's own address — never a spelling with a token in it; the
+        // token rides the cache's askpass rails instead.
+        let url = worker
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("https://github.com/{repo}.git"));
         match cli.job {
             Job::Feature => {
+                // No prefetch: a feature run reads its own graph, one
+                // snapshot serving the whole run.
                 let run = FeatureRun {
                     repo: repo.clone(),
                     url,
                     base: cli.target.clone(),
-                    issue,
+                    number: cli.number,
                     env,
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(verdict) = pumped(|log| run.conduct(git, &github, agent, log, &stop))
+                let Some(verdict) = pumped(|log| run.conduct(git, &github, agent, log, stop))
                 else {
                     return crashed();
                 };
@@ -237,6 +282,15 @@ mod worker {
                 }
             }
             Job::Issue => {
+                // The one REST prefetch: an issue run is fully provisioned,
+                // everything handed in, so the issue is read here.
+                let issue = match github.issue(repo, cli.number) {
+                    Ok(issue) => issue,
+                    Err(error) => {
+                        eprintln!("epik-worker: reading issue #{}: {error}", cli.number);
+                        return ExitCode::from(FAILED);
+                    }
+                };
                 let run = IssueRun {
                     repo: repo.clone(),
                     url,
@@ -246,7 +300,7 @@ mod worker {
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(concluded) = pumped(|log| run.conduct(git, &github, agent, log, &stop))
+                let Some(concluded) = pumped(|log| run.conduct(git, &github, agent, log, stop))
                 else {
                     return crashed();
                 };

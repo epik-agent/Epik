@@ -81,6 +81,14 @@ pub struct Worker {
     /// — launchd's `PATH` is not a login shell's — and a bare name falls
     /// back to `PATH` resolution.
     pub agent: String,
+    /// Where the repository is cloned from, when it is not GitHub's own
+    /// address for `repo` — an enterprise host, a mirror, a test's local
+    /// origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Where the GitHub API answers, when it is not `api.github.com`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
 }
 
 impl Default for Worker {
@@ -88,6 +96,8 @@ impl Default for Worker {
         Self {
             repo: "epik-agent/Epik".to_owned(),
             agent: "claude".to_owned(),
+            url: None,
+            api: None,
         }
     }
 }
