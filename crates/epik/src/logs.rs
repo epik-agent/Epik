@@ -10,8 +10,9 @@
 //! deletable at the cost of time alone, while the log is the only copy of
 //! the run's narration — no Epik code deletes it, and every run gets a
 //! fresh file of its own: `create_new` arbitrates, and a rival landing
-//! inside the same second takes the next `-2`, `-3`, … spelling, so no
-//! run ever writes into — let alone truncates — another's file.
+//! inside the same second takes the next `_2`, `_3`, … spelling — `_`
+//! sorts after `.`, so name order stays run order — and no run ever
+//! writes into, let alone truncates, another's file.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -68,20 +69,24 @@ impl Logs {
 
     /// Where a `kind` run of `number` that started at `start` writes its
     /// log, whether or not it exists yet: the plain spelling. A run that
-    /// finds it already taken writes beside it under the next `-2`, `-3`,
+    /// finds it already taken writes beside it under the next `_2`, `_3`,
     /// … — [`create`](Self::create) arbitrates.
     #[must_use]
     pub fn path(&self, repo: &Repo, kind: Kind, number: u64, start: SystemTime) -> PathBuf {
-        self.root
-            .join(&repo.owner)
-            .join(&repo.name)
-            .join(format!("{kind}-{number}-{}.jsonl", stamp(start)))
+        self.dir(repo)
+            .join(format!("{}.jsonl", stem(kind, number, start)))
+    }
+
+    /// Where `repo`'s logs gather: one directory per repository, on the
+    /// other roots' `<owner>/<name>` pattern.
+    fn dir(&self, repo: &Repo) -> PathBuf {
+        self.root.join(&repo.owner).join(&repo.name)
     }
 
     /// Opens the log for a run starting now: parents made, and a file no
     /// other run holds. The log is the only copy of the run's narration,
     /// so `create_new` is the arbiter: a rival that landed inside the same
-    /// second keeps its file, and this run takes the next `-2`, `-3`, …
+    /// second keeps its file, and this run takes the next `_2`, `_3`, …
     /// spelling — one file per run, and never a write into another's.
     ///
     /// # Errors
@@ -100,15 +105,18 @@ impl Logs {
         number: u64,
         start: SystemTime,
     ) -> Result<JsonLines<File>> {
-        let dir = self.root.join(&repo.owner).join(&repo.name);
+        let dir = self.dir(repo);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let stem = format!("{kind}-{number}-{}", stamp(start));
+        let stem = stem(kind, number, start);
         let mut rival = 1_u64;
         loop {
+            // `_` for the rival counter, not `-`: it sorts after `.`, so
+            // the plain spelling comes first and name order stays run
+            // order.
             let path = if rival == 1 {
                 dir.join(format!("{stem}.jsonl"))
             } else {
-                dir.join(format!("{stem}-{rival}.jsonl"))
+                dir.join(format!("{stem}_{rival}.jsonl"))
             };
             match OpenOptions::new().append(true).create_new(true).open(&path) {
                 Ok(file) => return Ok(JsonLines::new(file)),
@@ -119,6 +127,12 @@ impl Logs {
             }
         }
     }
+}
+
+/// The file name shy of its extension — what the rival counter lands
+/// after.
+fn stem(kind: Kind, number: u64, start: SystemTime) -> String {
+    format!("{kind}-{number}-{}", stamp(start))
 }
 
 /// `start` as UTC RFC 3339 to the second, with `-` for `:` — colons are
@@ -230,11 +244,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "issue-7-2026-08-08T12-30-05Z-2.jsonl",
-                "issue-7-2026-08-08T12-30-05Z-3.jsonl",
                 "issue-7-2026-08-08T12-30-05Z.jsonl",
+                "issue-7-2026-08-08T12-30-05Z_2.jsonl",
+                "issue-7-2026-08-08T12-30-05Z_3.jsonl",
             ],
-            "one file per run: rivals take the next spelling, never a shared file"
+            "one file per run, and sorting the names replays run order"
         );
         let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
         assert_eq!(
@@ -243,11 +257,11 @@ mod tests {
             "the first run's file carries the first run's line and nothing else"
         );
         assert_eq!(
-            read("issue-7-2026-08-08T12-30-05Z-2.jsonl").lines().count(),
+            read("issue-7-2026-08-08T12-30-05Z_2.jsonl").lines().count(),
             1
         );
         assert_eq!(
-            read("issue-7-2026-08-08T12-30-05Z-3.jsonl").lines().count(),
+            read("issue-7-2026-08-08T12-30-05Z_3.jsonl").lines().count(),
             1
         );
     }

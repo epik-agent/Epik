@@ -2,7 +2,7 @@
 //! [`crate::event`]: `Log` is generic over the event type, so a new
 //! vocabulary costs no new plumbing.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::mpsc::Sender;
 
 use serde::Serialize;
@@ -124,20 +124,39 @@ impl<E, L: Log<Envelope<E>>> Log<E> for Enveloping<L> {
 /// Writes each event as one JSON line: the wire format for logs that cross
 /// a process boundary.
 #[derive(Debug)]
-pub struct JsonLines<W: Write>(W);
+pub struct JsonLines<W: Write> {
+    writer: W,
+    failure: Option<io::Error>,
+}
 
 impl<W: Write> JsonLines<W> {
     pub const fn new(writer: W) -> Self {
-        Self(writer)
+        Self {
+            writer,
+            failure: None,
+        }
+    }
+
+    /// The first failure this sink swallowed, when any. Emitting is
+    /// infallible by design — a broken log must never abort the work it is
+    /// describing — so a caller whose writer is the only copy of the
+    /// narration asks here, after the work is safe, whether any of it was
+    /// lost.
+    pub const fn failure(&self) -> Option<&io::Error> {
+        self.failure.as_ref()
     }
 }
 
 impl<E: Serialize, W: Write> Log<E> for JsonLines<W> {
     fn emit(&mut self, event: E) {
-        // Emitting is infallible: an event that can't be written is dropped.
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = writeln!(self.0, "{json}");
-            let _ = self.0.flush();
+        // Emitting is infallible: an event that can't be written is
+        // dropped — but remembered, never silently.
+        let written = serde_json::to_string(&event)
+            .map_err(io::Error::other)
+            .and_then(|json| writeln!(self.writer, "{json}"))
+            .and_then(|()| self.writer.flush());
+        if let Err(error) = written {
+            self.failure.get_or_insert(error);
         }
     }
 }
@@ -161,10 +180,35 @@ mod tests {
             let mut log = JsonLines::new(&mut buffer);
             Log::emit(&mut log, Event::IssueStarted { id: 1 });
             Log::emit(&mut log, Noise::Hum);
+            assert!(log.failure().is_none(), "a healthy sink has lost nothing");
         }
         assert_eq!(
             String::from_utf8(buffer).unwrap(),
             "{\"IssueStarted\":{\"id\":1}}\n\"Hum\"\n"
+        );
+    }
+
+    #[test]
+    fn a_sink_that_lost_a_line_says_so_afterward() {
+        /// A writer standing in for a full disk: every write refuses.
+        struct Full;
+        impl Write for Full {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("no space left"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut log = JsonLines::new(Full);
+        Log::emit(&mut log, Event::IssueStarted { id: 1 });
+        Log::emit(&mut log, Event::IssueImplemented { id: 1 });
+
+        let failure = log.failure().expect("the loss is remembered");
+        assert!(
+            failure.to_string().contains("no space left"),
+            "and it is the first loss that speaks: {failure}"
         );
     }
 

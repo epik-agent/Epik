@@ -588,6 +588,41 @@ fn a_failed_runs_log_survives_beside_the_retained_worktree() {
 }
 
 #[test]
+fn a_run_that_could_not_be_provisioned_leaves_no_log() {
+    let rig = Rig::new();
+    let root = TempDir::new().unwrap();
+    let (origin_dir, sha) = origin(&root);
+    let port = little_github(&sha, true);
+    rig.conductable(&origin_dir, port);
+    rig.tool("claude", "exit 0");
+
+    // Issue 9 is one the little GitHub never learned: the prefetch fails,
+    // so no run ever starts.
+    let output = rig
+        .command(&["--issue", "9", "--target", "main"])
+        .env("PATH", rig.path_with_real_git())
+        .env("EPIK_GITHUB_TOKEN", "ghp-fake")
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("reading issue #9"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no run, so no events: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !rig.home.path().join("logs").exists(),
+        "a run that never started leaves no file saying otherwise"
+    );
+}
+
+#[test]
 fn two_runs_of_the_same_issue_leave_two_log_files() {
     let rig = Rig::new();
     let root = TempDir::new().unwrap();
