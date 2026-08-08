@@ -26,6 +26,10 @@ pub mod github;
 pub mod implementation;
 pub mod ipc;
 pub mod keystore;
+// A spawner of run threads over git, GitHub, and the log files, so the
+// whole module is native.
+#[cfg(feature = "native")]
+pub mod launch;
 pub mod logging;
 // Files and a wall clock through and through, so the whole module is
 // native.
