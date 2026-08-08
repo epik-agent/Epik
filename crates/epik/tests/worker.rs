@@ -151,9 +151,11 @@ fn origin(root: &TempDir) -> (PathBuf, String) {
 
 /// A little GitHub on a loopback port: exactly the REST reads one issue
 /// run makes, canned around `sha` — the commit the run's worktree will
-/// stand on. The issue reads open first and closed after, which is the
-/// arc the wide prompt promises: judgment's re-read sees the closure.
-fn little_github(sha: &str) -> u16 {
+/// stand on. When `closes`, the issue reads open first and closed after,
+/// which is the arc the wide prompt promises: judgment's re-read sees the
+/// closure. When not, the issue stays open and judgment disbelieves the
+/// agent — the staged failure.
+fn little_github(sha: &str, closes: bool) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let sha = sha.to_owned();
@@ -166,7 +168,11 @@ fn little_github(sha: &str) -> u16 {
             };
             let body = if path.starts_with("/repos/epik-agent/Epik/issues/7") {
                 issue_reads += 1;
-                let state = if issue_reads == 1 { "open" } else { "closed" };
+                let state = if closes && issue_reads > 1 {
+                    "closed"
+                } else {
+                    "open"
+                };
                 json!({"number": 7, "title": "make it work", "body": "details", "state": state})
             } else if path.starts_with("/repos/epik-agent/Epik/pulls/41") {
                 json!({
@@ -212,6 +218,29 @@ fn respond(stream: &mut TcpStream, body: &str) {
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len(),
     );
+}
+
+/// The run logs a rig accumulated, in file order: each file's name beside
+/// its lines parsed back into the issue-run vocabulary.
+fn run_logs(rig: &Rig) -> Vec<(String, Vec<RunEvent>)> {
+    let dir = rig.home.path().join("logs/epik-agent/Epik");
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|path| {
+            let events = fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("every log line is one JSON event"))
+                .collect();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, events)
+        })
+        .collect()
 }
 
 /// Polls `check` to true within `deadline`, or fails naming `what`.
@@ -262,6 +291,10 @@ fn assert_refused(rig: &Rig, output: &Output) {
         "no worktree before the preflight passes"
     );
     assert!(!rig.home.path().join("repos").exists(), "and no clone");
+    assert!(
+        !rig.home.path().join("logs").exists(),
+        "and no log file claiming a run happened"
+    );
 }
 
 #[test]
@@ -440,7 +473,7 @@ fn a_verified_issue_run_exits_zero_streaming_json_events() {
     let rig = Rig::new();
     let root = TempDir::new().unwrap();
     let (origin_dir, sha) = origin(&root);
-    let port = little_github(&sha);
+    let port = little_github(&sha, true);
     rig.conductable(&origin_dir, port);
     // A claude that is entirely script: it claims completion — and leaves a
     // note of the identity and credential the harness injected.
@@ -497,6 +530,135 @@ fn a_verified_issue_run_exits_zero_streaming_json_events() {
             .exists(),
         "a verified success leaves no worktree"
     );
+    let logs = run_logs(&rig);
+    let [(name, logged)] = logs.as_slice() else {
+        panic!("one run, one log file: {logs:?}");
+    };
+    assert!(
+        name.starts_with("issue-7-") && name.ends_with("Z.jsonl"),
+        "the file is named for the run and its start: {name}"
+    );
+    assert_eq!(
+        logged, &events,
+        "the log is the stream exactly as stdout heard it"
+    );
+}
+
+#[test]
+fn a_failed_runs_log_survives_beside_the_retained_worktree() {
+    let rig = Rig::new();
+    let root = TempDir::new().unwrap();
+    let (origin_dir, sha) = origin(&root);
+    // A github that never closes the issue: the agent's claimed completion
+    // is disbelieved, so the run fails and its worktree is retained.
+    let port = little_github(&sha, false);
+    rig.conductable(&origin_dir, port);
+    rig.tool(
+        "claude",
+        "echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'",
+    );
+
+    let output = rig
+        .command(&["--issue", "7", "--target", "main"])
+        .env("PATH", rig.path_with_real_git())
+        .env("EPIK_GITHUB_TOKEN", "ghp-fake")
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(
+        rig.home
+            .path()
+            .join("work/epik-agent/Epik/issue-7")
+            .is_dir(),
+        "the failed run's worktree is retained"
+    );
+    let logs = run_logs(&rig);
+    let [(name, logged)] = logs.as_slice() else {
+        panic!("the log survives beside the forensics: {logs:?}");
+    };
+    assert!(name.starts_with("issue-7-"), "{name}");
+    assert!(
+        matches!(
+            logged.last(),
+            Some(RunEvent::Finished(Verdict::Failed { .. }))
+        ),
+        "the log's last word is the failure: {logged:?}"
+    );
+}
+
+#[test]
+fn a_run_that_could_not_be_provisioned_leaves_no_log() {
+    let rig = Rig::new();
+    let root = TempDir::new().unwrap();
+    let (origin_dir, sha) = origin(&root);
+    let port = little_github(&sha, true);
+    rig.conductable(&origin_dir, port);
+    rig.tool("claude", "exit 0");
+
+    // Issue 9 is one the little GitHub never learned: the prefetch fails,
+    // so no run ever starts.
+    let output = rig
+        .command(&["--issue", "9", "--target", "main"])
+        .env("PATH", rig.path_with_real_git())
+        .env("EPIK_GITHUB_TOKEN", "ghp-fake")
+        .output()
+        .unwrap();
+
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("reading issue #9"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no run, so no events: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !rig.home.path().join("logs").exists(),
+        "a run that never started leaves no file saying otherwise"
+    );
+}
+
+#[test]
+fn two_runs_of_the_same_issue_leave_two_log_files() {
+    let rig = Rig::new();
+    let root = TempDir::new().unwrap();
+    let (origin_dir, sha) = origin(&root);
+    rig.tool(
+        "claude",
+        "echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\"}'",
+    );
+    // Each run gets its own little GitHub, so both walk the same
+    // open-then-closed arc; the home — and its logs — persists across both.
+    for _ in 0..2 {
+        let port = little_github(&sha, true);
+        rig.conductable(&origin_dir, port);
+        let output = rig
+            .command(&["--issue", "7", "--target", "main"])
+            .env("PATH", rig.path_with_real_git())
+            .env("EPIK_GITHUB_TOKEN", "ghp-fake")
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0, "{}", stderr(&output));
+    }
+
+    let logs = run_logs(&rig);
+    assert_eq!(
+        logs.len(),
+        2,
+        "one file per run, named by start time: {logs:?}"
+    );
+    for (name, logged) in &logs {
+        assert!(name.starts_with("issue-7-"), "{name}");
+        assert_eq!(
+            logged.last(),
+            Some(&RunEvent::Finished(Verdict::Done)),
+            "each file carries its own whole run"
+        );
+    }
 }
 
 #[test]
@@ -504,7 +666,7 @@ fn a_signal_winds_the_run_up_and_the_agents_whole_group_dies_with_it() {
     let rig = Rig::new();
     let root = TempDir::new().unwrap();
     let (origin_dir, sha) = origin(&root);
-    let port = little_github(&sha);
+    let port = little_github(&sha, true);
     rig.conductable(&origin_dir, port);
     // A claude that digs in: it notes its pid, spawns a child of its own —
     // the orphan candidate — and sleeps far past the test. `/bin/sleep` by

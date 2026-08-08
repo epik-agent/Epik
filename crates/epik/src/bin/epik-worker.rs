@@ -6,16 +6,19 @@
 //! conducts one issue — against `--target <branch>`, the agent on its own
 //! thread while this one pumps every event to stdout as JSON lines:
 //! `FeatureEvent`s for a feature, `RunEvent`s for an issue, through the
-//! same `Log<E>` machinery every host pumps.
+//! same `Log<E>` machinery every host pumps. The same lines land in the
+//! run's log beneath `~/.epik/logs` ([`epik::logs`]) — stdout is for
+//! whoever is listening now, the file for whoever asks later.
 //!
 //! Before any run, the preflight resolves the config-derived manifest
 //! ([`epik::preflight`]) and refuses with rendered `CapabilityStatus`es —
-//! nothing on stdout, no backtrace, no worktree. SIGINT and SIGTERM are
-//! wired to the run's stop token, so cancellation winds the run up through
-//! the governed agent's own group kill — never an orphaned, credentialed
-//! claude outliving its harness. Boot-integrity failures (unparseable
-//! config, an unwritable Epik home) are the only fatal-at-startup class,
-//! and the exit code tells every class apart:
+//! nothing on stdout, no backtrace, no worktree, no log file. SIGINT and
+//! SIGTERM are wired to the run's stop token, so cancellation winds the
+//! run up through the governed agent's own group kill — never an orphaned,
+//! credentialed claude outliving its harness. Boot-integrity failures
+//! (unparseable config, an unwritable Epik home, a run log that cannot be
+//! opened) are the only fatal-before-the-run class, and the exit code
+//! tells every class apart:
 //!
 //! - 0 — the run's verdict is done
 //! - 1 — the run failed: the verdict's report, or a run that could not be
@@ -41,6 +44,7 @@ fn main() -> std::process::ExitCode {
 #[cfg(unix)]
 mod worker {
     use std::fs;
+    use std::fs::File;
     use std::io;
     use std::process::ExitCode;
     use std::sync::mpsc;
@@ -54,9 +58,12 @@ mod worker {
     use epik::git::Git;
     use epik::github::{GitHub, Repo};
     use epik::keystore::{GITHUB_OVERRIDE_ENV, OsKeyring};
-    use epik::logging::{JsonLines, Log};
+    use epik::logging::{Both, JsonLines, Log};
+    use epik::logs::{Kind, Logs};
     use epik::preflight;
-    use epik::run::{FeatureRun, FeatureVerdict, IssueRun, Retained, Verdict};
+    use epik::run::{
+        FeatureEvent, FeatureRun, FeatureVerdict, IssueRun, Retained, RunEvent, Verdict,
+    };
     use serde::Serialize;
 
     /// A conducted run whose verdict is failure — or one that could not be
@@ -66,7 +73,8 @@ mod worker {
     const USAGE: u8 = 2;
     /// The preflight refused: a capability is not present.
     const REFUSED: u8 = 3;
-    /// Boot integrity: unparseable config, an unwritable Epik home.
+    /// Boot integrity: unparseable config, an unwritable Epik home, a run
+    /// log that cannot be opened.
     const BROKEN: u8 = 4;
 
     const USAGE_LINE: &str = "usage: epik-worker (--feature <n> | --issue <n>) --target <branch>";
@@ -85,14 +93,11 @@ mod worker {
     /// run failed: CI takes minutes, so half an hour is patience, not hope.
     const PATIENCE: Duration = Duration::from_mins(30);
 
-    /// Which run one invocation conducts.
-    enum Job {
-        Feature,
-        Issue,
-    }
-
     struct Cli {
-        job: Job,
+        /// Which run one invocation conducts — [`Kind`] doubles as the
+        /// worker's job vocabulary, being exactly the same two-way choice
+        /// the log file is named by.
+        job: Kind,
         number: u64,
         target: String,
     }
@@ -101,7 +106,7 @@ mod worker {
         /// Hand-rolled, like every host here: two flags do not earn a
         /// dependency.
         fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
-            let mut job: Option<(Job, u64)> = None;
+            let mut job: Option<(Kind, u64)> = None;
             let mut target: Option<String> = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -111,9 +116,9 @@ mod worker {
                             .and_then(|number| number.parse().ok())
                             .ok_or_else(|| format!("{arg} wants an issue number\n{USAGE_LINE}"))?;
                         let kind = if arg == "--feature" {
-                            Job::Feature
+                            Kind::Feature
                         } else {
-                            Job::Issue
+                            Kind::Issue
                         };
                         if job.replace((kind, number)).is_some() {
                             return Err(format!("one job per invocation\n{USAGE_LINE}"));
@@ -257,7 +262,7 @@ mod worker {
             .clone()
             .unwrap_or_else(|| format!("https://github.com/{repo}.git"));
         match cli.job {
-            Job::Feature => {
+            Kind::Feature => {
                 // No prefetch: a feature run reads its own graph, one
                 // snapshot serving the whole run.
                 let run = FeatureRun {
@@ -269,8 +274,20 @@ mod worker {
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(verdict) = pumped(|log| run.conduct(git, &github, agent, log, stop))
-                else {
+                let log = match opened(repo, Kind::Feature, cli.number) {
+                    Ok(log) => log,
+                    Err(code) => return code,
+                };
+                let verdict = pumped(
+                    log,
+                    |log| run.conduct(git, &github, agent, log, stop),
+                    || {
+                        FeatureEvent::Finished(FeatureVerdict::Failed {
+                            report: CRASHED.to_owned(),
+                        })
+                    },
+                );
+                let Some(verdict) = verdict else {
                     return crashed();
                 };
                 match verdict {
@@ -281,7 +298,7 @@ mod worker {
                     FeatureVerdict::Failed { report } => failed(&report),
                 }
             }
-            Job::Issue => {
+            Kind::Issue => {
                 // The one REST prefetch: an issue run is fully provisioned,
                 // everything handed in, so the issue is read here.
                 let issue = match github.issue(repo, cli.number) {
@@ -300,22 +317,23 @@ mod worker {
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(concluded) = pumped(|log| run.conduct(git, &github, agent, log, stop))
-                else {
+                let log = match opened(repo, Kind::Issue, cli.number) {
+                    Ok(log) => log,
+                    Err(code) => return code,
+                };
+                let concluded = pumped(
+                    log,
+                    |log| run.conduct(git, &github, agent, log, stop),
+                    || {
+                        RunEvent::Finished(Verdict::Failed {
+                            report: CRASHED.to_owned(),
+                        })
+                    },
+                );
+                let Some(concluded) = concluded else {
                     return crashed();
                 };
-                match &concluded.retained {
-                    Some(Retained::Forensics(worktree)) => {
-                        eprintln!("worktree retained at {}", worktree.path().display());
-                    }
-                    Some(Retained::Undeleted(worktree, error)) => {
-                        eprintln!(
-                            "worktree at {} could not be removed: {error}",
-                            worktree.path().display()
-                        );
-                    }
-                    None => {}
-                }
+                reported(concluded.retained.as_ref());
                 match concluded.verdict {
                     Verdict::Done => ExitCode::SUCCESS,
                     Verdict::Failed { report } => failed(&report),
@@ -324,13 +342,51 @@ mod worker {
         }
     }
 
+    /// Says on stderr where a kept worktree stands, and why.
+    fn reported(retained: Option<&Retained>) {
+        match retained {
+            Some(Retained::Forensics(worktree)) => {
+                eprintln!("worktree retained at {}", worktree.path().display());
+            }
+            Some(Retained::Undeleted(worktree, error)) => {
+                eprintln!(
+                    "worktree at {} could not be removed: {error}",
+                    worktree.path().display()
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Opens the run's log, deliberately fail-closed: the file is the only
+    /// durable copy of the narration, so a run whose log cannot exist must
+    /// not start — an unopenable log is boot integrity, exit code
+    /// [`BROKEN`]. Called at the last moment before the first event, after
+    /// everything that can refuse — the preflight, an issue run's prefetch
+    /// — because a run that never started leaves no file saying otherwise.
+    fn opened(repo: &Repo, kind: Kind, number: u64) -> Result<JsonLines<File>, ExitCode> {
+        Logs::new()
+            .and_then(|logs| logs.create(repo, kind, number))
+            .map_err(|error| {
+                eprintln!("epik-worker: {error:#}");
+                ExitCode::from(BROKEN)
+            })
+    }
+
     /// Conducts `work` on its own thread — one thread per running agent,
     /// the host's own pattern — while this one pumps every event it emits
-    /// to stdout, one JSON line each. `None` when the run panicked, which
-    /// no verdict can stand for.
-    fn pumped<E, V>(work: impl FnOnce(&mut dyn Log<E>) -> V + Send) -> Option<V>
+    /// to two sinks, one JSON line each: stdout for whoever is listening
+    /// now, `file` for whoever asks later. `None` when the run panicked,
+    /// which no verdict can stand for — though the sinks still get `crash`
+    /// as their last word, because a narration that just stops mid-stream
+    /// reads as an unfinished run rather than a dead one.
+    fn pumped<E, V>(
+        file: JsonLines<File>,
+        work: impl FnOnce(&mut dyn Log<E>) -> V + Send,
+        crash: impl FnOnce() -> E,
+    ) -> Option<V>
     where
-        E: Serialize + Send,
+        E: Clone + Serialize + Send,
         V: Send,
     {
         thread::scope(|scope| {
@@ -339,11 +395,21 @@ mod worker {
                 let mut log = sender;
                 work(&mut log)
             });
-            let mut lines = JsonLines::new(io::stdout().lock());
+            let mut sinks = Both(JsonLines::new(io::stdout().lock()), file);
             for event in receiver {
-                lines.emit(event);
+                sinks.emit(event);
             }
-            conducting.join().ok()
+            let verdict = conducting.join().ok();
+            if verdict.is_none() {
+                sinks.emit(crash());
+            }
+            // The file is the only durable copy of the narration: the
+            // verdict is GitHub's truth and stands whatever became of the
+            // log, but a lost line is said aloud, never swallowed.
+            if let Some(error) = sinks.1.failure() {
+                eprintln!("epik-worker: the run log lost events: {error}");
+            }
+            verdict
         })
     }
 
@@ -352,8 +418,11 @@ mod worker {
         ExitCode::from(FAILED)
     }
 
+    /// What a panicked run reports, in the log's last word and on stderr.
+    const CRASHED: &str = "the run panicked";
+
     fn crashed() -> ExitCode {
-        eprintln!("epik-worker: the run panicked");
+        eprintln!("epik-worker: {CRASHED}");
         ExitCode::from(FAILED)
     }
 }
