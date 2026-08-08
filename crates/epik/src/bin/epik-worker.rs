@@ -6,16 +6,19 @@
 //! conducts one issue — against `--target <branch>`, the agent on its own
 //! thread while this one pumps every event to stdout as JSON lines:
 //! `FeatureEvent`s for a feature, `RunEvent`s for an issue, through the
-//! same `Log<E>` machinery every host pumps.
+//! same `Log<E>` machinery every host pumps. The same lines land in the
+//! run's log beneath `~/.epik/logs` ([`epik::logs`]) — stdout is for
+//! whoever is listening now, the file for whoever asks later.
 //!
 //! Before any run, the preflight resolves the config-derived manifest
 //! ([`epik::preflight`]) and refuses with rendered `CapabilityStatus`es —
-//! nothing on stdout, no backtrace, no worktree. SIGINT and SIGTERM are
-//! wired to the run's stop token, so cancellation winds the run up through
-//! the governed agent's own group kill — never an orphaned, credentialed
-//! claude outliving its harness. Boot-integrity failures (unparseable
-//! config, an unwritable Epik home) are the only fatal-at-startup class,
-//! and the exit code tells every class apart:
+//! nothing on stdout, no backtrace, no worktree, no log file. SIGINT and
+//! SIGTERM are wired to the run's stop token, so cancellation winds the
+//! run up through the governed agent's own group kill — never an orphaned,
+//! credentialed claude outliving its harness. Boot-integrity failures
+//! (unparseable config, an unwritable Epik home, a run log that cannot be
+//! opened) are the only fatal-before-the-run class, and the exit code
+//! tells every class apart:
 //!
 //! - 0 — the run's verdict is done
 //! - 1 — the run failed: the verdict's report, or a run that could not be
@@ -41,6 +44,7 @@ fn main() -> std::process::ExitCode {
 #[cfg(unix)]
 mod worker {
     use std::fs;
+    use std::fs::File;
     use std::io;
     use std::process::ExitCode;
     use std::sync::mpsc;
@@ -54,7 +58,8 @@ mod worker {
     use epik::git::Git;
     use epik::github::{GitHub, Repo};
     use epik::keystore::{GITHUB_OVERRIDE_ENV, OsKeyring};
-    use epik::logging::{JsonLines, Log};
+    use epik::logging::{Both, JsonLines, Log};
+    use epik::logs::{Kind, Logs};
     use epik::preflight;
     use epik::run::{FeatureRun, FeatureVerdict, IssueRun, Retained, Verdict};
     use serde::Serialize;
@@ -66,7 +71,8 @@ mod worker {
     const USAGE: u8 = 2;
     /// The preflight refused: a capability is not present.
     const REFUSED: u8 = 3;
-    /// Boot integrity: unparseable config, an unwritable Epik home.
+    /// Boot integrity: unparseable config, an unwritable Epik home, a run
+    /// log that cannot be opened.
     const BROKEN: u8 = 4;
 
     const USAGE_LINE: &str = "usage: epik-worker (--feature <n> | --issue <n>) --target <branch>";
@@ -230,6 +236,21 @@ mod worker {
         token: String,
         stop: &StopToken,
     ) -> ExitCode {
+        // The run's log, opened before the run starts: the file is the only
+        // durable copy of the narration, so a run whose log cannot exist
+        // does not start. After the preflight, though — a refused
+        // invocation never ran, and leaves no empty file saying otherwise.
+        let kind = match cli.job {
+            Job::Feature => Kind::Feature,
+            Job::Issue => Kind::Issue,
+        };
+        let log = match Logs::new().and_then(|logs| logs.create(repo, kind, cli.number)) {
+            Ok(log) => log,
+            Err(error) => {
+                eprintln!("epik-worker: {error:#}");
+                return ExitCode::from(BROKEN);
+            }
+        };
         let github = worker.api.as_ref().map_or_else(
             || GitHub::new(Some(token.clone())),
             |api| GitHub::at(api, Some(token.clone())),
@@ -269,7 +290,7 @@ mod worker {
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(verdict) = pumped(|log| run.conduct(git, &github, agent, log, stop))
+                let Some(verdict) = pumped(log, |log| run.conduct(git, &github, agent, log, stop))
                 else {
                     return crashed();
                 };
@@ -300,7 +321,8 @@ mod worker {
                     budget: BUDGET,
                     patience: PATIENCE,
                 };
-                let Some(concluded) = pumped(|log| run.conduct(git, &github, agent, log, stop))
+                let Some(concluded) =
+                    pumped(log, |log| run.conduct(git, &github, agent, log, stop))
                 else {
                     return crashed();
                 };
@@ -326,11 +348,15 @@ mod worker {
 
     /// Conducts `work` on its own thread — one thread per running agent,
     /// the host's own pattern — while this one pumps every event it emits
-    /// to stdout, one JSON line each. `None` when the run panicked, which
-    /// no verdict can stand for.
-    fn pumped<E, V>(work: impl FnOnce(&mut dyn Log<E>) -> V + Send) -> Option<V>
+    /// to two sinks, one JSON line each: stdout for whoever is listening
+    /// now, `file` for whoever asks later. `None` when the run panicked,
+    /// which no verdict can stand for.
+    fn pumped<E, V>(
+        file: JsonLines<File>,
+        work: impl FnOnce(&mut dyn Log<E>) -> V + Send,
+    ) -> Option<V>
     where
-        E: Serialize + Send,
+        E: Clone + Serialize + Send,
         V: Send,
     {
         thread::scope(|scope| {
@@ -339,9 +365,9 @@ mod worker {
                 let mut log = sender;
                 work(&mut log)
             });
-            let mut lines = JsonLines::new(io::stdout().lock());
+            let mut sinks = Both(JsonLines::new(io::stdout().lock()), file);
             for event in receiver {
-                lines.emit(event);
+                sinks.emit(event);
             }
             conducting.join().ok()
         })

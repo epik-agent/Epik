@@ -27,6 +27,10 @@ pub mod implementation;
 pub mod ipc;
 pub mod keystore;
 pub mod logging;
+// Files and a wall clock through and through, so the whole module is
+// native.
+#[cfg(feature = "native")]
+pub mod logs;
 pub mod preflight;
 pub mod repository;
 pub mod run;

@@ -49,6 +49,21 @@ impl<E> Log<E> for Vec<E> {
     }
 }
 
+/// Carries one event stream to two sinks.
+///
+/// The fan-out that lets a run's file log ride beside whatever sink the
+/// host supplies. The first sink takes a clone, the second the event
+/// itself; more than two is `Both` nested.
+#[derive(Debug)]
+pub struct Both<A, B>(pub A, pub B);
+
+impl<E: Clone, A: Log<E>, B: Log<E>> Log<E> for Both<A, B> {
+    fn emit(&mut self, event: E) {
+        self.0.emit(event.clone());
+        self.1.emit(event);
+    }
+}
+
 /// Maps every event on its way to `inner`: how one vocabulary rides inside
 /// another — an issue run's events stamped into a feature run's, say —
 /// without the observed work knowing whose log it was lent.
@@ -151,6 +166,19 @@ mod tests {
             String::from_utf8(buffer).unwrap(),
             "{\"IssueStarted\":{\"id\":1}}\n\"Hum\"\n"
         );
+    }
+
+    #[test]
+    fn both_carries_one_stream_to_two_sinks_whole() {
+        let mut left: Vec<Event> = Vec::new();
+        let mut right: Vec<Event> = Vec::new();
+        {
+            let mut log = Both(&mut left, &mut right);
+            log.emit(Event::IssueStarted { id: 1 });
+            log.emit(Event::IssueImplemented { id: 1 });
+        }
+        assert_eq!(left, right, "neither sink is shortchanged");
+        assert_eq!(left.len(), 2);
     }
 
     #[test]
