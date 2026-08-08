@@ -49,10 +49,9 @@ mod worker {
     use std::process::ExitCode;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     use anyhow::{Context, Result, anyhow};
-    use epik::agent::{Budget, ClaudeCode, CodingAgent};
+    use epik::agent::{ClaudeCode, CodingAgent};
     use epik::chat::StopToken;
     use epik::config::{self, Config, Worker};
     use epik::git::Git;
@@ -62,7 +61,8 @@ mod worker {
     use epik::logs::{Kind, Logs};
     use epik::preflight;
     use epik::run::{
-        FeatureEvent, FeatureRun, FeatureVerdict, IssueRun, Retained, RunEvent, Verdict,
+        BUDGET, FeatureEvent, FeatureRun, FeatureVerdict, IssueRun, PATIENCE, Retained, RunEvent,
+        Verdict,
     };
     use serde::Serialize;
 
@@ -78,20 +78,6 @@ mod worker {
     const BROKEN: u8 = 4;
 
     const USAGE_LINE: &str = "usage: epik-worker (--feature <n> | --issue <n>) --target <branch>";
-
-    /// What each run may spend: wide now, tapering by evidence — no token
-    /// or dollar ceiling yet. Claude Code's stream narrates every tool
-    /// call, so ten minutes of true silence is a wedged run, not a slow
-    /// one.
-    const BUDGET: Budget = Budget {
-        max_tokens: None,
-        max_cost: None,
-        stall: Duration::from_mins(10),
-    };
-
-    /// How long judgment waits for a check still running before calling the
-    /// run failed: CI takes minutes, so half an hour is patience, not hope.
-    const PATIENCE: Duration = Duration::from_mins(30);
 
     struct Cli {
         /// Which run one invocation conducts — [`Kind`] doubles as the

@@ -267,7 +267,12 @@ impl std::error::Error for Error {}
 
 /// GitHub, as Epik needs it: exactly the verbs the harness speaks, over one
 /// authenticated agent.
-#[derive(Debug)]
+///
+/// Cloning shares the credential cell and the connection agent: every clone
+/// is the same client, and a token told to one reaches them all — which is
+/// how the session's verbs and the launcher's run machinery stay one
+/// GitHub.
+#[derive(Clone, Debug)]
 pub struct GitHub {
     api: String,
     /// Read on every request rather than held as a value, so a PAT pasted

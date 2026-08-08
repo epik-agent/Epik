@@ -308,6 +308,15 @@ impl<S: KeyStore> Keys<S> {
         self.stand(self.override_key.as_deref(), provider)
     }
 
+    /// The GitHub override as it was captured, for a host handing the run
+    /// machinery the same environment reading it honours itself — never a
+    /// second read of the environment, so a stated override carries
+    /// through.
+    #[must_use]
+    pub fn github_override(&self) -> Option<String> {
+        self.github_override.clone()
+    }
+
     /// Where the GitHub token stands: `EPIK_GITHUB_TOKEN`, then the keyring
     /// under [`GITHUB_ACCOUNT`], then absent.
     ///

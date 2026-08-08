@@ -28,7 +28,7 @@ use serde_json::json;
 use crate::agent::{Budget, CodingAgent};
 use crate::chat::StopToken;
 use crate::git::Git;
-use crate::github::Repo;
+use crate::github::{self, Repo};
 use crate::keystore::KeyStore;
 use crate::logs::{Kind, Logs};
 use crate::preflight::{self, CapabilityStatus};
@@ -44,8 +44,10 @@ pub struct Launch {
     pub repo: Repo,
     /// Where the repository is cloned from.
     pub url: String,
-    /// The branch the review pull request merges into.
-    pub base: String,
+    /// The branch the review pull request merges into: stated, or — the
+    /// window's case, which has no `--target` flag — unstated, resolving
+    /// to the repository's default branch through the machinery at launch.
+    pub base: Option<String>,
     /// What each issue run may spend.
     pub budget: Budget,
     /// How long each issue run's judgment waits for a check still running.
@@ -162,18 +164,6 @@ impl Launcher {
     /// created, because a run whose narration has nowhere durable to land
     /// must not start.
     pub fn launch(&self, number: u64) -> Result<Launched, Error> {
-        // Credentials arrive only after the preflight vouches for them;
-        // everything else the run needs is in hand now, and the claim
-        // below wants the run's own name.
-        let run = FeatureRun {
-            repo: self.launch.repo.clone(),
-            url: self.launch.url.clone(),
-            base: self.launch.base.clone(),
-            number,
-            env: Vec::new(),
-            budget: self.launch.budget,
-            patience: self.launch.patience,
-        };
         let stop = StopToken::new();
         // The claim, brief: the preflight can spawn processes and consult
         // the keyring — a dialog, on macOS — so the lock covers only the
@@ -188,12 +178,12 @@ impl Launcher {
                 });
             }
             *running = Some(InFlight {
-                run: run.branch(),
+                run: FeatureRun::branch_for(number),
                 stop: stop.clone(),
                 handle: None,
             });
         }
-        self.provisioned(run, stop).inspect_err(|_| {
+        self.provisioned(number, stop).inspect_err(|_| {
             // A refused launch frees the slot on its way out — no rival
             // could have taken it while the claim stood.
             *slot(&self.running) = None;
@@ -201,24 +191,40 @@ impl Launcher {
     }
 
     /// The expensive middle of a launch, outside the slot's lock: the
-    /// preflight, the log's creation, and the conducting thread's start.
-    /// The claim already stands; the thread lands in it on success.
-    fn provisioned(&self, run: FeatureRun, stop: StopToken) -> Result<Launched, Error> {
+    /// preflight, the base's resolution, the log's creation, and the
+    /// conducting thread's start. The claim already stands; the thread
+    /// lands in it on success.
+    fn provisioned(&self, number: u64, stop: StopToken) -> Result<Launched, Error> {
         let token = preflight::manifest(
             &self.agent.binaries(),
             self.launch.token_override.clone(),
             self.store.as_ref(),
         )
         .map_err(|refusals| Error::Refused { refusals })?;
+        // An unstated base is the repository's default branch, read now —
+        // after the preflight, so a launch that cannot stand never reaches
+        // the network, and before a log file exists to say a run started.
+        let base = match &self.launch.base {
+            Some(base) => base.clone(),
+            None => self
+                .machinery
+                .default_branch(&self.launch.repo)
+                .map_err(|error| Error::Base { error })?,
+        };
+        let run = FeatureRun {
+            repo: self.launch.repo.clone(),
+            url: self.launch.url.clone(),
+            base,
+            number,
+            env: credentialed(&token),
+            budget: self.launch.budget,
+            patience: self.launch.patience,
+        };
         let (log, sink) = self
             .logs
             .create(&run.repo, Kind::Feature, run.number)
             .map_err(|error| Error::Log { error })?;
         let name = run.branch();
-        let run = FeatureRun {
-            env: credentialed(&token),
-            ..run
-        };
         // The vouched-for token, offered onward to git for the fetches,
         // through the askpass rails.
         let git = self.git.clone().authenticated(token);
@@ -282,6 +288,9 @@ pub enum Error {
     Refused { refusals: Vec<CapabilityStatus> },
     /// One run in flight at a time, and this names the one that is.
     InFlight { running: String },
+    /// The unstated base could not be resolved to the repository's default
+    /// branch.
+    Base { error: github::Error },
     /// The run's log could not be created, and a run whose narration has
     /// nowhere durable to land must not start.
     Log { error: anyhow::Error },
@@ -296,6 +305,9 @@ impl fmt::Display for Error {
             }
             Self::InFlight { running } => {
                 write!(f, "{running} is already in flight; one run at a time")
+            }
+            Self::Base { error } => {
+                write!(f, "the base branch could not be resolved: {error}")
             }
             Self::Log { error } => write!(f, "the run log could not be created: {error:#}"),
         }
@@ -329,7 +341,10 @@ fn launch_feature() -> Tool {
          opened when they are all closed. Answers as soon as the run is started, naming \
          the run and the log file it narrates into — the run then proceeds on its own, and \
          this call never waits for it or reports its progress. One run at a time: \
-         launching while one is in flight is refused, naming the run that is running.",
+         launching while one is in flight is refused, naming the run that is running. To \
+         report how a run is going, do not call this again — read what the run has left on \
+         GitHub with the github_* tools: the feature branch, its sub-issues, pull \
+         requests, and checks.",
         json!({
             "type": "object",
             "properties": {
@@ -374,11 +389,18 @@ mod tests {
     /// run mid-conduct while the tool's answer is examined.
     struct Fake {
         gate: Option<Mutex<Receiver<()>>>,
+        /// What `default_branch` answers, when a test defers the base:
+        /// `Ok` a branch, `Err` a network that will not say. Unset, the
+        /// verb is unreachable — a stated base is never resolved.
+        default: Option<Result<String, github::Error>>,
     }
 
     impl Fake {
         fn instant() -> Self {
-            Self { gate: None }
+            Self {
+                gate: None,
+                default: None,
+            }
         }
 
         fn gated() -> (Self, Sender<()>) {
@@ -386,9 +408,17 @@ mod tests {
             (
                 Self {
                     gate: Some(Mutex::new(gate)),
+                    default: None,
                 },
                 open,
             )
+        }
+
+        fn defaulting(answer: Result<String, github::Error>) -> Self {
+            Self {
+                gate: None,
+                default: Some(answer),
+            }
         }
     }
 
@@ -407,6 +437,12 @@ mod tests {
     }
 
     impl Machinery for Fake {
+        fn default_branch(&self, _: &Repo) -> Result<String, github::Error> {
+            self.default
+                .clone()
+                .expect("a stated base is never resolved")
+        }
+
         fn graph(&self, _: &Repo, number: u64) -> Result<IssueGraph, github::Error> {
             if let Some(gate) = &self.gate {
                 // A dropped sender opens the gate too: the run winds up
@@ -447,13 +483,26 @@ mod tests {
 
     /// A launcher over the world's git, a temp log root, and the stated
     /// token override — the preflight's keystore rail deliberately empty,
-    /// so the override is the whole credential story.
+    /// so the override is the whole credential story. The base is stated;
+    /// [`based`] defers it.
     fn launcher(world: &World, logs: &Path, machinery: Fake, token: Option<&str>) -> Launcher {
+        based(world, logs, machinery, token, Some("main"))
+    }
+
+    /// [`launcher`], with the base as the test says — `None` resolving
+    /// through the machinery at launch.
+    fn based(
+        world: &World,
+        logs: &Path,
+        machinery: Fake,
+        token: Option<&str>,
+        base: Option<&str>,
+    ) -> Launcher {
         Launcher::new(
             Launch {
                 repo: world.repo.clone(),
                 url: world.url(),
-                base: "main".to_owned(),
+                base: base.map(str::to_owned),
                 budget: Budget {
                     max_tokens: None,
                     max_cost: None,
@@ -597,7 +646,7 @@ mod tests {
         let launch = Launch {
             repo: Repo::new("epik-agent", "Epik"),
             url: "https://github.com/epik-agent/Epik.git".to_owned(),
-            base: "main".to_owned(),
+            base: Some("main".to_owned()),
             budget: Budget {
                 max_tokens: None,
                 max_cost: None,
@@ -654,10 +703,64 @@ mod tests {
     }
 
     #[test]
+    fn an_unstated_base_is_the_repositorys_default_branch_read_at_launch() {
+        let w = World::new();
+        let root = TempDir::new().unwrap();
+        let fake = Fake::defaulting(Ok("main".to_owned()));
+        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+
+        let started = launcher.launch(7).unwrap();
+
+        assert_eq!(started.run, "feature-7");
+        finished(&launcher);
+        assert!(
+            matches!(
+                narrated(&started.log).last(),
+                Some(FeatureEvent::Finished(FeatureVerdict::Failed { report }))
+                    if report.contains("no sub-issues")
+            ),
+            "the run proceeded past the resolved base to its own verdict"
+        );
+    }
+
+    #[test]
+    fn a_base_that_cannot_be_resolved_refuses_and_frees_the_slot() {
+        let w = World::new();
+        let root = TempDir::new().unwrap();
+        let fake = Fake::defaulting(Err(github::Error::Wire("no answer".to_owned())));
+        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+
+        let error = launcher.launch(7).unwrap_err();
+
+        assert!(
+            matches!(&error, Error::Base { .. }),
+            "an unresolvable base is the tool's own refusal: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "the base branch could not be resolved: no answer"
+        );
+        assert_eq!(launcher.running(), None, "no thread started");
+        assert!(
+            !root.path().join(&w.repo.owner).exists(),
+            "a refused launch leaves no log file saying otherwise"
+        );
+        let again = launcher.launch(7).unwrap_err();
+        assert!(
+            matches!(again, Error::Base { .. }),
+            "a refused launch frees the slot rather than wedging it: {again:?}"
+        );
+    }
+
+    #[test]
     fn the_tool_is_worded_for_a_model_deciding_whether_to_call() {
         let tool = launch_feature();
         assert_eq!(tool.name, "launch_feature");
         assert!(tool.description.contains("as soon as the run is started"));
+        assert!(
+            tool.description.contains("github_"),
+            "the face points progress questions at the GitHub verbs"
+        );
         assert_eq!(tool.schema["required"], json!(["number"]));
         assert!(
             !tool.schema["properties"]["number"]["description"]

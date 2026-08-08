@@ -12,10 +12,11 @@
 //! emit it — [`IssueRun`] and [`FeatureRun`] — are native.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentEvent;
+use crate::agent::{AgentEvent, Budget};
 
 #[cfg(feature = "native")]
 mod feature;
@@ -25,6 +26,22 @@ mod issue;
 pub use feature::{FeatureRun, Machinery, ready};
 #[cfg(feature = "native")]
 pub use issue::{Concluded, Evidence, IssueRun, Retained};
+
+/// What each run may spend: wide now, tapering by evidence.
+///
+/// No token or dollar ceiling yet. Claude Code's stream narrates every
+/// tool call, so ten minutes of true silence is a wedged run, not a slow
+/// one. One policy rather than one per host, so the worker and the
+/// window's launcher conduct the same run the same way.
+pub const BUDGET: Budget = Budget {
+    max_tokens: None,
+    max_cost: None,
+    stall: Duration::from_mins(10),
+};
+
+/// How long judgment waits for a check still running before calling the
+/// run failed: CI takes minutes, so half an hour is patience, not hope.
+pub const PATIENCE: Duration = Duration::from_mins(30);
 
 /// Credentials injected, never discovered: what a run's agent gets in its
 /// `env` — the one injection every host makes.
