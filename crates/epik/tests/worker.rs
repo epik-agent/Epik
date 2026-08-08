@@ -73,6 +73,14 @@ impl Rig {
         fs::write(self.home.path().join("config.toml"), text).unwrap();
     }
 
+    /// A `[worker]` aimed at the canonical test repository, with `extra`
+    /// lines appended. The repo is the section's one required field — a
+    /// run aimed at a repository nobody named is unrepresentable — so
+    /// every staged worker states it.
+    fn worker(&self, extra: &str) {
+        self.config(&format!("[worker]\nrepo = \"epik-agent/Epik\"\n{extra}"));
+    }
+
     /// The worker, hermetically staged: args set, environment cleared down
     /// to the rig's own `PATH` and home. Tests customize before spawning.
     fn command(&self, args: &[&str]) -> Command {
@@ -95,8 +103,8 @@ impl Rig {
     /// on a loopback port, and a fake `gh`. The caller scripts the claude.
     fn conductable(&self, origin: &Path, api_port: u16) {
         self.tool("gh", "exit 0");
-        self.config(&format!(
-            "[worker]\nurl = {:?}\napi = \"http://127.0.0.1:{api_port}\"\n",
+        self.worker(&format!(
+            "url = {:?}\napi = \"http://127.0.0.1:{api_port}\"\n",
             origin.display().to_string(),
         ));
     }
@@ -300,6 +308,7 @@ fn assert_refused(rig: &Rig, output: &Output) {
 #[test]
 fn a_missing_git_refuses_naming_the_locations_searched() {
     let rig = Rig::new(); // the PATH directory exists and holds nothing
+    rig.worker("");
 
     let output = rig.run(&["--issue", "1", "--target", "main"]);
 
@@ -315,6 +324,7 @@ fn a_missing_git_refuses_naming_the_locations_searched() {
 #[test]
 fn a_git_beneath_the_version_floor_is_unfit_not_absent() {
     let rig = Rig::new();
+    rig.worker("");
     rig.git("2.16.0");
 
     let output = rig.run(&["--issue", "1", "--target", "main"]);
@@ -333,7 +343,7 @@ fn a_bogus_agent_path_refuses_naming_it_and_never_reaches_the_keystore() {
     let rig = Rig::new();
     rig.git("2.42.0");
     rig.tool("gh", "exit 0");
-    rig.config("[worker]\nagent = \"/nowhere/claude\"\n");
+    rig.worker("agent = \"/nowhere/claude\"\n");
 
     let output = rig.run(&["--feature", "104", "--target", "main"]);
 
@@ -350,8 +360,9 @@ fn a_bogus_agent_path_refuses_naming_it_and_never_reaches_the_keystore() {
 #[test]
 fn a_bare_agent_name_off_path_refuses_with_the_hunt() {
     let rig = Rig::new();
+    rig.worker(""); // the default `claude` is never installed
     rig.git("2.42.0");
-    rig.tool("gh", "exit 0"); // the default `claude` is never installed
+    rig.tool("gh", "exit 0");
 
     let output = rig.run(&["--issue", "7", "--target", "main"]);
 
@@ -372,6 +383,7 @@ fn a_bare_agent_name_off_path_refuses_with_the_hunt() {
 #[test]
 fn no_token_anywhere_refuses_naming_the_token() {
     let rig = Rig::new();
+    rig.worker("");
     rig.git("2.42.0");
     rig.tool("claude", "exit 0");
     rig.tool("gh", "exit 0");
@@ -416,6 +428,21 @@ fn unparseable_config_is_fatal_at_startup_not_a_refusal() {
 }
 
 #[test]
+fn no_worker_section_is_fatal_at_startup_never_a_default_repository() {
+    let rig = Rig::new();
+    rig.git("2.42.0"); // the preflight would pass its first layer, but boot refuses first
+
+    let output = rig.run(&["--issue", "1", "--target", "main"]);
+
+    assert_eq!(code(&output), BROKEN, "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no [worker]"),
+        "a run aimed at a repository nobody named must be unrepresentable: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn a_repo_that_is_not_owner_name_is_fatal_at_startup() {
     let rig = Rig::new();
     rig.config("[worker]\nrepo = \"nonsense\"\n");
@@ -429,6 +456,7 @@ fn a_repo_that_is_not_owner_name_is_fatal_at_startup() {
 #[test]
 fn no_path_at_all_refuses_with_nowhere_to_search() {
     let rig = Rig::new();
+    rig.worker("");
     // The launchd case: no PATH in the environment whatsoever.
     let output = Command::new(env!("CARGO_BIN_EXE_epik-worker"))
         .args(["--issue", "1", "--target", "main"])
@@ -450,7 +478,7 @@ fn an_explicit_relative_agent_spelling_is_vouched_for_absolutely() {
     let rig = Rig::new();
     rig.git("2.42.0");
     rig.tool("gh", "exit 0");
-    rig.config("[worker]\nagent = \"bin/claude\"\n");
+    rig.worker("agent = \"bin/claude\"\n");
     let elsewhere = TempDir::new().unwrap();
 
     let output = rig

@@ -189,6 +189,13 @@ impl<M: ChatModel + Keyed, S: KeyStore> Session<M, S> {
         self.conversation.model()
     }
 
+    /// The registry this session's turns run against — for a caller
+    /// asserting what the model is offered, which is chiefly a test.
+    #[must_use]
+    pub const fn tools(&self) -> &Registry {
+        &self.tools
+    }
+
     /// One turn, run against the session's tools: see
     /// [`Conversation::send_with_tools`]. A model that answers in plain text
     /// makes it one round, exactly as a plain send; one that asks for tools
@@ -303,6 +310,17 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     /// the registry builds tokenless, and the verbs that need one refuse at
     /// call time with a typed refusal the model reads as a tool result.
     ///
+    /// On unix, with a `[worker]` stated, the launch verb
+    /// ([`crate::launch`]) stands beside them: asked to build a feature,
+    /// the model dispatches the run machinery and answers at once, while
+    /// the run narrates into its log and its residue lands on GitHub —
+    /// where the same GitHub verbs report on it. The verb is provisioned
+    /// from the same `[worker]` table the worker reads, and each run
+    /// conducts with the token its own preflight vouches for, so the
+    /// window conducts the same run the worker would. No `[worker]`, no
+    /// launch verb: nothing can conduct a run against a repository nobody
+    /// named.
+    ///
     /// Each secret is read from the store once: the token resolved for the
     /// GitHub client is the same resolution [`Status`] reports. On macOS a
     /// keyring read can be a permission dialog, so launch asks each question
@@ -310,12 +328,19 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
     ///
     /// # Errors
     ///
-    /// As [`with_model`](Session::with_model).
+    /// As [`with_model`](Session::with_model) — and when a stated
+    /// `[worker]` is one this host cannot conduct for: a repo that is not
+    /// `owner/name`, or no discoverable home for the git cache and the run
+    /// logs. A capability the user configured must not vanish silently.
     pub fn open(config: &Config, keys: Keys<S>) -> Result<Self> {
         let token = keys.github_token();
         let github = crate::github::GitHub::new(token.clone().key());
         let credential = github.credential();
         let mut tools = Registry::new();
+        #[cfg(unix)]
+        if let Some(worker) = &config.worker {
+            crate::launch::register(&mut tools, launcher(worker, keys.github_override())?);
+        }
         crate::github::tools::register(&mut tools, github);
         let mut session = Self::with_github(
             config,
@@ -333,6 +358,50 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
         session.github = credential;
         Ok(session)
     }
+}
+
+/// The window's launcher: the same run the worker conducts, provisioned the
+/// same way — [`Worker`](crate::config::Worker)'s own derivations for the
+/// repository, the clone URL, and the API host, with the shared
+/// [`BUDGET`](crate::run::BUDGET) and [`PATIENCE`](crate::run::PATIENCE).
+/// The base is left unstated — the window has no `--target` flag — so a
+/// launch merges into the repository's default branch, resolved on the
+/// run's own thread.
+///
+/// The rig is handed over uncredentialed: every launch preflights and
+/// conducts with the token vouched for at that moment, so a PAT pasted
+/// mid-chat — kept in the keyring — is found by the very next launch. The
+/// preflight's keystore is [`OsKeyring`](crate::keystore::OsKeyring): the
+/// machine has one secret service, so a fresh value is the same store the
+/// session's keys read.
+///
+/// # Errors
+///
+/// Returns an error when the stated `[worker]` cannot be conducted for: a
+/// repo that is not `owner/name`, or no discoverable home for the git
+/// cache and the run logs.
+#[cfg(all(feature = "native", unix))]
+fn launcher(
+    worker: &crate::config::Worker,
+    token_override: Option<String>,
+) -> Result<crate::launch::Launcher> {
+    let repo = worker.repository()?;
+    let url = worker.clone_url(&repo);
+    Ok(crate::launch::Launcher::new(
+        crate::launch::Launch {
+            repo,
+            url,
+            base: None,
+            budget: crate::run::BUDGET,
+            patience: crate::run::PATIENCE,
+            token_override,
+        },
+        crate::agent::ClaudeCode::at(&worker.agent),
+        worker.github(None),
+        crate::git::Git::new()?,
+        crate::logs::Logs::new()?,
+        crate::keystore::OsKeyring,
+    ))
 }
 
 #[cfg(test)]
@@ -357,7 +426,18 @@ mod tests {
                     model: "smollm2:135m".to_owned(),
                 },
             )]),
-            worker: crate::config::Worker::default(),
+            worker: None,
+        }
+    }
+
+    /// A stated `[worker]`, aimed at a repository the test names.
+    #[cfg(all(feature = "native", unix))]
+    fn worker(repo: &str) -> crate::config::Worker {
+        crate::config::Worker {
+            repo: repo.to_owned(),
+            agent: "claude".to_owned(),
+            url: None,
+            api: None,
         }
     }
 
@@ -396,6 +476,183 @@ mod tests {
             "on macOS every keyring read is potentially a dialog, so launch \
              asks each question once"
         );
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn a_stated_worker_puts_the_launch_verb_beside_the_github_ones() {
+        let config = Config {
+            worker: Some(worker("wpm/epik-scratch")),
+            ..config()
+        };
+
+        let session = Session::open(
+            &config,
+            Keys::with_overrides(InMemory::default(), None, None),
+        )
+        .expect("the config names a provider it lists");
+
+        let names: Vec<&str> = session
+            .tools()
+            .tools()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(names.contains(&"launch_feature"), "{names:?}");
+        assert!(names.contains(&"github_issue_graph"), "{names:?}");
+        assert!(names.contains(&"github_default_branch"), "{names:?}");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn no_worker_is_a_session_with_no_launch_verb() {
+        let session = Session::open(
+            &config(),
+            Keys::with_overrides(InMemory::default(), None, None),
+        )
+        .expect("no [worker] is the ordinary state, not a fault");
+
+        let names: Vec<&str> = session
+            .tools()
+            .tools()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(
+            !names.contains(&"launch_feature"),
+            "nothing may conduct a run against a repository nobody named: {names:?}"
+        );
+        assert!(names.contains(&"github_issue_graph"), "{names:?}");
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn a_worker_epik_cannot_conduct_for_fails_open_rather_than_dropping_the_verb() {
+        let config = Config {
+            worker: Some(worker("not-a-repository")),
+            ..config()
+        };
+
+        let error = Session::open(
+            &config,
+            Keys::with_overrides(InMemory::default(), None, None),
+        )
+        .expect_err("a stated capability must not vanish silently");
+
+        assert!(
+            format!("{error:#}").contains("owner/name"),
+            "the error names the config to fix: {error:#}"
+        );
+    }
+
+    /// The window's whole conversation, one seam down: a scripted model
+    /// dispatches with the launch tool, the answer and the in-flight
+    /// refusal come back as tool results, and the run proceeds while the
+    /// chat goes on. The live-window version of this is the manual
+    /// acceptance; this is the library keeping its half of it.
+    #[cfg(feature = "native")]
+    #[test]
+    fn a_launch_answers_at_once_and_a_rival_turn_relays_the_typed_refusal() {
+        use std::time::Duration;
+
+        use tempfile::TempDir;
+
+        use crate::agent::{Budget, Scripted as ScriptedAgent};
+        use crate::chat::ToolCall;
+        use crate::git::Git;
+        use crate::github::Repo;
+        use crate::launch::testing::{Fake, finished};
+        use crate::launch::{Launch, Launcher};
+        use crate::logs::Logs;
+
+        let root = TempDir::new().expect("a temp root");
+        let (fake, open) = Fake::gated();
+        let launcher = Launcher::new(
+            Launch {
+                repo: Repo::new("epik-agent", "Epik"),
+                url: "unused: the run fails before any fetch".to_owned(),
+                base: Some("main".to_owned()),
+                budget: Budget {
+                    max_tokens: None,
+                    max_cost: None,
+                    stall: Duration::from_mins(1),
+                },
+                patience: Duration::ZERO,
+                token_override: Some("ghp-test".to_owned()),
+            },
+            ScriptedAgent::playing(Vec::new()),
+            fake,
+            Git::rooted(root.path().join("repos"), root.path().join("work")),
+            Logs::rooted(root.path().join("logs")),
+            InMemory::default(),
+        );
+        let mut tools = Registry::new();
+        crate::launch::register(&mut tools, launcher.clone());
+        let scripted = Scripted::saying(["Dispatching."])
+            .asking([ToolCall::new(
+                "call-1",
+                "launch_feature",
+                r#"{"number": 7}"#,
+            )])
+            .then_saying(["feature-7 is away."])
+            .then_saying(["Trying."])
+            .asking([ToolCall::new(
+                "call-2",
+                "launch_feature",
+                r#"{"number": 9}"#,
+            )])
+            .then_saying(["feature-7 is still in flight."]);
+        let mut session = Session::with_model(
+            &config(),
+            Keys::with_override(InMemory::default(), None),
+            tools,
+            |_, _, _| scripted,
+        )
+        .expect("the config names a provider it lists");
+
+        // "Implement feature #7": the reply arrives while the run — held
+        // at the gate — is still conducting.
+        let reply = session
+            .send("Implement feature #7", &mut Silent, &StopToken::new())
+            .expect("the turn completes without waiting for the run");
+        assert_eq!(reply.text, "feature-7 is away.");
+        let answer = launched(&session, "call-1");
+        assert!(answer.contains("feature-7"), "{answer}");
+        assert!(
+            answer.contains("feature-7-"),
+            "the answer names the log file: {answer}"
+        );
+
+        // A second "implement" while the run is live: the typed refusal,
+        // naming the run in flight, rendered as the tool result the model
+        // relays.
+        let reply = session
+            .send("Also implement feature #9", &mut Silent, &StopToken::new())
+            .expect("a refused tool call is a completed turn");
+        assert_eq!(reply.text, "feature-7 is still in flight.");
+        let refusal = launched(&session, "call-2");
+        assert_eq!(
+            refusal,
+            "launch_feature: feature-7 is already in flight; one run at a time"
+        );
+
+        // The run outlives both turns; wind it up before the root goes.
+        open.send(()).expect("the run is still at the gate");
+        finished(&launcher);
+    }
+
+    /// The tool result answering `id`, as the model read it.
+    #[cfg(feature = "native")]
+    fn launched<M: ChatModel + Keyed, S: KeyStore>(session: &Session<M, S>, id: &str) -> String {
+        session
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } if tool_call_id == id => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no tool result answers {id}"))
     }
 
     #[test]

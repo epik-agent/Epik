@@ -155,7 +155,14 @@ impl FeatureRun {
     /// precedent.
     #[must_use]
     pub fn branch(&self) -> String {
-        format!("feature-{}", self.number)
+        Self::branch_for(self.number)
+    }
+
+    /// [`branch`](Self::branch) before a run exists — what a launcher
+    /// claims its slot by, ahead of the provisioning that builds the run.
+    #[must_use]
+    pub fn branch_for(number: u64) -> String {
+        format!("feature-{number}")
     }
 
     /// Runs the whole feature to a verdict, narrating every state into

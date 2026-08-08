@@ -313,6 +313,14 @@ impl GitHub {
         self.token.clone()
     }
 
+    /// The API base this client speaks to — what a launcher builds a
+    /// freshly credentialed client against, so a vouched conduct stays on
+    /// the same host.
+    #[must_use]
+    pub fn api(&self) -> &str {
+        &self.api
+    }
+
     // ----- the REST verbs -----
 
     /// The branch a pull request merges into by default.

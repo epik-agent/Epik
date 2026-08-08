@@ -15,6 +15,12 @@
 //! the model like every other tool error. The run's stop token stays here,
 //! with the machinery that owns the thread — [`Launcher::stop`] is the one
 //! outside reach it answers to, and nothing leaks the token itself.
+//!
+//! The tool's answer never waits on the network: everything before the
+//! conducting thread is local — the preflight, the log's creation — and
+//! whatever must be asked of GitHub, like the default branch an unstated
+//! base resolves to, is asked on the run's own thread, where a refusal is
+//! a run failure in the log like every other.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -28,12 +34,48 @@ use serde_json::json;
 use crate::agent::{Budget, CodingAgent};
 use crate::chat::StopToken;
 use crate::git::Git;
-use crate::github::Repo;
+use crate::github::{self, GitHub, Repo};
 use crate::keystore::KeyStore;
+use crate::logging::Log;
 use crate::logs::{Kind, Logs};
 use crate::preflight::{self, CapabilityStatus};
-use crate::run::{FeatureRun, Machinery, credentialed};
+use crate::run::{FeatureEvent, FeatureRun, FeatureVerdict, Machinery, credentialed};
 use crate::tools::{Registry, Tool};
+
+/// What a launch conducts through: the run's [`Machinery`], plus the two
+/// verbs that belong to launching rather than running.
+///
+/// Those are the vouching that makes the preflight's token the conduct's
+/// whole credential, and the default branch an unstated base resolves to.
+/// The run never asks for either: everything it needs is handed in.
+pub trait Rig: Machinery {
+    /// The branch pull requests merge into by default — what an unstated
+    /// [`Launch::base`] resolves to, on the run's own thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`github::Error`] when GitHub cannot be asked or answers
+    /// no.
+    fn default_branch(&self, repo: &Repo) -> Result<String, github::Error>;
+
+    /// This rig, conducting with `token` as its whole credential: the
+    /// preflight-vouched token, read moments ago — never a shared cell
+    /// that may hold a staler reading. A test rig with no credential to
+    /// speak of hands back itself.
+    fn vouched(self: Arc<Self>, token: &str) -> Arc<dyn Rig + Send + Sync>;
+}
+
+impl Rig for GitHub {
+    fn default_branch(&self, repo: &Repo) -> Result<String, github::Error> {
+        Self::default_branch(self, repo)
+    }
+
+    fn vouched(self: Arc<Self>, token: &str) -> Arc<dyn Rig + Send + Sync> {
+        // The worker's own provisioning, repeated: a client built fresh
+        // with the vouched token, against the same API host.
+        Arc::new(Self::at(self.api(), Some(token.to_owned())))
+    }
+}
 
 /// What every launched feature shares, handed in once — the
 /// [`FeatureRun`] fields that do not depend on which issue, plus the
@@ -44,8 +86,11 @@ pub struct Launch {
     pub repo: Repo,
     /// Where the repository is cloned from.
     pub url: String,
-    /// The branch the review pull request merges into.
-    pub base: String,
+    /// The branch the review pull request merges into: stated, or — the
+    /// window's case, which has no `--target` flag — unstated, resolving
+    /// to the repository's default branch on the run's own thread. A base
+    /// that cannot be resolved is the run's failure, in its log.
+    pub base: Option<String>,
     /// What each issue run may spend.
     pub budget: Budget,
     /// How long each issue run's judgment waits for a check still running.
@@ -84,7 +129,7 @@ impl fmt::Debug for Launch {
 pub struct Launcher {
     launch: Launch,
     agent: Arc<dyn CodingAgent + Send + Sync>,
-    machinery: Arc<dyn Machinery + Send + Sync>,
+    rig: Arc<dyn Rig + Send + Sync>,
     git: Git,
     logs: Logs,
     store: Arc<dyn KeyStore + Send + Sync>,
@@ -123,16 +168,16 @@ fn slot(running: &Mutex<Option<InFlight>>) -> MutexGuard<'_, Option<InFlight>> {
 
 impl Launcher {
     /// A launcher over its collaborators: the config-derived agent, the
-    /// machinery the run reads and writes GitHub through, the git cache,
-    /// the log root, and the keystore the preflight resolves the token
-    /// from. All seams, so a test hands in a scripted agent and a loopback
-    /// machinery; the real path is `ClaudeCode` from `[worker]` config
-    /// over `GitHub`.
+    /// rig the run reads and writes GitHub through, the git cache, the
+    /// log root, and the keystore the preflight resolves the token from.
+    /// All seams, so a test hands in a scripted agent and a loopback rig;
+    /// the real path is `ClaudeCode` from `[worker]` config over
+    /// `GitHub`.
     #[must_use]
     pub fn new(
         launch: Launch,
         agent: impl CodingAgent + Send + Sync + 'static,
-        machinery: impl Machinery + Send + Sync + 'static,
+        rig: impl Rig + Send + Sync + 'static,
         git: Git,
         logs: Logs,
         store: impl KeyStore + Send + Sync + 'static,
@@ -140,7 +185,7 @@ impl Launcher {
         Self {
             launch,
             agent: Arc::new(agent),
-            machinery: Arc::new(machinery),
+            rig: Arc::new(rig),
             git,
             logs,
             store: Arc::new(store),
@@ -162,18 +207,6 @@ impl Launcher {
     /// created, because a run whose narration has nowhere durable to land
     /// must not start.
     pub fn launch(&self, number: u64) -> Result<Launched, Error> {
-        // Credentials arrive only after the preflight vouches for them;
-        // everything else the run needs is in hand now, and the claim
-        // below wants the run's own name.
-        let run = FeatureRun {
-            repo: self.launch.repo.clone(),
-            url: self.launch.url.clone(),
-            base: self.launch.base.clone(),
-            number,
-            env: Vec::new(),
-            budget: self.launch.budget,
-            patience: self.launch.patience,
-        };
         let stop = StopToken::new();
         // The claim, brief: the preflight can spawn processes and consult
         // the keyring — a dialog, on macOS — so the lock covers only the
@@ -188,22 +221,24 @@ impl Launcher {
                 });
             }
             *running = Some(InFlight {
-                run: run.branch(),
+                run: FeatureRun::branch_for(number),
                 stop: stop.clone(),
                 handle: None,
             });
         }
-        self.provisioned(run, stop).inspect_err(|_| {
+        self.provisioned(number, stop).inspect_err(|_| {
             // A refused launch frees the slot on its way out — no rival
             // could have taken it while the claim stood.
             *slot(&self.running) = None;
         })
     }
 
-    /// The expensive middle of a launch, outside the slot's lock: the
-    /// preflight, the log's creation, and the conducting thread's start.
-    /// The claim already stands; the thread lands in it on success.
-    fn provisioned(&self, run: FeatureRun, stop: StopToken) -> Result<Launched, Error> {
+    /// The expensive-but-local middle of a launch, outside the slot's
+    /// lock: the preflight, the log's creation, and the conducting
+    /// thread's start — never the network, so the tool's answer stays
+    /// prompt. The claim already stands; the thread lands in it on
+    /// success.
+    fn provisioned(&self, number: u64, stop: StopToken) -> Result<Launched, Error> {
         let token = preflight::manifest(
             &self.agent.binaries(),
             self.launch.token_override.clone(),
@@ -212,29 +247,55 @@ impl Launcher {
         .map_err(|refusals| Error::Refused { refusals })?;
         let (log, sink) = self
             .logs
-            .create(&run.repo, Kind::Feature, run.number)
+            .create(&self.launch.repo, Kind::Feature, number)
             .map_err(|error| Error::Log { error })?;
-        let name = run.branch();
-        let run = FeatureRun {
-            env: credentialed(&token),
-            ..run
-        };
-        // The vouched-for token, offered onward to git for the fetches,
-        // through the askpass rails.
-        let git = self.git.clone().authenticated(token);
+        // The vouched-for token, offered onward: to the rig as the run's
+        // whole GitHub credential, and to git for the fetches, through
+        // the askpass rails.
+        let rig = Arc::clone(&self.rig).vouched(&token);
+        let git = self.git.clone().authenticated(token.clone());
         let agent = Arc::clone(&self.agent);
-        let machinery = Arc::clone(&self.machinery);
+        let launch = self.launch.clone();
         let handle = thread::spawn(move || {
+            let mut sink = sink;
+            // An unstated base is the repository's default branch, read
+            // here on the run's own thread — the answer never waited on
+            // it, and a base that cannot be resolved is a run failure,
+            // the log's last word like every other.
+            let base = match launch.base.clone() {
+                Some(base) => base,
+                None => match rig.default_branch(&launch.repo) {
+                    Ok(base) => base,
+                    Err(error) => {
+                        sink.emit(FeatureEvent::Finished(FeatureVerdict::Failed {
+                            report: format!("the base branch could not be resolved: {error}"),
+                        }));
+                        return;
+                    }
+                },
+            };
+            let run = FeatureRun {
+                repo: launch.repo,
+                url: launch.url,
+                base,
+                number,
+                env: credentialed(&token),
+                budget: launch.budget,
+                patience: launch.patience,
+            };
             // The verdict is the log's last word, and GitHub's record
             // stands beside it; a conduct is infallible, so the thread has
             // nothing to answer for.
-            let mut sink = sink;
-            run.conduct(&git, machinery.as_ref(), agent.as_ref(), &mut sink, &stop);
+            let machinery: &dyn Machinery = rig.as_ref();
+            run.conduct(&git, machinery, agent.as_ref(), &mut sink, &stop);
         });
         if let Some(inflight) = slot(&self.running).as_mut() {
             inflight.handle = Some(handle);
         }
-        Ok(Launched { run: name, log })
+        Ok(Launched {
+            run: FeatureRun::branch_for(number),
+            log,
+        })
     }
 
     /// The run in flight's name — "feature-7" — while one is still
@@ -329,7 +390,10 @@ fn launch_feature() -> Tool {
          opened when they are all closed. Answers as soon as the run is started, naming \
          the run and the log file it narrates into — the run then proceeds on its own, and \
          this call never waits for it or reports its progress. One run at a time: \
-         launching while one is in flight is refused, naming the run that is running.",
+         launching while one is in flight is refused, naming the run that is running. To \
+         report how a run is going, do not call this again — read what the run has left on \
+         GitHub with the github_* tools: the feature branch, its sub-issues, pull \
+         requests, and checks.",
         json!({
             "type": "object",
             "properties": {
@@ -348,47 +412,68 @@ struct LaunchFeature {
     number: u64,
 }
 
+/// Test scaffolding shared with the session's tests: the littlest GitHub
+/// a launch can be judged against, and the rendezvous with a run thread
+/// nobody can join.
 #[cfg(test)]
-// Test scaffolding is entitled to panic; the allow-unwrap-in-tests clippy
-// setting only covers #[test] functions, not the helpers here.
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use std::fs;
-    use std::path::Path;
+// Test scaffolding is entitled to panic — the allow-unwrap-in-tests clippy
+// setting only covers #[test] functions — and skips the API-doc ceremony a
+// real surface owes.
+#[allow(
+    missing_debug_implementations,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
+pub mod testing {
     use std::sync::mpsc::{self, Receiver, Sender};
-    use std::time::Instant;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::agent::Scripted;
-    use crate::git::testing::World;
-    use crate::github::{self, Check, Issue, IssueGraph, Pull, State};
-    use crate::keystore::InMemory;
-    use crate::preflight::Capability;
-    use crate::run::{Evidence, FeatureEvent, FeatureVerdict};
+    use super::{Launcher, Rig};
+    use crate::github::{self, Check, Issue, IssueGraph, Pull, Repo, State};
+    use crate::run::{Evidence, Machinery};
 
     /// The littlest GitHub a launch can be judged against: one feature
-    /// issue with no sub-issues — the shortest conductable run — and, when
-    /// gated, a graph read that blocks until the test says, holding the
-    /// run mid-conduct while the tool's answer is examined.
-    struct Fake {
+    /// issue with no sub-issues — the shortest conductable run. Gated,
+    /// its graph read blocks until the test says, holding the run
+    /// mid-conduct while the tool's answers are examined; defaulting, its
+    /// default branch answers — or refuses — as the test stated.
+    pub struct Fake {
         gate: Option<Mutex<Receiver<()>>>,
+        /// What `default_branch` answers, when a test defers the base.
+        /// Unset, the verb is unreachable — a stated base is never
+        /// resolved.
+        default: Option<Result<String, github::Error>>,
     }
 
     impl Fake {
-        fn instant() -> Self {
-            Self { gate: None }
+        pub fn instant() -> Self {
+            Self {
+                gate: None,
+                default: None,
+            }
         }
 
-        fn gated() -> (Self, Sender<()>) {
+        pub fn gated() -> (Self, Sender<()>) {
             let (open, gate) = mpsc::channel();
             (
                 Self {
                     gate: Some(Mutex::new(gate)),
+                    default: None,
                 },
                 open,
             )
+        }
+
+        pub fn defaulting(answer: Result<String, github::Error>) -> Self {
+            Self {
+                gate: None,
+                default: Some(answer),
+            }
         }
     }
 
@@ -445,15 +530,68 @@ mod tests {
         }
     }
 
+    impl Rig for Fake {
+        fn default_branch(&self, _: &Repo) -> Result<String, github::Error> {
+            self.default
+                .clone()
+                .expect("a stated base is never resolved")
+        }
+
+        fn vouched(self: Arc<Self>, _: &str) -> Arc<dyn Rig + Send + Sync> {
+            self
+        }
+    }
+
+    /// Waits for the run in flight to finish — the test's rendezvous with
+    /// a thread it cannot join.
+    pub fn finished(launcher: &Launcher) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while launcher.running().is_some() {
+            assert!(Instant::now() < deadline, "the run never finished");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[cfg(test)]
+// Test scaffolding is entitled to panic; the allow-unwrap-in-tests clippy
+// setting only covers #[test] functions, not the helpers here.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use super::testing::{Fake, finished};
+    use super::*;
+    use crate::agent::Scripted;
+    use crate::git::testing::World;
+    use crate::keystore::InMemory;
+    use crate::preflight::Capability;
+
     /// A launcher over the world's git, a temp log root, and the stated
     /// token override — the preflight's keystore rail deliberately empty,
-    /// so the override is the whole credential story.
-    fn launcher(world: &World, logs: &Path, machinery: Fake, token: Option<&str>) -> Launcher {
+    /// so the override is the whole credential story. The base is stated;
+    /// [`based`] defers it.
+    fn launcher(world: &World, logs: &Path, rig: Fake, token: Option<&str>) -> Launcher {
+        based(world, logs, rig, token, Some("main"))
+    }
+
+    /// [`launcher`], with the base as the test says — `None` resolving
+    /// through the rig on the run's thread.
+    fn based(
+        world: &World,
+        logs: &Path,
+        rig: Fake,
+        token: Option<&str>,
+        base: Option<&str>,
+    ) -> Launcher {
         Launcher::new(
             Launch {
                 repo: world.repo.clone(),
                 url: world.url(),
-                base: "main".to_owned(),
+                base: base.map(str::to_owned),
                 budget: Budget {
                     max_tokens: None,
                     max_cost: None,
@@ -463,21 +601,11 @@ mod tests {
                 token_override: token.map(str::to_owned),
             },
             Scripted::playing(Vec::new()),
-            machinery,
+            rig,
             world.git.clone(),
             Logs::rooted(logs),
             InMemory::default(),
         )
-    }
-
-    /// Waits for the run in flight to finish — the test's rendezvous with
-    /// a thread it cannot join.
-    fn finished(launcher: &Launcher) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while launcher.running().is_some() {
-            assert!(Instant::now() < deadline, "the run never finished");
-            thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// Every line of the run's log, parsed back into the vocabulary.
@@ -597,7 +725,7 @@ mod tests {
         let launch = Launch {
             repo: Repo::new("epik-agent", "Epik"),
             url: "https://github.com/epik-agent/Epik.git".to_owned(),
-            base: "main".to_owned(),
+            base: Some("main".to_owned()),
             budget: Budget {
                 max_tokens: None,
                 max_cost: None,
@@ -654,10 +782,66 @@ mod tests {
     }
 
     #[test]
+    fn an_unstated_base_is_the_repositorys_default_branch_resolved_on_the_runs_thread() {
+        let w = World::new();
+        let root = TempDir::new().unwrap();
+        let fake = Fake::defaulting(Ok("main".to_owned()));
+        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+
+        let started = launcher.launch(7).unwrap();
+
+        assert_eq!(started.run, "feature-7");
+        finished(&launcher);
+        assert!(
+            matches!(
+                narrated(&started.log).last(),
+                Some(FeatureEvent::Finished(FeatureVerdict::Failed { report }))
+                    if report.contains("no sub-issues")
+            ),
+            "the run proceeded past the resolved base to its own verdict"
+        );
+    }
+
+    #[test]
+    fn a_base_that_cannot_be_resolved_is_the_runs_failure_in_its_log() {
+        let w = World::new();
+        let root = TempDir::new().unwrap();
+        let fake = Fake::defaulting(Err(github::Error::Wire("no answer".to_owned())));
+        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+
+        // The answer is prompt — the network is never consulted before the
+        // conducting thread — and the failure lands where every run
+        // failure lands.
+        let started = launcher.launch(7).unwrap();
+
+        assert_eq!(started.run, "feature-7");
+        finished(&launcher);
+        assert!(
+            matches!(
+                narrated(&started.log).last(),
+                Some(FeatureEvent::Finished(FeatureVerdict::Failed { report }))
+                    if report == "the base branch could not be resolved: no answer"
+            ),
+            "the log's last word names the base: {:?}",
+            narrated(&started.log)
+        );
+        let again = launcher.launch(9).unwrap();
+        assert_eq!(
+            again.run, "feature-9",
+            "a failed run frees the slot like any other"
+        );
+        finished(&launcher);
+    }
+
+    #[test]
     fn the_tool_is_worded_for_a_model_deciding_whether_to_call() {
         let tool = launch_feature();
         assert_eq!(tool.name, "launch_feature");
         assert!(tool.description.contains("as soon as the run is started"));
+        assert!(
+            tool.description.contains("github_"),
+            "the face points progress questions at the GitHub verbs"
+        );
         assert_eq!(tool.schema["required"], json!(["number"]));
         assert!(
             !tool.schema["properties"]["number"]["description"]
