@@ -11,7 +11,7 @@ default = ["native"]
 # Everything that cannot exist on wasm32, where this crate is a source of
 # types rather than a maker of requests: the HTTP client and the OS keyring.
 # The frontend depends on this crate with `default-features = false`.
-native = ["dep:keyring", "dep:ureq"]
+native = ["dep:keyring", "dep:rustix", "dep:signal-hook", "dep:ureq"]
 # Builds the stub claude below. Off by default and switched on only by this
 # crate's dev-dependency on itself, so `cargo test` always has the stub and
 # an ordinary or release build never ships a fake claude.
@@ -26,6 +26,13 @@ name = "stub-claude"
 path = "tests/bin/stub_claude.rs"
 required-features = ["stub-claude"]
 
+# The worker is a native host through and through; naming its requirement
+# keeps a `--no-default-features` build from trying to compile it.
+[[bin]]
+name = "epik-worker"
+path = "src/bin/epik-worker.rs"
+required-features = ["native"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
@@ -34,6 +41,14 @@ toml = "1"
 
 keyring = { version = "4", optional = true }
 ureq = { version = "3", features = ["json"], optional = true }
+
+# Unix-only, like the worker and the agent it governs. `rustix` asks the
+# kernel the execvp question (`access(X_OK)`) that no safe std API answers;
+# `signal-hook` owns the unsafety of signal handling so this crate keeps
+# its `unsafe_code = "forbid"`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"], optional = true }
+signal-hook = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # The crate itself, with the test-only feature on: how the stub claude gets

@@ -357,6 +357,7 @@ mod tests {
                     model: "smollm2:135m".to_owned(),
                 },
             )]),
+            worker: crate::config::Worker::default(),
         }
     }
 

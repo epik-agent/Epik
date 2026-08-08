@@ -65,10 +65,24 @@ impl ClaudeCode {
     /// spelling — launchd's `PATH` is not a login shell's — and a bare name
     /// falls back to `PATH` resolution, which is what [`new`](Self::new)
     /// does.
+    ///
+    /// An explicit *relative* spelling is settled against the launch cwd
+    /// here, once: the run itself spawns with the worktree as its cwd,
+    /// where the same spelling would name a different file than the
+    /// preflight vouched for.
     #[must_use]
     pub fn at(binary: impl Into<PathBuf>) -> Self {
+        let binary = binary.into();
+        let explicit = binary
+            .parent()
+            .is_some_and(|dir| !dir.as_os_str().is_empty());
+        let binary = if explicit && binary.is_relative() {
+            std::path::absolute(&binary).unwrap_or(binary)
+        } else {
+            binary
+        };
         Self {
-            binary: binary.into(),
+            binary,
             allowed_tools: None,
         }
     }
@@ -115,6 +129,14 @@ impl ClaudeCode {
 }
 
 impl CodingAgent for ClaudeCode {
+    /// The declaration the preflight resolves: this wrapper's own binary,
+    /// and `gh` — the wide v1 prompt has the agent conduct the pull-request
+    /// ceremony itself, so `gh` retires from here with that taper. git is
+    /// Epik's own manifest layer, not re-declared per agent.
+    fn binaries(&self) -> Vec<PathBuf> {
+        vec![self.binary.clone(), PathBuf::from("gh")]
+    }
+
     fn run(
         &self,
         task: &Task,
@@ -260,13 +282,16 @@ fn died(status: Option<ExitStatus>, noise: &Receiver<String>) -> Stop {
 /// OS has reissued. Harmless on a process that already exited: the kill
 /// misses, the wait returns the stored status.
 fn reap(mut child: Child) -> Option<ExitStatus> {
-    // The group, not the child — see the module doc. `kill(1)` rather than
-    // libc, to stay dependency-free; `--` because a negative pid reads like
-    // a flag.
-    let _ = Command::new("kill")
-        .args(["-9", "--", &format!("-{}", child.id())])
-        .stderr(Stdio::null())
-        .status();
+    // The group, not the child — see the module doc. The syscall directly,
+    // through rustix, never a spawned `kill`: governance must not turn on
+    // whether a kill binary happens to be on this process's PATH — under
+    // launchd's PATH it is not, and a group kill that silently misses is
+    // exactly the half-governance this module exists to prevent.
+    if let Ok(pid) = i32::try_from(child.id())
+        && let Some(group) = rustix::process::Pid::from_raw(pid)
+    {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
     let _ = child.kill();
     child.wait().ok()
 }
@@ -437,6 +462,37 @@ mod tests {
             }
         }
         (events, ended)
+    }
+
+    #[test]
+    fn an_explicit_relative_spelling_settles_where_the_preflight_will_look() {
+        let agent = ClaudeCode::at("bin/claude");
+        let [binary, _] = &agent.binaries()[..] else {
+            panic!("the declaration holds the settled spelling");
+        };
+        assert!(
+            binary.is_absolute(),
+            "settled against the launch cwd, not left for the worktree: {}",
+            binary.display()
+        );
+        assert!(binary.ends_with("bin/claude"), "{}", binary.display());
+
+        let bare = ClaudeCode::at("claude");
+        assert_eq!(
+            bare.binaries()[0],
+            PathBuf::from("claude"),
+            "a bare name stays bare: PATH resolution is the declared meaning"
+        );
+    }
+
+    #[test]
+    fn the_wrapper_declares_its_binary_and_gh() {
+        let agent = ClaudeCode::at("/opt/claude/claude");
+        assert_eq!(
+            agent.binaries(),
+            [PathBuf::from("/opt/claude/claude"), PathBuf::from("gh")],
+            "the per-agent preflight layer is the wrapper's own declaration"
+        );
     }
 
     #[test]

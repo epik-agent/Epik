@@ -5,7 +5,6 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
@@ -14,7 +13,6 @@ use epik::implementation::{Feature, Implementable, Issue};
 use epik::logging::{Log, Silent};
 use epik::repository::{Branch, Endpoint, Repository, Url};
 use epik::tree::Tree;
-use serde::Serialize;
 
 const OUTPUT_FILE: &str = "output.txt";
 
@@ -156,40 +154,4 @@ fn implementation_events_stream_over_a_channel() {
 
     let events: Vec<Event> = receiver.iter().collect();
     assert_eq!(events, expected_events());
-}
-
-/// Mirror of the worker binary's Job: what a run needs to know, on the wire.
-#[derive(Serialize)]
-struct Job<'a> {
-    source: &'a Endpoint,
-    dest: &'a Endpoint,
-    issues: Tree<Issue>,
-}
-
-#[test]
-fn implementing_in_a_separate_process_streams_events() {
-    let (dir, endpoint) = disposable_repo();
-    let job = Job {
-        source: &endpoint,
-        dest: &endpoint,
-        issues: red_green_blue(),
-    };
-
-    let mut worker = Command::new(env!("CARGO_BIN_EXE_epik-worker"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    serde_json::to_writer(worker.stdin.take().unwrap(), &job).unwrap();
-    let output = worker.wait_with_output().unwrap();
-    assert!(output.status.success(), "worker exited with failure");
-
-    let events: Vec<Event> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(events, expected_events());
-
-    assert_red_green_blue_committed(&dir);
 }

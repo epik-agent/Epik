@@ -27,6 +27,7 @@ pub mod implementation;
 pub mod ipc;
 pub mod keystore;
 pub mod logging;
+pub mod preflight;
 pub mod repository;
 pub mod run;
 pub mod session;

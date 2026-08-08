@@ -59,6 +59,23 @@ impl Repo {
             name: name.into(),
         }
     }
+
+    /// The `owner/name` spelling read back — what config carries. `None`
+    /// when `spec` is not a spelling GitHub itself would accept: owners are
+    /// alphanumerics and hyphens, names add underscores and dots, and a
+    /// `.git` suffix is a clone URL's decoration, not a name.
+    #[must_use]
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (owner, name) = spec.split_once('/')?;
+        let owner_fits =
+            !owner.is_empty() && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        let name_fits = !name.is_empty()
+            && !name.to_ascii_lowercase().ends_with(".git")
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        (owner_fits && name_fits).then(|| Self::new(owner, name))
+    }
 }
 
 impl fmt::Display for Repo {
@@ -918,6 +935,29 @@ mod tests {
 
     fn epik() -> Repo {
         Repo::new("epik-agent", "Epik")
+    }
+
+    #[test]
+    fn the_owner_name_spelling_parses_and_anything_else_does_not() {
+        assert_eq!(Repo::parse("epik-agent/Epik"), Some(epik()));
+        assert_eq!(
+            Repo::parse("rust-lang/rust.dev"),
+            Some(Repo::new("rust-lang", "rust.dev")),
+            "dots and hyphens are legitimate name characters"
+        );
+        for wrong in [
+            "",
+            "Epik",
+            "/Epik",
+            "epik-agent/",
+            "a/b/c",
+            "epik-agent/Epik.git",
+            "epik agent/Epik",
+            "epik-agent/E pik",
+            "epik.agent/Epik",
+        ] {
+            assert_eq!(Repo::parse(wrong), None, "{wrong:?}");
+        }
     }
 
     #[test]

@@ -42,6 +42,23 @@ const REPOS: &str = "repos";
 /// Where the worktrees live under Epik's home.
 const WORK: &str = "work";
 
+/// The askpass helper's name under the repos root — a dot-file, which no
+/// GitHub owner name can be, so it collides with nothing.
+const ASKPASS: &str = ".askpass";
+
+/// The environment variable the askpass helper echoes for a password
+/// prompt. The token rides here, per spawn; the helper file never holds it.
+const TOKEN_ENV: &str = "EPIK_GIT_PASSWORD";
+
+/// The helper itself: username `x-access-token` — GitHub's spelling for
+/// token-authenticated https — and the password read from the environment.
+const ASKPASS_SCRIPT: &str = "#!/bin/sh\n\
+# Epik's git askpass: the token rides the environment, never this file.\n\
+case \"$1\" in\n\
+Username*) echo x-access-token ;;\n\
+*) printf '%s\\n' \"$EPIK_GIT_PASSWORD\" ;;\n\
+esac\n";
+
 /// One registry writer at a time, process-wide: `worktree add`, `remove`,
 /// and `prune` all rewrite a clone's worktree registry, and git gives them
 /// no lock of their own — a concurrent add reads a sibling mid-birth, and a
@@ -60,6 +77,8 @@ fn registry() -> MutexGuard<'static, ()> {
 pub struct Git {
     repos: PathBuf,
     work: PathBuf,
+    /// Offered to https origins on the network verbs, when there is one.
+    token: Option<String>,
 }
 
 impl Git {
@@ -80,7 +99,19 @@ impl Git {
         Self {
             repos: repos.into(),
             work: work.into(),
+            token: None,
         }
+    }
+
+    /// The same verbs, offering `token` to https origins: an askpass helper
+    /// beside the cache — a script that only echoes what the environment
+    /// holds — and the secret itself in each spawn's environment. Never in
+    /// a URL, a gitconfig, or a command line, as the coding-agents ADR
+    /// prescribes.
+    #[must_use]
+    pub fn authenticated(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
     }
 
     /// Where `repo`'s bare clone is, whether or not it exists yet.
@@ -123,12 +154,12 @@ impl Git {
         // config lock for concurrent fetches to contend on.
         aimed(&bare, url)?;
         let fetched = || {
-            run(
-                Command::new("git")
-                    .current_dir(&bare)
-                    .args(["fetch", "--prune", "origin"]),
-                "fetch",
-            )
+            let mut command = Command::new("git");
+            command
+                .current_dir(&bare)
+                .args(["fetch", "--prune", "origin"]);
+            self.offered(&mut command)?;
+            run(&mut command, "fetch")
         };
         match fetched() {
             // Two runs racing the same fetch contend on ref locks; the
@@ -232,6 +263,31 @@ impl Git {
             branch: branch.to_owned(),
             bare: clone,
         })
+    }
+
+    /// Arms a network verb's spawn with the token, when this cache holds
+    /// one: `GIT_ASKPASS` aimed at the helper beside the cache, the token
+    /// in the environment the helper echoes from. The helper is rewritten
+    /// on every offer — everything under the roots may vanish between runs,
+    /// and rewriting is cheaper than checking.
+    fn offered(&self, command: &mut Command) -> Result<(), Error> {
+        let Some(token) = &self.token else {
+            return Ok(());
+        };
+        let cache = |error: std::io::Error| Error::Cache {
+            path: self.repos.join(ASKPASS),
+            error: error.to_string(),
+        };
+        fs::create_dir_all(&self.repos).map_err(cache)?;
+        let helper = self.repos.join(ASKPASS);
+        fs::write(&helper, ASKPASS_SCRIPT).map_err(cache)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).map_err(cache)?;
+        }
+        command.env("GIT_ASKPASS", &helper).env(TOKEN_ENV, token);
+        Ok(())
     }
 
     /// The worktree a previous run left at `issue`'s path, when one is
@@ -744,6 +800,40 @@ mod tests {
             rev(&w.origin, "main"),
             "the race's loser lost nothing: the winner's clone is the same clone"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_authenticated_fetch_offers_the_token_through_askpass_never_in_state() {
+        let w = World::new();
+        let git = w.git.clone().authenticated("ghp-secret");
+
+        // The fetch still works against an origin that wants no auth —
+        // offering credentials nobody asks for costs nothing...
+        git.fetch(&w.repo, &w.url()).unwrap();
+
+        // ...and leaves the helper armed beside the cache, holding no
+        // secret of its own.
+        let helper = w.root.path().join(REPOS).join(ASKPASS);
+        assert!(helper.is_file(), "the askpass helper stands with the cache");
+        let script = fs::read_to_string(&helper).unwrap();
+        assert!(
+            !script.contains("ghp-secret"),
+            "the token never persists: {script}"
+        );
+
+        // The helper answers git's two prompts: GitHub's token username,
+        // and the password from the environment — where the token rides.
+        let ask = |prompt: &str| {
+            let output = Command::new(&helper)
+                .arg(prompt)
+                .env(TOKEN_ENV, "ghp-secret")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        assert_eq!(ask("Username for 'https://github.com': "), "x-access-token");
+        assert_eq!(ask("Password for 'https://github.com': "), "ghp-secret");
     }
 
     #[test]
