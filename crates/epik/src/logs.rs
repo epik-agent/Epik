@@ -8,8 +8,10 @@
 //! for `:`, which some filesystems refuse. The contract is the opposite
 //! of [`crate::git`]'s roots: `repos/` and `work/` are caches of GitHub,
 //! deletable at the cost of time alone, while the log is the only copy of
-//! the run's narration — no Epik code deletes it, and the file is opened
-//! to append, so nothing ever truncates what an earlier run wrote.
+//! the run's narration — no Epik code deletes it, and every run gets a
+//! fresh file of its own: `create_new` arbitrates, and a rival landing
+//! inside the same second takes the next `-2`, `-3`, … spelling, so no
+//! run ever writes into — let alone truncates — another's file.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -65,7 +67,9 @@ impl Logs {
     }
 
     /// Where a `kind` run of `number` that started at `start` writes its
-    /// log, whether or not it exists yet.
+    /// log, whether or not it exists yet: the plain spelling. A run that
+    /// finds it already taken writes beside it under the next `-2`, `-3`,
+    /// … — [`create`](Self::create) arbitrates.
     #[must_use]
     pub fn path(&self, repo: &Repo, kind: Kind, number: u64, start: SystemTime) -> PathBuf {
         self.root
@@ -74,25 +78,46 @@ impl Logs {
             .join(format!("{kind}-{number}-{}.jsonl", stamp(start)))
     }
 
-    /// Opens the log for a run starting now: parents made, the file opened
-    /// to append. The log is the only copy of the run's narration, so even
-    /// a rerun landing inside the same second may add to a file but never
-    /// take from one.
+    /// Opens the log for a run starting now: parents made, and a file no
+    /// other run holds. The log is the only copy of the run's narration,
+    /// so `create_new` is the arbiter: a rival that landed inside the same
+    /// second keeps its file, and this run takes the next `-2`, `-3`, …
+    /// spelling — one file per run, and never a write into another's.
     ///
     /// # Errors
     ///
     /// Returns an error when the directory or the file cannot be made.
     pub fn create(&self, repo: &Repo, kind: Kind, number: u64) -> Result<JsonLines<File>> {
-        let path = self.path(repo, kind, number, SystemTime::now());
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        self.created(repo, kind, number, SystemTime::now())
+    }
+
+    /// [`create`](Self::create), from a stated start — the test seam, where
+    /// a collision can be forced instead of raced for.
+    fn created(
+        &self,
+        repo: &Repo,
+        kind: Kind,
+        number: u64,
+        start: SystemTime,
+    ) -> Result<JsonLines<File>> {
+        let dir = self.root.join(&repo.owner).join(&repo.name);
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let stem = format!("{kind}-{number}-{}", stamp(start));
+        let mut rival = 1_u64;
+        loop {
+            let path = if rival == 1 {
+                dir.join(format!("{stem}.jsonl"))
+            } else {
+                dir.join(format!("{stem}-{rival}.jsonl"))
+            };
+            match OpenOptions::new().append(true).create_new(true).open(&path) {
+                Ok(file) => return Ok(JsonLines::new(file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => rival += 1,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("opening {}", path.display()));
+                }
+            }
         }
-        let file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        Ok(JsonLines::new(file))
     }
 }
 
@@ -182,23 +207,49 @@ mod tests {
     }
 
     #[test]
-    fn a_rerun_takes_nothing_from_an_earlier_runs_log() {
+    fn rivals_inside_one_second_each_get_a_whole_file_of_their_own() {
         let root = TempDir::new().unwrap();
         let logs = Logs::rooted(root.path().join("logs"));
         let repo = Repo::new("epik-agent", "Epik");
+        // The forced collision: three runs stating the very same start.
+        let start = at(1_786_192_205);
 
-        let mut first = logs.create(&repo, Kind::Issue, 7).unwrap();
+        let mut first = logs.created(&repo, Kind::Issue, 7, start).unwrap();
         first.emit(RunEvent::Entered(Phase::Worktree));
-        drop(first);
-        let mut second = logs.create(&repo, Kind::Issue, 7).unwrap();
+        let mut second = logs.created(&repo, Kind::Issue, 7, start).unwrap();
         second.emit(RunEvent::Finished(Verdict::Done));
-        drop(second);
+        let mut third = logs.created(&repo, Kind::Issue, 7, start).unwrap();
+        third.emit(RunEvent::Entered(Phase::Cleanup));
 
-        // Whether the rerun landed inside the first run's second — one
-        // shared file — or the next, every line survives.
-        let events = collected(root.path().join("logs/epik-agent/Epik"));
-        assert!(events.contains(&RunEvent::Entered(Phase::Worktree)));
-        assert!(events.contains(&RunEvent::Finished(Verdict::Done)));
+        let dir = root.path().join("logs/epik-agent/Epik");
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "issue-7-2026-08-08T12-30-05Z-2.jsonl",
+                "issue-7-2026-08-08T12-30-05Z-3.jsonl",
+                "issue-7-2026-08-08T12-30-05Z.jsonl",
+            ],
+            "one file per run: rivals take the next spelling, never a shared file"
+        );
+        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(
+            read("issue-7-2026-08-08T12-30-05Z.jsonl").lines().count(),
+            1,
+            "the first run's file carries the first run's line and nothing else"
+        );
+        assert_eq!(
+            read("issue-7-2026-08-08T12-30-05Z-2.jsonl").lines().count(),
+            1
+        );
+        assert_eq!(
+            read("issue-7-2026-08-08T12-30-05Z-3.jsonl").lines().count(),
+            1
+        );
     }
 
     /// Every line of every log beneath `dir`, parsed, in file order.
