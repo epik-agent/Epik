@@ -87,12 +87,19 @@ impl Logs {
     /// other run holds. The log is the only copy of the run's narration,
     /// so `create_new` is the arbiter: a rival that landed inside the same
     /// second keeps its file, and this run takes the next `_2`, `_3`, …
-    /// spelling — one file per run, and never a write into another's.
+    /// spelling — one file per run, and never a write into another's. The
+    /// path rides beside the sink: arbitration decides the name, so only
+    /// the creation can say where the narration landed.
     ///
     /// # Errors
     ///
     /// Returns an error when the directory or the file cannot be made.
-    pub fn create(&self, repo: &Repo, kind: Kind, number: u64) -> Result<JsonLines<File>> {
+    pub fn create(
+        &self,
+        repo: &Repo,
+        kind: Kind,
+        number: u64,
+    ) -> Result<(PathBuf, JsonLines<File>)> {
         self.created(repo, kind, number, SystemTime::now())
     }
 
@@ -104,7 +111,7 @@ impl Logs {
         kind: Kind,
         number: u64,
         start: SystemTime,
-    ) -> Result<JsonLines<File>> {
+    ) -> Result<(PathBuf, JsonLines<File>)> {
         let dir = self.dir(repo);
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let stem = stem(kind, number, start);
@@ -119,7 +126,7 @@ impl Logs {
                 dir.join(format!("{stem}_{rival}.jsonl"))
             };
             match OpenOptions::new().append(true).create_new(true).open(&path) {
-                Ok(file) => return Ok(JsonLines::new(file)),
+                Ok(file) => return Ok((path, JsonLines::new(file))),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => rival += 1,
                 Err(error) => {
                     return Err(error).with_context(|| format!("opening {}", path.display()));
@@ -205,11 +212,19 @@ mod tests {
         let logs = Logs::rooted(root.path().join("logs"));
         let repo = Repo::new("epik-agent", "Epik");
 
-        let mut sink = logs.create(&repo, Kind::Issue, 7).unwrap();
+        let (path, mut sink) = logs.create(&repo, Kind::Issue, 7).unwrap();
         sink.emit(RunEvent::Entered(Phase::Worktree));
         sink.emit(RunEvent::Finished(Verdict::Done));
         drop(sink);
 
+        assert!(
+            path.is_file(),
+            "the returned path is where the narration landed"
+        );
+        assert_eq!(
+            path.parent(),
+            Some(&*root.path().join("logs/epik-agent/Epik"))
+        );
         let events = collected(root.path().join("logs/epik-agent/Epik"));
         assert_eq!(
             events,
@@ -228,14 +243,21 @@ mod tests {
         // The forced collision: three runs stating the very same start.
         let start = at(1_786_192_205);
 
-        let mut first = logs.created(&repo, Kind::Issue, 7, start).unwrap();
+        let dir = root.path().join("logs/epik-agent/Epik");
+        let (first_at, mut first) = logs.created(&repo, Kind::Issue, 7, start).unwrap();
         first.emit(RunEvent::Entered(Phase::Worktree));
-        let mut second = logs.created(&repo, Kind::Issue, 7, start).unwrap();
+        let (second_at, mut second) = logs.created(&repo, Kind::Issue, 7, start).unwrap();
         second.emit(RunEvent::Finished(Verdict::Done));
-        let mut third = logs.created(&repo, Kind::Issue, 7, start).unwrap();
+        let (third_at, mut third) = logs.created(&repo, Kind::Issue, 7, start).unwrap();
         third.emit(RunEvent::Entered(Phase::Cleanup));
 
-        let dir = root.path().join("logs/epik-agent/Epik");
+        assert_eq!(first_at, dir.join("issue-7-2026-08-08T12-30-05Z.jsonl"));
+        assert_eq!(second_at, dir.join("issue-7-2026-08-08T12-30-05Z_2.jsonl"));
+        assert_eq!(
+            third_at,
+            dir.join("issue-7-2026-08-08T12-30-05Z_3.jsonl"),
+            "each rival is told the spelling arbitration gave it"
+        );
         let mut names: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

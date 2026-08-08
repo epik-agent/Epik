@@ -188,7 +188,7 @@ mod worker {
         // The vouched-for token, offered onward: to git for the fetches,
         // through the askpass rails.
         let git = git.authenticated(token.clone());
-        conducted(&cli, &worker, &repo, &git, &agent, token, &stop)
+        conducted(&cli, &worker, &repo, &git, &agent, &token, &stop)
     }
 
     /// Wires SIGINT and SIGTERM to the run's stop token. A signal asks the
@@ -232,28 +232,16 @@ mod worker {
         repo: &Repo,
         git: &Git,
         agent: &ClaudeCode,
-        token: String,
+        token: &str,
         stop: &StopToken,
     ) -> ExitCode {
         let github = worker.api.as_ref().map_or_else(
-            || GitHub::new(Some(token.clone())),
-            |api| GitHub::at(api, Some(token.clone())),
+            || GitHub::new(Some(token.to_owned())),
+            |api| GitHub::at(api, Some(token.to_owned())),
         );
-        // Credentials injected, never discovered: the wide prompt's agent
-        // conducts the pull-request ceremony through gh, which answers to
-        // either spelling — and commits as Epik, so a box with no
-        // ~/.gitconfig never burns agent time on "tell me who you are".
-        let env = vec![
-            ("GH_TOKEN".to_owned(), token.clone()),
-            ("GITHUB_TOKEN".to_owned(), token),
-            ("GIT_AUTHOR_NAME".to_owned(), "Epik".to_owned()),
-            ("GIT_AUTHOR_EMAIL".to_owned(), "epik@localhost".to_owned()),
-            ("GIT_COMMITTER_NAME".to_owned(), "Epik".to_owned()),
-            (
-                "GIT_COMMITTER_EMAIL".to_owned(),
-                "epik@localhost".to_owned(),
-            ),
-        ];
+        // Credentials injected, never discovered — the same injection the
+        // launch tool makes, in one place.
+        let env = epik::run::credentialed(token);
         // GitHub is the only rendezvous, so the clone URL defaults to the
         // repo's own address — never a spelling with a token in it; the
         // token rides the cache's askpass rails instead.
@@ -367,6 +355,7 @@ mod worker {
     fn opened(repo: &Repo, kind: Kind, number: u64) -> Result<JsonLines<File>, ExitCode> {
         Logs::new()
             .and_then(|logs| logs.create(repo, kind, number))
+            .map(|(_, log)| log)
             .map_err(|error| {
                 eprintln!("epik-worker: {error:#}");
                 ExitCode::from(BROKEN)
