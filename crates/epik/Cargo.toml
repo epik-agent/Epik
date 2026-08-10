@@ -57,9 +57,6 @@ epik = { workspace = true, features = ["stub-claude"] }
 
 git2 = "0.20"
 tempfile = "3"
-# The worker tests render Config::default() to prove convergence wrote
-# exactly that file.
-toml = "1"
 # The GitHub mutation tier scaffolds branches over the raw git data API —
 # test plumbing that must not become a library verb.
 ureq = { version = "3", features = ["json"] }

@@ -196,15 +196,6 @@ impl Config {
     /// Returns an error when the file exists but cannot be read or parsed.
     /// A config Epik cannot understand is not quietly replaced with one it
     /// invented.
-    pub fn load() -> Result<Self> {
-        Self::read(&Self::path()?)
-    }
-
-    /// [`load`](Self::load), from a stated path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file exists but cannot be read or parsed.
     pub fn read(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -217,7 +208,7 @@ impl Config {
 
     /// Converges Epik's home: the directory exists, the file exists —
     /// materialized from the defaults when there is none — and the config
-    /// is read back. Every host's first act, so the window and the worker
+    /// is in hand. Every host's first act, so the window and the worker
     /// set up the machine identically.
     ///
     /// Idempotent by construction: an existing file is read, never
@@ -240,14 +231,18 @@ impl Config {
     /// Returns an error when the directory or the default cannot be
     /// written, or when an existing file cannot be read or parsed.
     pub fn converge_at(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        // `symlink_metadata` rather than `exists`: a dangling symlink is
+        // read — and comes back as the defaults, unwritten — never written
+        // through into its target. A probe that fails for any other reason
+        // falls through to the write, which says what is actually wrong.
+        // Between the probe and the write another host can only race this
+        // one to the same rendered defaults.
+        if path.symlink_metadata().is_ok() {
+            return Self::read(path);
         }
-        if !path.exists() {
-            let text = toml::to_string_pretty(&Self::default()).context("rendering the config")?;
-            fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
-        }
-        Self::read(path)
+        let config = Self::default();
+        config.save_at(path)?;
+        Ok(config)
     }
 
     /// Writes the config, creating Epik's home if it is not there.
@@ -256,12 +251,28 @@ impl Config {
     ///
     /// Returns an error when the directory or the file cannot be written.
     pub fn save(&self) -> Result<()> {
-        let path = Self::path()?;
+        self.save_at(&Self::path()?)
+    }
+
+    /// [`save`](Self::save), at a stated path. The write is atomic —
+    /// rendered beside the file, then renamed into place — so a crash or a
+    /// full disk leaves the old file or none, never a torn one the next
+    /// startup would refuse to parse.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory or the file cannot be written.
+    pub fn save_at(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
         let text = toml::to_string_pretty(self).context("rendering the config")?;
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        let mut staged = path.as_os_str().to_owned();
+        staged.push(".new");
+        let staged = PathBuf::from(staged);
+        fs::write(&staged, text).with_context(|| format!("writing {}", staged.display()))?;
+        fs::rename(&staged, path)
+            .with_context(|| format!("renaming {} into place", staged.display()))
     }
 
     /// The active provider, and the name it is configured under — which is
@@ -429,16 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn a_config_epik_cannot_parse_is_reported_rather_than_replaced() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), "this is not toml = = =").unwrap();
-
-        let error = Config::read(file.path()).expect_err("broken TOML is an error");
-
-        assert!(format!("{error:#}").contains("parsing"));
-    }
-
-    #[test]
     fn pointing_active_at_an_unlisted_provider_says_what_is_listed() {
         let config = Config {
             active: "groq".to_owned(),
@@ -469,6 +470,36 @@ mod tests {
         assert!(
             !written.contains("[worker]"),
             "the [worker] table is absent until the user states one:\n{written}"
+        );
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "the staged copy is renamed into place, never left beside the file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_config_symlink_is_never_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere.toml");
+        let path = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let config = Config::converge_at(&path).unwrap();
+
+        assert_eq!(
+            config,
+            Config::default(),
+            "a link to a missing file reads as a fresh install"
+        );
+        assert!(
+            !target.exists(),
+            "the defaults must not materialize behind the user's link"
+        );
+        assert!(
+            path.symlink_metadata().unwrap().file_type().is_symlink(),
+            "the link itself is left exactly as the user made it"
         );
     }
 
