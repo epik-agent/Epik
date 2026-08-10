@@ -1,7 +1,8 @@
 //! The launch tool: a feature handed to the coding agent, mid-chat.
 //!
 //! One registry entry sets the run machinery to work. Given a feature
-//! issue number, the handler preflights the config-derived manifest, then
+//! issue number — and, when stated, the branch the build works from and
+//! merges into — the handler preflights the config-derived manifest, then
 //! conducts a [`FeatureRun`] on a thread of its own and answers as soon as
 //! the run is started — naming the run and the log file it narrates into.
 //! Implementation belongs to the coding agent through the
@@ -49,8 +50,8 @@ use crate::tools::{Registry, Tool};
 /// whole credential, and the default branch an unstated base resolves to.
 /// The run never asks for either: everything it needs is handed in.
 pub trait Rig: Machinery {
-    /// The branch pull requests merge into by default — what an unstated
-    /// [`Launch::base`] resolves to, on the run's own thread.
+    /// The branch pull requests merge into by default — what a launch
+    /// whose base went unstated resolves to, on the run's own thread.
     ///
     /// # Errors
     ///
@@ -86,11 +87,6 @@ pub struct Launch {
     pub repo: Repo,
     /// Where the repository is cloned from.
     pub url: String,
-    /// The branch the review pull request merges into: stated, or — the
-    /// window's case, which has no `--target` flag — unstated, resolving
-    /// to the repository's default branch on the run's own thread. A base
-    /// that cannot be resolved is the run's failure, in its log.
-    pub base: Option<String>,
     /// What each issue run may spend.
     pub budget: Budget,
     /// How long each issue run's judgment waits for a check still running.
@@ -108,7 +104,6 @@ impl fmt::Debug for Launch {
         f.debug_struct("Launch")
             .field("repo", &self.repo)
             .field("url", &self.url)
-            .field("base", &self.base)
             .field("budget", &self.budget)
             .field("patience", &self.patience)
             .field(
@@ -199,6 +194,12 @@ impl Launcher {
     /// into the chat. The log file is created before the thread starts, so
     /// the answer can say where the narration lands.
     ///
+    /// `base` is the branch the build works from and merges into — the
+    /// feature branch is cut at its commit and the review pull request
+    /// merges back into it. Unstated, it resolves to the repository's
+    /// default branch on the run's own thread, where a resolution failure
+    /// is the run's failure in its log.
+    ///
     /// # Errors
     ///
     /// [`Error::InFlight`] while a run is still conducting — one at a
@@ -206,7 +207,7 @@ impl Launcher {
     /// preflight cannot stand; [`Error::Log`] when the run's log cannot be
     /// created, because a run whose narration has nowhere durable to land
     /// must not start.
-    pub fn launch(&self, number: u64) -> Result<Launched, Error> {
+    pub fn launch(&self, number: u64, base: Option<String>) -> Result<Launched, Error> {
         let stop = StopToken::new();
         // The claim, brief: the preflight can spawn processes and consult
         // the keyring — a dialog, on macOS — so the lock covers only the
@@ -226,7 +227,7 @@ impl Launcher {
                 handle: None,
             });
         }
-        self.provisioned(number, stop).inspect_err(|_| {
+        self.provisioned(number, base, stop).inspect_err(|_| {
             // A refused launch frees the slot on its way out — no rival
             // could have taken it while the claim stood.
             *slot(&self.running) = None;
@@ -238,7 +239,12 @@ impl Launcher {
     /// thread's start — never the network, so the tool's answer stays
     /// prompt. The claim already stands; the thread lands in it on
     /// success.
-    fn provisioned(&self, number: u64, stop: StopToken) -> Result<Launched, Error> {
+    fn provisioned(
+        &self,
+        number: u64,
+        base: Option<String>,
+        stop: StopToken,
+    ) -> Result<Launched, Error> {
         let token = preflight::manifest(
             &self.agent.binaries(),
             self.launch.token_override.clone(),
@@ -262,7 +268,7 @@ impl Launcher {
             // here on the run's own thread — the answer never waited on
             // it, and a base that cannot be resolved is a run failure,
             // the log's last word like every other.
-            let base = match launch.base.clone() {
+            let base = match base {
                 Some(base) => base,
                 None => match rig.default_branch(&launch.repo) {
                     Ok(base) => base,
@@ -375,7 +381,7 @@ impl std::error::Error for Error {}
 /// [`Registry::register`] does.
 pub fn register(registry: &mut Registry, launcher: Launcher) {
     registry.register(launch_feature(), move |args: LaunchFeature| {
-        launcher.launch(args.number)
+        launcher.launch(args.number, args.base)
     });
 }
 
@@ -401,6 +407,13 @@ fn launch_feature() -> Tool {
                     "type": "integer",
                     "description": "The feature issue's number, without the leading #.",
                 },
+                "base": {
+                    "type": "string",
+                    "description": "The branch the build works from and the review pull \
+                                    request merges into, exactly as the user names it. \
+                                    Omit when the user names none: the repository's \
+                                    default branch.",
+                },
             },
             "required": ["number"],
         }),
@@ -410,6 +423,10 @@ fn launch_feature() -> Tool {
 #[derive(Deserialize)]
 struct LaunchFeature {
     number: u64,
+    /// The branch the user names, passed through verbatim; absent meaning
+    /// the repository's default branch.
+    #[serde(default)]
+    base: Option<String>,
 }
 
 /// Test scaffolding shared with the session's tests: the littlest GitHub
@@ -434,20 +451,41 @@ pub mod testing {
     use std::time::{Duration, Instant};
 
     use super::{Launcher, Rig};
-    use crate::github::{self, Check, Issue, IssueGraph, Pull, Repo, State};
+    use crate::github::{self, Branch, Check, Edge, Issue, IssueGraph, Pull, Repo, State};
     use crate::run::{Evidence, Machinery};
+
+    /// The commit every reviewing fake's base branch stands at — what a
+    /// feature branch cut from it must be created at.
+    pub const TIP: &str = "base-tip";
 
     /// The littlest GitHub a launch can be judged against: one feature
     /// issue with no sub-issues — the shortest conductable run. Gated,
     /// its graph read blocks until the test says, holding the run
     /// mid-conduct while the tool's answers are examined; defaulting, its
-    /// default branch answers — or refuses — as the test stated.
+    /// default branch answers — or refuses — as the test stated;
+    /// reviewing, the run carries to the review phase and what the base
+    /// drove is recorded.
     pub struct Fake {
         gate: Option<Mutex<Receiver<()>>>,
         /// What `default_branch` answers, when a test defers the base.
         /// Unset, the verb is unreachable — a stated base is never
         /// resolved.
         default: Option<Result<String, github::Error>>,
+        /// The whole-run staging: set, the feature's one sub-issue is
+        /// already closed and the base stands at [`TIP`], so the run cuts
+        /// the feature branch and opens the review pull request — both
+        /// recorded here for the test to examine.
+        review: Option<Arc<Review>>,
+    }
+
+    /// What a reviewing run left behind: every branch the machinery was
+    /// asked to create, and every pull request it was asked to open.
+    #[derive(Default)]
+    pub struct Review {
+        /// Each created branch: (name, commit).
+        pub created: Mutex<Vec<(String, String)>>,
+        /// Each opened pull request: (head, base).
+        pub opened: Mutex<Vec<(String, String)>>,
     }
 
     impl Fake {
@@ -455,6 +493,7 @@ pub mod testing {
             Self {
                 gate: None,
                 default: None,
+                review: None,
             }
         }
 
@@ -464,6 +503,7 @@ pub mod testing {
                 Self {
                     gate: Some(Mutex::new(gate)),
                     default: None,
+                    review: None,
                 },
                 open,
             )
@@ -473,21 +513,44 @@ pub mod testing {
             Self {
                 gate: None,
                 default: Some(answer),
+                review: None,
             }
+        }
+
+        pub fn reviewing() -> (Self, Arc<Review>) {
+            let review = Arc::new(Review::default());
+            (
+                Self {
+                    gate: None,
+                    default: None,
+                    review: Some(Arc::clone(&review)),
+                },
+                review,
+            )
+        }
+
+        /// The staging, where the run has carried past the graph phase —
+        /// which only a reviewing fake's runs do.
+        fn review(&self) -> &Review {
+            self.review
+                .as_ref()
+                .expect("a sub-issueless feature run stops at the graph phase")
         }
     }
 
     impl Evidence for Fake {
         fn pull(&self, _: &Repo, _: &str) -> Result<Option<Pull>, github::Error> {
-            unimplemented!("a sub-issueless feature run never consults evidence")
+            // No review stands yet: the run must open one.
+            let _ = self.review();
+            Ok(None)
         }
 
         fn checks(&self, _: &Repo, _: &str) -> Result<Vec<Check>, github::Error> {
-            unimplemented!("a sub-issueless feature run never consults evidence")
+            unimplemented!("a fake feature run never consults check evidence")
         }
 
         fn issue(&self, _: &Repo, _: u64) -> Result<Issue, github::Error> {
-            unimplemented!("a sub-issueless feature run never consults evidence")
+            unimplemented!("a fake feature run never consults issue evidence")
         }
     }
 
@@ -498,6 +561,16 @@ pub mod testing {
                 // rather than outliving the test that staged it.
                 let _ = gate.lock().unwrap().recv();
             }
+            // A reviewing fake's one sub-issue is already closed, so the
+            // run conducts nothing and carries straight to review.
+            let sub_issues = match &self.review {
+                Some(_) => vec![Edge {
+                    number: number + 1,
+                    title: "already done".to_owned(),
+                    state: State::Closed,
+                }],
+                None => Vec::new(),
+            };
             Ok(IssueGraph {
                 issue: Issue {
                     number,
@@ -505,28 +578,54 @@ pub mod testing {
                     body: "the plan".to_owned(),
                     state: State::Open,
                 },
-                sub_issues: Vec::new(),
+                sub_issues,
                 blocked_by: Vec::new(),
             })
         }
 
-        fn branch(&self, _: &Repo, _: &str) -> Result<Option<String>, github::Error> {
-            unimplemented!("a sub-issueless feature fails before the branch phase")
+        fn branch(&self, _: &Repo, name: &str) -> Result<Option<String>, github::Error> {
+            let _ = self.review();
+            // The feature branch is absent — the run must cut it — and
+            // any other name is the base, standing at its tip.
+            Ok((!name.starts_with("feature-")).then(|| TIP.to_owned()))
         }
 
-        fn create_branch(&self, _: &Repo, _: &str, _: &str) -> Result<(), github::Error> {
-            unimplemented!("a sub-issueless feature fails before the branch phase")
+        fn create_branch(&self, _: &Repo, branch: &str, sha: &str) -> Result<(), github::Error> {
+            self.review()
+                .created
+                .lock()
+                .unwrap()
+                .push((branch.to_owned(), sha.to_owned()));
+            Ok(())
         }
 
         fn open_pull(
             &self,
             _: &Repo,
-            _: &str,
-            _: &str,
-            _: &str,
+            title: &str,
+            head: &str,
+            base: &str,
             _: &str,
         ) -> Result<Pull, github::Error> {
-            unimplemented!("a sub-issueless feature fails before the review phase")
+            self.review()
+                .opened
+                .lock()
+                .unwrap()
+                .push((head.to_owned(), base.to_owned()));
+            Ok(Pull {
+                number: 101,
+                title: title.to_owned(),
+                state: State::Open,
+                merged: false,
+                head: Branch {
+                    name: head.to_owned(),
+                    sha: TIP.to_owned(),
+                },
+                base: Branch {
+                    name: base.to_owned(),
+                    sha: TIP.to_owned(),
+                },
+            })
         }
     }
 
@@ -563,7 +662,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::testing::{Fake, finished};
+    use super::testing::{Fake, TIP, finished};
     use super::*;
     use crate::agent::Scripted;
     use crate::git::testing::World;
@@ -572,26 +671,13 @@ mod tests {
 
     /// A launcher over the world's git, a temp log root, and the stated
     /// token override — the preflight's keystore rail deliberately empty,
-    /// so the override is the whole credential story. The base is stated;
-    /// [`based`] defers it.
+    /// so the override is the whole credential story. The base belongs to
+    /// each launch, as each test says it.
     fn launcher(world: &World, logs: &Path, rig: Fake, token: Option<&str>) -> Launcher {
-        based(world, logs, rig, token, Some("main"))
-    }
-
-    /// [`launcher`], with the base as the test says — `None` resolving
-    /// through the rig on the run's thread.
-    fn based(
-        world: &World,
-        logs: &Path,
-        rig: Fake,
-        token: Option<&str>,
-        base: Option<&str>,
-    ) -> Launcher {
         Launcher::new(
             Launch {
                 repo: world.repo.clone(),
                 url: world.url(),
-                base: base.map(str::to_owned),
                 budget: Budget {
                     max_tokens: None,
                     max_cost: None,
@@ -606,6 +692,13 @@ mod tests {
             Logs::rooted(logs),
             InMemory::default(),
         )
+    }
+
+    /// The base most tests state — passed through verbatim, never
+    /// resolved through the rig.
+    #[allow(clippy::unnecessary_wraps)]
+    fn stated() -> Option<String> {
+        Some("main".to_owned())
     }
 
     /// Every line of the run's log, parsed back into the vocabulary.
@@ -624,7 +717,7 @@ mod tests {
         let (fake, open) = Fake::gated();
         let launcher = launcher(&w, root.path(), fake, Some("ghp-test"));
 
-        let started = launcher.launch(7).unwrap();
+        let started = launcher.launch(7, stated()).unwrap();
 
         assert_eq!(started.run, "feature-7");
         assert!(
@@ -640,7 +733,7 @@ mod tests {
         assert!(name.starts_with("feature-7-"), "{name}");
         // The run is still conducting — held at the gate — so a second
         // launch is refused, naming the run in flight.
-        let error = launcher.launch(9).unwrap_err();
+        let error = launcher.launch(9, stated()).unwrap_err();
         assert!(
             matches!(&error, Error::InFlight { running } if running == "feature-7"),
             "{error:?}"
@@ -677,10 +770,10 @@ mod tests {
         let root = TempDir::new().unwrap();
         let launcher = launcher(&w, root.path(), Fake::instant(), Some("ghp-test"));
 
-        let first = launcher.launch(7).unwrap();
+        let first = launcher.launch(7, stated()).unwrap();
         finished(&launcher);
 
-        let second = launcher.launch(9).unwrap();
+        let second = launcher.launch(9, stated()).unwrap();
         assert_eq!(second.run, "feature-9");
         assert_ne!(first.log, second.log, "every run gets a file of its own");
         finished(&launcher);
@@ -693,7 +786,7 @@ mod tests {
         // No override and an empty keystore: the token layer cannot stand.
         let launcher = launcher(&w, root.path(), Fake::instant(), None);
 
-        let error = launcher.launch(7).unwrap_err();
+        let error = launcher.launch(7, stated()).unwrap_err();
 
         let Error::Refused { refusals } = &error else {
             panic!("a failed preflight refuses: {error:?}");
@@ -713,7 +806,7 @@ mod tests {
             !root.path().join(&w.repo.owner).exists(),
             "a refused launch leaves no log file saying otherwise"
         );
-        let again = launcher.launch(7).unwrap_err();
+        let again = launcher.launch(7, stated()).unwrap_err();
         assert!(
             matches!(again, Error::Refused { .. }),
             "a refused launch frees the slot rather than wedging it: {again:?}"
@@ -725,7 +818,6 @@ mod tests {
         let launch = Launch {
             repo: Repo::new("epik-agent", "Epik"),
             url: "https://github.com/epik-agent/Epik.git".to_owned(),
-            base: Some("main".to_owned()),
             budget: Budget {
                 max_tokens: None,
                 max_cost: None,
@@ -756,7 +848,9 @@ mod tests {
         let mut registry = Registry::new();
         register(&mut registry, launcher.clone());
 
-        let answer = registry.call("launch_feature", r#"{"number": 7}"#).unwrap();
+        let answer = registry
+            .call("launch_feature", r#"{"number": 7, "base": "main"}"#)
+            .unwrap();
         assert_eq!(answer["run"], "feature-7");
         assert!(
             answer["log"].as_str().unwrap().contains("feature-7-"),
@@ -782,13 +876,46 @@ mod tests {
     }
 
     #[test]
+    fn a_stated_base_is_cut_from_and_merged_into_carried_through_the_registry() {
+        let w = World::new();
+        let root = TempDir::new().unwrap();
+        let (fake, review) = Fake::reviewing();
+        let launcher = launcher(&w, root.path(), fake, Some("ghp-test"));
+        let mut registry = Registry::new();
+        register(&mut registry, launcher.clone());
+
+        // The model's call, base filled from the conversation. It reaches
+        // the run verbatim — never resolved, or the rig would panic the
+        // thread and nothing below would be recorded.
+        let answer = registry
+            .call(
+                "launch_feature",
+                r#"{"number": 7, "base": "local-client-greenfield"}"#,
+            )
+            .unwrap();
+
+        assert_eq!(answer["run"], "feature-7");
+        finished(&launcher);
+        assert_eq!(
+            *review.created.lock().unwrap(),
+            vec![("feature-7".to_owned(), TIP.to_owned())],
+            "the feature branch is created at the named base's commit"
+        );
+        assert_eq!(
+            *review.opened.lock().unwrap(),
+            vec![("feature-7".to_owned(), "local-client-greenfield".to_owned())],
+            "the review pull request merges into the named base"
+        );
+    }
+
+    #[test]
     fn an_unstated_base_is_the_repositorys_default_branch_resolved_on_the_runs_thread() {
         let w = World::new();
         let root = TempDir::new().unwrap();
         let fake = Fake::defaulting(Ok("main".to_owned()));
-        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+        let launcher = launcher(&w, root.path(), fake, Some("ghp-test"));
 
-        let started = launcher.launch(7).unwrap();
+        let started = launcher.launch(7, None).unwrap();
 
         assert_eq!(started.run, "feature-7");
         finished(&launcher);
@@ -807,25 +934,29 @@ mod tests {
         let w = World::new();
         let root = TempDir::new().unwrap();
         let fake = Fake::defaulting(Err(github::Error::Wire("no answer".to_owned())));
-        let launcher = based(&w, root.path(), fake, Some("ghp-test"), None);
+        let launcher = launcher(&w, root.path(), fake, Some("ghp-test"));
+        let mut registry = Registry::new();
+        register(&mut registry, launcher.clone());
 
-        // The answer is prompt — the network is never consulted before the
-        // conducting thread — and the failure lands where every run
-        // failure lands.
-        let started = launcher.launch(7).unwrap();
+        // A call that says nothing of the base reaches the run with it
+        // unstated. The answer is prompt — the network is never consulted
+        // before the conducting thread — and the failure lands where every
+        // run failure lands.
+        let answer = registry.call("launch_feature", r#"{"number": 7}"#).unwrap();
 
-        assert_eq!(started.run, "feature-7");
+        assert_eq!(answer["run"], "feature-7");
+        let log = PathBuf::from(answer["log"].as_str().unwrap());
         finished(&launcher);
         assert!(
             matches!(
-                narrated(&started.log).last(),
+                narrated(&log).last(),
                 Some(FeatureEvent::Finished(FeatureVerdict::Failed { report }))
                     if report == "the base branch could not be resolved: no answer"
             ),
             "the log's last word names the base: {:?}",
-            narrated(&started.log)
+            narrated(&log)
         );
-        let again = launcher.launch(9).unwrap();
+        let again = launcher.launch(9, None).unwrap();
         assert_eq!(
             again.run, "feature-9",
             "a failed run frees the slot like any other"
@@ -842,12 +973,23 @@ mod tests {
             tool.description.contains("github_"),
             "the face points progress questions at the GitHub verbs"
         );
-        assert_eq!(tool.schema["required"], json!(["number"]));
+        assert_eq!(
+            tool.schema["required"],
+            json!(["number"]),
+            "the base stays optional: unstated is the default branch"
+        );
         assert!(
             !tool.schema["properties"]["number"]["description"]
                 .as_str()
                 .unwrap()
                 .is_empty()
+        );
+        let base = tool.schema["properties"]["base"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            base.contains("as the user names it") && base.contains("default branch"),
+            "the face says what the argument carries: {base}"
         );
     }
 

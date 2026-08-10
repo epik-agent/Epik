@@ -364,9 +364,9 @@ impl<S: KeyStore> Session<crate::chat::OpenAiCompatible, S> {
 /// same way — [`Worker`](crate::config::Worker)'s own derivations for the
 /// repository, the clone URL, and the API host, with the shared
 /// [`BUDGET`](crate::run::BUDGET) and [`PATIENCE`](crate::run::PATIENCE).
-/// The base is left unstated — the window has no `--target` flag — so a
-/// launch merges into the repository's default branch, resolved on the
-/// run's own thread.
+/// The base belongs to each launch — the tool's `base` argument, filled by
+/// the model from the conversation — and a launch that states none merges
+/// into the repository's default branch, resolved on the run's own thread.
 ///
 /// The rig is handed over uncredentialed: every launch preflights and
 /// conducts with the token vouched for at that moment, so a PAT pasted
@@ -391,7 +391,6 @@ fn launcher(
         crate::launch::Launch {
             repo,
             url,
-            base: None,
             budget: crate::run::BUDGET,
             patience: crate::run::PATIENCE,
             token_override,
@@ -569,7 +568,6 @@ mod tests {
             Launch {
                 repo: Repo::new("epik-agent", "Epik"),
                 url: "unused: the run fails before any fetch".to_owned(),
-                base: Some("main".to_owned()),
                 budget: Budget {
                     max_tokens: None,
                     max_cost: None,
@@ -586,11 +584,13 @@ mod tests {
         );
         let mut tools = Registry::new();
         crate::launch::register(&mut tools, launcher.clone());
+        // The base, filled by the model from the conversation: "on main"
+        // lands as the tool call's `base` argument, verbatim.
         let scripted = Scripted::saying(["Dispatching."])
             .asking([ToolCall::new(
                 "call-1",
                 "launch_feature",
-                r#"{"number": 7}"#,
+                r#"{"number": 7, "base": "main"}"#,
             )])
             .then_saying(["feature-7 is away."])
             .then_saying(["Trying."])
@@ -608,10 +608,14 @@ mod tests {
         )
         .expect("the config names a provider it lists");
 
-        // "Implement feature #7": the reply arrives while the run — held
-        // at the gate — is still conducting.
+        // "Implement feature #7 on main": the reply arrives while the run
+        // — held at the gate — is still conducting.
         let reply = session
-            .send("Implement feature #7", &mut Silent, &StopToken::new())
+            .send(
+                "Implement feature #7 on main",
+                &mut Silent,
+                &StopToken::new(),
+            )
             .expect("the turn completes without waiting for the run");
         assert_eq!(reply.text, "feature-7 is away.");
         let answer = launched(&session, "call-1");
