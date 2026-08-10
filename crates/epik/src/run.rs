@@ -135,9 +135,9 @@ pub enum FeaturePhase {
     /// which issues, waiting on what.
     Graph,
     /// The harness ensures the feature branch exists at the remote — cut
-    /// from the base branch's tip when absent — so every issue run has a
-    /// base to check out and merge into. Machinery, never an agent's
-    /// errand.
+    /// from the base branch's tip when absent, and refused when a standing
+    /// branch has diverged from the base — so every issue run has a base
+    /// to check out and merge into. Machinery, never an agent's errand.
     Branch,
     /// One scheduling round: the pure fold picks the ready set, and an
     /// issue run is conducted for each. Entered once per round, so the log

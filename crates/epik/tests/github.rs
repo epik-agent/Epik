@@ -24,7 +24,7 @@ use std::env;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use epik::github::{Error, GitHub, Repo, State};
+use epik::github::{Comparison, Error, GitHub, Repo, State};
 
 /// Set this and an unreachable GitHub stops being a reason to skip.
 const REQUIRE_ENV: &str = "EPIK_REQUIRE_GITHUB";
@@ -138,6 +138,16 @@ fn a_pull_is_findable_by_its_head_branch_alone() {
         none, None,
         "a branch with no pull request is a None, not an error"
     );
+}
+
+#[test]
+fn a_branch_compares_to_itself_as_identical() {
+    let Some(github) = smoke() else { return };
+    // The one comparison no future commit can change.
+    let Some(comparison) = tolerating(github.compare(&epik(), "main", "main")) else {
+        return;
+    };
+    assert_eq!(comparison, Comparison::Identical);
 }
 
 #[test]

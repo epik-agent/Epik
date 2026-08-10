@@ -24,7 +24,7 @@ use std::time::Duration;
 use crate::agent::{Budget, CodingAgent};
 use crate::chat::StopToken;
 use crate::git::Git;
-use crate::github::{self, GitHub, Issue, IssueGraph, Pull, Repo, State};
+use crate::github::{self, Comparison, GitHub, Issue, IssueGraph, Pull, Repo, State};
 use crate::logging::{Log, Mapping};
 use crate::run::{
     Evidence, FeatureEvent, FeaturePhase, FeatureVerdict, IssueRun, Retained, RunEvent, Verdict,
@@ -84,6 +84,14 @@ pub trait Machinery: Evidence {
     /// no.
     fn create_branch(&self, repo: &Repo, branch: &str, sha: &str) -> Result<(), github::Error>;
 
+    /// How `head` stands relative to `base` at the remote.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`github::Error`] when GitHub cannot be asked or answers
+    /// no.
+    fn compare(&self, repo: &Repo, base: &str, head: &str) -> Result<Comparison, github::Error>;
+
     /// Opens the pull request merging `head` into `base`.
     ///
     /// # Errors
@@ -112,6 +120,10 @@ impl Machinery for GitHub {
     fn create_branch(&self, repo: &Repo, branch: &str, sha: &str) -> Result<(), github::Error> {
         // The inherent verb: inherent methods win the name over this trait's.
         Self::create_branch(self, repo, branch, sha)
+    }
+
+    fn compare(&self, repo: &Repo, base: &str, head: &str) -> Result<Comparison, github::Error> {
+        Self::compare(self, repo, base, head)
     }
 
     fn open_pull(
@@ -262,13 +274,30 @@ impl FeatureRun {
     /// branch's tip when absent, so the first issue run has an
     /// `origin/<branch>` to check out from. Mechanical, so it is the
     /// harness's own act, never an agent's errand.
+    ///
+    /// A branch already standing is reused only where its history and the
+    /// base's agree. Diverged — commits on both sides — means the branch
+    /// was cut from some other base, or this base has moved past merged
+    /// work, and a review opened from it would carry the whole difference;
+    /// that mismatch is the run's failure, never silently proceeded past.
     fn branched(&self, machinery: &dyn Machinery) -> Result<(), String> {
         let head = self.branch();
         let standing = machinery
             .branch(&self.repo, &head)
             .map_err(|error| error.to_string())?;
         if standing.is_some() {
-            return Ok(());
+            return match machinery
+                .compare(&self.repo, &self.base, &head)
+                .map_err(|error| error.to_string())?
+            {
+                Comparison::Diverged => Err(format!(
+                    "feature branch {head} and base {} have diverged: each holds \
+                     commits the other lacks. Delete {head} to cut it fresh from \
+                     {}, or merge {} into it and relaunch",
+                    self.base, self.base, self.base
+                )),
+                Comparison::Identical | Comparison::Ahead | Comparison::Behind => Ok(()),
+            };
         }
         let base = machinery
             .branch(&self.repo, &self.base)
@@ -509,6 +538,18 @@ mod tests {
             .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
 
+    /// Whether `of` is an ancestor of `descendant` at the origin — the
+    /// truth the fake's compare verb folds GitHub's four words from.
+    fn ancestor(origin: &Path, of: &str, descendant: &str) -> bool {
+        Command::new("git")
+            .current_dir(origin)
+            .args(["merge-base", "--is-ancestor", of, descendant])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
     /// The little GitHub a feature run is judged against: sub-issues with
     /// their blockers, playing a world where every conducted run's agent
     /// did its whole job — the first time judgment asks for an issue's pull
@@ -658,6 +699,20 @@ mod tests {
         fn create_branch(&self, _: &Repo, branch: &str, sha: &str) -> Result<(), github::Error> {
             sh(&self.origin, &["branch", branch, sha]);
             Ok(())
+        }
+
+        fn compare(&self, _: &Repo, base: &str, head: &str) -> Result<Comparison, github::Error> {
+            Ok(
+                match (
+                    ancestor(&self.origin, base, head),
+                    ancestor(&self.origin, head, base),
+                ) {
+                    (true, true) => Comparison::Identical,
+                    (true, false) => Comparison::Ahead,
+                    (false, true) => Comparison::Behind,
+                    (false, false) => Comparison::Diverged,
+                },
+            )
         }
 
         fn open_pull(
@@ -863,6 +918,65 @@ mod tests {
             origin_branch(&w.origin, "feature-109"),
             tip,
             "a standing feature branch is left exactly where it stood"
+        );
+    }
+
+    #[test]
+    fn a_standing_branch_diverged_from_the_base_is_the_runs_failure() {
+        let w = World::new();
+        // The branch stands on history the base lacks — a cut from some
+        // other base — and the base has moved past it too: diverged, and a
+        // review opened from it would carry the whole difference.
+        sh(&w.origin, &["checkout", "-b", "feature-113"]);
+        commit(&w.origin, "elsewhere.md", "cut from another base");
+        sh(&w.origin, &["checkout", "main"]);
+        commit(&w.origin, "moved.md", "the base moved on");
+        let tip = origin_branch(&w.origin, "feature-113");
+        let r = run(&w, 113);
+        let fake = Fake::new(&w, 113, &[(1, &[], Open)]);
+
+        let (events, verdict) = conducted(&r, &w, &fake, &completing());
+
+        let report = report(&verdict);
+        assert!(
+            report.contains("feature-113 and base main have diverged"),
+            "{report}"
+        );
+        assert!(
+            report.contains("Delete feature-113"),
+            "the report says how to proceed: {report}"
+        );
+        assert_eq!(
+            origin_branch(&w.origin, "feature-113"),
+            tip,
+            "the mismatched branch is left exactly where it stood"
+        );
+        assert!(fake.opened.borrow().is_empty(), "and no review is opened");
+        assert_eq!(
+            phases(&events),
+            [FeaturePhase::Graph, FeaturePhase::Branch],
+            "the run stops at the branch phase"
+        );
+    }
+
+    #[test]
+    fn a_standing_branch_the_base_absorbed_is_reused_not_refused() {
+        let w = World::new();
+        // The merged rerun: the branch stands where the base once did, and
+        // the base has since absorbed it — behind, holding nothing the
+        // base lacks, so the run proceeds to link the merged review.
+        sh(&w.origin, &["branch", "feature-114"]);
+        commit(&w.origin, "after.md", "the base moved past the merged work");
+        let r = run(&w, 114);
+        let fake = Fake::new(&w, 114, &[(1, &[], Closed)]);
+        *fake.review.borrow_mut() = Some(review(80, "feature-114", &fake.sha, Closed, true));
+
+        let (_, verdict) = conducted(&r, &w, &fake, &completing());
+
+        assert_eq!(
+            verdict,
+            FeatureVerdict::Done { review: 80 },
+            "a branch the base contains can carry no divergence into review"
         );
     }
 

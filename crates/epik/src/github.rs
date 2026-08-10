@@ -132,6 +132,18 @@ pub struct Pull {
     pub base: Branch,
 }
 
+/// How one ref stands relative to another — `head` against `base`, in
+/// GitHub's own four words. `Diverged` is the one that matters: each side
+/// holds commits the other lacks.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Comparison {
+    Identical,
+    Ahead,
+    Behind,
+    Diverged,
+}
+
 /// How to merge a pull request. Deserializes from the same lowercase words
 /// GitHub's own UI uses, which is how a tool argument names one.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -522,6 +534,28 @@ impl GitHub {
             Err(Error::Refused { status: 404, .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// How `head` stands relative to `base`: identical, ahead, behind, or
+    /// diverged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no — a
+    /// ref that does not exist, chiefly.
+    pub fn compare(&self, repo: &Repo, base: &str, head: &str) -> Result<Comparison, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            status: Comparison,
+        }
+        // The endpoint carries the commits between the two; one per page
+        // keeps the answer to the status this caller reads.
+        let wire: Wire = self.get(&format!(
+            "repos/{repo}/compare/{}...{}?per_page=1",
+            encoded(base),
+            encoded(head)
+        ))?;
+        Ok(wire.status)
     }
 
     /// Creates `branch` at `sha` — how a feature branch comes to exist at
@@ -1024,6 +1058,20 @@ mod tests {
             wire.check_runs.iter().any(|check| check.name == "CI"),
             "the aggregate check is among them"
         );
+    }
+
+    #[test]
+    fn a_comparison_decodes_from_githubs_own_words() {
+        for (word, comparison) in [
+            ("identical", Comparison::Identical),
+            ("ahead", Comparison::Ahead),
+            ("behind", Comparison::Behind),
+            ("diverged", Comparison::Diverged),
+        ] {
+            let decoded: Comparison = decode("a comparison", Value::String(word.to_owned()))
+                .unwrap_or_else(|error| panic!("{word}: {error}"));
+            assert_eq!(decoded, comparison);
+        }
     }
 
     #[test]
