@@ -443,6 +443,23 @@ fn no_worker_section_is_fatal_at_startup_never_a_default_repository() {
 }
 
 #[test]
+fn a_fresh_home_is_converged_before_the_preflight() {
+    let rig = Rig::new();
+    rig.git("2.42.0");
+
+    let output = rig.run(&["--issue", "1", "--target", "main"]);
+
+    // The materialized default has no [worker], so boot still refuses —
+    // but the same file the window would write is now on disk.
+    assert_eq!(code(&output), BROKEN, "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(rig.home.path().join("config.toml")).unwrap(),
+        toml::to_string_pretty(&epik::config::Config::default()).unwrap(),
+        "convergence leaves the rendered defaults on disk"
+    );
+}
+
+#[test]
 fn a_repo_that_is_not_owner_name_is_fatal_at_startup() {
     let rig = Rig::new();
     rig.config("[worker]\nrepo = \"nonsense\"\n");

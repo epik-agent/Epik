@@ -3,7 +3,9 @@
 //! The file lives at `~/.epik/config.toml` and is edited by hand: there is no
 //! settings UI, by decision — edit and restart, and the status bar names the
 //! active model so you can see which one took. It lists providers, says which
-//! is active, and carries the system prompt. The `[worker]` table is opt-in
+//! is active, and carries the system prompt. Every host converges the file
+//! into existence at startup ([`Config::converge`]), so there is always one
+//! on disk to edit. The `[worker]` table is opt-in
 //! and says what the run machinery conducts: which repository — its one
 //! required field — and which coding-agent binary. Without the table there
 //! is no worker and no launch verb, because a run aimed at a repository
@@ -213,6 +215,41 @@ impl Config {
         }
     }
 
+    /// Converges Epik's home: the directory exists, the file exists —
+    /// materialized from the defaults when there is none — and the config
+    /// is read back. Every host's first act, so the window and the worker
+    /// set up the machine identically.
+    ///
+    /// Idempotent by construction: an existing file is read, never
+    /// rewritten, so a hand-edited config survives every startup byte for
+    /// byte — and a deleted home is just the first run over again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Epik's home is not discoverable or cannot be
+    /// made a directory, when the default cannot be written, or when an
+    /// existing file cannot be read or parsed.
+    pub fn converge() -> Result<Self> {
+        Self::converge_at(&Self::path()?)
+    }
+
+    /// [`converge`](Self::converge), at a stated path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory or the default cannot be
+    /// written, or when an existing file cannot be read or parsed.
+    pub fn converge_at(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        if !path.exists() {
+            let text = toml::to_string_pretty(&Self::default()).context("rendering the config")?;
+            fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+        }
+        Self::read(path)
+    }
+
     /// Writes the config, creating Epik's home if it is not there.
     ///
     /// # Errors
@@ -413,6 +450,86 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("groq"), "{message}");
         assert!(message.contains("anthropic, ollama"), "{message}");
+    }
+
+    #[test]
+    fn convergence_materializes_the_default_file_where_there_was_no_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".epik").join("config.toml");
+
+        let config = Config::converge_at(&path).unwrap();
+
+        assert_eq!(config, Config::default());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            written,
+            toml::to_string_pretty(&Config::default()).unwrap(),
+            "the written default is Config::default() rendered to TOML"
+        );
+        assert!(
+            !written.contains("[worker]"),
+            "the [worker] table is absent until the user states one:\n{written}"
+        );
+    }
+
+    #[test]
+    fn a_deleted_home_converges_to_the_same_file_as_the_first_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(".epik");
+        let path = home.join("config.toml");
+        Config::converge_at(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+
+        Config::converge_at(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            first,
+            "a deleted home and a fresh install are the same case by construction"
+        );
+    }
+
+    #[test]
+    fn a_hand_edited_config_survives_convergence_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let stated = "active = \"local\"\n\
+             [providers.local]\n\
+             base_url = \"http://localhost:1234/v1\"\n\
+             model = \"local\"\n\
+             [worker]\n\
+             repo = \"wpm/epik-scratch\"\n";
+        std::fs::write(&path, stated).unwrap();
+
+        let config = Config::converge_at(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            stated,
+            "an existing config is read, never rewritten"
+        );
+        assert_eq!(config.provider().unwrap().0, "local");
+        assert_eq!(
+            config.worker.expect("the section was stated").repo,
+            "wpm/epik-scratch"
+        );
+    }
+
+    #[test]
+    fn convergence_reports_a_broken_config_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not toml = = =").unwrap();
+
+        let error = Config::converge_at(&path).expect_err("broken TOML is an error");
+
+        assert!(format!("{error:#}").contains("parsing"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "this is not toml = = =",
+            "a config Epik cannot understand is not quietly replaced"
+        );
     }
 
     #[test]

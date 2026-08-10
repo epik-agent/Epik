@@ -43,17 +43,16 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(unix)]
 mod worker {
-    use std::fs;
     use std::fs::File;
     use std::io;
     use std::process::ExitCode;
     use std::sync::mpsc;
     use std::thread;
 
-    use anyhow::{Context, Result, anyhow};
+    use anyhow::{Result, anyhow};
     use epik::agent::{ClaudeCode, CodingAgent};
     use epik::chat::StopToken;
-    use epik::config::{self, Config, Worker};
+    use epik::config::{Config, Worker};
     use epik::git::Git;
     use epik::github::Repo;
     use epik::keystore::{GITHUB_OVERRIDE_ENV, OsKeyring};
@@ -194,16 +193,15 @@ mod worker {
         Ok(())
     }
 
-    /// Boot integrity: the home made writable, the config read whole and
-    /// carrying a `[worker]`. The only failures fatal at startup —
-    /// capability absences refuse and report instead. A config without a
-    /// `[worker]` is a config to finish, never a default repository to
-    /// reach for: a run aimed at a repository nobody named must be
-    /// unrepresentable.
+    /// Boot integrity: the home converged — the same verb as the window's,
+    /// so a fresh machine ends up with the same default file on disk — and
+    /// the config read whole and carrying a `[worker]`. The only failures
+    /// fatal at startup — capability absences refuse and report instead. A
+    /// config without a `[worker]` is a config to finish, never a default
+    /// repository to reach for: a run aimed at a repository nobody named
+    /// must be unrepresentable.
     fn booted() -> Result<(Worker, Repo, Git)> {
-        let home = config::home()?;
-        fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
-        let config = Config::load()?;
+        let config = Config::converge()?;
         let worker = config
             .worker
             .ok_or_else(|| anyhow!("no [worker] in the config: say which repository to run for"))?;

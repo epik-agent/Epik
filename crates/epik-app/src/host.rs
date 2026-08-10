@@ -52,7 +52,9 @@ struct Host {
 
 impl Host {
     fn open(events: Sender<Envelope<ChatEvent>>) -> anyhow::Result<Self> {
-        let config = Config::load()?;
+        // The first act of every host: converge Epik's home, so the file is
+        // on disk to edit whether or not this is a fresh machine.
+        let config = Config::converge()?;
         let session = Session::open(&config, Keys::new(OsKeyring))?;
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
