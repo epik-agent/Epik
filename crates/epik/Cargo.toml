@@ -3,4 +3,15 @@ name = "epik"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# The OS keyring, for builds that run on an actual desktop. Off by default so
+# the crate stays wasm-clean for the frontend.
+native = ["dep:keyring"]
+
 [dependencies]
+anyhow = "1"
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+], optional = true }
