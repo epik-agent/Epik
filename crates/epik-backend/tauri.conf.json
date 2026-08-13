@@ -4,10 +4,16 @@
   "version": "0.1.0",
   "identifier": "com.epik.app",
   "build": {
-    "beforeDevCommand": "trunk serve",
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "../epik-frontend"
+    },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "trunk build",
-    "frontendDist": "../dist"
+    "beforeBuildCommand": {
+      "script": "trunk build",
+      "cwd": "../epik-frontend"
+    },
+    "frontendDist": "../epik-frontend/dist"
   },
   "app": {
     "withGlobalTauri": true,

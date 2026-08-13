@@ -1,0 +1,12 @@
+[package]
+name = "epik-frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+console_error_panic_hook = "0.1"
+
+# Deliberately its own workspace: this crate targets wasm while the root
+# workspace targets native, so it must not attach to the root.
+[workspace]
