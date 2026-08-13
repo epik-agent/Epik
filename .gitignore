@@ -1,1 +1,7 @@
 /target
+# Trunk's output, which the Tauri host embeds at compile time.
+/dist
+# Permission schemas, regenerated from the plugin set on every build.
+/src-tauri/gen/schemas
+# Claude Code's session-local state: commands, worktrees, never the repo's.
+/.claude
