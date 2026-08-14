@@ -132,7 +132,7 @@ fn bubble(item: &TranscriptItem) -> impl IntoView + use<> {
     };
     view! {
         <li class=format!(
-            "max-w-[85%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed \
+            "max-w-[min(85%,75ch)] rounded-2xl px-3.5 py-2 text-sm leading-relaxed \
              break-words whitespace-pre-wrap {side}",
         )>{render_message(text)}</li>
     }
@@ -213,13 +213,14 @@ pub fn Chat() -> impl IntoView {
     };
 
     view! {
-        <main class="relative flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900">
-            <button
-                type="button"
-                aria-label="Switch between light and dark"
-                class="absolute top-3 right-3 z-10 rounded-md p-1.5 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                on:click=flip_theme
-            >
+        <main class="flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900">
+            <header class="flex shrink-0 items-center justify-end border-b border-neutral-200 px-3 py-1 dark:border-neutral-800">
+                <button
+                    type="button"
+                    aria-label="Switch between light and dark"
+                    class="rounded-md p-1.5 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                    on:click=flip_theme
+                >
                 <svg
                     class="h-5 w-5"
                     viewBox="0 0 24 24"
@@ -242,7 +243,8 @@ pub fn Chat() -> impl IntoView {
                         <path d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" />
                     </Show>
                 </svg>
-            </button>
+                </button>
+            </header>
             <div
                 node_ref=pane
                 on:scroll=move |_| {
@@ -253,7 +255,7 @@ pub fn Chat() -> impl IntoView {
                 }
                 class="min-h-0 flex-1 overflow-y-auto px-4 py-6 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-neutral-300 dark:[&::-webkit-scrollbar-thumb]:bg-neutral-700"
             >
-                <ul class="mx-auto flex max-w-2xl flex-col gap-3">
+                <ul class="mx-auto flex max-w-4xl flex-col gap-3">
                     <For
                         each=move || transcript.get().into_iter().enumerate()
                         key=|(index, _)| *index
@@ -262,7 +264,7 @@ pub fn Chat() -> impl IntoView {
                 </ul>
             </div>
             <div class="shrink-0 border-t border-neutral-200 p-3 dark:border-neutral-800">
-                <div class="mx-auto flex max-w-2xl items-end gap-2">
+                <div class="mx-auto flex max-w-4xl items-end gap-2">
                     <textarea
                         node_ref=input
                         rows=2
