@@ -82,15 +82,16 @@ pub(crate) async fn save_secret(name: &str, value: &Secret) -> Result<(), String
         .map_err(|error| error_text(&error))
 }
 
-/// Posts the user's message. Fire-and-forget: the message becomes visible
-/// when it comes back around as a transcript event, not before.
-pub(crate) fn send_message(text: String) {
-    spawn_local(async move {
-        let Ok(args) = serde_wasm_bindgen::to_value(&SendArgs { text: &text }) else {
-            return;
-        };
-        let _ = invoke("send_message", args).await;
-    });
+/// Posts the user's message. The message becomes visible when it comes
+/// back around as a transcript event; the Err is the command channel's
+/// refusal, distinct from a turn that fails.
+pub(crate) async fn send_message(text: String) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&SendArgs { text: &text })
+        .map_err(|_| "the request could not be encoded".to_owned())?;
+    invoke("send_message", args)
+        .await
+        .map(|_| ())
+        .map_err(|error| error_text(&error))
 }
 
 /// The whole transcript so far, for a window that has just mounted.

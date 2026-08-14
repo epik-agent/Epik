@@ -16,11 +16,32 @@ use wasm_bindgen::closure::Closure;
 
 use crate::ipc;
 
-/// Folds one arriving item into the transcript. A single arm today; new
-/// item kinds become new arms here, never a second channel.
+/// Folds one arriving item into the transcript. New item kinds become new
+/// arms here, never a second channel.
+///
+/// Deltas accumulate into one in-progress tail item; the completed
+/// message replaces that tail, its text authoritative. A failure also
+/// clears the tail — the conversation never held the fragments, so the
+/// view doesn't either — and lands as its own item.
 pub(crate) fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
     match item {
-        TranscriptItem::Message { .. } => transcript.push(item),
+        TranscriptItem::Message { .. } | TranscriptItem::TurnFailed { .. } => {
+            if matches!(
+                transcript.last(),
+                Some(TranscriptItem::AssistantDelta { .. })
+            ) {
+                transcript.pop();
+            }
+            transcript.push(item);
+        }
+        TranscriptItem::AssistantDelta { text } => {
+            if let Some(TranscriptItem::AssistantDelta { text: streaming }) = transcript.last_mut()
+            {
+                streaming.push_str(&text);
+            } else {
+                transcript.push(TranscriptItem::AssistantDelta { text });
+            }
+        }
     }
 }
 
@@ -118,23 +139,41 @@ fn render_message(text: &str) -> impl IntoView + use<> {
         .collect_view()
 }
 
-/// One bubble: the user against the right edge in the accent, the
-/// assistant against the left in neutral — styled and folded evenly even
-/// though nothing produces assistant items yet.
-fn bubble(item: &TranscriptItem) -> impl IntoView + use<> {
-    let TranscriptItem::Message { role, text } = item;
-    let side = match role {
-        Role::User => "self-end bg-[#00b377] text-white dark:bg-[#00e599] dark:text-neutral-950",
-        Role::Assistant => {
-            "self-start border border-neutral-200 bg-white text-neutral-900 \
-             dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
+/// What every bubble wears.
+const BUBBLE: &str = "max-w-[min(85%,75ch)] rounded-2xl px-3.5 py-2 text-sm leading-relaxed \
+                      break-words whitespace-pre-wrap";
+/// The assistant's side of the room.
+const ASSISTANT: &str = "self-start border border-neutral-200 bg-white text-neutral-900 \
+                         dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100";
+
+/// One transcript entry: the user against the right edge in the accent,
+/// the assistant against the left in neutral — streaming as escaped plain
+/// text behind a pulsing caret, completed with the full rendering — and a
+/// failure as an error card in the flow, not a speech bubble.
+fn bubble(item: &TranscriptItem) -> AnyView {
+    match item {
+        TranscriptItem::Message { role, text } => {
+            let side = match role {
+                Role::User => {
+                    "self-end bg-[#00b377] text-white dark:bg-[#00e599] dark:text-neutral-950"
+                }
+                Role::Assistant => ASSISTANT,
+            };
+            view! { <li class=format!("{BUBBLE} {side}")>{render_message(text)}</li> }.into_any()
         }
-    };
-    view! {
-        <li class=format!(
-            "max-w-[min(85%,75ch)] rounded-2xl px-3.5 py-2 text-sm leading-relaxed \
-             break-words whitespace-pre-wrap {side}",
-        )>{render_message(text)}</li>
+        TranscriptItem::AssistantDelta { text } => view! {
+            <li class=format!("{BUBBLE} {ASSISTANT}")>
+                {text.clone()}
+                <span class="ml-0.5 inline-block h-3.5 w-1 animate-pulse rounded-sm bg-current align-text-bottom"></span>
+            </li>
+        }
+        .into_any(),
+        TranscriptItem::TurnFailed { reason } => view! {
+            <li class="self-stretch rounded-lg border border-[#dc2626]/30 bg-[#dc2626]/5 px-3.5 py-2 text-sm break-words whitespace-pre-wrap text-[#dc2626] dark:border-[#ef4444]/30 dark:bg-[#ef4444]/10 dark:text-[#ef4444]">
+                {reason.clone()}
+            </li>
+        }
+        .into_any(),
     }
 }
 
@@ -149,6 +188,10 @@ pub fn Chat() -> impl IntoView {
     let pane = NodeRef::<leptos::html::Div>::new();
     let input = NodeRef::<leptos::html::Textarea>::new();
 
+    // Whether a turn is in flight: set on send, cleared by whichever end
+    // of the turn arrives — the completed reply or the failure.
+    let busy = RwSignal::new(false);
+
     // History first, then live items, through the same fold.
     spawn_local(async move {
         for item in ipc::get_transcript().await {
@@ -156,6 +199,15 @@ pub fn Chat() -> impl IntoView {
         }
     });
     ipc::listen_transcript(move |item| {
+        if matches!(
+            &item,
+            TranscriptItem::Message {
+                role: Role::Assistant,
+                ..
+            } | TranscriptItem::TurnFailed { .. }
+        ) {
+            busy.set(false);
+        }
         transcript.update(|transcript| fold(transcript, item));
     });
 
@@ -202,14 +254,25 @@ pub fn Chat() -> impl IntoView {
 
     let send = move || {
         let text = draft.get_untracked();
-        if text.trim().is_empty() {
+        if busy.get_untracked() || text.trim().is_empty() {
             return;
         }
-        ipc::send_message(text);
+        busy.set(true);
         draft.set(String::new());
         if let Some(input) = input.get_untracked() {
             let _ = input.focus();
         }
+        spawn_local(async move {
+            // A refusal from the command channel — not a turn that
+            // failed, but the send never started, so the turn never
+            // ends: surface it and stand down.
+            if let Err(reason) = ipc::send_message(text).await {
+                busy.set(false);
+                transcript.update(|transcript| {
+                    fold(transcript, TranscriptItem::TurnFailed { reason });
+                });
+            }
+        });
     };
 
     view! {
@@ -256,9 +319,19 @@ pub fn Chat() -> impl IntoView {
                 class="min-h-0 flex-1 overflow-y-auto px-4 py-6 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-neutral-300 dark:[&::-webkit-scrollbar-thumb]:bg-neutral-700"
             >
                 <ul class="mx-auto flex max-w-4xl flex-col gap-3">
+                    // The key carries kind and length, so the in-progress
+                    // bubble re-renders as its text grows and again when
+                    // the final message replaces it in place.
                     <For
                         each=move || transcript.get().into_iter().enumerate()
-                        key=|(index, _)| *index
+                        key=|(index, item)| {
+                            let (kind, length) = match item {
+                                TranscriptItem::Message { text, .. } => (0u8, text.len()),
+                                TranscriptItem::AssistantDelta { text } => (1, text.len()),
+                                TranscriptItem::TurnFailed { reason } => (2, reason.len()),
+                            };
+                            (*index, kind, length)
+                        }
                         children=|(_, item)| bubble(&item)
                     />
                 </ul>
@@ -284,7 +357,8 @@ pub fn Chat() -> impl IntoView {
                     <button
                         type="button"
                         aria-label="Send"
-                        class="shrink-0 rounded-lg bg-[#00b377] p-2 text-white hover:bg-[#009966] dark:bg-[#00e599] dark:text-neutral-950 dark:hover:bg-[#33edb3]"
+                        prop:disabled=busy
+                        class="shrink-0 rounded-lg bg-[#00b377] p-2 text-white hover:bg-[#009966] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-[#00b377] dark:bg-[#00e599] dark:text-neutral-950 dark:hover:bg-[#33edb3] dark:disabled:hover:bg-[#00e599]"
                         on:click=move |_| send()
                     >
                         <svg
@@ -344,6 +418,65 @@ mod tests {
         let mut transcript = Vec::new();
         fold(&mut transcript, message(Role::Assistant, "hello yourself"));
         assert_eq!(transcript, [message(Role::Assistant, "hello yourself")]);
+    }
+
+    fn delta(text: &str) -> TranscriptItem {
+        TranscriptItem::AssistantDelta {
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn deltas_accumulate_into_one_in_progress_bubble() {
+        let mut transcript = vec![message(Role::User, "hi")];
+        fold(&mut transcript, delta("Hel"));
+        fold(&mut transcript, delta("lo"));
+        assert_eq!(transcript, [message(Role::User, "hi"), delta("Hello")]);
+    }
+
+    #[test]
+    fn the_completed_message_replaces_the_in_progress_bubble() {
+        let mut transcript = vec![message(Role::User, "hi"), delta("Hel")];
+        fold(&mut transcript, message(Role::Assistant, "Hello"));
+        assert_eq!(
+            transcript,
+            [message(Role::User, "hi"), message(Role::Assistant, "Hello")],
+            "the final text is authoritative"
+        );
+    }
+
+    #[test]
+    fn a_completed_message_with_no_stream_just_lands() {
+        let mut transcript = vec![message(Role::User, "hi")];
+        fold(&mut transcript, message(Role::Assistant, "Hello"));
+        assert_eq!(
+            transcript,
+            [message(Role::User, "hi"), message(Role::Assistant, "Hello")]
+        );
+    }
+
+    fn failed(reason: &str) -> TranscriptItem {
+        TranscriptItem::TurnFailed {
+            reason: reason.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_failure_clears_the_fragments_and_lands_as_its_own_item() {
+        let mut transcript = vec![message(Role::User, "hi"), delta("Hel")];
+        fold(&mut transcript, failed("the wire went quiet"));
+        assert_eq!(
+            transcript,
+            [message(Role::User, "hi"), failed("the wire went quiet")],
+            "the conversation never held the fragments, so the view doesn't either"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_no_stream_just_lands() {
+        let mut transcript = vec![message(Role::User, "hi")];
+        fold(&mut transcript, failed("no key"));
+        assert_eq!(transcript, [message(Role::User, "hi"), failed("no key")]);
     }
 
     #[test]

@@ -1,6 +1,3 @@
-use std::sync::Mutex;
-
-use epik::chat::Conversation;
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -68,7 +65,7 @@ pub fn run() {
             app.handle().set_theme(None);
             Ok(())
         })
-        .manage(Mutex::new(Conversation::default()))
+        .manage(chat::ChatState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             let settings =
