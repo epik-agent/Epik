@@ -24,7 +24,14 @@ pub const SERVICE: &str = "Epik";
 /// every use of the raw value is greppable. `Debug` prints a redaction and
 /// there is no `Display` at all: a secret cannot wander into an error
 /// message, a panic, or a log line just by being formatted along the way.
+///
+/// The `serde` feature adds the one other door: serialization, as the bare
+/// bytes, which is what lets a secret cross the IPC barrier as itself
+/// instead of decaying into a `String` on each side. That crossing is the
+/// accepted exposure — every place it can happen types itself `Secret` and
+/// is findable by that name.
 #[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Secret(String);
 
 impl Secret {
@@ -95,7 +102,11 @@ pub trait KeyStore {
 /// Three states rather than an `Option`, because "there is no secret" and
 /// "there is no way to find out" are different situations and a caller
 /// usually wants to treat them differently.
+///
+/// With the `serde` feature this is also the wire shape of a resolution:
+/// both sides of the IPC barrier speak this type, defined once, here.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolved {
     /// A secret, from the store.
     Found(Secret),
@@ -265,5 +276,20 @@ mod tests {
             debugged.contains("anthropic"),
             "the name is not the secret: {debugged}"
         );
+    }
+
+    /// Serialization is the one deliberate door out: a resolution crosses
+    /// the wire with its bytes intact and comes back the same resolution —
+    /// while Debug keeps redacting on both sides of the trip.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_resolution_crosses_the_wire_and_comes_back_itself() {
+        let sent = Resolved::Found("sk-super-secret".into());
+        let wire = serde_json::to_string(&sent).unwrap();
+        let received: Resolved = serde_json::from_str(&wire).unwrap();
+
+        assert!(wire.contains("sk-super-secret"), "the wire carries bytes");
+        assert_eq!(received, sent);
+        assert!(!format!("{received:?}").contains("sk-super-secret"));
     }
 }

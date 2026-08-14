@@ -2,82 +2,21 @@
 //! to have one row — Anthropic.
 //!
 //! A secret's bytes live in exactly one place on this side: the password
-//! input's reactive state. They arrive there through `secret_reveal` and
-//! leave through `secret_save`, and nowhere else — never a log line, never
-//! a persisted structure.
+//! input's reactive state. They arrive there through [`ipc::reveal_secret`]
+//! and leave through [`ipc::save_secret`], and nowhere else — never a log
+//! line, never a persisted structure.
 
+use epik::keystore::{Resolved, Secret};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
+
+use crate::ipc;
 
 /// The keyring entry the one row manages, under the backend's service.
 const ANTHROPIC_NAME: &str = "ANTHROPIC_API_KEY";
 /// What the row calls it.
 const ANTHROPIC_LABEL: &str = "Anthropic";
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(catch, js_namespace = ["window", "__TAURI__", "core"])]
-    async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
-}
-
-/// The frontend's reading of the backend's `RevealOutcome`. Deliberately not
-/// `Debug`: nothing that can hold a secret gets a printable form.
-#[derive(Clone, Deserialize)]
-enum RevealOutcome {
-    Found(String),
-    Absent,
-    Unreachable(String),
-}
-
-#[derive(Serialize)]
-struct RevealArgs<'a> {
-    name: &'a str,
-}
-
-#[derive(Serialize)]
-struct SaveArgs<'a> {
-    name: &'a str,
-    value: &'a str,
-}
-
-/// A rejected invoke as text for the page, with a fallback that can never
-/// carry secret bytes.
-fn error_text(error: &JsValue) -> String {
-    error
-        .as_string()
-        .unwrap_or_else(|| "the backend would not answer".to_owned())
-}
-
-async fn reveal(name: &str) -> RevealOutcome {
-    let Ok(args) = serde_wasm_bindgen::to_value(&RevealArgs { name }) else {
-        return RevealOutcome::Unreachable("the request could not be encoded".to_owned());
-    };
-    match invoke("secret_reveal", args).await {
-        Ok(outcome) => serde_wasm_bindgen::from_value(outcome).unwrap_or_else(|_| {
-            RevealOutcome::Unreachable("an unintelligible answer from the backend".to_owned())
-        }),
-        Err(error) => RevealOutcome::Unreachable(error_text(&error)),
-    }
-}
-
-async fn save(name: &str, value: &str) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&SaveArgs { name, value })
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke("secret_save", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
-}
-
-/// The window is the backend's to close, so this only asks.
-fn close() {
-    spawn_local(async {
-        let _ = invoke("settings_close", JsValue::UNDEFINED).await;
-    });
-}
 
 /// What Ok does, given what was loaded and what the box holds now.
 #[derive(Debug, Eq, PartialEq)]
@@ -110,13 +49,13 @@ pub fn SettingsPage() -> impl IntoView {
     let note = RwSignal::new(None::<String>);
 
     spawn_local(async move {
-        match reveal(ANTHROPIC_NAME).await {
-            RevealOutcome::Found(secret) => {
-                loaded.set(secret.clone());
-                value.set(secret);
+        match ipc::reveal_secret(ANTHROPIC_NAME).await {
+            Resolved::Found(secret) => {
+                loaded.set(secret.reveal().to_owned());
+                value.set(secret.reveal().to_owned());
             }
-            RevealOutcome::Absent => {}
-            RevealOutcome::Unreachable(reason) => {
+            Resolved::Absent => {}
+            Resolved::Unreachable(reason) => {
                 note.set(Some(format!(
                     "The system keychain couldn't be reached: {reason}"
                 )));
@@ -127,16 +66,16 @@ pub fn SettingsPage() -> impl IntoView {
     // Esc: close, nothing changed, regardless of box contents.
     let handle = window_event_listener(ev::keydown, move |event| {
         if event.key() == "Escape" {
-            close();
+            ipc::close_settings();
         }
     });
     on_cleanup(move || handle.remove());
 
     let ok = move |_| match ok_outcome(&loaded.get(), &value.get()) {
-        OkOutcome::CloseUntouched => close(),
+        OkOutcome::CloseUntouched => ipc::close_settings(),
         OkOutcome::SaveThenClose => spawn_local(async move {
-            match save(ANTHROPIC_NAME, &value.get_untracked()).await {
-                Ok(()) => close(),
+            match ipc::save_secret(ANTHROPIC_NAME, &Secret::from(value.get_untracked())).await {
+                Ok(()) => ipc::close_settings(),
                 Err(reason) => note.set(Some(reason)),
             }
         }),

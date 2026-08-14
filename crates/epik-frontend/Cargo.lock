@@ -305,10 +305,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "epik"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+]
+
+[[package]]
 name = "epik-frontend"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "epik",
  "leptos",
  "serde",
  "serde-wasm-bindgen",

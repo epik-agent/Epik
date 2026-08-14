@@ -7,6 +7,9 @@ edition = "2024"
 # The OS keyring, for builds that run on an actual desktop. Off by default so
 # the crate stays wasm-clean for the frontend.
 native = ["dep:keyring"]
+# Wire form for the types both sides of the IPC barrier share — including
+# Secret, whose serialization is the one door its bytes leave through.
+serde = ["dep:serde"]
 
 [dependencies]
 anyhow = "1"
@@ -15,3 +18,7 @@ keyring = { version = "3", features = [
     "windows-native",
     "linux-native",
 ], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
