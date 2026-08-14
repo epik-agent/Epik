@@ -11,6 +11,8 @@ serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+# Only for features leptos doesn't already enable (matchMedia).
+web-sys = { version = "0.3", features = ["MediaQueryList"] }
 
 # Deliberately its own workspace: this crate targets wasm while the root
 # workspace targets native, so it must not attach to the root.

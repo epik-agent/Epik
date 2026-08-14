@@ -46,10 +46,28 @@ async fn settings_close(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// Dresses every window — webview and native chrome alike — in `theme`,
+/// "light" or "dark". App-wide, so both windows always agree.
+#[tauri::command]
+async fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
+    let theme = match theme.as_str() {
+        "dark" => tauri::Theme::Dark,
+        _ => tauri::Theme::Light,
+    };
+    app.set_theme(Some(theme));
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Follow the system at startup. When persistence arrives, a
+            // remembered choice will override this initialization here.
+            app.handle().set_theme(None);
+            Ok(())
+        })
         .manage(Mutex::new(Conversation::default()))
         .menu(|handle| {
             let menu = Menu::default(handle)?;
@@ -77,6 +95,7 @@ pub fn run() {
             chat::get_transcript,
             secrets::secret_reveal,
             secrets::secret_save,
+            set_theme,
             settings_open,
             settings_close
         ])

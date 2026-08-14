@@ -11,6 +11,8 @@ use epik::chat::{Role, TranscriptItem};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::ipc;
 
@@ -169,6 +171,28 @@ pub fn Chat() -> impl IntoView {
         }
     });
 
+    // Whether the app is currently dark. The media query is the source of
+    // truth: it follows the system until the first click pins a theme, and
+    // it keeps talking if the OS switches under a still-unpinned app — so
+    // the icon mirrors it, initially and on every change. It drives only
+    // the icon; the styling follows the media query on its own.
+    let dark = RwSignal::new(false);
+    if let Ok(Some(query)) = window().match_media("(prefers-color-scheme: dark)") {
+        dark.set(query.matches());
+        let mirror = Closure::<dyn FnMut()>::new(move || {
+            if let Ok(Some(query)) = window().match_media("(prefers-color-scheme: dark)") {
+                dark.set(query.matches());
+            }
+        });
+        let _ = query.add_event_listener_with_callback("change", mirror.as_ref().unchecked_ref());
+        mirror.forget();
+    }
+    let flip_theme = move |_| {
+        let to_dark = !dark.get_untracked();
+        ipc::set_theme(if to_dark { "dark" } else { "light" });
+        dark.set(to_dark);
+    };
+
     // `autocorrect` has no typed attribute in leptos; set it on the node.
     Effect::new(move |_| {
         if let Some(input) = input.get() {
@@ -189,7 +213,36 @@ pub fn Chat() -> impl IntoView {
     };
 
     view! {
-        <main class="flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900">
+        <main class="relative flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900">
+            <button
+                type="button"
+                aria-label="Switch between light and dark"
+                class="absolute top-3 right-3 z-10 rounded-md p-1.5 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                on:click=flip_theme
+            >
+                <svg
+                    class="h-5 w-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <Show
+                        when=move || dark.get()
+                        fallback=|| {
+                            view! {
+                                // The moon, shown in light mode: the way to the dark.
+                                <path d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" />
+                            }
+                        }
+                    >
+                        // The sun, shown in dark mode: the way to the light.
+                        <path d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" />
+                    </Show>
+                </svg>
+            </button>
             <div
                 node_ref=pane
                 on:scroll=move |_| {

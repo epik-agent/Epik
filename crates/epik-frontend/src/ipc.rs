@@ -40,6 +40,11 @@ struct OpenUrlArgs<'a> {
     url: &'a str,
 }
 
+#[derive(Serialize)]
+struct ThemeArgs<'a> {
+    theme: &'a str,
+}
+
 /// What the event binding hands the callback; the item rides in `payload`.
 #[derive(Deserialize)]
 struct TranscriptEnvelope {
@@ -118,6 +123,16 @@ pub(crate) fn open_url(url: String) {
             return;
         };
         let _ = invoke("plugin:opener|open_url", args).await;
+    });
+}
+
+/// Asks the backend to dress every window in `theme` — "light" or "dark".
+pub(crate) fn set_theme(theme: &'static str) {
+    spawn_local(async move {
+        let Ok(args) = serde_wasm_bindgen::to_value(&ThemeArgs { theme }) else {
+            return;
+        };
+        let _ = invoke("set_theme", args).await;
     });
 }
 
