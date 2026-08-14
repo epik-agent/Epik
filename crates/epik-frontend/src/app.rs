@@ -1,6 +1,7 @@
 use leptos::ev;
 use leptos::prelude::*;
 
+use crate::chat::Chat;
 use crate::ipc;
 
 #[component]
@@ -15,9 +16,5 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || handle.remove());
 
-    view! {
-        <main class="flex h-screen items-center justify-center">
-            <h1 class="text-2xl font-semibold text-gray-400">"Epik"</h1>
-        </main>
-    }
+    view! { <Chat /> }
 }

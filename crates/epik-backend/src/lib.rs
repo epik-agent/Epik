@@ -1,6 +1,10 @@
+use std::sync::Mutex;
+
+use epik::chat::Conversation;
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
+mod chat;
 mod secrets;
 
 /// The settings window, opened over the main one. One per app: a second
@@ -45,6 +49,8 @@ async fn settings_close(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(Mutex::new(Conversation::default()))
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             let settings =
@@ -67,6 +73,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            chat::send_message,
+            chat::get_transcript,
             secrets::secret_reveal,
             secrets::secret_save,
             settings_open,
