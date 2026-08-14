@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-leptos = { version = "0.8", features = ["csr"] }
 console_error_panic_hook = "0.1"
+leptos = { version = "0.8", features = ["csr"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 # Deliberately its own workspace: this crate targets wasm while the root
 # workspace targets native, so it must not attach to the root.

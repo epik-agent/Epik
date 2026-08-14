@@ -754,7 +754,9 @@ dependencies = [
 name = "epik-backend"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "epik",
+ "serde",
  "tauri",
  "tauri-build",
 ]
