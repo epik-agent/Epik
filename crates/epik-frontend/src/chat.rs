@@ -14,6 +14,7 @@ use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::card::{self, Card};
 use crate::ipc;
 
 /// Folds one arriving item into the transcript. New item kinds become new
@@ -25,7 +26,10 @@ use crate::ipc;
 /// view doesn't either — and lands as its own item.
 pub(crate) fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
     match item {
-        TranscriptItem::Message { .. } | TranscriptItem::TurnFailed { .. } => {
+        TranscriptItem::Message { .. }
+        | TranscriptItem::TurnFailed { .. }
+        | TranscriptItem::ToolCall { .. }
+        | TranscriptItem::ToolResult { .. } => {
             if matches!(
                 transcript.last(),
                 Some(TranscriptItem::AssistantDelta { .. })
@@ -148,8 +152,9 @@ const ASSISTANT: &str = "self-start border border-neutral-200 bg-white text-neut
 
 /// One transcript entry: the user against the right edge in the accent,
 /// the assistant against the left in neutral — streaming as escaped plain
-/// text behind a pulsing caret, completed with the full rendering — and a
-/// failure as an error card in the flow, not a speech bubble.
+/// text behind a pulsing caret, completed with the full rendering — and
+/// everything that wasn't said — tool calls, tool results, failures — as
+/// a [`Card`] in the flow, not a speech bubble.
 fn bubble(item: &TranscriptItem) -> AnyView {
     match item {
         TranscriptItem::Message { role, text } => {
@@ -168,12 +173,10 @@ fn bubble(item: &TranscriptItem) -> AnyView {
             </li>
         }
         .into_any(),
-        TranscriptItem::TurnFailed { reason } => view! {
-            <li class="self-stretch rounded-lg border border-[#dc2626]/30 bg-[#dc2626]/5 px-3.5 py-2 text-sm break-words whitespace-pre-wrap text-[#dc2626] dark:border-[#ef4444]/30 dark:bg-[#ef4444]/10 dark:text-[#ef4444]">
-                {reason.clone()}
-            </li>
+        item => {
+            let spec = card::spec(item).expect("every non-speech item is a card");
+            view! { <Card spec /> }.into_any()
         }
-        .into_any(),
     }
 }
 
@@ -329,6 +332,8 @@ pub fn Chat() -> impl IntoView {
                                 TranscriptItem::Message { text, .. } => (0u8, text.len()),
                                 TranscriptItem::AssistantDelta { text } => (1, text.len()),
                                 TranscriptItem::TurnFailed { reason } => (2, reason.len()),
+                                TranscriptItem::ToolCall { arguments, .. } => (3, arguments.len()),
+                                TranscriptItem::ToolResult { content, .. } => (4, content.len()),
                             };
                             (*index, kind, length)
                         }
@@ -477,6 +482,48 @@ mod tests {
         let mut transcript = vec![message(Role::User, "hi")];
         fold(&mut transcript, failed("no key"));
         assert_eq!(transcript, [message(Role::User, "hi"), failed("no key")]);
+    }
+
+    fn tool_call() -> TranscriptItem {
+        TranscriptItem::ToolCall {
+            name: "current_time".to_owned(),
+            arguments: "{}".to_owned(),
+        }
+    }
+
+    fn tool_result(ok: bool) -> TranscriptItem {
+        TranscriptItem::ToolResult {
+            name: "current_time".to_owned(),
+            ok,
+            content: "{\"local\":\"noon\"}".to_owned(),
+        }
+    }
+
+    #[test]
+    fn tool_items_land_in_order_like_messages() {
+        let mut transcript = vec![message(Role::User, "what time is it?")];
+        fold(&mut transcript, tool_call());
+        fold(&mut transcript, tool_result(true));
+        fold(&mut transcript, message(Role::Assistant, "It's noon."));
+        assert_eq!(
+            transcript,
+            [
+                message(Role::User, "what time is it?"),
+                tool_call(),
+                tool_result(true),
+                message(Role::Assistant, "It's noon."),
+            ]
+        );
+    }
+
+    /// Text the model streamed before deciding on a tool never became
+    /// conversation, so a tool call clears the fragments like a
+    /// completed message would.
+    #[test]
+    fn a_tool_call_clears_a_streaming_tail() {
+        let mut transcript = vec![message(Role::User, "hi"), delta("Let me")];
+        fold(&mut transcript, tool_call());
+        assert_eq!(transcript, [message(Role::User, "hi"), tool_call()]);
     }
 
     #[test]

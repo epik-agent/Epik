@@ -18,3 +18,5 @@ tauri-plugin-opener = "2"
 
 [dev-dependencies]
 anyhow = "1"
+# The scripted model rides in for tests only; no shipping build sees it.
+epik = { path = "../epik", features = ["scripted"] }

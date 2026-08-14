@@ -1,4 +1,5 @@
 mod app;
+mod card;
 mod chat;
 mod ipc;
 mod settings;
