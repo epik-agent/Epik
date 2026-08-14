@@ -67,6 +67,12 @@ impl Registry {
         self.0.push(tool);
     }
 
+    /// Registers a whole set at once — how the git and GitHub verbs
+    /// arrive.
+    pub fn extend(&mut self, tools: impl IntoIterator<Item = Tool>) {
+        self.0.extend(tools);
+    }
+
     /// The request's tools array.
     #[must_use]
     pub fn to_wire(&self) -> Vec<ToolSpec> {
@@ -432,6 +438,100 @@ mod tests {
 
             assert_eq!(text, "Hello");
             assert_eq!(model.requests().len(), 1);
+        }
+    }
+
+    /// The whole registry as the backend assembles it each turn:
+    /// current_time, the GitHub verbs, and the git verbs together.
+    #[cfg(feature = "native")]
+    mod registration {
+        use super::*;
+
+        fn full() -> Registry {
+            let mut registry = Registry::standard();
+            registry.extend(crate::github::tools::all(crate::github::GitHub::at(
+                "http://127.0.0.1:1",
+                None,
+            )));
+            registry.extend(crate::git::all());
+            registry
+        }
+
+        #[test]
+        fn every_verb_is_present_and_every_name_unique() {
+            let wire = serde_json::to_value(full().to_wire()).unwrap();
+            let names: Vec<String> = wire
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap().to_owned())
+                .collect();
+            let expected_github = [
+                "default_branch",
+                "issue",
+                "create_issue",
+                "edit_issue",
+                "comment",
+                "close_issue",
+                "open_pull",
+                "pull",
+                "pull_for",
+                "merge_pull",
+                "branch_sha",
+                "compare",
+                "create_branch",
+                "check_conclusions",
+                "issue_graph",
+                "add_sub_issue",
+                "remove_sub_issue",
+                "add_blocked_by",
+                "remove_blocked_by",
+            ];
+            let expected_git = [
+                "status",
+                "log",
+                "diff",
+                "show",
+                "branch_list",
+                "current_branch",
+                "add",
+                "commit",
+                "checkout",
+                "fetch",
+                "pull",
+                "push",
+                "clone",
+                "remote_list",
+            ];
+            assert!(names.contains(&"current_time".to_owned()));
+            for verb in expected_github {
+                assert!(names.contains(&format!("github_{verb}")), "{verb}");
+            }
+            for verb in expected_git {
+                assert!(names.contains(&format!("git_{verb}")), "{verb}");
+            }
+            assert_eq!(
+                names.len(),
+                1 + expected_github.len() + expected_git.len(),
+                "{names:?}"
+            );
+            let unique: std::collections::BTreeSet<_> = names.iter().collect();
+            assert_eq!(unique.len(), names.len(), "names must be unique");
+        }
+
+        #[test]
+        fn every_parameters_value_is_a_json_schema_object() {
+            let wire = serde_json::to_value(full().to_wire()).unwrap();
+            for tool in wire.as_array().unwrap() {
+                let name = tool["function"]["name"].as_str().unwrap();
+                let parameters = &tool["function"]["parameters"];
+                assert_eq!(parameters["type"], "object", "{name}: {parameters}");
+                assert!(parameters["properties"].is_object(), "{name}: {parameters}");
+                assert!(
+                    !tool["function"]["description"].as_str().unwrap().is_empty(),
+                    "{name} says what it is for"
+                );
+            }
         }
     }
 

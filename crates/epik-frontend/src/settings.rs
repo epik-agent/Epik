@@ -1,5 +1,5 @@
-//! The settings window: a list of labeled secret rows that happens, so far,
-//! to have one row — Anthropic.
+//! The settings window: a list of labeled secret rows — Anthropic and
+//! GitHub, with identical semantics.
 //!
 //! A secret's bytes live in exactly one place on this side: the password
 //! input's reactive state. They arrive there through [`ipc::reveal_secret`]
@@ -13,12 +13,14 @@ use leptos::task::spawn_local;
 
 use crate::ipc;
 
-/// The keyring entry the one row manages, under the backend's service.
-const ANTHROPIC_NAME: &str = "ANTHROPIC_API_KEY";
-/// What the row calls it.
-const ANTHROPIC_LABEL: &str = "Anthropic";
+/// The rows, in display order: keystore name and label.
+const ROWS: [(&str, &str); 2] = [
+    ("ANTHROPIC_API_KEY", "Anthropic"),
+    ("GITHUB_TOKEN", "GitHub"),
+];
 
-/// What Ok does, given what was loaded and what the box holds now.
+/// What Ok does to one row, given what was loaded and what the box holds
+/// now.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum OkOutcome {
     /// Changed and non-empty: worth a keychain write.
@@ -37,31 +39,53 @@ pub(crate) fn ok_outcome(loaded: &str, current: &str) -> OkOutcome {
     }
 }
 
+/// One row's reactive state. `RwSignal` is `Copy`, so the whole struct is.
+#[derive(Clone, Copy)]
+struct Row {
+    /// What came out of the keystore, for Ok to compare against.
+    loaded: RwSignal<String>,
+    /// The box. The only home the bytes have on this side of IPC.
+    value: RwSignal<String>,
+    revealed: RwSignal<bool>,
+}
+
+impl Row {
+    fn new() -> Self {
+        Self {
+            loaded: RwSignal::new(String::new()),
+            value: RwSignal::new(String::new()),
+            revealed: RwSignal::new(false),
+        }
+    }
+}
+
 /// The settings window's whole content. A fresh window every open, so the
-/// eyeball starts hidden and the row starts from whatever the keystore says.
+/// eyeballs start hidden and each row starts from whatever the keystore
+/// says.
 #[component]
 pub fn SettingsPage() -> impl IntoView {
-    // What came out of the keystore, for Ok to compare against.
-    let loaded = RwSignal::new(String::new());
-    // The box. The only home the bytes have on this side of IPC.
-    let value = RwSignal::new(String::new());
-    let revealed = RwSignal::new(false);
+    let rows: Vec<(&'static str, &'static str, Row)> = ROWS
+        .iter()
+        .map(|&(name, label)| (name, label, Row::new()))
+        .collect();
     let note = RwSignal::new(None::<String>);
 
-    spawn_local(async move {
-        match ipc::reveal_secret(ANTHROPIC_NAME).await {
-            Resolved::Found(secret) => {
-                loaded.set(secret.reveal().to_owned());
-                value.set(secret.reveal().to_owned());
+    for &(name, _, row) in &rows {
+        spawn_local(async move {
+            match ipc::reveal_secret(name).await {
+                Resolved::Found(secret) => {
+                    row.loaded.set(secret.reveal().to_owned());
+                    row.value.set(secret.reveal().to_owned());
+                }
+                Resolved::Absent => {}
+                Resolved::Unreachable(reason) => {
+                    note.set(Some(format!(
+                        "The system keychain couldn't be reached: {reason}"
+                    )));
+                }
             }
-            Resolved::Absent => {}
-            Resolved::Unreachable(reason) => {
-                note.set(Some(format!(
-                    "The system keychain couldn't be reached: {reason}"
-                )));
-            }
-        }
-    });
+        });
+    }
 
     // Esc: close, nothing changed, regardless of box contents.
     let handle = window_event_listener(ev::keydown, move |event| {
@@ -71,58 +95,35 @@ pub fn SettingsPage() -> impl IntoView {
     });
     on_cleanup(move || handle.remove());
 
-    let ok = move |_| match ok_outcome(&loaded.get(), &value.get()) {
-        OkOutcome::CloseUntouched => ipc::close_settings(),
-        OkOutcome::SaveThenClose => spawn_local(async move {
-            match ipc::save_secret(ANTHROPIC_NAME, &Secret::from(value.get_untracked())).await {
-                Ok(()) => ipc::close_settings(),
-                Err(reason) => note.set(Some(reason)),
+    let saves: Vec<(&'static str, Row)> = rows.iter().map(|&(name, _, row)| (name, row)).collect();
+    let ok = move |_| {
+        let due: Vec<(&'static str, String)> = saves
+            .iter()
+            .filter(|(_, row)| {
+                ok_outcome(&row.loaded.get_untracked(), &row.value.get_untracked())
+                    == OkOutcome::SaveThenClose
+            })
+            .map(|&(name, row)| (name, row.value.get_untracked()))
+            .collect();
+        spawn_local(async move {
+            for (name, value) in due {
+                if let Err(reason) = ipc::save_secret(name, &Secret::from(value)).await {
+                    note.set(Some(reason));
+                    return;
+                }
             }
-        }),
+            ipc::close_settings();
+        });
     };
 
     view! {
         <main class="flex h-screen flex-col bg-neutral-50 p-6 dark:bg-neutral-900">
-            // The list of secret rows. One today; more rows are more <li>s.
+            // The list of secret rows; more rows are more entries in ROWS.
             <ul class="flex flex-col gap-3">
-                <li class="flex items-center gap-3">
-                    <label
-                        for="secret-anthropic"
-                        class="w-24 shrink-0 text-sm text-neutral-600 dark:text-neutral-400"
-                    >
-                        {ANTHROPIC_LABEL}
-                    </label>
-                    <input
-                        id="secret-anthropic"
-                        type=move || if revealed.get() { "text" } else { "password" }
-                        autocomplete="off"
-                        class="min-w-0 flex-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 font-mono text-sm text-neutral-900 focus:border-[#00b377] focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-[#00e599]"
-                        prop:value=value
-                        on:input=move |ev| value.set(event_target_value(&ev))
-                    />
-                    <button
-                        type="button"
-                        aria-label="Reveal the secret"
-                        class="shrink-0 rounded-md p-1.5 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
-                        on:click=move |_| revealed.update(|shown| *shown = !*shown)
-                    >
-                        <svg
-                            class="h-4 w-4"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                        >
-                            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-                            <circle cx="12" cy="12" r="3" />
-                            <Show when=move || revealed.get()>
-                                <line x1="4" y1="20" x2="20" y2="4" />
-                            </Show>
-                        </svg>
-                    </button>
-                </li>
+                {rows
+                    .iter()
+                    .map(|&(name, label, row)| secret_row(name, label, row))
+                    .collect_view()}
             </ul>
             <Show when=move || note.get().is_some()>
                 <p class="mt-3 text-sm text-[#d4940a] dark:text-[#f5a623]">{move || note.get()}</p>
@@ -137,6 +138,51 @@ pub fn SettingsPage() -> impl IntoView {
                 </button>
             </div>
         </main>
+    }
+}
+
+/// One labeled secret row: the password box and its eyeball.
+fn secret_row(name: &'static str, label: &'static str, row: Row) -> impl IntoView {
+    let id = format!("secret-{}", name.to_lowercase());
+    view! {
+        <li class="flex items-center gap-3">
+            <label
+                for=id.clone()
+                class="w-24 shrink-0 text-sm text-neutral-600 dark:text-neutral-400"
+            >
+                {label}
+            </label>
+            <input
+                id=id
+                type=move || if row.revealed.get() { "text" } else { "password" }
+                autocomplete="off"
+                class="min-w-0 flex-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 font-mono text-sm text-neutral-900 focus:border-[#00b377] focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-[#00e599]"
+                prop:value=row.value
+                on:input=move |ev| row.value.set(event_target_value(&ev))
+            />
+            <button
+                type="button"
+                aria-label="Reveal the secret"
+                class="shrink-0 rounded-md p-1.5 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-700 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
+                on:click=move |_| row.revealed.update(|shown| *shown = !*shown)
+            >
+                <svg
+                    class="h-4 w-4"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                    <circle cx="12" cy="12" r="3" />
+                    <Show when=move || row.revealed.get()>
+                        <line x1="4" y1="20" x2="20" y2="4" />
+                    </Show>
+                </svg>
+            </button>
+        </li>
     }
 }
 
@@ -167,5 +213,16 @@ mod tests {
     #[test]
     fn an_empty_box_over_no_secret_closes_without_writing() {
         assert_eq!(ok_outcome("", ""), OkOutcome::CloseUntouched);
+    }
+
+    #[test]
+    fn the_rows_are_anthropic_then_github() {
+        assert_eq!(
+            ROWS,
+            [
+                ("ANTHROPIC_API_KEY", "Anthropic"),
+                ("GITHUB_TOKEN", "GitHub")
+            ]
+        );
     }
 }

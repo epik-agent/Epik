@@ -29,4 +29,9 @@ keyring = { version = "3", features = [
 ], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-ureq = { version = "3", optional = true }
+ureq = { version = "3", features = ["json"], optional = true }
+
+[dev-dependencies]
+# The independent git implementation the git.rs tests verify against:
+# CLI in prod, libgit2 in tests. Local-only, so no TLS or SSH features.
+git2 = { version = "0.20", default-features = false }

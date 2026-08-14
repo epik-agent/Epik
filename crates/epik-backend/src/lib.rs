@@ -16,7 +16,8 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
         WebviewUrl::App("index.html?window=settings".into()),
     )
     .title("Settings")
-    .inner_size(520.0, 200.0)
+    // Two secret rows plus the button; grew with the GitHub row.
+    .inner_size(520.0, 240.0)
     .resizable(false)
     .minimizable(false);
     // Parented, so it floats above the main window and travels with it —

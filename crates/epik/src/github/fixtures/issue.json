@@ -1,0 +1,91 @@
+{
+  "url": "https://api.github.com/repos/epik-agent/Epik/issues/106",
+  "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+  "labels_url": "https://api.github.com/repos/epik-agent/Epik/issues/106/labels{/name}",
+  "comments_url": "https://api.github.com/repos/epik-agent/Epik/issues/106/comments",
+  "events_url": "https://api.github.com/repos/epik-agent/Epik/issues/106/events",
+  "html_url": "https://github.com/epik-agent/Epik/issues/106",
+  "id": 5075912927,
+  "node_id": "I_kwDOTGiPCs8AAAABLoxI3w",
+  "number": 106,
+  "title": "github.rs: a typed REST + GraphQL client for Epik's verbs",
+  "user": {
+    "login": "wpm",
+    "id": 141456,
+    "node_id": "MDQ6VXNlcjE0MTQ1Ng==",
+    "avatar_url": "https://avatars.githubusercontent.com/u/141456?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/wpm",
+    "html_url": "https://github.com/wpm",
+    "followers_url": "https://api.github.com/users/wpm/followers",
+    "following_url": "https://api.github.com/users/wpm/following{/other_user}",
+    "gists_url": "https://api.github.com/users/wpm/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/wpm/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/wpm/subscriptions",
+    "organizations_url": "https://api.github.com/users/wpm/orgs",
+    "repos_url": "https://api.github.com/users/wpm/repos",
+    "events_url": "https://api.github.com/users/wpm/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/wpm/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "labels": [
+    {
+      "id": 11349943602,
+      "node_id": "LA_kwDOTGiPCs8AAAACpIJlMg",
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/enhancement",
+      "name": "enhancement",
+      "color": "a2eeef",
+      "default": true,
+      "description": "New feature or request"
+    }
+  ],
+  "state": "open",
+  "locked": false,
+  "assignees": [
+
+  ],
+  "milestone": null,
+  "comments": 0,
+  "created_at": "2026-08-05T22:54:47Z",
+  "updated_at": "2026-08-05T22:54:47Z",
+  "closed_at": null,
+  "assignee": null,
+  "author_association": "COLLABORATOR",
+  "issue_field_values": [
+
+  ],
+  "type": null,
+  "active_lock_reason": null,
+  "sub_issues_summary": {
+    "total": 0,
+    "completed": 0,
+    "percent_completed": 0
+  },
+  "parent_issue_url": "https://api.github.com/repos/epik-agent/Epik/issues/102",
+  "issue_dependencies_summary": {
+    "blocked_by": 1,
+    "total_blocked_by": 1,
+    "blocking": 0,
+    "total_blocking": 0
+  },
+  "body": "Sub-issue of #102. Design: `docs/design-history/2026-08-05-coding-agents-and-tools.md`.\n\nA hand-rolled client in `crates/epik` beside `chat.rs`, on the `OpenAiCompatible` precedent: synchronous, no SDK crate (`octocrab` rejected — async/tokio against a synchronous library, and it misses the GraphQL mutations anyway). REST for issues (get/create/edit/comment/close), PRs (open/get/merge), check conclusions, default branch; GraphQL (POST `/graphql`) for sub-issue add/remove and blocked-by set/remove. The surface covers exactly Epik's verbs, nothing more. Typed errors, with rate limiting distinguished from failure. Stringliness confined to the module.\n\nTesting, shaped by secretless CI: a unit tier against captured payloads; an unauthenticated read smoke against this public repo in CI; mutation tests run locally against a scratch repo only when a token is present, and are required nowhere — no secret enters CI.\n\nAcceptance: the parent feature's acceptance list is achievable through this module alone.",
+  "closed_by": null,
+  "reactions": {
+    "url": "https://api.github.com/repos/epik-agent/Epik/issues/106/reactions",
+    "total_count": 0,
+    "+1": 0,
+    "-1": 0,
+    "laugh": 0,
+    "hooray": 0,
+    "confused": 0,
+    "heart": 0,
+    "rocket": 0,
+    "eyes": 0
+  },
+  "timeline_url": "https://api.github.com/repos/epik-agent/Epik/issues/106/timeline",
+  "performed_via_github_app": null,
+  "state_reason": null,
+  "pinned_comment": null
+}

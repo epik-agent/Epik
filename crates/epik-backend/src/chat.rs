@@ -18,12 +18,17 @@ use std::sync::{Mutex, PoisonError};
 use epik::chat::{
     ChatError, Client, Conversation, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT, TranscriptItem,
 };
+use epik::github::GitHub;
 use epik::keystore::{KeyStore, OsKeyring, Resolved};
 use epik::tools::{self, Registry};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The keystore entry the turn's key comes from.
 const API_KEY_NAME: &str = "ANTHROPIC_API_KEY";
+
+/// The keystore entry the GitHub verbs authenticate with. Optional: absent
+/// means public reads still work and the writing verbs refuse per-call.
+const GITHUB_TOKEN_NAME: &str = "GITHUB_TOKEN";
 
 /// Where to send someone whose turn failed for want of a key.
 const SET_KEY_HINT: &str = "Set the Anthropic key in Settings (Cmd+,).";
@@ -148,11 +153,23 @@ pub async fn send_message(
         }
     };
 
+    // The GitHub token is optional; a keystore that has none — or cannot
+    // be reached for it — just means an unauthenticated client, whose
+    // writing verbs refuse individually with their own message.
+    let github_token = match OsKeyring.resolve(GITHUB_TOKEN_NAME) {
+        Resolved::Found(token) => Some(token),
+        Resolved::Absent | Resolved::Unreachable(_) => None,
+    };
+
     // The turn gets its own thread: an inline turn would hold this async
     // context — and the window's patience — for its whole duration.
     std::thread::spawn(move || {
         let client = Client::anthropic(key);
-        let registry = Registry::standard();
+        // Assembled fresh each turn, so a token pasted mid-session
+        // reaches the very next turn.
+        let mut registry = Registry::standard();
+        registry.extend(epik::github::tools::all(GitHub::new(github_token)));
+        registry.extend(epik::git::all());
         let stop = AtomicBool::new(false);
         let state = app.state::<ChatState>();
         turn(
