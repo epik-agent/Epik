@@ -3,9 +3,10 @@
 //! The transcript the user sees is a pure fold over [`TranscriptItem`]s —
 //! history from `get_transcript` first, then live events on top. Nothing
 //! is shown that didn't come back over the barrier as an item. Message
-//! text renders through a deterministic parse into escaped text, backtick
-//! code spans, and http(s) autolinks — a chat message can never inject
-//! markup.
+//! text renders through the deterministic [`markdown`] parse into a
+//! typed structure mapped 1:1 into elements — a chat message can never
+//! inject markup, links open only the system browser through one
+//! delegated handler, and images never fetch.
 
 use epik::chat::{Role, TranscriptItem};
 use leptos::ev;
@@ -16,6 +17,7 @@ use wasm_bindgen::closure::Closure;
 
 use crate::card::{self, Card};
 use crate::ipc;
+use crate::markdown::{self, Item, Node};
 
 /// Folds one arriving item into the transcript. New item kinds become new
 /// arms here, never a second channel.
@@ -49,98 +51,168 @@ pub(crate) fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
     }
 }
 
-/// One run of a message, after parsing. What the renderer maps 1:1 into
-/// the view, and what the golden tests pin down.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Segment {
-    /// Escaped plain text, newlines preserved.
-    Text(String),
-    /// A `backtick span`, rendered monospace.
-    Code(String),
-    /// A bare http(s) URL, rendered as a link that opens the system browser.
-    Link(String),
-}
-
-/// Punctuation that ends a sentence rather than a URL.
-const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
-
-/// Splits `text` into text runs and bare http(s) links.
-fn push_text_and_links(segments: &mut Vec<Segment>, text: &str) {
-    let mut rest = text;
-    loop {
-        let start = ["http://", "https://"]
-            .iter()
-            .filter_map(|scheme| rest.find(scheme))
-            .min();
-        let Some(start) = start else { break };
-        let end = rest[start..]
-            .find(char::is_whitespace)
-            .map_or(rest.len(), |length| start + length);
-        let url = rest[start..end].trim_end_matches(TRAILING);
-        if !rest[..start].is_empty() {
-            segments.push(Segment::Text(rest[..start].to_owned()));
-        }
-        segments.push(Segment::Link(url.to_owned()));
-        rest = &rest[start + url.len()..];
-    }
-    if !rest.is_empty() {
-        segments.push(Segment::Text(rest.to_owned()));
-    }
-}
-
-/// The deterministic heart of message rendering: text in, structure out.
-///
-/// Backtick pairs become code spans (an unmatched backtick is just text),
-/// bare http(s) URLs in the remaining text become links with sentence
-/// punctuation left outside, and everything else stays text. That is the
-/// whole formatting language of this slice.
-pub(crate) fn parse(text: &str) -> Vec<Segment> {
-    let mut segments = Vec::new();
-    let mut rest = text;
-    while let Some(open) = rest.find('`') {
-        let Some(length) = rest[open + 1..].find('`') else {
-            break;
-        };
-        push_text_and_links(&mut segments, &rest[..open]);
-        segments.push(Segment::Code(rest[open + 1..open + 1 + length].to_owned()));
-        rest = &rest[open + length + 2..];
-    }
-    push_text_and_links(&mut segments, rest);
-    segments
-}
+/// What every anchor wears. Clicks are handled once, delegated on the
+/// transcript pane — anchors carry no handlers of their own.
+const LINK: &str = "cursor-pointer underline decoration-current/50 underline-offset-2 \
+                    hover:decoration-current";
+/// What inline code wears.
+const CODE: &str = "rounded bg-black/10 px-1 font-mono text-[0.9em] dark:bg-white/10";
+/// Vertical rhythm for block elements inside a bubble.
+const BLOCK: &str = "my-1 first:mt-0 last:mb-0";
+/// Table and blockquote edges, both themes.
+const EDGE: &str = "border-neutral-300 dark:border-neutral-600";
 
 /// Maps a message's parse 1:1 into the view. Text lands in text nodes —
 /// escaped by construction — so markup in a message stays words.
 fn render_message(text: &str) -> impl IntoView + use<> {
-    parse(text)
-        .into_iter()
-        .map(|segment| match segment {
-            Segment::Text(text) => text.into_any(),
-            Segment::Code(code) => view! {
-                <code class="rounded bg-black/10 px-1 font-mono text-[0.9em] dark:bg-white/10">
-                    {code}
-                </code>
+    nodes_view(&markdown::parse(text))
+}
+
+fn nodes_view(nodes: &[Node]) -> AnyView {
+    nodes.iter().map(node_view).collect_view().into_any()
+}
+
+fn node_view(node: &Node) -> AnyView {
+    match node {
+        Node::Text(text) => text.clone().into_any(),
+        Node::Code(code) => view! { <code class=CODE>{code.clone()}</code> }.into_any(),
+        Node::Emphasis(children) => view! { <em>{nodes_view(children)}</em> }.into_any(),
+        Node::Strong(children) => view! { <strong>{nodes_view(children)}</strong> }.into_any(),
+        Node::Strikethrough(children) => view! { <del>{nodes_view(children)}</del> }.into_any(),
+        Node::Link { href, children } => {
+            view! { <a href=href.clone() class=LINK>{nodes_view(children)}</a> }.into_any()
+        }
+        // The image was not fetched; its alt text stands in, dressed to
+        // say something was elided.
+        Node::Elided(alt) => {
+            let alt = if alt.is_empty() { "image" } else { alt.as_str() };
+            view! { <span class="italic opacity-60">"["{alt.to_owned()}"]"</span> }.into_any()
+        }
+        Node::Paragraph(children) => {
+            view! { <p class=BLOCK>{nodes_view(children)}</p> }.into_any()
+        }
+        // Headings scaled for a bubble: a bold lead line, not a
+        // billboard.
+        Node::Heading { level, children } => {
+            let inner = nodes_view(children);
+            match level {
+                1 => view! { <h1 class=format!("{BLOCK} text-base font-bold")>{inner}</h1> }
+                    .into_any(),
+                2 => view! { <h2 class=format!("{BLOCK} text-[0.95rem] font-bold")>{inner}</h2> }
+                    .into_any(),
+                _ => view! { <h3 class=format!("{BLOCK} font-semibold")>{inner}</h3> }.into_any(),
             }
-            .into_any(),
-            Segment::Link(url) => {
-                let href = url.clone();
-                let target = url.clone();
+        }
+        Node::CodeBlock { code, .. } => view! {
+            <pre class=format!(
+                "{BLOCK} overflow-x-auto rounded-md bg-black/5 p-2 font-mono text-xs dark:bg-white/10"
+            )>
+                <code>{code.clone()}</code>
+            </pre>
+        }
+        .into_any(),
+        Node::BlockQuote(children) => view! {
+            <blockquote class=format!("{BLOCK} border-l-2 {EDGE} pl-3 opacity-80")>
+                {nodes_view(children)}
+            </blockquote>
+        }
+        .into_any(),
+        Node::List { start, items } => list_view(*start, items),
+        Node::Rule => view! { <hr class=format!("{BLOCK} {EDGE}") /> }.into_any(),
+        Node::Table { header, rows } => view! {
+            <div class=format!("{BLOCK} overflow-x-auto")>
+                <table class="border-collapse text-left">
+                    <thead>
+                        <tr>
+                            {header
+                                .iter()
+                                .map(|cell| view! {
+                                    <th class=format!("border {EDGE} px-2 py-0.5 font-semibold")>
+                                        {nodes_view(cell)}
+                                    </th>
+                                })
+                                .collect_view()}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows
+                            .iter()
+                            .map(|row| view! {
+                                <tr>
+                                    {row
+                                        .iter()
+                                        .map(|cell| view! {
+                                            <td class=format!("border {EDGE} px-2 py-0.5")>
+                                                {nodes_view(cell)}
+                                            </td>
+                                        })
+                                        .collect_view()}
+                                </tr>
+                            })
+                            .collect_view()}
+                    </tbody>
+                </table>
+            </div>
+        }
+        .into_any(),
+    }
+}
+
+fn list_view(start: Option<u64>, items: &[Item]) -> AnyView {
+    // A task list wears checkboxes instead of markers.
+    let tasks = items.iter().any(|item| item.checked.is_some());
+    let class = if tasks {
+        format!("{BLOCK} list-none pl-1")
+    } else if start.is_some() {
+        format!("{BLOCK} list-decimal pl-5")
+    } else {
+        format!("{BLOCK} list-disc pl-5")
+    };
+    let rendered = items
+        .iter()
+        .map(|item| {
+            let checkbox = item.checked.map(|checked| {
                 view! {
-                    <a
-                        href=href
-                        class="cursor-pointer underline decoration-current/50 underline-offset-2 hover:decoration-current"
-                        on:click=move |event| {
-                            event.prevent_default();
-                            ipc::open_url(target.clone());
-                        }
-                    >
-                        {url}
-                    </a>
+                    // Disabled on purpose: nothing in a bubble is
+                    // interactive except links.
+                    <input
+                        type="checkbox"
+                        disabled=true
+                        prop:checked=checked
+                        class="mr-1.5 align-middle accent-[#00b377] dark:accent-[#00e599]"
+                    />
                 }
-                .into_any()
-            }
+            });
+            view! { <li>{checkbox}{nodes_view(&item.children)}</li> }
         })
-        .collect_view()
+        .collect_view();
+    match start {
+        Some(first) => {
+            let start_attr = (first != 1).then(|| first.to_string());
+            view! { <ol class=class start=start_attr>{rendered}</ol> }.into_any()
+        }
+        None => view! { <ul class=class>{rendered}</ul> }.into_any(),
+    }
+}
+
+/// The delegated link handler: any anchor in the transcript opens the
+/// system browser — the webview never navigates. Anchors only exist for
+/// http(s) (the parse guarantees it), and the guard here repeats the
+/// check anyway.
+fn open_link(event: &ev::MouseEvent) {
+    let Some(target) = event.target() else { return };
+    let Some(element) = target.dyn_ref::<web_sys::Element>() else {
+        return;
+    };
+    let Ok(Some(anchor)) = element.closest("a") else {
+        return;
+    };
+    event.prevent_default();
+    if let Some(href) = anchor.get_attribute("href")
+        && (href.starts_with("http://") || href.starts_with("https://"))
+    {
+        ipc::open_url(href);
+    }
 }
 
 /// What every bubble wears.
@@ -313,6 +385,7 @@ pub fn Chat() -> impl IntoView {
             </header>
             <div
                 node_ref=pane
+                on:click=move |event| open_link(&event)
                 on:scroll=move |_| {
                     if let Some(pane) = pane.get_untracked() {
                         let bottom = pane.scroll_top() + pane.client_height();
@@ -393,18 +466,6 @@ mod tests {
             role,
             text: text.to_owned(),
         }
-    }
-
-    fn text(s: &str) -> Segment {
-        Segment::Text(s.to_owned())
-    }
-
-    fn code(s: &str) -> Segment {
-        Segment::Code(s.to_owned())
-    }
-
-    fn link(s: &str) -> Segment {
-        Segment::Link(s.to_owned())
     }
 
     #[test]
@@ -524,89 +585,5 @@ mod tests {
         let mut transcript = vec![message(Role::User, "hi"), delta("Let me")];
         fold(&mut transcript, tool_call());
         assert_eq!(transcript, [message(Role::User, "hi"), tool_call()]);
-    }
-
-    #[test]
-    fn plain_text_stays_one_text_run() {
-        assert_eq!(parse("just words"), [text("just words")]);
-    }
-
-    #[test]
-    fn newlines_survive_parsing() {
-        assert_eq!(parse("line one\nline two"), [text("line one\nline two")]);
-    }
-
-    #[test]
-    fn an_attempted_script_tag_arrives_as_text() {
-        assert_eq!(
-            parse("<script>alert(1)</script>"),
-            [text("<script>alert(1)</script>")]
-        );
-    }
-
-    #[test]
-    fn a_backtick_span_becomes_code() {
-        assert_eq!(
-            parse("run `cargo test` now"),
-            [text("run "), code("cargo test"), text(" now")]
-        );
-    }
-
-    #[test]
-    fn backticks_at_the_edges_still_pair() {
-        assert_eq!(
-            parse("`start` and `end`"),
-            [code("start"), text(" and "), code("end"),]
-        );
-    }
-
-    #[test]
-    fn an_unmatched_backtick_is_just_text() {
-        assert_eq!(parse("a ` b"), [text("a ` b")]);
-    }
-
-    #[test]
-    fn a_bare_url_becomes_a_link() {
-        assert_eq!(
-            parse("see https://example.com for more"),
-            [text("see "), link("https://example.com"), text(" for more"),]
-        );
-    }
-
-    #[test]
-    fn http_links_too() {
-        assert_eq!(parse("http://example.com"), [link("http://example.com")]);
-    }
-
-    #[test]
-    fn sentence_punctuation_stays_outside_the_link() {
-        assert_eq!(
-            parse("read https://example.com/docs."),
-            [text("read "), link("https://example.com/docs"), text(".")]
-        );
-    }
-
-    #[test]
-    fn a_parenthesized_url_keeps_its_parenthesis_outside() {
-        assert_eq!(
-            parse("(https://example.com)"),
-            [text("("), link("https://example.com"), text(")")]
-        );
-    }
-
-    #[test]
-    fn nothing_else_becomes_a_link() {
-        assert_eq!(
-            parse("ftp://example.com and www.example.com"),
-            [text("ftp://example.com and www.example.com")]
-        );
-    }
-
-    #[test]
-    fn a_url_inside_backticks_is_code_not_a_link() {
-        assert_eq!(
-            parse("`https://example.com`"),
-            [code("https://example.com")]
-        );
     }
 }

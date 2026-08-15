@@ -2,6 +2,7 @@ mod app;
 mod card;
 mod chat;
 mod ipc;
+mod markdown;
 mod settings;
 
 use leptos::prelude::*;
