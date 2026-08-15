@@ -1,1 +1,46 @@
 @import "tailwindcss";
+
+/* The code-highlight palette: seven classes, subdued, one set per
+   theme. The classes come from src/highlight.rs; the app's theme rides
+   prefers-color-scheme, like every dark: style in the markup. */
+.hl-kw {
+  color: #cf222e;
+}
+.hl-fn {
+  color: #8250df;
+}
+.hl-ty {
+  color: #953800;
+}
+.hl-st {
+  color: #0a3069;
+}
+.hl-nm,
+.hl-cn {
+  color: #0550ae;
+}
+.hl-cm {
+  color: #6e7781;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hl-kw {
+    color: #ff7b72;
+  }
+  .hl-fn {
+    color: #d2a8ff;
+  }
+  .hl-ty {
+    color: #ffa657;
+  }
+  .hl-st {
+    color: #a5d6ff;
+  }
+  .hl-nm,
+  .hl-cn {
+    color: #79c0ff;
+  }
+  .hl-cm {
+    color: #8b949e;
+  }
+}

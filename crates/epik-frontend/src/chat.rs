@@ -16,6 +16,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::card::{self, Card};
+use crate::highlight;
 use crate::ipc;
 use crate::markdown::{self, Item, Node};
 
@@ -85,12 +86,14 @@ fn node_view(node: &Node) -> AnyView {
         // The image was not fetched; its alt text stands in, dressed to
         // say something was elided.
         Node::Elided(alt) => {
-            let alt = if alt.is_empty() { "image" } else { alt.as_str() };
+            let alt = if alt.is_empty() {
+                "image"
+            } else {
+                alt.as_str()
+            };
             view! { <span class="italic opacity-60">"["{alt.to_owned()}"]"</span> }.into_any()
         }
-        Node::Paragraph(children) => {
-            view! { <p class=BLOCK>{nodes_view(children)}</p> }.into_any()
-        }
+        Node::Paragraph(children) => view! { <p class=BLOCK>{nodes_view(children)}</p> }.into_any(),
         // Headings scaled for a bubble: a bold lead line, not a
         // billboard.
         Node::Heading { level, children } => {
@@ -103,14 +106,35 @@ fn node_view(node: &Node) -> AnyView {
                 _ => view! { <h3 class=format!("{BLOCK} font-semibold")>{inner}</h3> }.into_any(),
             }
         }
-        Node::CodeBlock { code, .. } => view! {
-            <pre class=format!(
-                "{BLOCK} overflow-x-auto rounded-md bg-black/5 p-2 font-mono text-xs dark:bg-white/10"
-            )>
-                <code>{code.clone()}</code>
-            </pre>
+        // The info string's first token picks the grammar; a language
+        // the pruned set doesn't know renders the same plain block as
+        // ever.
+        Node::CodeBlock { info, code } => {
+            let language = info
+                .split([',', ' ', '\t'])
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let body = match highlight::highlight(language, code) {
+                Some(chunks) => chunks
+                    .into_iter()
+                    .map(|chunk| match chunk.class {
+                        Some(class) => view! { <span class=class>{chunk.text}</span> }.into_any(),
+                        None => chunk.text.into_any(),
+                    })
+                    .collect_view()
+                    .into_any(),
+                None => code.clone().into_any(),
+            };
+            view! {
+                <pre class=format!(
+                    "{BLOCK} overflow-x-auto rounded-md bg-black/5 p-2 font-mono text-xs dark:bg-white/10"
+                )>
+                    <code>{body}</code>
+                </pre>
+            }
+            .into_any()
         }
-        .into_any(),
         Node::BlockQuote(children) => view! {
             <blockquote class=format!("{BLOCK} border-l-2 {EDGE} pl-3 opacity-80")>
                 {nodes_view(children)}

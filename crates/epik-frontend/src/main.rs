@@ -1,6 +1,7 @@
 mod app;
 mod card;
 mod chat;
+mod highlight;
 mod ipc;
 mod markdown;
 mod settings;

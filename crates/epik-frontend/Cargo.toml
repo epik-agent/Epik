@@ -10,6 +10,14 @@ leptos = { version = "0.8", features = ["csr"] }
 # The Markdown grammar. Parser only — Epik renders the events into its
 # own typed structure; the HTML output half is never used.
 pulldown-cmark = { version = "0.13", default-features = false }
+# Syntax highlighting over the pruned grammar set build.rs compiles.
+# fancy-regex only: the default onig backend is a C dependency and must
+# never appear in the tree.
+syntect = { version = "5", default-features = false, features = [
+    "parsing",
+    "regex-fancy",
+    "dump-load",
+] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
@@ -25,3 +33,13 @@ web-sys = { version = "0.3", features = [
 # Deliberately its own workspace: this crate targets wasm while the root
 # workspace targets native, so it must not attach to the root.
 [workspace]
+
+[build-dependencies]
+# build.rs compiles grammars/ into the pruned SyntaxSet dump the
+# highlighter embeds. Same pure-Rust regex backend as the runtime.
+syntect = { version = "5", default-features = false, features = [
+    "parsing",
+    "regex-fancy",
+    "yaml-load",
+    "dump-create",
+] }
