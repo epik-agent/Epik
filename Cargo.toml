@@ -1,3 +1,3 @@
 [workspace]
 resolver = "3"
-members = ["crates/epik", "crates/epik-backend"]
+members = ["crates/epik", "crates/epik-agent", "crates/epik-backend"]

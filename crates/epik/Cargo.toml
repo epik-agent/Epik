@@ -4,16 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The machinery of an actual desktop: the OS keyring, blocking HTTP. Off by
-# default so the crate stays wasm-clean for the frontend. Wire protocols
-# come with it, so native implies serde.
-native = ["dep:chrono", "dep:include-crypt", "dep:keyring", "dep:ureq", "serde"]
+# The machinery of an actual desktop: the OS keyring, blocking HTTP,
+# process supervision. Off by default so the crate stays wasm-clean for
+# the frontend. Wire protocols come with it, so native implies serde.
+native = [
+    "dep:chrono",
+    "dep:include-crypt",
+    "dep:keyring",
+    "dep:libc",
+    "dep:ureq",
+    "serde",
+]
 # Wire form for the types both sides of the IPC barrier share — including
-# Secret, whose serialization is the one door its bytes leave through.
-serde = ["dep:serde", "dep:serde_json"]
-# The scripted model: a deterministic loopback fake of just enough OpenAI
-# protocol to test against. Test infrastructure only — no shipping build
-# enables it, and no test in this project ever depends on a real LLM.
+# Secret, whose serialization is the one door its bytes leave through. A
+# marker: the serde crates themselves are unconditional, because the agent
+# vocabulary is wire protocol under every feature set.
+serde = []
+# The scripted fakes: the loopback model and the deterministic agent, just
+# enough behavior to test against. Test infrastructure only — no shipping
+# build enables it, and no test in this project ever depends on a real LLM.
 scripted = ["native"]
 
 [dependencies]
@@ -27,8 +36,9 @@ keyring = { version = "3", features = [
     "windows-native",
     "linux-native",
 ], optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+libc = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]

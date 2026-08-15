@@ -1016,9 +1016,19 @@ dependencies = [
  "git2",
  "include-crypt",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "epik-agent"
+version = "0.1.0"
+dependencies = [
+ "epik",
+ "libc",
+ "serde_json",
 ]
 
 [[package]]
