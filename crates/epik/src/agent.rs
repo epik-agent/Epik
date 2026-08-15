@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 // re-exported so agent callers need nothing beyond this module.
 pub use crate::keystore::Secret;
 
+pub mod claude_code;
 #[cfg(feature = "scripted")]
 pub mod scripted;
 #[cfg(feature = "scripted")]
