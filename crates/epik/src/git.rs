@@ -251,29 +251,39 @@ pub fn all() -> Vec<Tool> {
         ),
         Tool::new(
             "git_log",
-            "The most recent commits — hash, author, date, and subject, one per line — newest first.",
+            "The most recent commits — hash, author, date, and subject, one per line — newest first, of HEAD or of a named ref such as a branch.",
             schema(
-                &[(
-                    "count",
-                    json!({
-                        "type": "integer",
-                        "description": "How many commits to show; 20 when omitted.",
-                    }),
-                )],
+                &[
+                    (
+                        "count",
+                        json!({
+                            "type": "integer",
+                            "description": "How many commits to show; 20 when omitted.",
+                        }),
+                    ),
+                    (
+                        "ref",
+                        json!({
+                            "type": "string",
+                            "description": "The branch, tag, or commit whose history to show; HEAD when omitted.",
+                        }),
+                    ),
+                ],
                 &[],
             ),
             Box::new(|arguments| {
                 let count = arguments["count"].as_u64().unwrap_or(20).to_string();
-                git(
-                    directory(arguments)?,
-                    &[
-                        "log",
-                        "-n",
-                        &count,
-                        "--date=short",
-                        "--pretty=format:%h\t%an\t%ad\t%s",
-                    ],
-                )
+                let mut args = vec![
+                    "log",
+                    "-n",
+                    &count,
+                    "--date=short",
+                    "--pretty=format:%h\t%an\t%ad\t%s",
+                ];
+                if arguments["ref"].is_string() {
+                    args.push(positional(arguments, "ref")?);
+                }
+                git(directory(arguments)?, &args)
             }),
         ),
         Tool::new(
@@ -746,6 +756,27 @@ mod tests {
         // Which is exactly enough for the git tools to read.
         let log = ok("git_log", json!({ "directory": dir }));
         assert!(log.contains("Initial commit"), "{log}");
+    }
+
+    /// A bare repository's HEAD is one branch; the others are reached by
+    /// name — which is how the persona reads a build branch's history.
+    #[test]
+    fn log_reads_a_named_branch_of_a_bare_repository() {
+        let scratch = Scratch::new("branchlog");
+        let dir = scratch.join("r.git");
+        ok("git_init", json!({ "directory": dir }));
+        assert!(
+            execute(&["-C", &dir, "branch", "other", "main"]).unwrap()["ok"]
+                .as_bool()
+                .unwrap()
+        );
+        let log = ok(
+            "git_log",
+            json!({ "directory": dir, "ref": "other", "count": 5 }),
+        );
+        assert!(log.contains("Initial commit"), "{log}");
+        let (ok, output) = call("git_log", json!({ "directory": dir, "ref": "nonesuch" }));
+        assert!(!ok, "{output}");
     }
 
     #[test]
