@@ -183,8 +183,10 @@ fn start_build(start: impl Fn(Order) -> Result<Workspace, String> + 'static) -> 
          path (make one with git_init if the user's chosen location has none yet) — on a new \
          branch named branch, started from base or the repository's default branch. Returns at \
          once with the branch and the private worktree directory the agent works in; the build \
-         runs on its own, and build_status reports on it. One build runs at a time. The agent \
-         commits as it goes; the branch is where the work lands.",
+         then runs on its own for minutes. As soon as it has started, tell the user the branch \
+         and repository and end your turn — do not call build_status in the same turn; the user \
+         will ask how it is going. One build runs at a time. The agent commits as it goes; the \
+         branch is where the work lands.",
         json!({
             "type": "object",
             "properties": {
@@ -282,8 +284,10 @@ fn build_status(record: impl Fn() -> Option<Record> + 'static) -> Tool {
         "build_status",
         "How the build launched by start_build is going — or went: its phase, the agent's \
          latest narration, the terminal result when there is one (ok, text, cost), and at the \
-         end whether the branch advanced and the worktree was left clean. This covers the \
-         launched build only; questions about a repository's history are for git_log.",
+         end whether the branch advanced and the worktree was left clean. Call it once when the \
+         user asks and report what it says; never poll it in a loop, since the build runs on \
+         its own and a running phase means exactly that. This covers the launched build only; \
+         questions about a repository's history are for git_log.",
         json!({ "type": "object", "properties": {} }),
         Box::new(move |_| {
             Ok(record().map_or_else(
