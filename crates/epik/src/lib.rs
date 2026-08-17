@@ -1,4 +1,6 @@
 pub mod agent;
+#[cfg(all(feature = "native", unix))]
+pub mod build;
 pub mod chat;
 #[cfg(feature = "native")]
 pub mod git;

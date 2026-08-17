@@ -502,6 +502,7 @@ mod tests {
                 "push",
                 "clone",
                 "remote_list",
+                "init",
             ];
             assert!(names.contains(&"current_time".to_owned()));
             for verb in expected_github {

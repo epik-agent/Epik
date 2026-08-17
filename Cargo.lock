@@ -1027,6 +1027,7 @@ name = "epik-agent"
 version = "0.1.0"
 dependencies = [
  "epik",
+ "git2",
  "libc",
  "serde_json",
 ]

@@ -15,7 +15,9 @@
 //! the interim safety story; a permission layer comes later. Network
 //! verbs ride the user's own ambient credentials — credential helpers,
 //! SSH config; Epik injects nothing, and commits are made under the
-//! user's own git identity.
+//! user's own git identity — with one exception: `git_init` makes a
+//! repository's empty root commit under the Epik persona's own identity,
+//! by per-invocation config, so a repository is never commitless.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -29,6 +31,12 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What every argument named `directory` must say.
 const DIRECTORY: &str = "The absolute path of the repository's directory.";
+
+/// The Epik persona's git identity: what its own commits are authored as
+/// — the root commit `git_init` makes, and everything a build agent
+/// commits in a provisioned worktree.
+pub const PERSONA_NAME: &str = "Epik";
+pub const PERSONA_EMAIL: &str = "epik@epik-agent.dev";
 
 /// Runs git with `args` as argv — no shell anywhere — and settles the
 /// outcome into the one shape every git tool answers with:
@@ -93,6 +101,86 @@ fn reader(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<
         let mut text = String::new();
         let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
         text
+    })
+}
+
+/// [`execute`] for callers inside the crate that want git's answer, not
+/// a tool result: the combined output on success, git's own words as the
+/// Err on a nonzero exit.
+pub(crate) fn plumbing(args: &[&str]) -> Result<String, String> {
+    let value = execute(args)?;
+    let output = value["output"].as_str().unwrap_or_default().to_owned();
+    if value["ok"].as_bool().unwrap_or(false) {
+        Ok(output)
+    } else if output.trim().is_empty() {
+        Err(format!("git {} failed without saying why", args.join(" ")))
+    } else {
+        Err(output.trim().to_owned())
+    }
+}
+
+/// Whether `directory` is itself a git repository — bare, or a working
+/// tree with its `.git` — as opposed to merely lying inside one.
+fn is_repository(directory: &str) -> bool {
+    let Ok(git_dir) = plumbing(&["-C", directory, "rev-parse", "--absolute-git-dir"]) else {
+        return false;
+    };
+    let git_dir = std::path::Path::new(git_dir.trim());
+    let here = std::path::Path::new(directory);
+    let same = |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize())
+    {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    same(git_dir, here) || same(git_dir, &here.join(".git"))
+}
+
+/// A bare repository at `directory` on branch `main`, holding one empty
+/// root commit — the guarantee that a repository is never commitless,
+/// so every later branch has somewhere to start. Plumbing all the way:
+/// `mktree` on nothing, `commit-tree`, `update-ref`, the commit authored
+/// as the persona by per-invocation config that touches nothing the
+/// repository keeps.
+fn init(directory: &str) -> Result<Value, String> {
+    if is_repository(directory) {
+        return Ok(json!({
+            "ok": false,
+            "output": format!("{directory} already holds a git repository"),
+        }));
+    }
+    let init = execute(&["init", "--bare", "--initial-branch=main", "--", directory])?;
+    if !init["ok"].as_bool().unwrap_or(false) {
+        return Ok(init);
+    }
+    let root = || -> Result<String, String> {
+        let tree = plumbing(&["-C", directory, "mktree"])?;
+        let commit = plumbing(&[
+            "-C",
+            directory,
+            "-c",
+            &format!("user.name={PERSONA_NAME}"),
+            "-c",
+            &format!("user.email={PERSONA_EMAIL}"),
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            tree.trim(),
+            "-m",
+            "Initial commit",
+        ])?;
+        let commit = commit.trim().to_owned();
+        plumbing(&["-C", directory, "update-ref", "refs/heads/main", &commit])?;
+        Ok(commit)
+    };
+    Ok(match root() {
+        Ok(commit) => json!({
+            "ok": true,
+            "output": format!(
+                "Initialized empty bare repository in {directory}: branch main at root commit {}",
+                &commit[..commit.len().min(7)]
+            ),
+        }),
+        Err(words) => json!({ "ok": false, "output": words }),
     })
 }
 
@@ -390,6 +478,12 @@ pub fn all() -> Vec<Tool> {
             schema(&[], &[]),
             Box::new(|arguments| git(directory(arguments)?, &["remote", "-v"])),
         ),
+        Tool::new(
+            "git_init",
+            "Creates a new bare git repository at directory — an absolute path that must not already hold a repository — on branch main with an empty root commit, so it is ready to be built in or cloned. Use this to give a project a home when the user has named a location that has no repository yet.",
+            schema(&[], &[]),
+            Box::new(|arguments| init(absolute(directory(arguments)?)?)),
+        ),
     ]
 }
 
@@ -627,6 +721,45 @@ mod tests {
         let verified = git2::Repository::open(std::path::Path::new(&copy)).unwrap();
         let head = verified.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(head.message().unwrap().trim(), "more");
+    }
+
+    #[test]
+    fn init_makes_a_bare_repository_with_one_empty_root_commit_on_main() {
+        let scratch = Scratch::new("init");
+        let dir = scratch.join("wumpus.git");
+
+        let output = ok("git_init", json!({ "directory": dir }));
+        assert!(output.contains("main"), "{output}");
+
+        // The independent implementation: bare, on main, one commit with
+        // no parents, whose tree is empty, authored as the persona.
+        let verified = git2::Repository::open(&dir).unwrap();
+        assert!(verified.is_bare());
+        let head = verified.head().unwrap();
+        assert_eq!(head.shorthand(), Some("main"));
+        let commit = head.peel_to_commit().unwrap();
+        assert_eq!(commit.parent_count(), 0);
+        assert_eq!(commit.tree().unwrap().len(), 0);
+        assert_eq!(commit.author().name(), Some(PERSONA_NAME));
+        assert_eq!(commit.author().email(), Some(PERSONA_EMAIL));
+
+        // Which is exactly enough for the git tools to read.
+        let log = ok("git_log", json!({ "directory": dir }));
+        assert!(log.contains("Initial commit"), "{log}");
+    }
+
+    #[test]
+    fn init_refuses_a_directory_that_already_holds_a_repository() {
+        let repo = seeded("reinit");
+        let (ok, output) = call("git_init", json!({ "directory": repo.path() }));
+        assert!(!ok);
+        assert!(output.contains("already holds"), "{output}");
+
+        let bare = Scratch::new("rebare");
+        let dir = bare.join("r.git");
+        self::ok("git_init", json!({ "directory": dir }));
+        let (ok, output) = call("git_init", json!({ "directory": dir }));
+        assert!(!ok, "a bare repository counts too: {output}");
     }
 
     #[test]
