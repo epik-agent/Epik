@@ -1,6 +1,7 @@
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
+mod build;
 mod chat;
 mod secrets;
 
@@ -68,6 +69,7 @@ pub fn run() {
             Ok(())
         })
         .manage(chat::ChatState::default())
+        .manage(build::BuildState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             let settings =

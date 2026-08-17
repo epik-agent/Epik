@@ -280,12 +280,17 @@ pub async fn send_message(
     // The turn gets its own thread: an inline turn would hold this async
     // context — and the window's patience — for its whole duration.
     std::thread::spawn(move || {
+        // The same key rides into a build agent's environment; the CLI's
+        // own logged-in auth would also do, but the one the user set here
+        // is the one they mean.
+        let agent_key = Some(key.clone());
         let client = Client::anthropic(key);
         // Assembled fresh each turn, so a token pasted mid-session
         // reaches the very next turn.
         let mut registry = Registry::standard();
         registry.extend(epik::github::tools::all(GitHub::new(github_token)));
         registry.extend(epik::git::all());
+        registry.extend(crate::build::tools(app.clone(), agent_key));
         registry.register(choose_repository({
             let app = app.clone();
             move |question| {
