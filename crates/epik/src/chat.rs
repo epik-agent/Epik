@@ -61,6 +61,49 @@ pub enum TranscriptItem {
         ok: bool,
         content: String,
     },
+    /// The persona is asking the user something and the turn is waiting
+    /// on the answer. Ephemeral like a delta: it exists on the event
+    /// channel and is never pushed into a [`Conversation`] — the settled
+    /// record is [`QuestionResolved`](Self::QuestionResolved).
+    Question { id: String, ask: Ask },
+    /// A question and what the user answered — the settled record,
+    /// appended and emitted exactly like a tool call and its result.
+    QuestionResolved {
+        id: String,
+        ask: Ask,
+        answer: Answer,
+    },
+}
+
+/// What the persona needs from the user, in modality-free terms: the
+/// backend says *what* it wants, never how to collect it — every input
+/// modality is the frontend's. Tagged like [`TranscriptItem`], so a new
+/// kind of question is a new variant, never a schema break.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "kind", rename_all = "snake_case")
+)]
+pub enum Ask {
+    /// Where a repository should live. `prompt` is the persona's own
+    /// wording of the question.
+    Repository { prompt: String },
+}
+
+/// What the user answered. A decline is a first-class answer — the
+/// persona reads it and reacts — not an error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(tag = "kind", rename_all = "snake_case")
+)]
+pub enum Answer {
+    /// A repository location: a git URL, of which a path is one.
+    Repository { url: String },
+    /// The user would rather not say.
+    Declined,
 }
 
 /// The event channel transcript items arrive on, backend to window.
@@ -839,12 +882,67 @@ mod tests {
                     },
                     r#""kind":"tool_result""#,
                 ),
+                (
+                    TranscriptItem::Question {
+                        id: "1".to_owned(),
+                        ask: Ask::Repository {
+                            prompt: "Where should this live?".to_owned(),
+                        },
+                    },
+                    r#""kind":"question""#,
+                ),
+                (
+                    TranscriptItem::QuestionResolved {
+                        id: "1".to_owned(),
+                        ask: Ask::Repository {
+                            prompt: "Where should this live?".to_owned(),
+                        },
+                        answer: Answer::Repository {
+                            url: "/tmp/wumpus.git".to_owned(),
+                        },
+                    },
+                    r#""kind":"question_resolved""#,
+                ),
+                (
+                    TranscriptItem::QuestionResolved {
+                        id: "2".to_owned(),
+                        ask: Ask::Repository {
+                            prompt: "Where?".to_owned(),
+                        },
+                        answer: Answer::Declined,
+                    },
+                    r#""kind":"question_resolved""#,
+                ),
             ] {
                 let wire = serde_json::to_string(&item).unwrap();
                 assert!(wire.contains(tag), "{wire}");
                 let received: TranscriptItem = serde_json::from_str(&wire).unwrap();
                 assert_eq!(received, item);
             }
+        }
+
+        /// Asks and answers are tagged inside the item, one tag each.
+        #[test]
+        fn asks_and_answers_carry_their_own_tags() {
+            let ask = serde_json::to_string(&Ask::Repository {
+                prompt: "Where?".to_owned(),
+            })
+            .unwrap();
+            assert_eq!(ask, r#"{"kind":"repository","prompt":"Where?"}"#);
+            assert_eq!(
+                serde_json::to_string(&Answer::Declined).unwrap(),
+                r#"{"kind":"declined"}"#
+            );
+        }
+
+        /// A newer build's question kind does not decode here: tagged
+        /// enums without an `#[serde(other)]` arm fail on an unknown
+        /// tag. Acceptable — both ends of the barrier ship together —
+        /// and documented rather than papered over with an `Unknown`.
+        #[test]
+        fn an_ask_kind_from_a_newer_build_fails_to_decode() {
+            assert!(serde_json::from_str::<Ask>(r#"{"kind":"colour","prompt":"?"}"#).is_err());
+            assert!(serde_json::from_str::<Answer>(r#"{"kind":"colour","value":"red"}"#).is_err());
         }
 
         #[test]

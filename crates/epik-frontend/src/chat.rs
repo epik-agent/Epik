@@ -15,7 +15,7 @@ use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::card::{self, Card};
+use crate::card::{self, Card, QuestionCard};
 use crate::highlight;
 use crate::ipc;
 use crate::markdown::{self, Item, Node};
@@ -26,13 +26,25 @@ use crate::markdown::{self, Item, Node};
 /// Deltas accumulate into one in-progress tail item; the completed
 /// message replaces that tail, its text authoritative. A failure also
 /// clears the tail — the conversation never held the fragments, so the
-/// view doesn't either — and lands as its own item.
+/// view doesn't either — and lands as its own item. A resolved question
+/// replaces the pending question with its id, or appends when none is
+/// pending (a window that mounted mid-question and caught only the
+/// resolution) — replace-or-append is the whole rule.
 pub(crate) fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
     match item {
+        TranscriptItem::QuestionResolved { ref id, .. }
+            if let Some(pending) = transcript.iter().position(
+                |shown| matches!(shown, TranscriptItem::Question { id: asked, .. } if asked == id),
+            ) =>
+        {
+            transcript[pending] = item;
+        }
         TranscriptItem::Message { .. }
         | TranscriptItem::TurnFailed { .. }
         | TranscriptItem::ToolCall { .. }
-        | TranscriptItem::ToolResult { .. } => {
+        | TranscriptItem::ToolResult { .. }
+        | TranscriptItem::Question { .. }
+        | TranscriptItem::QuestionResolved { .. } => {
             if matches!(
                 transcript.last(),
                 Some(TranscriptItem::AssistantDelta { .. })
@@ -249,8 +261,9 @@ const ASSISTANT: &str = "self-start border border-neutral-200 bg-white text-neut
 /// One transcript entry: the user against the right edge in the accent,
 /// the assistant against the left in neutral — streaming as escaped plain
 /// text behind a pulsing caret, completed with the full rendering — and
-/// everything that wasn't said — tool calls, tool results, failures — as
-/// a [`Card`] in the flow, not a speech bubble.
+/// everything that wasn't said — tool calls, tool results, failures,
+/// questions — as a [`Card`] in the flow, not a speech bubble; a pending
+/// question as the live [`QuestionCard`].
 fn bubble(item: &TranscriptItem) -> AnyView {
     match item {
         TranscriptItem::Message { role, text } => {
@@ -269,6 +282,9 @@ fn bubble(item: &TranscriptItem) -> AnyView {
             </li>
         }
         .into_any(),
+        TranscriptItem::Question { id, ask } => {
+            view! { <QuestionCard id=id.clone() ask=ask.clone() /> }.into_any()
+        }
         item => {
             let spec = card::spec(item).expect("every non-speech item is a card");
             view! { <Card spec /> }.into_any()
@@ -431,6 +447,8 @@ pub fn Chat() -> impl IntoView {
                                 TranscriptItem::TurnFailed { reason } => (2, reason.len()),
                                 TranscriptItem::ToolCall { arguments, .. } => (3, arguments.len()),
                                 TranscriptItem::ToolResult { content, .. } => (4, content.len()),
+                                TranscriptItem::Question { id, .. } => (5, id.len()),
+                                TranscriptItem::QuestionResolved { id, .. } => (6, id.len()),
                             };
                             (*index, kind, length)
                         }
@@ -609,5 +627,75 @@ mod tests {
         let mut transcript = vec![message(Role::User, "hi"), delta("Let me")];
         fold(&mut transcript, tool_call());
         assert_eq!(transcript, [message(Role::User, "hi"), tool_call()]);
+    }
+
+    fn where_to() -> epik::chat::Ask {
+        epik::chat::Ask::Repository {
+            prompt: "Where should this live?".to_owned(),
+        }
+    }
+
+    fn question(id: &str) -> TranscriptItem {
+        TranscriptItem::Question {
+            id: id.to_owned(),
+            ask: where_to(),
+        }
+    }
+
+    fn resolved(id: &str) -> TranscriptItem {
+        TranscriptItem::QuestionResolved {
+            id: id.to_owned(),
+            ask: where_to(),
+            answer: epik::chat::Answer::Repository {
+                url: "/tmp/wumpus.git".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_question_appends_and_its_resolution_replaces_it_in_place() {
+        let mut transcript = vec![message(Role::User, "write me wumpus")];
+        fold(&mut transcript, question("1"));
+        fold(&mut transcript, tool_call());
+        assert_eq!(
+            transcript,
+            [
+                message(Role::User, "write me wumpus"),
+                question("1"),
+                tool_call()
+            ]
+        );
+
+        fold(&mut transcript, resolved("1"));
+        assert_eq!(
+            transcript,
+            [
+                message(Role::User, "write me wumpus"),
+                resolved("1"),
+                tool_call()
+            ],
+            "the resolution takes the pending question's place, not the tail"
+        );
+    }
+
+    #[test]
+    fn a_resolution_with_no_pending_question_just_appends() {
+        let mut transcript = vec![message(Role::User, "hi")];
+        fold(&mut transcript, resolved("7"));
+        assert_eq!(transcript, [message(Role::User, "hi"), resolved("7")]);
+    }
+
+    #[test]
+    fn a_resolution_replaces_only_the_question_with_its_id() {
+        let mut transcript = vec![question("1"), question("2")];
+        fold(&mut transcript, resolved("2"));
+        assert_eq!(transcript, [question("1"), resolved("2")]);
+    }
+
+    #[test]
+    fn a_question_clears_a_streaming_tail_like_any_act() {
+        let mut transcript = vec![message(Role::User, "hi"), delta("Let me")];
+        fold(&mut transcript, question("1"));
+        assert_eq!(transcript, [message(Role::User, "hi"), question("1")]);
     }
 }

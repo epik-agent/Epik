@@ -60,6 +60,7 @@ async fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.
@@ -91,6 +92,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             chat::send_message,
             chat::get_transcript,
+            chat::answer_question,
             secrets::secret_reveal,
             secrets::secret_save,
             set_theme,

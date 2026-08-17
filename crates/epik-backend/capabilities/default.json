@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:event:allow-listen",
+    "dialog:allow-save",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://*" }, { "url": "http://*" }]

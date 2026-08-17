@@ -5,7 +5,7 @@
 //! [`Secret`], [`TranscriptItem`] — so nothing here re-declares what
 //! `epik` already says.
 
-use epik::chat::{TRANSCRIPT_EVENT, TranscriptItem};
+use epik::chat::{Answer, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::keystore::{Resolved, Secret};
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,27 @@ struct OpenUrlArgs<'a> {
 #[derive(Serialize)]
 struct ThemeArgs<'a> {
     theme: &'a str,
+}
+
+#[derive(Serialize)]
+struct AnswerArgs<'a> {
+    id: &'a str,
+    answer: &'a Answer,
+}
+
+/// The dialog plugin's save-dialog request: `{ options }`, in the
+/// plugin's own camelCase.
+#[derive(Serialize)]
+struct SaveDialogArgs<'a> {
+    options: SaveDialogOptions<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveDialogOptions<'a> {
+    title: &'a str,
+    default_path: &'a str,
+    can_create_directories: bool,
 }
 
 /// What the event binding hands the callback; the item rides in `payload`.
@@ -92,6 +113,37 @@ pub(crate) async fn send_message(text: String) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|error| error_text(&error))
+}
+
+/// Answers the pending question `id`. The card that asked shows nothing
+/// on its own account: the resolution comes back around as a
+/// `QuestionResolved` event. The Err is the command channel's refusal —
+/// a stale card, a double answer.
+pub(crate) async fn answer_question(id: &str, answer: &Answer) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&AnswerArgs { id, answer })
+        .map_err(|_| "the request could not be encoded".to_owned())?;
+    invoke("answer_question", args)
+        .await
+        .map(|_| ())
+        .map_err(|error| error_text(&error))
+}
+
+/// The default name the Browse dialog offers for a repository-to-be.
+pub(crate) const DEFAULT_REPOSITORY_NAME: &str = "repository.git";
+
+/// Opens the native save dialog to name a repository directory that need
+/// not exist yet, and returns the chosen path — `None` when the user
+/// cancels, or when the dialog could not be opened at all.
+pub(crate) async fn browse_repository() -> Option<String> {
+    let args = serde_wasm_bindgen::to_value(&SaveDialogArgs {
+        options: SaveDialogOptions {
+            title: "Where should the repository live?",
+            default_path: DEFAULT_REPOSITORY_NAME,
+            can_create_directories: true,
+        },
+    })
+    .ok()?;
+    invoke("plugin:dialog|save", args).await.ok()?.as_string()
 }
 
 /// The whole transcript so far, for a window that has just mounted.

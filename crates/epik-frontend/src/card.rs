@@ -1,13 +1,25 @@
-//! The one card in the codebase.
+//! The one card in the codebase — and its one live relative.
 //!
 //! A card is how the transcript shows an observed act — a tool call, a
-//! tool's answer, a turn that failed — as distinct from something a
-//! speaker said. One component renders all of them from a [`Spec`]: a
-//! title, a body, a tone, and — when the body outgrows its preview — a
-//! click-to-expand toggle, the component's only interactivity.
+//! tool's answer, a turn that failed, a question settled — as distinct
+//! from something a speaker said. One component renders all of them from
+//! a [`Spec`]: a title, a body, a tone, and — when the body outgrows its
+//! preview — a click-to-expand toggle, the component's only
+//! interactivity.
+//!
+//! A *pending* question is the family's one live member: the same
+//! chrome, with the input the answer needs. The card owns the modality —
+//! a path field, a native Browse dialog, a decline — and nothing else:
+//! it sends the answer through [`ipc::answer_question`] and then waits,
+//! disabled, for the `QuestionResolved` event to replace it. It never
+//! updates itself; the window shows nothing it didn't receive.
 
-use epik::chat::TranscriptItem;
+use epik::chat::{Answer, Ask, TranscriptItem};
+use leptos::ev;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
+
+use crate::ipc;
 
 /// How a card carries itself: matter-of-fact, or bad news.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,10 +39,27 @@ pub(crate) struct Spec {
     pub(crate) mono: bool,
 }
 
+/// A card title for `ask`: what kind of thing was asked for.
+pub(crate) const fn ask_title(ask: &Ask) -> &'static str {
+    match ask {
+        Ask::Repository { .. } => "repository",
+    }
+}
+
 /// The card for `item`, if `item` is card-shaped: tool calls, tool
-/// results, and failures are; speech is not.
+/// results, failures, and settled questions are; speech is not, and
+/// neither is a pending question, which is a [`QuestionCard`].
 pub(crate) fn spec(item: &TranscriptItem) -> Option<Spec> {
     match item {
+        TranscriptItem::QuestionResolved { ask, answer, .. } => Some(Spec {
+            title: Some(ask_title(ask).to_owned()),
+            body: match answer {
+                Answer::Repository { url } => url.clone(),
+                Answer::Declined => "declined".to_owned(),
+            },
+            tone: Tone::Neutral,
+            mono: false,
+        }),
         TranscriptItem::ToolCall { name, arguments } => Some(Spec {
             title: Some(name.clone()),
             body: arguments.clone(),
@@ -49,7 +78,9 @@ pub(crate) fn spec(item: &TranscriptItem) -> Option<Spec> {
             tone: Tone::Error,
             mono: false,
         }),
-        TranscriptItem::Message { .. } | TranscriptItem::AssistantDelta { .. } => None,
+        TranscriptItem::Message { .. }
+        | TranscriptItem::AssistantDelta { .. }
+        | TranscriptItem::Question { .. } => None,
     }
 }
 
@@ -71,12 +102,13 @@ pub(crate) fn shown(body: &str, expanded: bool) -> (String, bool) {
     (preview, true)
 }
 
-/// One card in the transcript flow: full-width where bubbles hug their
-/// side, bordered where bubbles are filled — an observation, not speech.
-#[component]
-pub(crate) fn Card(spec: Spec) -> impl IntoView {
-    let expanded = RwSignal::new(false);
-    let tone = match spec.tone {
+/// What every card wears; the tone colors it.
+const CHROME: &str = "self-stretch rounded-lg border px-3.5 py-2 text-sm";
+/// What a card's title wears.
+const TITLE: &str = "mb-1 font-mono text-xs font-semibold tracking-wide opacity-70";
+
+const fn tone_class(tone: Tone) -> &'static str {
+    match tone {
         Tone::Neutral => {
             "border-neutral-200 bg-neutral-100 text-neutral-600 \
              dark:border-neutral-700 dark:bg-neutral-800/60 dark:text-neutral-300"
@@ -85,7 +117,15 @@ pub(crate) fn Card(spec: Spec) -> impl IntoView {
             "border-[#dc2626]/30 bg-[#dc2626]/5 text-[#dc2626] \
              dark:border-[#ef4444]/30 dark:bg-[#ef4444]/10 dark:text-[#ef4444]"
         }
-    };
+    }
+}
+
+/// One card in the transcript flow: full-width where bubbles hug their
+/// side, bordered where bubbles are filled — an observation, not speech.
+#[component]
+pub(crate) fn Card(spec: Spec) -> impl IntoView {
+    let expanded = RwSignal::new(false);
+    let tone = tone_class(spec.tone);
     let body_class = if spec.mono {
         "font-mono text-xs break-words whitespace-pre-wrap"
     } else {
@@ -93,15 +133,11 @@ pub(crate) fn Card(spec: Spec) -> impl IntoView {
     };
     let body = spec.body;
     view! {
-        <li class=format!("self-stretch rounded-lg border px-3.5 py-2 text-sm {tone}")>
+        <li class=format!("{CHROME} {tone}")>
             {spec
                 .title
                 .map(|title| {
-                    view! {
-                        <div class="mb-1 font-mono text-xs font-semibold tracking-wide opacity-70">
-                            {title}
-                        </div>
-                    }
+                    view! { <div class=TITLE>{title}</div> }
                 })}
             <div class=body_class>{
                 let body = body.clone();
@@ -123,9 +159,159 @@ pub(crate) fn Card(spec: Spec) -> impl IntoView {
     }
 }
 
+/// What a card's small buttons wear.
+const BUTTON: &str = "shrink-0 rounded-md border border-neutral-300 px-2.5 py-1 text-xs \
+                      hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-40 \
+                      disabled:hover:bg-transparent dark:border-neutral-600 \
+                      dark:hover:bg-neutral-700";
+/// What the confirming button wears: the accent, like Send.
+const CONFIRM: &str = "shrink-0 rounded-md bg-[#00b377] px-2.5 py-1 text-xs font-medium \
+                       text-white hover:bg-[#009966] disabled:cursor-not-allowed \
+                       disabled:opacity-40 disabled:hover:bg-[#00b377] dark:bg-[#00e599] \
+                       dark:text-neutral-950 dark:hover:bg-[#33edb3] \
+                       dark:disabled:hover:bg-[#00e599]";
+
+/// A pending question, in the card family: the persona's prompt, and
+/// the affordances its answer needs. Every control disables on submit;
+/// the card then waits for the resolution to come back as an event.
+#[component]
+pub(crate) fn QuestionCard(id: String, ask: Ask) -> impl IntoView {
+    let title = ask_title(&ask);
+    let Ask::Repository { prompt } = ask;
+    let path = RwSignal::new(String::new());
+    let submitted = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let id = StoredValue::new(id);
+
+    // One door for both answers: claim the card, send, and stay disabled
+    // — the reply, or the refusal, is the backend's to give.
+    let answer_with = move |answer: Answer| {
+        if submitted.get_untracked() {
+            return;
+        }
+        submitted.set(true);
+        spawn_local(async move {
+            if let Err(reason) = ipc::answer_question(&id.get_value(), &answer).await {
+                note.set(Some(reason));
+            }
+        });
+    };
+    let confirm = move || {
+        let url = path.get_untracked().trim().to_owned();
+        if !url.is_empty() {
+            answer_with(Answer::Repository { url });
+        }
+    };
+    let browse = move |_| {
+        spawn_local(async move {
+            if let Some(chosen) = ipc::browse_repository().await {
+                path.set(chosen);
+            }
+        });
+    };
+
+    view! {
+        <li class=format!("{CHROME} {}", tone_class(Tone::Neutral))>
+            <div class=TITLE>{title}</div>
+            <div class="break-words whitespace-pre-wrap">{prompt}</div>
+            <div class="mt-2 flex items-center gap-2">
+                <input
+                    type="text"
+                    placeholder="/path/to/repository.git"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="min-w-0 flex-1 rounded-md border border-neutral-300 bg-white px-2.5 py-1 font-mono text-xs text-neutral-900 focus:border-[#00b377] focus:outline-none disabled:opacity-60 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-[#00e599]"
+                    prop:value=path
+                    prop:disabled=submitted
+                    on:input=move |event| path.set(event_target_value(&event))
+                    on:keydown=move |event: ev::KeyboardEvent| {
+                        if event.key() == "Enter" {
+                            event.prevent_default();
+                            confirm();
+                        }
+                    }
+                />
+                <button type="button" class=BUTTON prop:disabled=submitted on:click=browse>
+                    "Browse…"
+                </button>
+                <button
+                    type="button"
+                    class=CONFIRM
+                    prop:disabled=move || submitted.get() || path.get().trim().is_empty()
+                    on:click=move |_| confirm()
+                >
+                    "Use this"
+                </button>
+                <button
+                    type="button"
+                    class=BUTTON
+                    prop:disabled=submitted
+                    on:click=move |_| answer_with(Answer::Declined)
+                >
+                    "Never mind"
+                </button>
+            </div>
+            <Show when=move || note.get().is_some()>
+                <p class="mt-1 text-xs text-[#d4940a] dark:text-[#f5a623]">{move || note.get()}</p>
+            </Show>
+        </li>
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settled_question_is_a_neutral_prose_card_titled_by_its_kind() {
+        let ask = Ask::Repository {
+            prompt: "Where should this live?".to_owned(),
+        };
+        let answered = TranscriptItem::QuestionResolved {
+            id: "1".to_owned(),
+            ask: ask.clone(),
+            answer: Answer::Repository {
+                url: "/tmp/wumpus.git".to_owned(),
+            },
+        };
+        assert_eq!(
+            spec(&answered),
+            Some(Spec {
+                title: Some("repository".to_owned()),
+                body: "/tmp/wumpus.git".to_owned(),
+                tone: Tone::Neutral,
+                mono: false,
+            })
+        );
+
+        let declined = TranscriptItem::QuestionResolved {
+            id: "2".to_owned(),
+            ask,
+            answer: Answer::Declined,
+        };
+        assert_eq!(
+            spec(&declined),
+            Some(Spec {
+                title: Some("repository".to_owned()),
+                body: "declined".to_owned(),
+                tone: Tone::Neutral,
+                mono: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_pending_question_is_not_a_static_card() {
+        assert_eq!(
+            spec(&TranscriptItem::Question {
+                id: "1".to_owned(),
+                ask: Ask::Repository {
+                    prompt: "Where?".to_owned(),
+                },
+            }),
+            None
+        );
+    }
 
     #[test]
     fn a_tool_call_is_a_neutral_mono_card_titled_by_its_tool() {
