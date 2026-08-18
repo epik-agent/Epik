@@ -368,6 +368,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "syntect",
  "wasm-bindgen",
  "wasm-bindgen-futures",

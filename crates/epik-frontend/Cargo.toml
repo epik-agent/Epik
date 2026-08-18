@@ -19,6 +19,9 @@ syntect = { version = "5", default-features = false, features = [
     "dump-load",
 ] }
 serde = { version = "1", features = ["derive"] }
+# Already in the tree through epik (unconditional there) and already in
+# this lockfile; the line only makes it nameable for the JSON tree.
+serde_json = "1"
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

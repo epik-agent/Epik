@@ -18,6 +18,7 @@ use wasm_bindgen::closure::Closure;
 use crate::card::{self, Card, QuestionCard};
 use crate::highlight;
 use crate::ipc;
+use crate::json::{self, JsonTree};
 use crate::markdown::{self, Item, Node};
 
 /// Folds one arriving item into the transcript. New item kinds become new
@@ -118,15 +119,31 @@ fn node_view(node: &Node) -> AnyView {
                 _ => view! { <h3 class=format!("{BLOCK} font-semibold")>{inner}</h3> }.into_any(),
             }
         }
-        // The info string's first token picks the grammar; a language
-        // the pruned set doesn't know renders the same plain block as
-        // ever.
+        // The info string's first token picks the rendering, in order:
+        // a ```json fence holding a real JSON document is the folding
+        // tree; anything the grammar set knows is highlighted — which
+        // is where a ```json fence with a comment or an ellipsis in it
+        // still lands; a language the pruned set doesn't know renders
+        // the same plain block as ever.
         Node::CodeBlock { info, code } => {
             let language = info
                 .split([',', ' ', '\t'])
                 .next()
                 .unwrap_or_default()
                 .trim();
+            let chrome = format!(
+                "{BLOCK} overflow-x-auto rounded-md bg-black/5 p-2 font-mono text-xs dark:bg-white/10"
+            );
+            if language.eq_ignore_ascii_case("json")
+                && json::rows(code, &std::collections::HashSet::new()).is_some()
+            {
+                return view! {
+                    <pre class=chrome>
+                        <JsonTree text=code.clone() />
+                    </pre>
+                }
+                .into_any();
+            }
             let body = match highlight::highlight(language, code) {
                 Some(chunks) => chunks
                     .into_iter()
@@ -139,9 +156,7 @@ fn node_view(node: &Node) -> AnyView {
                 None => code.clone().into_any(),
             };
             view! {
-                <pre class=format!(
-                    "{BLOCK} overflow-x-auto rounded-md bg-black/5 p-2 font-mono text-xs dark:bg-white/10"
-                )>
+                <pre class=chrome>
                     <code>{body}</code>
                 </pre>
             }

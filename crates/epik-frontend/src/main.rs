@@ -3,6 +3,7 @@ mod card;
 mod chat;
 mod highlight;
 mod ipc;
+mod json;
 mod markdown;
 mod settings;
 
