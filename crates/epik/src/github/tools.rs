@@ -1,20 +1,26 @@
 //! The GitHub verbs as tools the model can call.
 //!
-//! [`all`] turns one [`GitHub`] client into one [`Tool`] per public verb.
+//! [`all`] turns one [`GitHub`] client into one [`Tool`] per public verb,
+//! plus `feature_plan`, the [`Tracker`] seam's read of a whole feature.
 //! Descriptions are written for a model: one sentence each, and the verbs
 //! that need the token say so, so the persona can tell the user what is
 //! missing instead of guessing. Arguments arrive as JSON; a repository is
 //! one `owner/name` string settled through [`Repo::parse`], and a bad
 //! spelling is an Err result in plain words, never a panic.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{GitHub, Merge, Repo};
+use super::{GitHub, GitHubTracker, Merge, Repo};
+use crate::feature::{IssueId, Plan};
 use crate::tools::Tool;
+use crate::tracker::Tracker;
 
-/// One tool per public GitHub verb, all speaking through `github`.
+/// One tool per public GitHub verb — plus `feature_plan`, the
+/// [`Tracker`] seam's read of a whole feature — all speaking through
+/// `github`.
 #[must_use]
 pub fn all(github: GitHub) -> Vec<Tool> {
     let github = Arc::new(github);
@@ -254,6 +260,40 @@ pub fn all(github: GitHub) -> Vec<Tool> {
             }),
         ),
         Tool::new(
+            "feature_plan",
+            "A feature's whole plan in one call: the sub-issue tree rooted at the feature issue, \
+             the blocked-by edges over it, any blockers outside the tree, the issues ready to \
+             start, and any problems with the plan's shape. Titles and state only, no bodies. \
+             Needs the GitHub token.",
+            schema(
+                &[
+                    repo_arg(),
+                    number_arg("feature", "The feature issue's number."),
+                ],
+                &["repo", "feature"],
+            ),
+            gh(|github, arguments| {
+                /// The whole [`Plan`] flattened into the answer — a field
+                /// added to it later reaches the model unasked — plus the
+                /// two readings taken of it.
+                #[derive(serde::Serialize)]
+                struct Shown<'a> {
+                    #[serde(flatten)]
+                    plan: &'a Plan,
+                    ready: Vec<&'a crate::feature::Issue>,
+                    problems: Vec<crate::feature::Problem>,
+                }
+                let tracker = GitHubTracker::new(github, repo(arguments)?);
+                let plan = tracker.plan(&IssueId::from(number(arguments, "feature")?))?;
+                let none = BTreeSet::new();
+                answer(Ok(Shown {
+                    ready: plan.ready(&none),
+                    problems: plan.problems(),
+                    plan: &plan,
+                }))
+            }),
+        ),
+        Tool::new(
             "github_add_sub_issue",
             "Makes one GitHub issue a sub-issue of another. Needs the GitHub token.",
             schema(
@@ -414,8 +454,19 @@ mod tests {
     }
 
     #[test]
-    fn one_tool_per_public_verb() {
-        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None)).len(), 19);
+    fn one_tool_per_public_verb_plus_the_trackers_plan() {
+        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None)).len(), 20);
+    }
+
+    #[test]
+    fn the_plan_tool_without_a_token_answers_with_the_settings_pointer() {
+        let error = registry()
+            .dispatch(
+                "feature_plan",
+                r#"{"repo":"epik-agent/Epik","feature":100}"#,
+            )
+            .unwrap_err();
+        assert!(error.contains("Settings (Cmd+,)"), "{error}");
     }
 
     #[test]

@@ -30,7 +30,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[cfg(feature = "native")]
+use crate::feature::Plan;
+use crate::feature::{self, IssueId};
+#[cfg(feature = "native")]
 use crate::keystore::Secret;
+#[cfg(feature = "native")]
+use crate::tracker::Tracker;
 
 #[cfg(feature = "native")]
 pub mod tools;
@@ -735,6 +740,90 @@ impl GitHub {
     }
 }
 
+// ----- the tracker seam -----
+
+/// The [`Tracker`] seam, spoken by GitHub: issue verbs only, each one of
+/// this module's verbs with its errors rendered in words a model reads.
+/// It holds the repository, because a bare [`IssueId`] — `154` — names an
+/// issue only inside one.
+#[cfg(feature = "native")]
+#[derive(Debug)]
+pub struct GitHubTracker<'a> {
+    github: &'a GitHub,
+    repo: Repo,
+}
+
+#[cfg(feature = "native")]
+impl<'a> GitHubTracker<'a> {
+    #[must_use]
+    pub const fn new(github: &'a GitHub, repo: Repo) -> Self {
+        Self { github, repo }
+    }
+
+    /// The number behind an id. GitHub numbers its issues; an id that is
+    /// not a number belongs to some other tracker.
+    fn number(id: &IssueId) -> Result<u64, String> {
+        id.0.parse()
+            .map_err(|_| format!("{id} is not a GitHub issue number"))
+    }
+}
+
+#[cfg(feature = "native")]
+impl Tracker for GitHubTracker<'_> {
+    fn plan(&self, feature: &IssueId) -> Result<Plan, String> {
+        Plan::descend(feature, |id| {
+            self.github
+                .issue_graph(&self.repo, Self::number(id)?)
+                .map(fetched)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note(&self, issue: &IssueId, body: &str) -> Result<(), String> {
+        self.github
+            .comment(&self.repo, Self::number(issue)?, body)
+            .map_err(|error| error.to_string())
+    }
+
+    fn close(&self, issue: &IssueId) -> Result<(), String> {
+        self.github
+            .close_issue(&self.repo, Self::number(issue)?)
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// An [`IssueGraph`] in the plan's vocabulary: numbers become ids, the
+/// edges keep title and state, and the body stays behind — a plan carries
+/// what schedules and renders, nothing more.
+// Driven by the tracker under `native`; compiled — and tested —
+// everywhere serde is.
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+fn fetched(graph: IssueGraph) -> feature::Node {
+    feature::Node {
+        issue: domain(graph.issue.number, graph.issue.title, graph.issue.state),
+        children: graph
+            .sub_issues
+            .iter()
+            .map(|edge| IssueId::from(edge.number))
+            .collect(),
+        blockers: graph
+            .blocked_by
+            .into_iter()
+            .map(|edge| domain(edge.number, edge.title, edge.state))
+            .collect(),
+    }
+}
+
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+fn domain(number: u64, title: String, state: State) -> feature::Issue {
+    feature::Issue {
+        id: IssueId::from(number),
+        title,
+        closed: state == State::Closed,
+    }
+}
+
 /// The methods this module writes with. A private vocabulary, so the verb
 /// implementations stay one-liners over [`GitHub::send`].
 #[cfg(feature = "native")]
@@ -889,9 +978,33 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
     #[derive(Deserialize)]
     struct Connection {
         nodes: Vec<Edge>,
+        #[serde(default, rename = "pageInfo")]
+        page_info: PageInfo,
+    }
+    #[derive(Default, Deserialize)]
+    struct PageInfo {
+        #[serde(default, rename = "hasNextPage")]
+        has_next_page: bool,
     }
     let data: Data = decode("the issue graph", data)?;
     let wire = data.repository.issue;
+    // The query asks for the first hundred edges and no more. A page that
+    // overflows is refused in words — the descent's node-cap register —
+    // because an edge past the cutoff would leave a truncated plan that
+    // reads as complete.
+    let overflow = |edges: &str| {
+        Error::Wire(format!(
+            "issue {} carries more than 100 {edges} edges; \
+             refusing to answer with a truncated plan that would read as complete",
+            wire.number
+        ))
+    };
+    if wire.sub_issues.page_info.has_next_page {
+        return Err(overflow("sub-issue"));
+    }
+    if wire.blocked_by.page_info.has_next_page {
+        return Err(overflow("blocked-by"));
+    }
     Ok(IssueGraph {
         issue: Issue {
             number: wire.number,
@@ -950,7 +1063,9 @@ fn variables(repo: &Repo, number: u64) -> Value {
 // The GraphQL strings. Sub-issues and blocked-by have no REST endpoints, and
 // each fetch asks for the first hundred edges without paginating: GitHub
 // itself caps sub-issues at one hundred per parent, and an issue blocked by
-// more than a hundred others has problems no client can fix.
+// more than a hundred others has problems no client can fix. `pageInfo`
+// rides along so an overflowing page is a refusal in [`graph`], never a
+// silent truncation.
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
@@ -960,8 +1075,8 @@ const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { 
 const GRAPH_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { issue(number: $number) { \
      number title state body \
-     subIssues(first: 100) { nodes { number title state } } \
-     blockedBy(first: 100) { nodes { number title state } } } } }";
+     subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
+     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ADD_SUB_ISSUE: &str = "mutation($from: ID!, $to: ID!) { \
@@ -1175,6 +1290,75 @@ mod tests {
             "GraphQL's OPEN lands on the same State as REST's open"
         );
         assert!(graph.sub_issues.is_empty());
+    }
+
+    #[test]
+    fn a_captured_graph_speaks_the_plans_vocabulary() {
+        let node = fetched(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).unwrap());
+        assert_eq!(node.issue.id, IssueId::from(102));
+        assert!(!node.issue.closed);
+        assert_eq!(node.children, [IssueId::from(105), IssueId::from(106)]);
+        assert!(node.blockers.is_empty());
+    }
+
+    #[test]
+    fn a_captured_blocker_carries_the_state_that_decides_whether_it_holds() {
+        let node = fetched(graph(graphql_data(value(GRAPH_BLOCKED)).unwrap()).unwrap());
+        assert!(node.children.is_empty());
+        assert_eq!(node.blockers.len(), 1);
+        assert_eq!(node.blockers[0].id, IssueId::from(105));
+        assert!(!node.blockers[0].closed, "#105 stood open when captured");
+    }
+
+    #[test]
+    fn an_overflowing_edge_page_is_a_refusal_not_a_truncated_graph() {
+        // The captured fixtures predate `pageInfo` in the query; this one
+        // states the shape GitHub answers when a hundred-and-first edge
+        // exists.
+        let payload = r#"{"data": {"repository": {"issue": {
+            "number": 7, "title": "t", "state": "OPEN", "body": null,
+            "subIssues": {"nodes": [], "pageInfo": {"hasNextPage": false}},
+            "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": true}}}}}}"#;
+        let error = graph(graphql_data(value(payload)).unwrap()).unwrap_err();
+        let Error::Wire(message) = error else {
+            panic!("{error:?}");
+        };
+        assert!(message.contains("blocked-by"), "{message}");
+        assert!(message.contains("issue 7"), "{message}");
+        assert!(message.contains("truncated"), "{message}");
+    }
+
+    #[test]
+    fn a_fixture_without_page_info_still_decodes_as_a_complete_page() {
+        // The captured payloads were taken before the query asked for
+        // `pageInfo`; absence means nothing overflowed.
+        assert!(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).is_ok());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_tracker_renders_a_github_refusal_in_words() {
+        // No token, so GraphQL refuses before any wire is touched — and
+        // the tracker's answer is that refusal as a sentence, not a value
+        // the model cannot read.
+        let github = GitHub::at("http://127.0.0.1:1", None);
+        let tracker = GitHubTracker::new(&github, epik());
+        let plan = tracker.plan(&IssueId::from(154)).unwrap_err();
+        assert!(plan.contains("Settings (Cmd+,)"), "{plan}");
+        let note = tracker.note(&IssueId::from(154), "hi").unwrap_err();
+        assert!(note.contains("Settings (Cmd+,)"), "{note}");
+        let close = tracker.close(&IssueId::from(154)).unwrap_err();
+        assert!(close.contains("Settings (Cmd+,)"), "{close}");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn an_id_from_another_tracker_is_refused_in_words() {
+        let github = GitHub::at("http://127.0.0.1:1", None);
+        let tracker = GitHubTracker::new(&github, epik());
+        let error = tracker.plan(&IssueId::from("EPK-12")).unwrap_err();
+        assert!(error.contains("EPK-12"), "{error}");
+        assert!(error.contains("not a GitHub issue number"), "{error}");
     }
 
     #[test]
