@@ -23,13 +23,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
 use crate::tree::Tree;
 
 /// A tracker's name for an issue. A string, because a Linear key is not a
 /// number; GitHub's numbers ride in as their decimal spelling.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct IssueId(pub String);
 
 impl fmt::Display for IssueId {
@@ -52,7 +52,7 @@ impl From<u64> for IssueId {
 
 /// An issue as a plan carries one: enough to schedule and render — title
 /// and state, no body.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Issue {
     pub id: IssueId,
     pub title: String,
@@ -63,7 +63,7 @@ pub struct Issue {
 /// the containment tree freely, and a blocker may be a container — "the
 /// docs wait on the whole API" is the natural thing to say — or an issue
 /// outside the tree altogether.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Blocking {
     pub issue: IssueId,
     pub blocker: IssueId,
@@ -135,7 +135,9 @@ const CAP: usize = 500;
 
 /// A feature's plan: containment as a tree, ordering as a flat edge list
 /// over the same ids, and the blockers that point outside the tree.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Output vocabulary, like everything here: serialized on its way to a
+/// model, never read back in.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Plan {
     /// The feature issue at the root, its decomposition beneath it.
     /// Interior nodes are containers, not work; only leaves get an Agent.
@@ -208,6 +210,7 @@ impl Plan {
     /// clause.
     #[must_use]
     pub fn ready(&self, done: &BTreeSet<IssueId>) -> Vec<&Issue> {
+        let blockers = self.blockers();
         self.tree
             .leaves()
             .filter(|leaf| {
@@ -216,11 +219,11 @@ impl Plan {
                     .find_path(|issue| issue.id == leaf.id)
                     .expect("a leaf is in its own tree");
                 path.iter().all(|node| !settled(node, done))
-                    && self
-                        .blocking
-                        .iter()
-                        .filter(|edge| edge.issue == leaf.id)
-                        .all(|edge| self.settled(&edge.blocker, done))
+                    && blockers
+                        .get(&leaf.id)
+                        .into_iter()
+                        .flatten()
+                        .all(|blocker| self.settled(blocker, done))
             })
             .collect()
     }
@@ -231,13 +234,16 @@ impl Plan {
     /// broken plan is precisely when this answer matters.
     #[must_use]
     pub fn problems(&self) -> Vec<Problem> {
-        let ids: BTreeSet<&IssueId> = self.tree.nodes().map(|issue| &issue.id).collect();
-        let known =
-            |id: &IssueId| ids.contains(id) || self.outside.iter().any(|issue| &issue.id == id);
+        let known: BTreeSet<&IssueId> = self
+            .tree
+            .nodes()
+            .chain(self.outside.iter())
+            .map(|issue| &issue.id)
+            .collect();
         let mut problems: Vec<Problem> = self
             .blocking
             .iter()
-            .filter(|edge| !known(&edge.issue) || !known(&edge.blocker))
+            .filter(|edge| !known.contains(&edge.issue) || !known.contains(&edge.blocker))
             .cloned()
             .map(Problem::Dangling)
             .collect();
@@ -248,44 +254,55 @@ impl Plan {
         problems
     }
 
+    /// The blocked-by edges indexed by their `issue` side, built once per
+    /// query so no caller rescans the whole edge list per node.
+    fn blockers(&self) -> BTreeMap<&IssueId, Vec<&IssueId>> {
+        let mut index: BTreeMap<&IssueId, Vec<&IssueId>> = BTreeMap::new();
+        for edge in &self.blocking {
+            index.entry(&edge.issue).or_default().push(&edge.blocker);
+        }
+        index
+    }
+
     /// Every cycle among the blocked-by edges, each found once: a
     /// depth-first walk that finishes each id exactly once, so it ends on
     /// any graph.
     fn cycles(&self) -> Vec<Vec<IssueId>> {
+        let blockers = self.blockers();
         let mut cycles = Vec::new();
         let mut finished = BTreeSet::new();
         let mut path = Vec::new();
         for start in self.tree.nodes().map(|issue| &issue.id) {
-            self.chase(start, &mut path, &mut finished, &mut cycles);
+            chase(start, &blockers, &mut path, &mut finished, &mut cycles);
         }
         cycles
     }
+}
 
-    /// One step of the cycle hunt: an id already on the path closes a
-    /// loop; an id already finished has told everything it knows.
-    fn chase<'a>(
-        &'a self,
-        id: &'a IssueId,
-        path: &mut Vec<&'a IssueId>,
-        finished: &mut BTreeSet<&'a IssueId>,
-        cycles: &mut Vec<Vec<IssueId>>,
-    ) {
-        if finished.contains(id) {
-            return;
-        }
-        if let Some(entered) = path.iter().position(|seen| *seen == id) {
-            let mut cycle: Vec<IssueId> = path[entered..].iter().copied().cloned().collect();
-            cycle.push(id.clone());
-            cycles.push(cycle);
-            return;
-        }
-        path.push(id);
-        for edge in self.blocking.iter().filter(|edge| &edge.issue == id) {
-            self.chase(&edge.blocker, path, finished, cycles);
-        }
-        path.pop();
-        finished.insert(id);
+/// One step of the cycle hunt: an id already on the path closes a loop;
+/// an id already finished has told everything it knows.
+fn chase<'a>(
+    id: &'a IssueId,
+    blockers: &BTreeMap<&'a IssueId, Vec<&'a IssueId>>,
+    path: &mut Vec<&'a IssueId>,
+    finished: &mut BTreeSet<&'a IssueId>,
+    cycles: &mut Vec<Vec<IssueId>>,
+) {
+    if finished.contains(id) {
+        return;
     }
+    if let Some(entered) = path.iter().position(|seen| *seen == id) {
+        let mut cycle: Vec<IssueId> = path[entered..].iter().copied().cloned().collect();
+        cycle.push(id.clone());
+        cycles.push(cycle);
+        return;
+    }
+    path.push(id);
+    for blocker in blockers.get(id).into_iter().flatten() {
+        chase(blocker, blockers, path, finished, cycles);
+    }
+    path.pop();
+    finished.insert(id);
 }
 
 /// [`Plan::settled`], said of a subtree: every chain from this node down

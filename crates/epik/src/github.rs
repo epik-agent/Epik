@@ -978,9 +978,33 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
     #[derive(Deserialize)]
     struct Connection {
         nodes: Vec<Edge>,
+        #[serde(default, rename = "pageInfo")]
+        page_info: PageInfo,
+    }
+    #[derive(Default, Deserialize)]
+    struct PageInfo {
+        #[serde(default, rename = "hasNextPage")]
+        has_next_page: bool,
     }
     let data: Data = decode("the issue graph", data)?;
     let wire = data.repository.issue;
+    // The query asks for the first hundred edges and no more. A page that
+    // overflows is refused in words — the descent's node-cap register —
+    // because an edge past the cutoff would leave a truncated plan that
+    // reads as complete.
+    let overflow = |edges: &str| {
+        Error::Wire(format!(
+            "issue {} carries more than 100 {edges} edges; \
+             refusing to answer with a truncated plan that would read as complete",
+            wire.number
+        ))
+    };
+    if wire.sub_issues.page_info.has_next_page {
+        return Err(overflow("sub-issue"));
+    }
+    if wire.blocked_by.page_info.has_next_page {
+        return Err(overflow("blocked-by"));
+    }
     Ok(IssueGraph {
         issue: Issue {
             number: wire.number,
@@ -1039,7 +1063,9 @@ fn variables(repo: &Repo, number: u64) -> Value {
 // The GraphQL strings. Sub-issues and blocked-by have no REST endpoints, and
 // each fetch asks for the first hundred edges without paginating: GitHub
 // itself caps sub-issues at one hundred per parent, and an issue blocked by
-// more than a hundred others has problems no client can fix.
+// more than a hundred others has problems no client can fix. `pageInfo`
+// rides along so an overflowing page is a refusal in [`graph`], never a
+// silent truncation.
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
@@ -1049,8 +1075,8 @@ const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { 
 const GRAPH_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { issue(number: $number) { \
      number title state body \
-     subIssues(first: 100) { nodes { number title state } } \
-     blockedBy(first: 100) { nodes { number title state } } } } }";
+     subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
+     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ADD_SUB_ISSUE: &str = "mutation($from: ID!, $to: ID!) { \
@@ -1282,6 +1308,31 @@ mod tests {
         assert_eq!(node.blockers.len(), 1);
         assert_eq!(node.blockers[0].id, IssueId::from(105));
         assert!(!node.blockers[0].closed, "#105 stood open when captured");
+    }
+
+    #[test]
+    fn an_overflowing_edge_page_is_a_refusal_not_a_truncated_graph() {
+        // The captured fixtures predate `pageInfo` in the query; this one
+        // states the shape GitHub answers when a hundred-and-first edge
+        // exists.
+        let payload = r#"{"data": {"repository": {"issue": {
+            "number": 7, "title": "t", "state": "OPEN", "body": null,
+            "subIssues": {"nodes": [], "pageInfo": {"hasNextPage": false}},
+            "blockedBy": {"nodes": [], "pageInfo": {"hasNextPage": true}}}}}}"#;
+        let error = graph(graphql_data(value(payload)).unwrap()).unwrap_err();
+        let Error::Wire(message) = error else {
+            panic!("{error:?}");
+        };
+        assert!(message.contains("blocked-by"), "{message}");
+        assert!(message.contains("issue 7"), "{message}");
+        assert!(message.contains("truncated"), "{message}");
+    }
+
+    #[test]
+    fn a_fixture_without_page_info_still_decodes_as_a_complete_page() {
+        // The captured payloads were taken before the query asked for
+        // `pageInfo`; absence means nothing overflowed.
+        assert!(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).is_ok());
     }
 
     #[cfg(feature = "native")]

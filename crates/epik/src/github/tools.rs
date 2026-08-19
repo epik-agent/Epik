@@ -14,11 +14,13 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::{GitHub, GitHubTracker, Merge, Repo};
-use crate::feature::IssueId;
+use crate::feature::{IssueId, Plan};
 use crate::tools::Tool;
 use crate::tracker::Tracker;
 
-/// One tool per public GitHub verb, all speaking through `github`.
+/// One tool per public GitHub verb — plus `feature_plan`, the
+/// [`Tracker`] seam's read of a whole feature — all speaking through
+/// `github`.
 #[must_use]
 pub fn all(github: GitHub) -> Vec<Tool> {
     let github = Arc::new(github);
@@ -271,15 +273,23 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &["repo", "feature"],
             ),
             gh(|github, arguments| {
+                /// The whole [`Plan`] flattened into the answer — a field
+                /// added to it later reaches the model unasked — plus the
+                /// two readings taken of it.
+                #[derive(serde::Serialize)]
+                struct Shown<'a> {
+                    #[serde(flatten)]
+                    plan: &'a Plan,
+                    ready: Vec<&'a crate::feature::Issue>,
+                    problems: Vec<crate::feature::Problem>,
+                }
                 let tracker = GitHubTracker::new(github, repo(arguments)?);
                 let plan = tracker.plan(&IssueId::from(number(arguments, "feature")?))?;
                 let none = BTreeSet::new();
-                Ok(json!({
-                    "tree": &plan.tree,
-                    "blocking": &plan.blocking,
-                    "outside": &plan.outside,
-                    "ready": plan.ready(&none),
-                    "problems": plan.problems(),
+                answer(Ok(Shown {
+                    ready: plan.ready(&none),
+                    problems: plan.problems(),
+                    plan: &plan,
                 }))
             }),
         ),
