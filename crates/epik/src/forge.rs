@@ -79,13 +79,18 @@ struct Askpass(std::path::PathBuf);
 impl Askpass {
     fn new() -> Result<Self, String> {
         use std::os::unix::fs::PermissionsExt;
+        // The clock alone can collide when two pushes start in the same
+        // tick, and a shared path would let one Drop delete the other's
+        // live script mid-auth — a process-wide count settles it.
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "epik-askpass-{}-{}",
+            "epik-askpass-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|since| since.as_nanos())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, ASKPASS)
             .map_err(|error| format!("could not write the askpass script: {error}"))?;
@@ -156,7 +161,7 @@ pub fn push(directory: &Path, branch: &str, forge: &impl Forge) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Write};
 
     /// A forge for tests: a bare directory, no credentials — pushing to
     /// it is pushing to a path.
@@ -393,8 +398,4 @@ mod tests {
         };
         assert!(!path.exists());
     }
-
-    // Unused-read appeasement: the BufReader Read import backs read_line.
-    #[allow(dead_code)]
-    fn _uses<R: Read>(_: R) {}
 }

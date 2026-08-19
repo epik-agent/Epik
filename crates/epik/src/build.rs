@@ -98,7 +98,7 @@ pub(crate) fn positional<'a>(name: &str, value: &'a str) -> Result<&'a str, Stri
 /// add -b`), or git failed along the way.
 pub fn provision(order: &Order) -> Result<Workspace, String> {
     let repository = order.repository.as_str();
-    ground(repository)?;
+    let git_dir = locate(repository)?;
     let branch = valid_branch(repository, &order.branch)?;
 
     let base = match &order.base {
@@ -120,7 +120,14 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
     .trim()
     .to_owned();
 
-    let directory = furnish(repository, branch, &base_commit, true)?;
+    enable_worktree_config(repository, &git_dir)?;
+    let directory = furnish(
+        repository,
+        Checkout::Create {
+            branch,
+            at: &base_commit,
+        },
+    )?;
     Ok(Workspace {
         repository: repository.to_owned(),
         branch: branch.to_owned(),
@@ -141,7 +148,7 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
 /// exist (this function creates nothing), the branch is already checked
 /// out somewhere (git's own refusal), or git failed along the way.
 pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
-    ground(repository)?;
+    let git_dir = locate(repository)?;
     let branch = valid_branch(repository, branch)?;
     let tip = plumbing(&[
         "-C",
@@ -155,7 +162,8 @@ pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
     .trim()
     .to_owned();
 
-    let directory = furnish(repository, branch, branch, false)?;
+    enable_worktree_config(repository, &git_dir)?;
+    let directory = furnish(repository, Checkout::Standing { branch })?;
     Ok(Workspace {
         repository: repository.to_owned(),
         branch: branch.to_owned(),
@@ -165,11 +173,9 @@ pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
 }
 
 /// What both provisioners insist on before touching anything: an
-/// absolute path that is a git repository, with per-worktree config
-/// enabled — and a bare repository's `core.bare` moved into the main
-/// tree's own worktree config, or every linked worktree would read it
-/// and believe itself bare.
-fn ground(repository: &str) -> Result<(), String> {
+/// absolute path that is a git repository. Reads only; the answer is
+/// the repository's git dir, which the config work needs later.
+fn locate(repository: &str) -> Result<String, String> {
     if !Path::new(repository).is_absolute() {
         return Err(format!(
             "the repository must be an absolute local path for now, not {repository:?}"
@@ -177,8 +183,30 @@ fn ground(repository: &str) -> Result<(), String> {
     }
     let git_dir = plumbing(&["-C", repository, "rev-parse", "--absolute-git-dir"])
         .map_err(|words| format!("{repository} is not a git repository: {words}"))?;
-    let git_dir = git_dir.trim().to_owned();
+    Ok(git_dir.trim().to_owned())
+}
 
+/// Turns per-worktree config on — and moves a bare repository's
+/// `core.bare` into the main tree's own worktree config, or every
+/// linked worktree would read it and believe itself bare. The one place
+/// provisioning writes the repository's shared config, so it runs after
+/// everything is validated, skips when the extension is already on —
+/// the steady state — and holds a process-wide lock for the write:
+/// concurrent provisions must not race each other onto git's
+/// `config.lock`.
+fn enable_worktree_config(repository: &str, git_dir: &str) -> Result<(), String> {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _serialized = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+    let enabled = plumbing(&[
+        "-C",
+        repository,
+        "config",
+        "--get",
+        "extensions.worktreeConfig",
+    ]);
+    if enabled.is_ok_and(|value| value.trim() == "true") {
+        return Ok(());
+    }
     let bare = plumbing(&["-C", repository, "rev-parse", "--is-bare-repository"])?;
     plumbing(&[
         "-C",
@@ -214,20 +242,36 @@ fn valid_branch<'a>(repository: &str, branch: &'a str) -> Result<&'a str, String
     Ok(branch)
 }
 
+/// How a workspace gets its branch: each provisioner is one variant,
+/// so neither can reach the other's git invocation.
+enum Checkout<'a> {
+    /// Create `branch` at the commit `at` — `worktree add -b`.
+    Create { branch: &'a str, at: &'a str },
+    /// Check out `branch` as it already stands.
+    Standing { branch: &'a str },
+}
+
+impl Checkout<'_> {
+    const fn branch(&self) -> &str {
+        match self {
+            Self::Create { branch, .. } | Self::Standing { branch } => branch,
+        }
+    }
+}
+
 /// The worktree itself: a fresh directory under the system temp dir,
-/// `worktree add` at `at` — creating `branch` there when `create`,
-/// checking it out as it stands otherwise — and the persona identity
-/// set per-worktree, so every commit made inside is attributed to the
+/// `worktree add` as `checkout` says — and the persona identity set
+/// per-worktree, so every commit made inside is attributed to the
 /// persona without touching the identity the repository's own config
 /// keeps.
-fn furnish(repository: &str, branch: &str, at: &str, create: bool) -> Result<PathBuf, String> {
+fn furnish(repository: &str, checkout: Checkout) -> Result<PathBuf, String> {
     // The clock alone can collide when two workspaces are furnished in
     // the same tick — concurrent builds do that — so a process-wide
     // count settles it.
     static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let directory = std::env::temp_dir().join(format!(
         "epik-build-{}-{}-{}-{}",
-        branch.replace(['/', '\\'], "-"),
+        checkout.branch().replace(['/', '\\'], "-"),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -240,10 +284,10 @@ fn furnish(repository: &str, branch: &str, at: &str, create: bool) -> Result<Pat
         .ok_or("the temp dir path is not valid unicode")?
         .to_owned();
     let mut args = vec!["-C", repository, "worktree", "add"];
-    if create {
-        args.extend(["-b", branch]);
+    match checkout {
+        Checkout::Create { branch, at } => args.extend(["-b", branch, &directory_str, at]),
+        Checkout::Standing { branch } => args.extend([directory_str.as_str(), branch]),
     }
-    args.extend([directory_str.as_str(), at]);
     plumbing(&args)?;
 
     let identity = [("user.name", PERSONA_NAME), ("user.email", PERSONA_EMAIL)];
@@ -579,6 +623,28 @@ mod tests {
 
         tidy(&workspace);
         tidy(&first);
+    }
+
+    /// Two provisions racing onto a fresh repository — whose shared
+    /// config has never been written — both land: the config write is
+    /// serialized and skipped once made, so neither loses to git's own
+    /// `config.lock`.
+    #[test]
+    fn concurrent_provisions_against_a_fresh_repository_both_land() {
+        let scratch = Scratch::new("race");
+        let repository = bare(&scratch);
+
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| provision(&order(&repository, "race/one")));
+            let second = scope.spawn(|| provision(&order(&repository, "race/two")));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_ne!(first.directory, second.directory);
+
+        tidy(&first);
+        tidy(&second);
     }
 
     #[test]

@@ -75,16 +75,22 @@ impl<F: Forge> Branch<F> {
         check: Option<Check>,
     ) -> Result<Self, String> {
         let name = positional("branch", name)?;
+        // Absence and failure are different answers: `for-each-ref`
+        // exits zero either way and simply lists nothing for a branch
+        // that is not there, so a repository that cannot be read blames
+        // itself — never the base — and never sends the build down the
+        // create path onto a name that exists.
+        let ref_name = format!("refs/heads/{name}");
         let standing = plumbing(&[
             "-C",
             repository,
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &format!("refs/heads/{name}"),
+            "for-each-ref",
+            "--format=%(refname)",
+            &ref_name,
         ])
-        .is_ok();
+        .map_err(|words| format!("could not read the branches of {repository}: {words}"))?
+        .lines()
+        .any(|line| line.trim() == ref_name);
         if !standing {
             let base = positional("base", base)?;
             let base_commit = plumbing(&[
@@ -99,7 +105,13 @@ impl<F: Forge> Branch<F> {
             .trim()
             .to_owned();
             plumbing(&["-C", repository, "branch", "--", name, &base_commit])?;
-            forge::push(Path::new(repository), name, &forge)?;
+            // A branch created but never pushed must not read as
+            // standing on retry — unwind it, so the retry re-creates
+            // and re-pushes instead of silently skipping the remote.
+            if let Err(words) = forge::push(Path::new(repository), name, &forge) {
+                let _ = plumbing(&["-C", repository, "branch", "-D", name]);
+                return Err(words);
+            }
         }
         let workspace = build::adopt(repository, name)?;
         Ok(Self {
@@ -122,6 +134,11 @@ impl<F: Forge> Branch<F> {
     /// branch pushed when it holds. A conflict or a red check comes
     /// back as an [`Outcome`] with the branch already put right.
     ///
+    /// Each merge is self-contained: it opens, still under the lock, by
+    /// restoring the workspace to a clean checkout of the feature
+    /// branch tip — a standing half-merge whose abort once failed, or
+    /// tracked files a green check dirtied, cannot reach it.
+    ///
     /// # Errors
     ///
     /// Git failing for reasons that are not a conflict — and the push
@@ -135,6 +152,11 @@ impl<F: Forge> Branch<F> {
             .directory
             .to_str()
             .ok_or("the workspace path is not valid unicode")?;
+
+        // The opening restore. "There is no merge to abort" is the
+        // ordinary answer, not a fault; the reset is what must hold.
+        let _ = plumbing(&["-C", directory, "merge", "--abort"]);
+        plumbing(&["-C", directory, "reset", "--hard", "HEAD"])?;
 
         let before = plumbing(&["-C", directory, "rev-parse", "HEAD"])?
             .trim()
@@ -150,18 +172,23 @@ impl<F: Forge> Branch<F> {
             branch,
         ]);
         if let Err(words) = merged {
-            // Git's own report of what it could not settle; empty means
-            // the merge failed for some other reason, which is a fault.
-            let paths: Vec<String> =
-                plumbing(&["-C", directory, "diff", "--name-only", "--diff-filter=U"])
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::to_owned)
-                    .collect();
+            // Git's own report of what it could not settle — read
+            // before the abort erases it, judged after the abort has
+            // been attempted, so the report can never skip the abort.
+            let probed = plumbing(&["-C", directory, "diff", "--name-only", "--diff-filter=U"]);
+            let _ = plumbing(&["-C", directory, "merge", "--abort"]);
+            let paths: Vec<String> = probed
+                .map_err(|probe| {
+                    format!(
+                        "the merge failed ({words}) and the conflict could not be read: {probe}"
+                    )
+                })?
+                .lines()
+                .map(str::to_owned)
+                .collect();
             if paths.is_empty() {
                 return Err(words);
             }
-            plumbing(&["-C", directory, "merge", "--abort"])?;
             return Ok(Outcome::Conflict { paths });
         }
 
@@ -197,6 +224,7 @@ mod tests {
     use crate::forge::Credentials;
 
     /// A forge for tests: a bare directory, no credentials.
+    #[derive(Debug)]
     struct Local(String);
 
     impl Forge for Local {
@@ -360,6 +388,33 @@ mod tests {
         tidy(branch.workspace());
     }
 
+    /// A create-path push that fails unwinds the local branch it just
+    /// made — a retry must re-create and re-push, not read the orphan
+    /// as standing and leave the remote without it forever.
+    #[test]
+    fn a_failed_push_unwinds_the_created_branch_so_a_retry_reaches_the_remote() {
+        let scratch = Scratch::new("unwind");
+        let (work, forge) = seeded(&scratch);
+        let remote = forge.0.clone();
+
+        let gone = Local(scratch.join("gone.git"));
+        let error = Branch::establish(&work, "feature/wumpus", "main", gone, None).unwrap_err();
+        assert!(error.contains("gone.git"), "{error}");
+        let listed = git(&["-C", &work, "for-each-ref", "refs/heads/feature/wumpus"]);
+        assert_eq!(listed.trim(), "", "the created branch was unwound");
+
+        // The retry, against a forge that answers, creates and pushes.
+        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+        let verified = git2::Repository::open(&remote).unwrap();
+        assert!(
+            verified
+                .find_branch("feature/wumpus", git2::BranchType::Local)
+                .is_ok()
+        );
+
+        tidy(branch.workspace());
+    }
+
     #[test]
     fn two_siblings_from_the_same_tip_both_merge_when_their_edits_do_not_overlap() {
         let scratch = Scratch::new("siblings");
@@ -435,6 +490,63 @@ mod tests {
         assert_eq!(tip(&work, "issue-2"), issue_tip);
         let directory = branch.workspace().directory.to_str().unwrap().to_owned();
         assert_eq!(git(&["-C", &directory, "status", "--porcelain"]).trim(), "");
+
+        // The conflict poisoned nothing: the next sibling still lands.
+        let third = agent(&work, "issue-3", "three.txt", "three\n");
+        assert!(matches!(
+            branch.merge("issue-3").unwrap(),
+            Outcome::Merged { .. }
+        ));
+
+        tidy(&first);
+        tidy(&second);
+        tidy(&third);
+        tidy(branch.workspace());
+    }
+
+    /// A green check that mutates tracked files — a formatter, a test
+    /// refreshing a lockfile — must not wedge the workspace: each merge
+    /// opens by restoring a clean checkout, so the next one still lands.
+    #[test]
+    fn a_check_that_dirties_the_workspace_on_green_does_not_reach_the_next_merge() {
+        let scratch = Scratch::new("dirty");
+        let (work, forge) = seeded(&scratch);
+        let remote = forge.0.clone();
+        let check = Check {
+            command: "echo dirt >> hello.txt".to_owned(),
+        };
+        let branch =
+            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+
+        let first = agent(&work, "issue-1", "one.txt", "one\n");
+        let second = agent(&work, "issue-2", "two.txt", "two\n");
+
+        assert!(matches!(
+            branch.merge("issue-1").unwrap(),
+            Outcome::Merged { checked: true, .. }
+        ));
+        // The green check left hello.txt dirty in the sole workspace;
+        // without the opening restore this merge refuses in git's words.
+        let Outcome::Merged { commit, .. } = branch.merge("issue-2").unwrap() else {
+            panic!("check-dirt from a green run must not reach the next merge");
+        };
+        assert_eq!(tip(&work, "feature/wumpus"), commit);
+        assert_eq!(tip(&remote, "feature/wumpus"), commit);
+
+        // The dirt itself was never committed: what landed is history's
+        // hello.txt, not the check's scribbles.
+        let verified = git2::Repository::open(&work).unwrap();
+        let tree = verified
+            .find_branch("feature/wumpus", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        let hello = tree.get_name("hello.txt").unwrap();
+        let blob = verified.find_blob(hello.id()).unwrap();
+        assert_eq!(blob.content(), b"hello\n");
 
         tidy(&first);
         tidy(&second);

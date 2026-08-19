@@ -19,8 +19,8 @@
 //! repository's empty root commit under the Epik persona's own identity,
 //! by per-invocation config, so a repository is never commitless.
 
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -55,60 +55,16 @@ fn execute_within(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<Value, String> {
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .envs(envs.iter().copied())
         // No terminal is attached, so a network verb that wants
         // credentials must fail in words rather than wait for a prompt
         // nobody can see. The user's helpers and SSH config still apply.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run git: {error}"))?;
-
-    // Drain both pipes off-thread so a chatty git can't fill one and
-    // deadlock against the deadline poll.
-    let stdout = reader(child.stdout.take().expect("stdout was piped"));
-    let stderr = reader(child.stderr.take().expect("stderr was piped"));
-
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "git was killed after {} seconds without finishing",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => return Err(format!("could not wait for git: {error}")),
-        }
-    };
-
-    let mut output = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    if !output.is_empty() && !stderr.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(&stderr);
-    Ok(json!({ "ok": status.success(), "output": output }))
-}
-
-/// Reads one of the child's pipes to its end, off-thread.
-fn reader(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut pipe = pipe;
-        let mut text = String::new();
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
-        text
-    })
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let finished = crate::child::run("git", &mut command, timeout)?;
+    Ok(json!({ "ok": finished.success, "output": finished.output }))
 }
 
 /// [`execute`] for callers inside the crate that want git's answer, not

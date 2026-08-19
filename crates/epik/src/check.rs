@@ -15,13 +15,21 @@
 //! and says so.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 /// A repository's own idea of green: a command, judged by its exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Check {
     pub command: String,
 }
+
+/// How long a check may run before it is killed and judged red.
+/// Generous, because a check is a whole test suite; a bound all the
+/// same, because the check runs under the merge lock, and a hung check
+/// — a deadlocked test, a tool that prompts despite a closed stdin —
+/// must not hold every future merge hostage.
+pub const DEADLINE: Duration = Duration::from_secs(60 * 60);
 
 /// What one run of the check said: green or not, and the command's own
 /// words — stdout and stderr both — for the record when it is not.
@@ -32,58 +40,29 @@ pub struct Verdict {
 }
 
 /// Runs `check` in `workspace` through `sh -c` and judges the exit
-/// code. A shell that cannot be started, or a command killed by a
-/// signal, is nobody's green; the verdict says why in words.
+/// code. A shell that cannot be started, a command killed by a signal,
+/// or one still running at the [`DEADLINE`] is nobody's green; the
+/// verdict says why in words.
 #[must_use]
 pub fn run(check: &Check, workspace: &Path) -> Verdict {
-    let spawned = Command::new("sh")
-        .arg("-c")
-        .arg(&check.command)
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => {
-            return Verdict {
-                green: false,
-                output: format!("could not run the check: {error}"),
-            };
-        }
-    };
-    // Drain both pipes off-thread so a chatty check can't fill one and
-    // deadlock against the wait.
-    let stdout = reader(child.stdout.take().expect("stdout was piped"));
-    let stderr = reader(child.stderr.take().expect("stderr was piped"));
-    let status = child.wait();
-    let mut output = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    if !output.is_empty() && !stderr.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(&stderr);
-    match status {
-        Ok(status) => Verdict {
-            green: status.success(),
-            output,
-        },
-        Err(error) => Verdict {
-            green: false,
-            output: format!("could not wait for the check: {error}"),
-        },
-    }
+    run_within(check, workspace, DEADLINE)
 }
 
-/// Reads one of the child's pipes to its end, off-thread.
-fn reader(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut pipe = pipe;
-        let mut text = String::new();
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
-        text
-    })
+/// [`run`] against a stated deadline — which is how the tests exercise
+/// the kill without sitting through the real one.
+fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(&check.command).current_dir(workspace);
+    match crate::child::run("the check", &mut command, deadline) {
+        Ok(finished) => Verdict {
+            green: finished.success,
+            output: finished.output,
+        },
+        Err(words) => Verdict {
+            green: false,
+            output: words,
+        },
+    }
 }
 
 /// The detection table: the first marker in `worktree` that names a
@@ -216,6 +195,23 @@ mod tests {
         );
         assert!(verdict.green);
         assert_eq!(verdict.output, "here");
+    }
+
+    /// The deadline, on a short fuse rather than the real hour: a check
+    /// that will not finish is killed and judged red in words, so a hung
+    /// suite cannot hold the merge lock forever.
+    #[test]
+    fn a_check_that_will_not_finish_is_killed_and_judged_red() {
+        let scratch = Scratch::new("hung");
+        let verdict = run_within(
+            &Check {
+                command: "sleep 60".to_owned(),
+            },
+            &scratch.0,
+            Duration::from_millis(200),
+        );
+        assert!(!verdict.green);
+        assert!(verdict.output.contains("killed"), "{}", verdict.output);
     }
 
     #[test]
