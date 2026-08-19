@@ -19,11 +19,17 @@
 //! over an injected fetch closure; the [`Tracker`](crate::tracker::Tracker)
 //! seam is where a real tracker plugs in. Everything here compiles with no
 //! features enabled: the vocabulary is the library's, not any provider's;
-//! the machinery by which work lands on a feature branch is the gated
-//! `merge` module, a slice of its own.
+//! the machinery is gated — the `merge` module by which work lands on a
+//! feature branch, and the build that folds a whole plan into work:
+//! [`build`], the verb, and [`Build`], its record.
 
 #[cfg(all(feature = "native", unix))]
+mod build;
+#[cfg(all(feature = "native", unix))]
 pub mod merge;
+
+#[cfg(all(feature = "native", unix))]
+pub use build::{Build, CONCURRENCY, State, build};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
