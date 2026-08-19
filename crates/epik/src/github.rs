@@ -30,7 +30,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[cfg(feature = "native")]
+use crate::feature::Plan;
+use crate::feature::{self, IssueId};
+#[cfg(feature = "native")]
 use crate::keystore::Secret;
+#[cfg(feature = "native")]
+use crate::tracker::Tracker;
 
 #[cfg(feature = "native")]
 pub mod tools;
@@ -735,6 +740,90 @@ impl GitHub {
     }
 }
 
+// ----- the tracker seam -----
+
+/// The [`Tracker`] seam, spoken by GitHub: issue verbs only, each one of
+/// this module's verbs with its errors rendered in words a model reads.
+/// It holds the repository, because a bare [`IssueId`] — `154` — names an
+/// issue only inside one.
+#[cfg(feature = "native")]
+#[derive(Debug)]
+pub struct GitHubTracker<'a> {
+    github: &'a GitHub,
+    repo: Repo,
+}
+
+#[cfg(feature = "native")]
+impl<'a> GitHubTracker<'a> {
+    #[must_use]
+    pub const fn new(github: &'a GitHub, repo: Repo) -> Self {
+        Self { github, repo }
+    }
+
+    /// The number behind an id. GitHub numbers its issues; an id that is
+    /// not a number belongs to some other tracker.
+    fn number(id: &IssueId) -> Result<u64, String> {
+        id.0.parse()
+            .map_err(|_| format!("{id} is not a GitHub issue number"))
+    }
+}
+
+#[cfg(feature = "native")]
+impl Tracker for GitHubTracker<'_> {
+    fn plan(&self, feature: &IssueId) -> Result<Plan, String> {
+        Plan::descend(feature, |id| {
+            self.github
+                .issue_graph(&self.repo, Self::number(id)?)
+                .map(fetched)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn note(&self, issue: &IssueId, body: &str) -> Result<(), String> {
+        self.github
+            .comment(&self.repo, Self::number(issue)?, body)
+            .map_err(|error| error.to_string())
+    }
+
+    fn close(&self, issue: &IssueId) -> Result<(), String> {
+        self.github
+            .close_issue(&self.repo, Self::number(issue)?)
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// An [`IssueGraph`] in the plan's vocabulary: numbers become ids, the
+/// edges keep title and state, and the body stays behind — a plan carries
+/// what schedules and renders, nothing more.
+// Driven by the tracker under `native`; compiled — and tested —
+// everywhere serde is.
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+fn fetched(graph: IssueGraph) -> feature::Node {
+    feature::Node {
+        issue: domain(graph.issue.number, graph.issue.title, graph.issue.state),
+        children: graph
+            .sub_issues
+            .iter()
+            .map(|edge| IssueId::from(edge.number))
+            .collect(),
+        blockers: graph
+            .blocked_by
+            .into_iter()
+            .map(|edge| domain(edge.number, edge.title, edge.state))
+            .collect(),
+    }
+}
+
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
+fn domain(number: u64, title: String, state: State) -> feature::Issue {
+    feature::Issue {
+        id: IssueId::from(number),
+        title,
+        closed: state == State::Closed,
+    }
+}
+
 /// The methods this module writes with. A private vocabulary, so the verb
 /// implementations stay one-liners over [`GitHub::send`].
 #[cfg(feature = "native")]
@@ -1175,6 +1264,50 @@ mod tests {
             "GraphQL's OPEN lands on the same State as REST's open"
         );
         assert!(graph.sub_issues.is_empty());
+    }
+
+    #[test]
+    fn a_captured_graph_speaks_the_plans_vocabulary() {
+        let node = fetched(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).unwrap());
+        assert_eq!(node.issue.id, IssueId::from(102));
+        assert!(!node.issue.closed);
+        assert_eq!(node.children, [IssueId::from(105), IssueId::from(106)]);
+        assert!(node.blockers.is_empty());
+    }
+
+    #[test]
+    fn a_captured_blocker_carries_the_state_that_decides_whether_it_holds() {
+        let node = fetched(graph(graphql_data(value(GRAPH_BLOCKED)).unwrap()).unwrap());
+        assert!(node.children.is_empty());
+        assert_eq!(node.blockers.len(), 1);
+        assert_eq!(node.blockers[0].id, IssueId::from(105));
+        assert!(!node.blockers[0].closed, "#105 stood open when captured");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_tracker_renders_a_github_refusal_in_words() {
+        // No token, so GraphQL refuses before any wire is touched — and
+        // the tracker's answer is that refusal as a sentence, not a value
+        // the model cannot read.
+        let github = GitHub::at("http://127.0.0.1:1", None);
+        let tracker = GitHubTracker::new(&github, epik());
+        let plan = tracker.plan(&IssueId::from(154)).unwrap_err();
+        assert!(plan.contains("Settings (Cmd+,)"), "{plan}");
+        let note = tracker.note(&IssueId::from(154), "hi").unwrap_err();
+        assert!(note.contains("Settings (Cmd+,)"), "{note}");
+        let close = tracker.close(&IssueId::from(154)).unwrap_err();
+        assert!(close.contains("Settings (Cmd+,)"), "{close}");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn an_id_from_another_tracker_is_refused_in_words() {
+        let github = GitHub::at("http://127.0.0.1:1", None);
+        let tracker = GitHubTracker::new(&github, epik());
+        let error = tracker.plan(&IssueId::from("EPK-12")).unwrap_err();
+        assert!(error.contains("EPK-12"), "{error}");
+        assert!(error.contains("not a GitHub issue number"), "{error}");
     }
 
     #[test]

@@ -505,6 +505,10 @@ mod tests {
                 "init",
             ];
             assert!(names.contains(&"current_time".to_owned()));
+            assert!(
+                names.contains(&"feature_plan".to_owned()),
+                "the tracker's read of a whole feature rides with the GitHub verbs"
+            );
             for verb in expected_github {
                 assert!(names.contains(&format!("github_{verb}")), "{verb}");
             }
@@ -513,7 +517,7 @@ mod tests {
             }
             assert_eq!(
                 names.len(),
-                1 + expected_github.len() + expected_git.len(),
+                2 + expected_github.len() + expected_git.len(),
                 "{names:?}"
             );
             let unique: std::collections::BTreeSet<_> = names.iter().collect();
