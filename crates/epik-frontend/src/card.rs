@@ -3,9 +3,10 @@
 //! A card is how the transcript shows an observed act — a tool call, a
 //! tool's answer, a turn that failed, a question settled — as distinct
 //! from something a speaker said. One component renders all of them from
-//! a [`Spec`]: a title, a body, a tone, and — when the body outgrows its
-//! preview — a click-to-expand toggle, the component's only
-//! interactivity.
+//! a [`Spec`]: a title, a body, and a tone. Cards carry the
+//! interactivity in this window: a machine body that is a JSON document
+//! delegates its own — per-node folding — to [`JsonTree`]; any other
+//! body past its preview gets the click-to-expand toggle.
 //!
 //! A *pending* question is the family's one live member: the same
 //! chrome, with the input the answer needs. The card owns the modality —
@@ -20,6 +21,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::ipc;
+use crate::json::{self, JsonTree};
 
 /// How a card carries itself: matter-of-fact, or bad news.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,23 +124,35 @@ const fn tone_class(tone: Tone) -> &'static str {
 
 /// One card in the transcript flow: full-width where bubbles hug their
 /// side, bordered where bubbles are filled — an observation, not speech.
+/// A mono body that is a JSON document renders as a folding
+/// [`JsonTree`]; every other body is the folded-or-whole text.
 #[component]
 pub(crate) fn Card(spec: Spec) -> impl IntoView {
-    let expanded = RwSignal::new(false);
     let tone = tone_class(spec.tone);
+    let title = spec
+        .title
+        .map(|title| view! { <div class=TITLE>{title}</div> });
+    let body = spec.body;
+    if spec.mono && json::rows(&body, &std::collections::HashSet::new()).is_some() {
+        return view! {
+            <li class=format!("{CHROME} {tone}")>
+                {title}
+                <div class="font-mono text-xs">
+                    <JsonTree text=body />
+                </div>
+            </li>
+        }
+        .into_any();
+    }
+    let expanded = RwSignal::new(false);
     let body_class = if spec.mono {
         "font-mono text-xs break-words whitespace-pre-wrap"
     } else {
         "break-words whitespace-pre-wrap"
     };
-    let body = spec.body;
     view! {
         <li class=format!("{CHROME} {tone}")>
-            {spec
-                .title
-                .map(|title| {
-                    view! { <div class=TITLE>{title}</div> }
-                })}
+            {title}
             <div class=body_class>{
                 let body = body.clone();
                 move || shown(&body, expanded.get()).0
@@ -157,6 +171,7 @@ pub(crate) fn Card(spec: Spec) -> impl IntoView {
             </Show>
         </li>
     }
+    .into_any()
 }
 
 /// What a card's small buttons wear.
