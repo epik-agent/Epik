@@ -12,7 +12,9 @@
 //! the identity the repository's own config keeps. (Enabling
 //! `extensions.worktreeConfig` does touch the repository once, and a bare
 //! repository's `core.bare` moves into its main-tree `config.worktree`
-//! as git requires; that is plumbing, not identity.)
+//! as git requires; that is plumbing, not identity.) [`adopt`] is its
+//! sibling for a branch that already stands: the feature workspace a
+//! build keeps for itself, distinct from the per-issue workspaces.
 //!
 //! [`launch`] runs any [`Agent`] in the workspace through the runner —
 //! `ClaudeCode` in production, an inline shell script in tests, the same
@@ -20,7 +22,7 @@
 //! its events into the shared [`Record`]: stdout lines interpreted
 //! through [`claude_code::interpret`] into narration, and at the end the
 //! commit *observation* — did the branch advance past the base, is the
-//! worktree clean. The harness observes; the Agent commits. A clean
+//! worktree clean. Epik observes; the Agent commits. A clean
 //! worktree is removed; a dirty one is left where it is and its path
 //! noted. Remediation is deliberately unbuilt.
 //!
@@ -78,7 +80,7 @@ impl Workspace {
 
 /// A user-supplied name that will reach git as a positional argument:
 /// one that starts with a dash would be read as a flag.
-fn positional<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
+pub(crate) fn positional<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
     if value.starts_with('-') {
         return Err(format!("the {name} may not start with a dash: {value:?}"));
     }
@@ -96,18 +98,8 @@ fn positional<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
 /// add -b`), or git failed along the way.
 pub fn provision(order: &Order) -> Result<Workspace, String> {
     let repository = order.repository.as_str();
-    if !Path::new(repository).is_absolute() {
-        return Err(format!(
-            "the repository must be an absolute local path for now, not {repository:?}"
-        ));
-    }
-    let git_dir = plumbing(&["-C", repository, "rev-parse", "--absolute-git-dir"])
-        .map_err(|words| format!("{repository} is not a git repository: {words}"))?;
-    let git_dir = git_dir.trim().to_owned();
-
-    let branch = positional("branch", &order.branch)?;
-    plumbing(&["-C", repository, "check-ref-format", "--branch", branch])
-        .map_err(|words| format!("{branch:?} is not a valid branch name: {words}"))?;
+    ground(repository)?;
+    let branch = valid_branch(repository, &order.branch)?;
 
     let base = match &order.base {
         Some(base) => positional("base", base)?.to_owned(),
@@ -128,9 +120,65 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
     .trim()
     .to_owned();
 
-    // Per-worktree config needs the extension on; a bare repository's
-    // core.bare must then live in the main tree's own worktree config,
-    // or every linked worktree would read it and believe itself bare.
+    let directory = furnish(repository, branch, &base_commit, true)?;
+    Ok(Workspace {
+        repository: repository.to_owned(),
+        branch: branch.to_owned(),
+        base_commit,
+        directory,
+    })
+}
+
+/// [`provision`]'s sibling for a branch that already exists: a fresh
+/// worktree of `repository` with `branch` checked out as it stands —
+/// the feature workspace a build keeps for itself, distinct from the
+/// per-issue workspaces — under the same persona identity.
+/// `base_commit` is the tip the branch stood on when adopted.
+///
+/// # Errors
+///
+/// Words for the model: the repository is not one, the branch does not
+/// exist (this function creates nothing), the branch is already checked
+/// out somewhere (git's own refusal), or git failed along the way.
+pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
+    ground(repository)?;
+    let branch = valid_branch(repository, branch)?;
+    let tip = plumbing(&[
+        "-C",
+        repository,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        &format!("refs/heads/{branch}^{{commit}}"),
+    ])
+    .map_err(|words| format!("the branch {branch:?} does not exist: {words}"))?
+    .trim()
+    .to_owned();
+
+    let directory = furnish(repository, branch, branch, false)?;
+    Ok(Workspace {
+        repository: repository.to_owned(),
+        branch: branch.to_owned(),
+        base_commit: tip,
+        directory,
+    })
+}
+
+/// What both provisioners insist on before touching anything: an
+/// absolute path that is a git repository, with per-worktree config
+/// enabled — and a bare repository's `core.bare` moved into the main
+/// tree's own worktree config, or every linked worktree would read it
+/// and believe itself bare.
+fn ground(repository: &str) -> Result<(), String> {
+    if !Path::new(repository).is_absolute() {
+        return Err(format!(
+            "the repository must be an absolute local path for now, not {repository:?}"
+        ));
+    }
+    let git_dir = plumbing(&["-C", repository, "rev-parse", "--absolute-git-dir"])
+        .map_err(|words| format!("{repository} is not a git repository: {words}"))?;
+    let git_dir = git_dir.trim().to_owned();
+
     let bare = plumbing(&["-C", repository, "rev-parse", "--is-bare-repository"])?;
     plumbing(&[
         "-C",
@@ -154,42 +202,55 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
             plumbing(&["config", "--file", &common, "--unset", "core.bare"])?;
         }
     }
+    Ok(())
+}
 
+/// A branch name fit to reach git as a positional: no leading dash, and
+/// well-formed by git's own judgement.
+fn valid_branch<'a>(repository: &str, branch: &'a str) -> Result<&'a str, String> {
+    let branch = positional("branch", branch)?;
+    plumbing(&["-C", repository, "check-ref-format", "--branch", branch])
+        .map_err(|words| format!("{branch:?} is not a valid branch name: {words}"))?;
+    Ok(branch)
+}
+
+/// The worktree itself: a fresh directory under the system temp dir,
+/// `worktree add` at `at` — creating `branch` there when `create`,
+/// checking it out as it stands otherwise — and the persona identity
+/// set per-worktree, so every commit made inside is attributed to the
+/// persona without touching the identity the repository's own config
+/// keeps.
+fn furnish(repository: &str, branch: &str, at: &str, create: bool) -> Result<PathBuf, String> {
+    // The clock alone can collide when two workspaces are furnished in
+    // the same tick — concurrent builds do that — so a process-wide
+    // count settles it.
+    static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let directory = std::env::temp_dir().join(format!(
-        "epik-build-{}-{}-{}",
+        "epik-build-{}-{}-{}-{}",
         branch.replace(['/', '\\'], "-"),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_nanos())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let directory_str = directory
         .to_str()
         .ok_or("the temp dir path is not valid unicode")?
         .to_owned();
-    plumbing(&[
-        "-C",
-        repository,
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        &directory_str,
-        &base_commit,
-    ])?;
+    let mut args = vec!["-C", repository, "worktree", "add"];
+    if create {
+        args.extend(["-b", branch]);
+    }
+    args.extend([directory_str.as_str(), at]);
+    plumbing(&args)?;
 
     let identity = [("user.name", PERSONA_NAME), ("user.email", PERSONA_EMAIL)];
     for (key, value) in identity {
         plumbing(&["-C", &directory_str, "config", "--worktree", key, value])?;
     }
-
-    Ok(Workspace {
-        repository: repository.to_owned(),
-        branch: branch.to_owned(),
-        base_commit,
-        directory,
-    })
+    Ok(directory)
 }
 
 /// Where a run stands.

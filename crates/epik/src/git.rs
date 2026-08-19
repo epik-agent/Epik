@@ -43,14 +43,21 @@ pub const PERSONA_EMAIL: &str = "epik@epik-agent.dev";
 /// `{ ok, output }`, where a nonzero exit is `ok: false` and `output`
 /// carries git's own words, stdout and stderr both.
 fn execute(args: &[&str]) -> Result<Value, String> {
-    execute_within(args, TIMEOUT)
+    execute_within(args, &[], TIMEOUT)
 }
 
 /// [`execute`] against a stated deadline — which is how the tests
-/// exercise the kill without sitting through the real one.
-fn execute_within(args: &[&str], timeout: Duration) -> Result<Value, String> {
+/// exercise the kill without sitting through the real one — and with
+/// extra environment, which is how a push's credentials ride askpass
+/// rather than argv.
+fn execute_within(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<Value, String> {
     let mut child = Command::new("git")
         .args(args)
+        .envs(envs.iter().copied())
         // No terminal is attached, so a network verb that wants
         // credentials must fail in words rather than wait for a prompt
         // nobody can see. The user's helpers and SSH config still apply.
@@ -108,7 +115,14 @@ fn reader(pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<
 /// a tool result: the combined output on success, git's own words as the
 /// Err on a nonzero exit.
 pub(crate) fn plumbing(args: &[&str]) -> Result<String, String> {
-    let value = execute(args)?;
+    plumbing_with(args, &[])
+}
+
+/// [`plumbing`] with extra environment, for the one caller whose git
+/// must be told things argv may not carry: the push, whose credentials
+/// answer askpass through variables that die with the process.
+pub(crate) fn plumbing_with(args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
+    let value = execute_within(args, envs, TIMEOUT)?;
     let output = value["output"].as_str().unwrap_or_default().to_owned();
     if value["ok"].as_bool().unwrap_or(false) {
         Ok(output)
@@ -914,6 +928,7 @@ mod tests {
 
         let error = execute_within(
             &["-C", repo.path(), "fetch", &url],
+            &[],
             Duration::from_millis(500),
         )
         .unwrap_err();
