@@ -1,0 +1,154 @@
+# Check every push and pull request; bundle the app from main.
+#
+# Both jobs run over an OS matrix. Only macOS is in it today; Linux is
+# a matter of adding `ubuntu-latest` — its system packages and its
+# artifact paths are already here, gated on runner.os.
+#
+# macOS signing is armed by secrets and absent otherwise: without them
+# the bundle job still runs and proves the build, it just produces an
+# unsigned app. Adding the secrets is the only step between this file and
+# a signed, notarized Epik.app — no workflow change needed.
+#
+#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD  the .p12's password
+#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   (optional) notarization via an
+#                               app-specific password; tauri-cli notarizes and
+#                               staples when all three are present, otherwise
+#                               warns and skips.
+#
+# tauri-cli reads all of these itself: it imports the certificate into a
+# temporary keychain for the build and tears it down afterwards.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Two workspaces by design: the frontend is wasm and kept apart.
+          workspaces: |
+            . -> target
+            crates/epik-frontend -> target
+
+      - name: fmt
+        run: |
+          cargo fmt --all --check
+          cargo fmt --all --check --manifest-path crates/epik-frontend/Cargo.toml
+      - name: clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --all-targets --manifest-path crates/epik-frontend/Cargo.toml -- -D warnings
+      - name: test
+        # The live tiers (EPIK_LIVE_*, EPIK_GITHUB_*) skip themselves when
+        # their environment is unset, so this is the hermetic suite.
+        run: |
+          cargo test --workspace
+          cargo test --manifest-path crates/epik-frontend/Cargo.toml
+
+  bundle:
+    name: bundle (${{ matrix.os }})
+    needs: check
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/epik-frontend -> target
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install trunk and tauri-cli
+        run: cargo binstall -y trunk tauri-cli@^2
+
+      - name: Arm code signing
+        if: runner.os == 'macOS'
+        # Secrets reach tauri-cli only when they exist: an empty
+        # APPLE_SIGNING_IDENTITY would be taken as an identity and fail.
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$IDENTITY" ]; then
+            echo "::notice::No signing secrets; the bundle will be unsigned."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"; echo "$CERT"; echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM" ]; then
+            {
+              echo "APPLE_ID=$NOTARY_ID"
+              echo "APPLE_PASSWORD=$NOTARY_PASSWORD"
+              echo "APPLE_TEAM_ID=$NOTARY_TEAM"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::notice::No notarization secrets; the bundle will be signed but not notarized."
+          fi
+
+      - name: Bundle
+        run: cargo tauri build
+        working-directory: crates/epik-backend
+
+      - name: Signature
+        if: runner.os == 'macOS'
+        run: |
+          app=$(ls -d target/release/bundle/macos/*.app | head -1)
+          codesign --verify --deep --strict --verbose=2 "$app" || echo "::notice::unsigned bundle"
+          codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)' || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Epik-${{ runner.os }}
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
