@@ -14,6 +14,8 @@ pub mod git;
 #[cfg(feature = "serde")]
 pub mod github;
 pub mod keystore;
+#[cfg(all(test, feature = "native"))]
+mod testing;
 #[cfg(feature = "serde")]
 pub mod tools;
 pub mod tracker;

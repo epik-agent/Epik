@@ -162,7 +162,10 @@ fn start_claude(order: Order, api_key: Option<Secret>) -> Result<Started, String
         api_key,
     };
     let record = Record::new(order, workspace);
-    let handle = build::launch(&agent, &runner, record.clone())
+    // The drainer's join handle is dropped deliberately: the chat
+    // surface reads the record as it fills and never waits for the
+    // observation, so the drainer detaches and finishes on its own.
+    let (handle, _drainer) = build::launch(&agent, &runner, record.clone())
         .map_err(|error| format!("could not launch the agent runner: {error}"))?;
     Ok((record, Some(handle)))
 }

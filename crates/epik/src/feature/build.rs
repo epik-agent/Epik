@@ -8,49 +8,52 @@
 //! fills whatever slots are free — [`CONCURRENCY`] of them — and a
 //! finished issue releases its slot at once: there is no round barrier,
 //! so a fast issue never waits on a slow sibling. Each issue's branch
-//! is cut from the feature branch's tip at the moment it is dispatched,
-//! so an issue that starts late already contains everything that landed
-//! early. Merges land one at a time through the
-//! [`Branch`](super::merge::Branch) the caller established, which is
+//! is cut at dispatch from [`Branch::tip`] — the settled tip, read
+//! under the merge lock, so a commit a red check is about to reset away
+//! is never anyone's base — and an issue that starts late already
+//! contains everything that landed early. A standing `issue/<id>`
+//! branch is a corpse from an earlier run, kept then on purpose;
+//! dispatch deletes it, because a rerun supersedes it. Merges land one
+//! at a time through the [`Branch`] the caller established, which is
 //! why [`State`] gives Merging a word of its own: an issue can be
 //! finished — its Agent gone, its slot released — and still queued
 //! behind the merge lock.
 //!
-//! A failed issue dooms what depended on it: its descendants, and
-//! everything transitively blocked by it, become Skipped, and the build
-//! finishes the rest. Epik observes; the Agent commits — an Agent that
-//! exits cleanly but advances nothing, or leaves uncommitted work, has
-//! failed by observation alone. And Agent events never enter any chat
-//! transcript: each dispatched issue's [`Run`] rides in the record, and
-//! the record is the sink.
+//! Every issue of work ends in a terminal state. A failed issue dooms
+//! what depended on it, and work that could never become ready — stuck
+//! behind an open issue outside the tree, a dangling edge, a cycle —
+//! is skipped before anything runs, each naming the blocker it is
+//! stuck on; [`Plan::doomed`] is the judgement, [`Plan::problems`]
+//! rides in the record, and the build finishes the rest. Epik
+//! observes; the Agent commits — an Agent that exits cleanly but
+//! advances nothing, or leaves uncommitted work, has failed by
+//! observation alone. And Agent events never enter any chat
+//! transcript: each dispatched issue's [`Run`] rides in the record,
+//! and the record is the sink.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Duration;
 
 use serde::Serialize;
 
 use super::merge::{Branch, Outcome};
-use super::{Issue, IssueId, Plan};
+use super::{Issue, IssueId, Plan, Problem};
 use crate::agent::Agent;
 use crate::build::{Order, Record, Run, Workspace, launch, provision};
 use crate::forge::Forge;
+use crate::git::plumbing;
 
 /// The most Agents a feature build runs at once. A constant, not a
 /// setting: configuration is its own unbuilt subject, and a number is
 /// honest until there is somewhere for a setting to live.
 pub const CONCURRENCY: usize = 4;
 
-/// How often a worker re-reads its run while the commit observation is
-/// still on its way.
-const OBSERVATION_POLL: Duration = Duration::from_millis(20);
-
 /// Where one issue stands: waiting on a slot or a blocker, running
 /// under an Agent, merging behind the lock, and three ends — landed,
-/// failed in its own right, or skipped because a failure upstream made
-/// it unreachable.
+/// failed in its own right, or skipped because nothing this build can
+/// do would ever make it ready.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum State {
     /// Not yet dispatched: blocked, or ready and out of slots.
@@ -67,43 +70,52 @@ pub enum State {
     /// Failed, with the words to fail it by: the Agent's end, the
     /// observation, a conflict's paths, or a red check's output.
     Failed { report: String },
-    /// Never dispatched: a failure upstream means it can never become
-    /// ready.
-    Skipped,
+    /// Never dispatched, and never will be: the blocker it is stuck on,
+    /// which this build can never settle — a failure upstream, or a
+    /// plan that was never buildable here.
+    Skipped { reason: String },
 }
 
-/// The record of a feature build: the plan, one [`State`] per issue of
-/// work, and each dispatched issue's [`Run`] — where its Agent's
-/// narration sinks. Shared behind `Arc<Mutex<_>>`: [`build`]'s workers
-/// write it, the caller reads it.
+/// The record of a feature build: the plan and what is wrong with its
+/// shape, one [`State`] per issue of work, and each dispatched issue's
+/// [`Run`] — where its Agent's narration sinks. Shared behind
+/// `Arc<Mutex<_>>`: [`build`]'s workers write it, the caller reads it.
 #[derive(Clone, Debug)]
 pub struct Build {
     pub plan: Plan,
+    /// [`Plan::problems`], taken once at the start: cycles and dangling
+    /// edges are named here, and the work they strand is Skipped rather
+    /// than silently left Waiting.
+    pub problems: Vec<Problem>,
     pub states: BTreeMap<IssueId, State>,
     pub runs: BTreeMap<IssueId, Run>,
 }
 
 impl Build {
-    /// A record for a plan about to build: one Waiting state per issue
-    /// of work — the open leaves with no settled ancestor. What is
-    /// already settled, or abandoned under a closed container, is not
-    /// work and gets no state.
+    /// A record for a plan about to build: one state per issue of work
+    /// — the open leaves with no settled ancestor — Waiting, except
+    /// what could never become ready, which is Skipped at once with the
+    /// blocker it is stuck on. What is already settled, or abandoned
+    /// under a closed container, is not work and gets no state.
     fn new(plan: Plan) -> Self {
         let none = BTreeSet::new();
-        let states = plan
-            .tree
-            .leaves()
-            .filter(|leaf| {
-                plan.tree
-                    .find_path(|issue| issue.id == leaf.id)
-                    .expect("a leaf is in its own tree")
-                    .iter()
-                    .all(|node| !super::settled(node, &none))
-            })
+        let problems = plan.problems();
+        let mut states: BTreeMap<IssueId, State> = plan
+            .work(&none)
+            .into_iter()
             .map(|leaf| (leaf.id.clone(), State::Waiting))
             .collect();
+        for (leaf, blocker) in plan.doomed(&none, &none) {
+            states.insert(
+                leaf,
+                State::Skipped {
+                    reason: stuck(&blocker),
+                },
+            );
+        }
         Self {
             plan,
+            problems,
             states,
             runs: BTreeMap::new(),
         }
@@ -111,6 +123,8 @@ impl Build {
 
     /// The build is over when nothing is ready and nothing is running —
     /// merging included, because a queued merge can still unblock work.
+    /// Every state is terminal by then: what could not end any other
+    /// way was Skipped when its fate was sealed.
     #[must_use]
     pub fn finished(&self) -> bool {
         !self
@@ -144,78 +158,35 @@ impl Build {
     }
 
     /// Marks `issue` Failed with `report`, and everything the failure
-    /// dooms Skipped: the issue's descendants, and everything
-    /// transitively blocked by it — containers included, since a
-    /// container with a lost leaf beneath it can never settle. A
-    /// fixpoint, because each skip can strand someone further out.
+    /// dooms Skipped, each naming the blocker it is stuck on —
+    /// [`Plan::doomed`] is the judgement; this only writes it down.
     fn fail(&mut self, issue: &IssueId, report: String) {
         self.states.insert(issue.clone(), State::Failed { report });
-        let descendants: Vec<IssueId> = self
-            .plan
-            .tree
-            .find_path(|node| &node.id == issue)
-            .map(|path| {
-                path.last()
-                    .expect("a found path reaches its match")
-                    .leaves()
-                    .filter(|leaf| &leaf.id != issue)
-                    .map(|leaf| leaf.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for id in descendants {
-            self.skip(&id);
-        }
-        loop {
-            let stranded: Vec<IssueId> = self
-                .states
-                .iter()
-                .filter(|(_, state)| matches!(state, State::Waiting))
-                .filter(|(id, _)| {
-                    self.plan
-                        .blocking
-                        .iter()
-                        .filter(|edge| &edge.issue == *id)
-                        .any(|edge| self.hopeless(&edge.blocker))
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            if stranded.is_empty() {
-                break;
-            }
-            for id in stranded {
-                self.skip(&id);
-            }
+        let done = self.merged();
+        let lost: BTreeSet<IssueId> = self
+            .states
+            .iter()
+            .filter(|(_, state)| matches!(state, State::Failed { .. } | State::Skipped { .. }))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let doomed = self.plan.doomed(&done, &lost);
+        for (leaf, blocker) in doomed {
+            self.skip(&leaf, stuck(&blocker));
         }
     }
 
     /// Skipped, if it was still Waiting: an issue already running,
     /// landed, or failed keeps the state it earned.
-    fn skip(&mut self, id: &IssueId) {
+    fn skip(&mut self, id: &IssueId, reason: String) {
         if matches!(self.states.get(id), Some(State::Waiting)) {
-            self.states.insert(id.clone(), State::Skipped);
+            self.states.insert(id.clone(), State::Skipped { reason });
         }
     }
+}
 
-    /// A blocker this build can never settle: a node of the tree with a
-    /// failed or skipped leaf beneath it. An issue outside the tree is
-    /// judged by its own state, never by ours.
-    fn hopeless(&self, blocker: &IssueId) -> bool {
-        self.plan
-            .tree
-            .find_path(|node| &node.id == blocker)
-            .is_some_and(|path| {
-                path.last()
-                    .expect("a found path reaches its match")
-                    .leaves()
-                    .any(|leaf| {
-                        matches!(
-                            self.states.get(&leaf.id),
-                            Some(State::Failed { .. } | State::Skipped)
-                        )
-                    })
-            })
-    }
+/// The words a skipped issue carries.
+fn stuck(blocker: &IssueId) -> String {
+    format!("waits on {blocker}, which this build can never settle")
 }
 
 /// The instructions one issue's Agent receives — the order's prompt,
@@ -328,9 +299,13 @@ where
 
     /// One issue, dispatch to its end: however [`attempt`](Self::attempt)
     /// came out, write the state — failing an issue also skips whatever
-    /// that dooms — and wake the scheduler.
+    /// that dooms — and wake the scheduler. A worker must never hang the
+    /// build: the Agent factory is caller code, so a panic anywhere in
+    /// the attempt becomes a Failed issue with the panic's words, and
+    /// the slot is released like any other end.
     fn work(&self, issue: &Issue) {
-        let landed = self.attempt(issue);
+        let landed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(issue)))
+            .unwrap_or_else(|panic| Err(format!("the worker panicked: {}", words(&*panic))));
         {
             let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
             match landed {
@@ -345,24 +320,32 @@ where
         self.signal.notify_all();
     }
 
-    /// The issue's whole journey: a branch cut from the feature tip at
-    /// this moment, an Agent launched in a workspace of it, the commit
-    /// observation judged, and the branch merged. The slot is released —
-    /// Merging said, scheduler woken — before queueing on the merge
-    /// lock, so no issue waits on a slower sibling's check.
+    /// The issue's whole journey: a branch cut from the settled feature
+    /// tip at this moment, an Agent launched in a workspace of it, the
+    /// commit observation judged, and the branch merged. The slot is
+    /// released — Merging said, scheduler woken — before queueing on
+    /// the merge lock, so no issue waits on a slower sibling's check.
     fn attempt(&self, issue: &Issue) -> Result<(String, bool), String> {
         let feature = self.branch.workspace();
         let order = Order {
             prompt: brief(issue),
             repository: feature.repository.clone(),
             branch: format!("issue/{}", issue.id),
-            base: Some(feature.branch.clone()),
+            // The settled tip, read under the merge lock — never the
+            // feature ref itself, which mid-merge may hold a commit a
+            // red check is about to reset away.
+            base: Some(self.branch.tip()?),
         };
+        // A standing issue branch is a corpse from an earlier run, kept
+        // then on purpose; this run supersedes it. One still pinned by
+        // a kept worktree refuses in git's words, and the provision
+        // below fails the issue with the corpse named.
+        let _ = plumbing(&["-C", &order.repository, "branch", "-D", &order.branch]);
         let workspace = provision(&order)?;
         let agent = (self.agents)(issue, &workspace, &workspace.brief(&order.prompt));
         let branch = workspace.branch.clone();
         let run = Record::new(order, workspace);
-        let handle = launch(&agent, &self.runner, Arc::clone(&run))
+        let (handle, observer) = launch(&agent, &self.runner, Arc::clone(&run))
             .map_err(|error| format!("could not launch the agent runner: {error}"))?;
         self.record
             .lock()
@@ -376,19 +359,17 @@ where
             (None, Some(signal)) => return Err(format!("the Agent was killed by signal {signal}")),
             (None, None) => return Err("the Agent ended without saying how".to_owned()),
         }
-        // The observation is the last thing the drainer writes, just
-        // after the exit already seen — a short wait, never a long one.
-        let commits = loop {
-            let observed = run
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .commits
-                .clone();
-            if let Some(commits) = observed {
-                break commits;
-            }
-            std::thread::sleep(OBSERVATION_POLL);
-        };
+        // The observation is the last thing the drainer writes; joining
+        // it waits exactly as long as that takes, no polling.
+        observer
+            .join()
+            .map_err(|_| "the run's observer died unsettled".to_owned())?;
+        let commits = run
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commits
+            .clone()
+            .ok_or("the run ended with no commit observation")?;
         if !commits.advanced {
             return Err(
                 "the Agent committed nothing: the branch never advanced past its base".to_owned(),
@@ -418,52 +399,19 @@ where
     }
 }
 
+/// A panic payload's words, when it has any.
+fn words(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no words came with it")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::Node;
-
-    fn id(number: u64) -> IssueId {
-        IssueId::from(number)
-    }
-
-    fn issue(number: u64, closed: bool) -> Issue {
-        Issue {
-            id: id(number),
-            title: format!("issue {number}"),
-            closed,
-        }
-    }
-
-    fn node(number: u64, closed: bool, children: &[u64], blockers: &[(u64, bool)]) -> Node {
-        Node {
-            issue: issue(number, closed),
-            children: children.iter().copied().map(id).collect(),
-            blockers: blockers
-                .iter()
-                .map(|&(number, closed)| issue(number, closed))
-                .collect(),
-        }
-    }
-
-    fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
-        Plan::descend(&id(feature), |asked| {
-            nodes
-                .iter()
-                .find(|node| &node.issue.id == asked)
-                .cloned()
-                .ok_or_else(|| format!("no fixture for {asked}"))
-        })
-        .unwrap()
-    }
-
-    fn states(build: &Build) -> Vec<(&str, &State)> {
-        build
-            .states
-            .iter()
-            .map(|(id, state)| (id.0.as_str(), state))
-            .collect()
-    }
+    use crate::feature::fixtures::{id, issue, node, plan};
 
     #[test]
     fn a_new_build_states_only_the_open_reachable_leaves() {
@@ -487,6 +435,53 @@ mod tests {
             "no containers, no closed leaves, no abandoned subtrees"
         );
         assert!(build.states.values().all(|s| *s == State::Waiting));
+        assert!(build.problems.is_empty());
+    }
+
+    #[test]
+    fn what_could_never_become_ready_is_skipped_before_anything_runs() {
+        let build = Build::new(plan(
+            1,
+            vec![
+                node(1, false, &[2, 3], &[]),
+                node(2, false, &[], &[]),
+                node(3, false, &[], &[(55, false)]),
+            ],
+        ));
+        assert_eq!(build.states[&id(2)], State::Waiting);
+        let State::Skipped { reason } = &build.states[&id(3)] else {
+            panic!("an open outside blocker is permanent: {:?}", build.states);
+        };
+        assert!(reason.contains("waits on 55"), "{reason}");
+    }
+
+    #[test]
+    fn a_cycle_is_skipped_at_the_start_and_named_in_the_problems() {
+        let build = Build::new(plan(
+            1,
+            vec![
+                node(1, false, &[2, 3], &[]),
+                node(2, false, &[], &[(3, false)]),
+                node(3, false, &[], &[(2, false)]),
+            ],
+        ));
+        assert!(
+            build
+                .states
+                .values()
+                .all(|state| matches!(state, State::Skipped { .. })),
+            "{:?}",
+            build.states
+        );
+        assert!(
+            build
+                .problems
+                .iter()
+                .any(|problem| matches!(problem, Problem::Cycle(_))),
+            "{:?}",
+            build.problems
+        );
+        assert!(build.finished(), "no non-terminal state is left behind");
     }
 
     #[test]
@@ -503,20 +498,23 @@ mod tests {
         ));
         build.fail(&id(2), "the wumpus got in".to_owned());
         assert_eq!(
-            states(&build),
-            [
-                (
-                    "2",
-                    &State::Failed {
-                        report: "the wumpus got in".to_owned()
-                    }
-                ),
-                ("3", &State::Skipped),
-                ("4", &State::Waiting),
-                ("5", &State::Skipped),
-            ],
-            "3 waited on 2, 5 waited on 3; 4 waited on no one"
+            build.states[&id(2)],
+            State::Failed {
+                report: "the wumpus got in".to_owned()
+            }
         );
+        let State::Skipped { reason } = &build.states[&id(3)] else {
+            panic!("3 waited on 2: {:?}", build.states);
+        };
+        assert!(reason.contains("waits on 2"), "{reason}");
+        let State::Skipped { reason } = &build.states[&id(5)] else {
+            panic!("5 waited on 3: {:?}", build.states);
+        };
+        assert!(
+            reason.contains("waits on 3"),
+            "doom is transitive: {reason}"
+        );
+        assert_eq!(build.states[&id(4)], State::Waiting, "4 waited on no one");
     }
 
     #[test]
@@ -532,7 +530,10 @@ mod tests {
             ],
         ));
         build.fail(&id(2), "boom".to_owned());
-        assert_eq!(build.states[&id(9)], State::Skipped, "7 can never settle");
+        let State::Skipped { reason } = &build.states[&id(9)] else {
+            panic!("7 can never settle: {:?}", build.states);
+        };
+        assert!(reason.contains("waits on 7"), "{reason}");
         assert_eq!(
             build.states[&id(8)],
             State::Waiting,
@@ -597,6 +598,7 @@ mod tests {
         ));
         assert!(build.states.is_empty());
         assert!(build.finished());
+        assert_eq!(build.problems, [Problem::NoWork]);
     }
 
     #[test]
@@ -607,5 +609,12 @@ mod tests {
             brief.contains("Write tests covering the work, and make them pass."),
             "{brief}"
         );
+    }
+
+    #[test]
+    fn a_panics_words_are_read_from_either_payload() {
+        assert_eq!(words(&"static words"), "static words");
+        assert_eq!(words(&"owned words".to_owned()), "owned words");
+        assert_eq!(words(&7_u64), "no words came with it");
     }
 }

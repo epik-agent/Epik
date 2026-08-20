@@ -195,33 +195,7 @@ mod tests {
         }
     }
 
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-forge-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_str().unwrap().to_owned()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::Scratch;
 
     /// A working repository with one commit, plus a bare remote.
     fn seeded(scratch: &Scratch) -> (String, String) {

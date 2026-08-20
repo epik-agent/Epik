@@ -6,87 +6,16 @@
 //! marker files rather than timing, and every wait is a bounded poll on
 //! a condition, not a sleep-and-hope.
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use epik::agent::{Agent, Task};
+use common::{Scratch, Shell, git, runner, seeded, tidy};
 use epik::build::Workspace;
 use epik::feature::merge::Branch;
 use epik::feature::{self, Build, Issue, IssueId, Node, Plan, State};
-use epik::forge::{Credentials, Forge};
-
-fn runner() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_epik-agent"))
-}
-
-/// A forge for tests: a bare directory, no credentials.
-#[derive(Debug)]
-struct Local(String);
-
-impl Forge for Local {
-    fn remote(&self) -> String {
-        self.0.clone()
-    }
-
-    fn credentials(&self) -> Option<Credentials> {
-        None
-    }
-}
-
-/// A scratch directory that cleans up after itself.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "epik-feature-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn join(&self, name: &str) -> String {
-        self.0.join(name).to_str().unwrap().to_owned()
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn git(args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?} failed");
-}
-
-/// A working repository with one commit on main, and a bare remote for
-/// the forge.
-fn seeded(scratch: &Scratch) -> (String, Local) {
-    let work = scratch.join("work");
-    let remote = scratch.join("remote.git");
-    git(&["init", "--initial-branch=main", &work]);
-    git(&["-C", &work, "config", "user.name", "Test"]);
-    git(&["-C", &work, "config", "user.email", "test@example.com"]);
-    git(&["-C", &work, "config", "commit.gpgsign", "false"]);
-    std::fs::write(Path::new(&work).join("hello.txt"), "hello\n").unwrap();
-    git(&["-C", &work, "add", "hello.txt"]);
-    git(&["-C", &work, "commit", "-m", "the first commit"]);
-    git(&["init", "--bare", "--initial-branch=main", &remote]);
-    (work, Local(remote))
-}
 
 fn id(number: u64) -> IssueId {
     IssueId::from(number)
@@ -122,23 +51,6 @@ fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
     .unwrap()
 }
 
-/// The scripted Agent: `sh -c` of an inline script, in the workspace.
-struct Shell {
-    script: String,
-    cwd: String,
-}
-
-impl Agent for Shell {
-    fn task(&self) -> Task {
-        Task {
-            argv: vec!["sh".to_owned(), "-c".to_owned(), self.script.clone()],
-            env: Vec::new(),
-            cwd: self.cwd.clone(),
-            stdin: None,
-        }
-    }
-}
-
 /// One script per issue number becomes the Agent factory a build takes.
 fn scripted(
     scripts: BTreeMap<u64, String>,
@@ -157,16 +69,19 @@ fn lands(number: u64) -> String {
     )
 }
 
-/// A script step that waits — bounded, so a broken build fails a test
-/// instead of hanging it — until `path` exists.
+/// A script step that waits until `path` exists — bounded, so a broken
+/// build fails a test instead of hanging it, and bounded well past
+/// [`eventually`]'s budget, so a slow CI runner times out there in
+/// words rather than fabricating an Agent failure here.
 fn until(path: &str) -> String {
     format!(
         "i=0; until [ -e '{path}' ]; do i=$((i+1)); \
-         if [ \"$i\" -gt 600 ]; then exit 1; fi; sleep 0.1; done"
+         if [ \"$i\" -gt 2400 ]; then exit 1; fi; sleep 0.1; done"
     )
 }
 
 /// Polls a condition on the record until it holds, bounded in words.
+/// The budget stays comfortably under [`until`]'s 240 seconds.
 fn eventually(what: &str, holds: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while !holds() {
@@ -175,15 +90,15 @@ fn eventually(what: &str, holds: impl Fn() -> bool) {
     }
 }
 
-fn snapshot(record: &std::sync::Arc<std::sync::Mutex<Build>>) -> Build {
+fn snapshot(record: &Arc<Mutex<Build>>) -> Build {
     record.lock().unwrap().clone()
 }
 
-fn state(record: &std::sync::Arc<std::sync::Mutex<Build>>, number: u64) -> State {
+fn state(record: &Arc<Mutex<Build>>, number: u64) -> State {
     snapshot(record).states[&id(number)].clone()
 }
 
-fn counted(record: &std::sync::Arc<std::sync::Mutex<Build>>, wanted: &State) -> usize {
+fn counted(record: &Arc<Mutex<Build>>, wanted: &State) -> usize {
     snapshot(record)
         .states
         .values()
@@ -217,21 +132,6 @@ fn tip(repository: &str, branch: &str) -> String {
         .unwrap()
         .id()
         .to_string()
-}
-
-/// Removes the feature workspace a build kept for itself.
-fn tidy(repository: &str, workspace: &Path) {
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            repository,
-            "worktree",
-            "remove",
-            "--force",
-            "--",
-            workspace.to_str().unwrap(),
-        ])
-        .status();
 }
 
 /// The diamond: 2 at the top, 3 and 4 in the middle, 5 at the tail. The
@@ -283,6 +183,7 @@ fn a_diamond_runs_its_middles_at_once_and_its_tail_only_after_both_land() {
 
     eventually("the diamond finishes", || snapshot(&record).finished());
     let build = snapshot(&record);
+    assert!(build.problems.is_empty());
     for number in [2, 3, 4, 5] {
         assert!(
             matches!(
@@ -470,7 +371,8 @@ fn a_plan_with_more_ready_issues_than_slots_never_runs_more_than_four_agents() {
 }
 
 /// One issue fails; what waited on it — directly and transitively — is
-/// Skipped, and its independent sibling still lands.
+/// Skipped with the blocker it is stuck on named, and its independent
+/// sibling still lands.
 #[test]
 fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
     let scratch = Scratch::new("failure");
@@ -507,8 +409,17 @@ fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
         panic!("2 should have failed: {:?}", build.states);
     };
     assert!(report.contains("exited with code 3"), "{report}");
-    assert_eq!(build.states[&id(3)], State::Skipped);
-    assert_eq!(build.states[&id(5)], State::Skipped, "doom is transitive");
+    let State::Skipped { reason } = &build.states[&id(3)] else {
+        panic!("3 waited on 2: {:?}", build.states);
+    };
+    assert!(reason.contains("waits on 2"), "{reason}");
+    let State::Skipped { reason } = &build.states[&id(5)] else {
+        panic!("5 waited on 3: {:?}", build.states);
+    };
+    assert!(
+        reason.contains("waits on 3"),
+        "doom is transitive: {reason}"
+    );
     assert!(
         matches!(build.states[&id(4)], State::Merged { .. }),
         "the independent sibling still lands: {:?}",
@@ -519,6 +430,99 @@ fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
         !build.runs.contains_key(&id(3)) && !build.runs.contains_key(&id(5)),
         "a skipped issue never got an Agent"
     );
+
+    tidy(&work, &feature_workspace);
+}
+
+/// The Agent factory is caller code and may panic; the worker catches
+/// it, the issue fails with the panic's words, the slot comes back, and
+/// the rest of the plan still builds to the end.
+#[test]
+fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
+    let scratch = Scratch::new("panic");
+    let (work, forge) = seeded(&scratch);
+    let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+    let feature_workspace = branch.workspace().directory.clone();
+
+    let record = feature::build(
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3], &[]),
+                node(2, false, &[], &[]),
+                node(3, false, &[], &[]),
+            ],
+        ),
+        branch,
+        runner(),
+        move |issue: &Issue, workspace: &Workspace, _brief: &str| {
+            assert!(issue.id.0 != "3", "the factory had no Agent for issue 3");
+            Shell {
+                script: lands(2),
+                cwd: workspace.directory.to_string_lossy().into_owned(),
+            }
+        },
+    );
+
+    eventually("the build survives the panic", || {
+        snapshot(&record).finished()
+    });
+    let build = snapshot(&record);
+    let State::Failed { report } = &build.states[&id(3)] else {
+        panic!("the panic becomes a failure: {:?}", build.states);
+    };
+    assert!(report.contains("the worker panicked"), "{report}");
+    assert!(report.contains("no Agent for issue 3"), "{report}");
+    assert!(
+        matches!(build.states[&id(2)], State::Merged { .. }),
+        "{:?}",
+        build.states
+    );
+
+    tidy(&work, &feature_workspace);
+}
+
+/// A second build over the same repository, after a failure: the issue
+/// branch the first run left standing is a corpse the rerun supersedes,
+/// so the retry builds instead of insta-failing on `worktree add -b`.
+#[test]
+fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() {
+    let scratch = Scratch::new("rerun");
+    let (work, forge) = seeded(&scratch);
+    let remote = forge.0.clone();
+    let nodes = || vec![node(1, false, &[2], &[]), node(2, false, &[], &[])];
+
+    let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+    let feature_workspace = branch.workspace().directory.clone();
+    let record = feature::build(
+        plan(1, nodes()),
+        branch,
+        runner(),
+        scripted(BTreeMap::from([(2, "exit 3".to_owned())])),
+    );
+    eventually("the first build fails", || snapshot(&record).finished());
+    assert!(matches!(state(&record, 2), State::Failed { .. }));
+    tidy(&work, &feature_workspace);
+
+    // The rerun: the standing feature branch is adopted as it stands,
+    // and the standing issue/2 branch is deleted at dispatch.
+    git(&["-C", &work, "rev-parse", "refs/heads/issue/2"]);
+    let branch =
+        Branch::establish(&work, "feature/wumpus", "main", common::Local(remote), None).unwrap();
+    let feature_workspace = branch.workspace().directory.clone();
+    let record = feature::build(
+        plan(1, nodes()),
+        branch,
+        runner(),
+        scripted(BTreeMap::from([(2, lands(2))])),
+    );
+    eventually("the rerun lands", || snapshot(&record).finished());
+    assert!(
+        matches!(state(&record, 2), State::Merged { .. }),
+        "{:?}",
+        snapshot(&record).states
+    );
+    assert!(on_branch(&work, "feature/wumpus", "issue-2.txt"));
 
     tidy(&work, &feature_workspace);
 }
