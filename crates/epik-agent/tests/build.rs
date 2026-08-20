@@ -5,45 +5,14 @@
 //! the Agent is an inline `sh -c` script, never a script file (the
 //! ETXTBSY race), and no LLM is anywhere near.
 
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+mod common;
 
+use std::path::Path;
+
+use common::{Scratch, Shell, runner};
 use epik::agent::claude_code::Update;
-use epik::agent::{Agent, Task};
 use epik::build::{Order, Phase, Record, Run, launch, provision};
 use epik::git::{PERSONA_EMAIL, PERSONA_NAME};
-
-fn runner() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_epik-agent"))
-}
-
-/// A scratch directory that cleans up after itself.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "epik-launch-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn join(&self, name: &str) -> String {
-        self.0.join(name).to_str().unwrap().to_owned()
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A bare repository with its empty root commit, made by git_init.
 fn bare(scratch: &Scratch) -> String {
@@ -60,31 +29,6 @@ fn bare(scratch: &Scratch) -> String {
     directory
 }
 
-/// A test Agent: `sh -c` of an inline script, in the workspace. It also
-/// speaks one stream-json line, so the record has narration to keep.
-struct Shell {
-    script: String,
-    cwd: String,
-}
-
-impl Agent for Shell {
-    fn task(&self) -> Task {
-        Task {
-            argv: vec![
-                "sh".to_owned(),
-                "-c".to_owned(),
-                format!(
-                    "{}; echo '{{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}}'",
-                    self.script
-                ),
-            ],
-            env: Vec::new(),
-            cwd: self.cwd.clone(),
-            stdin: None,
-        }
-    }
-}
-
 fn order(repository: &str, branch: &str) -> Order {
     Order {
         prompt: "build it".to_owned(),
@@ -95,22 +39,24 @@ fn order(repository: &str, branch: &str) -> Order {
 }
 
 /// Provisions and launches `script` in the workspace, then waits for the
-/// record to settle — the commit observation is the last thing written.
+/// record to settle: the commit observation is the last thing the
+/// drainer writes, and joining the drainer is the bounded wait for it.
+/// The script gets one stream-json line appended, so the record has
+/// narration to keep.
 fn build(repository: &str, branch: &str, script: &str) -> Run {
     let order = order(repository, branch);
     let workspace = provision(&order).unwrap();
     let agent = Shell {
-        script: script.to_owned(),
+        script: format!(
+            "{script}; echo '{{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}}'"
+        ),
         cwd: workspace.directory.to_string_lossy().into_owned(),
     };
     let run = Record::new(order, workspace);
-    let handle = launch(&agent, runner(), run.clone()).unwrap();
+    let (handle, observer) = launch(&agent, runner(), run.clone()).unwrap();
     handle.wait().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while run.lock().unwrap().commits.is_none() {
-        assert!(Instant::now() < deadline, "the observation never landed");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    observer.join().unwrap();
+    assert!(run.lock().unwrap().commits.is_some());
     run
 }
 

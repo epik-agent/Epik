@@ -117,43 +117,15 @@ fn make_test(worktree: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::Scratch;
 
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-check-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn write(&self, name: &str, content: &str) -> &Self {
-            std::fs::write(self.0.join(name), content).unwrap();
-            self
-        }
-
-        fn proposes(&self, command: &str) {
-            assert_eq!(
-                detect(&self.0),
-                Some(Check {
-                    command: command.to_owned()
-                })
-            );
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    fn proposes(scratch: &Scratch, command: &str) {
+        assert_eq!(
+            detect(&scratch.0),
+            Some(Check {
+                command: command.to_owned()
+            })
+        );
     }
 
     #[test]
@@ -218,7 +190,7 @@ mod tests {
     fn a_package_json_with_a_test_script_proposes_npm_test() {
         let scratch = Scratch::new("npm");
         scratch.write("package.json", r#"{"scripts": {"test": "vitest run"}}"#);
-        scratch.proposes("npm test");
+        proposes(&scratch, "npm test");
     }
 
     #[test]
@@ -232,28 +204,28 @@ mod tests {
     fn a_go_mod_proposes_go_test() {
         let scratch = Scratch::new("go");
         scratch.write("go.mod", "module example.com/wumpus\n");
-        scratch.proposes("go test ./...");
+        proposes(&scratch, "go test ./...");
     }
 
     #[test]
     fn a_pyproject_proposes_pytest() {
         let scratch = Scratch::new("python");
         scratch.write("pyproject.toml", "[project]\nname = \"wumpus\"\n");
-        scratch.proposes("python -m pytest");
+        proposes(&scratch, "python -m pytest");
     }
 
     #[test]
     fn a_pom_proposes_mvn_test() {
         let scratch = Scratch::new("maven");
         scratch.write("pom.xml", "<project/>\n");
-        scratch.proposes("mvn test");
+        proposes(&scratch, "mvn test");
     }
 
     #[test]
     fn a_makefile_with_a_test_target_proposes_make_test() {
         let scratch = Scratch::new("make");
         scratch.write("Makefile", "build:\n\tcc main.c\n\ntest: build\n\t./run\n");
-        scratch.proposes("make test");
+        proposes(&scratch, "make test");
     }
 
     #[test]
@@ -268,7 +240,7 @@ mod tests {
     fn a_cargo_toml_proposes_cargo_test() {
         let scratch = Scratch::new("cargo");
         scratch.write("Cargo.toml", "[package]\nname = \"wumpus\"\n");
-        scratch.proposes("cargo test");
+        proposes(&scratch, "cargo test");
     }
 
     #[test]
@@ -284,6 +256,6 @@ mod tests {
         scratch
             .write("package.json", r#"{"scripts": {"test": "vitest run"}}"#)
             .write("Cargo.toml", "[package]\nname = \"wumpus\"\n");
-        scratch.proposes("npm test");
+        proposes(&scratch, "npm test");
     }
 }

@@ -475,37 +475,7 @@ mod tests {
     // tempdirs; git2 is the independent implementation that verifies what
     // the CLI did — the project's established cross-check pattern.
 
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-git-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &str {
-            self.0.to_str().unwrap()
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_str().unwrap().to_owned()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::Scratch;
 
     /// The allowlist as a registry, which is also how the backend holds it.
     fn registry() -> crate::tools::Registry {

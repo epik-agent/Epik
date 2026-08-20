@@ -447,13 +447,21 @@ fn abandon(workspace: &Workspace) {
 /// describes, and returns at once. One drainer thread folds the events
 /// into the record; when the Agent exits it takes the commit observation
 /// and removes the worktree if clean. The [`Handle`] is the run's life:
-/// dropping it kills the Agent, so the caller keeps it.
+/// dropping it kills the Agent, so the caller keeps it. Beside it rides
+/// the drainer's own [`JoinHandle`](std::thread::JoinHandle): joining it
+/// is how a caller waits for the commit observation — the last thing the
+/// drainer writes — bounded by the work itself rather than by polling;
+/// dropping it detaches the drainer, which finishes on its own.
 ///
 /// # Errors
 ///
 /// The spawn itself failing — the runner binary missing, chiefly. The
 /// provisioned worktree is removed on the way out.
-pub fn launch(agent: &impl Agent, runner: &Path, record: Run) -> io::Result<Handle> {
+pub fn launch(
+    agent: &impl Agent,
+    runner: &Path,
+    record: Run,
+) -> io::Result<(Handle, std::thread::JoinHandle<()>)> {
     let (events_in, events) = channel();
     let handle = match crate::agent::run(agent, runner, events_in) {
         Ok(handle) => handle,
@@ -467,7 +475,7 @@ pub fn launch(agent: &impl Agent, runner: &Path, record: Run) -> io::Result<Hand
             return Err(error);
         }
     };
-    std::thread::spawn(move || {
+    let drainer = std::thread::spawn(move || {
         for event in events {
             let exited = matches!(event, Event::Exited(_));
             let workspace = {
@@ -485,7 +493,7 @@ pub fn launch(agent: &impl Agent, runner: &Path, record: Run) -> io::Result<Hand
             }
         }
     });
-    Ok(handle)
+    Ok((handle, drainer))
 }
 
 #[cfg(test)]
@@ -497,33 +505,7 @@ mod tests {
     // binary, which only the epik-agent package's tests can locate; those
     // live in crates/epik-agent/tests/build.rs.
 
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-build-test-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_str().unwrap().to_owned()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::Scratch;
 
     /// A bare repository with its empty root commit, made by git_init.
     fn bare(scratch: &Scratch) -> String {

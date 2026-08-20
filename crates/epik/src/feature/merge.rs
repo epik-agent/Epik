@@ -12,9 +12,15 @@
 //! Agent that lied and two siblings that build alone and not together —
 //! and the branch pushed on green. A conflict aborts the merge, leaves
 //! the issue branch intact, and reports the conflicting paths in git's
-//! own reckoning; a red check resets the branch to the exact commit it
-//! stood on and reports the check's output. Every commit on a feature
-//! branch is green.
+//! own reckoning; a red check — and a failed push, the same posture —
+//! resets the branch to the exact commit it stood on, so an error
+//! always means nothing landed. Every commit on a feature branch is
+//! green.
+//!
+//! [`Branch::tip`] reads the branch's settled tip under the same lock,
+//! which is where an issue branch is cut from at dispatch: a merge
+//! mid-judgement, whose commit may yet be reset away, can never be the
+//! answer.
 //!
 //! A build handed no check merges on observation alone, and the
 //! [`Outcome`] says so.
@@ -129,6 +135,32 @@ impl<F: Forge> Branch<F> {
         &self.workspace
     }
 
+    /// The feature branch's tip as it stands settled — read under the
+    /// merge lock, so a merge mid-judgement, whose commit a red check
+    /// or a failed push may yet reset away, can never be the answer.
+    /// Every commit this returns is permanent: it is where an issue
+    /// branch is cut from at dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Git failing to read the ref, in its own words.
+    pub fn tip(&self) -> Result<String, String> {
+        let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let directory = self
+            .workspace
+            .directory
+            .to_str()
+            .ok_or("the workspace path is not valid unicode")?;
+        Ok(plumbing(&[
+            "-C",
+            directory,
+            "rev-parse",
+            &format!("refs/heads/{}", self.workspace.branch),
+        ])?
+        .trim()
+        .to_owned())
+    }
+
     /// Merges `branch` into the feature branch: `--no-ff`, one at a
     /// time, the check run on the result under the same lock, the
     /// branch pushed when it holds. A conflict or a red check comes
@@ -142,8 +174,10 @@ impl<F: Forge> Branch<F> {
     /// # Errors
     ///
     /// Git failing for reasons that are not a conflict — and the push
-    /// failing, in which case the merge stands locally and the remote
-    /// is behind.
+    /// failing, in which case the merge is unwound: the feature branch
+    /// is back on its pre-merge commit and the issue branch stands
+    /// intact, so an error always means nothing landed and a retry can
+    /// merge again.
     pub fn merge(&self, branch: &str) -> Result<Outcome, String> {
         let branch = positional("branch", branch)?;
         let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
@@ -202,11 +236,20 @@ impl<F: Forge> Branch<F> {
             }
         }
 
-        forge::push(
+        // A merge the remote never saw must not stand: unwind it, so an
+        // error always means nothing landed — the same posture as
+        // reset-on-red — and the caller's record never contradicts what
+        // the next push publishes.
+        if let Err(words) = forge::push(
             &self.workspace.directory,
             &self.workspace.branch,
             &self.forge,
-        )?;
+        ) {
+            plumbing(&["-C", directory, "reset", "--hard", &before]).map_err(|reset| {
+                format!("the push failed ({words}) and the merge could not be unwound: {reset}")
+            })?;
+            return Err(words);
+        }
         let commit = plumbing(&["-C", directory, "rev-parse", "HEAD"])?
             .trim()
             .to_owned();
@@ -237,33 +280,7 @@ mod tests {
         }
     }
 
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-merge-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_str().unwrap().to_owned()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::testing::Scratch;
 
     fn git(args: &[&str]) -> String {
         plumbing(args).unwrap()
@@ -599,6 +616,89 @@ mod tests {
         assert!(checked);
         assert_eq!(tip(&work, "feature/wumpus"), commit);
         assert_eq!(tip(&remote, "feature/wumpus"), commit);
+
+        tidy(&issue);
+        tidy(branch.workspace());
+    }
+
+    /// A push the remote refuses unwinds the merge — Err means nothing
+    /// landed — and the same issue branch merges again once the remote
+    /// answers: the retry the reset invites actually works.
+    #[test]
+    fn a_failed_push_unwinds_the_merge_so_a_retry_can_land_it() {
+        let scratch = Scratch::new("pushless");
+        let (work, _) = seeded(&scratch);
+        // A standing branch, so establishing pushes nothing; the forge
+        // does not exist yet.
+        git(&["-C", &work, "branch", "feature/wumpus", "HEAD"]);
+        let gone = scratch.join("gone.git");
+        let branch =
+            Branch::establish(&work, "feature/wumpus", "main", Local(gone.clone()), None).unwrap();
+        let before = tip(&work, "feature/wumpus");
+
+        let issue = agent(&work, "issue-1", "one.txt", "one\n");
+        let error = branch.merge("issue-1").unwrap_err();
+        assert!(error.contains("gone.git"), "{error}");
+        assert_eq!(
+            tip(&work, "feature/wumpus"),
+            before,
+            "the merge was unwound: nothing landed"
+        );
+
+        // The remote comes up; the same branch merges and lands.
+        git(&["init", "--bare", "--initial-branch=main", &gone]);
+        let Outcome::Merged { commit, .. } = branch.merge("issue-1").unwrap() else {
+            panic!("the retry lands");
+        };
+        assert_eq!(tip(&work, "feature/wumpus"), commit);
+        assert_eq!(tip(&gone, "feature/wumpus"), commit);
+
+        tidy(&issue);
+        tidy(branch.workspace());
+    }
+
+    /// The tip is read under the merge lock: while a red check holds a
+    /// doomed merge commit on the ref, a concurrent tip read waits it
+    /// out and answers with the settled commit — never the one about to
+    /// be reset away. This is the cut point dispatch uses.
+    #[test]
+    fn the_tip_never_answers_with_a_commit_a_red_check_is_about_to_reset() {
+        let scratch = Scratch::new("tip");
+        let (work, forge) = seeded(&scratch);
+        let sync = scratch.join("sync");
+        std::fs::create_dir_all(&sync).unwrap();
+        // The check announces itself, holds until released, then goes
+        // red — keeping the doomed merge commit on the ref meanwhile.
+        let check = Check {
+            command: format!(
+                "touch '{sync}/checking'; i=0; until [ -e '{sync}/release' ]; do \
+                 i=$((i+1)); if [ \"$i\" -gt 600 ]; then exit 1; fi; sleep 0.05; done; exit 1"
+            ),
+        };
+        let branch =
+            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+        let before = tip(&work, "feature/wumpus");
+        let issue = agent(&work, "issue-1", "one.txt", "one\n");
+
+        std::thread::scope(|scope| {
+            let merging = scope.spawn(|| branch.merge("issue-1"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !std::path::Path::new(&sync).join("checking").exists() {
+                assert!(std::time::Instant::now() < deadline, "the check never ran");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let asked = scope.spawn(|| branch.tip());
+            std::fs::write(std::path::Path::new(&sync).join("release"), "").unwrap();
+            assert!(matches!(
+                merging.join().unwrap().unwrap(),
+                Outcome::Red { .. }
+            ));
+            assert_eq!(
+                asked.join().unwrap().unwrap(),
+                before,
+                "the settled tip, not the doomed merge commit"
+            );
+        });
 
         tidy(&issue);
         tidy(branch.workspace());
