@@ -3,6 +3,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod build;
 mod chat;
+mod config;
 mod secrets;
 
 /// The settings window, opened over the main one. One per app: a second
@@ -17,9 +18,11 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
         WebviewUrl::App("index.html?window=settings".into()),
     )
     .title("Settings")
-    // Two secret rows plus the button; grew with the GitHub row.
-    .inner_size(520.0, 240.0)
-    .resizable(false)
+    // Two tabs, each a secret row over the fields that depend on it;
+    // resizable, with a floor the tabs and their controls still fit.
+    .inner_size(620.0, 420.0)
+    .min_inner_size(520.0, 360.0)
+    .resizable(true)
     .minimizable(false);
     // Parented, so it floats above the main window and travels with it —
     // the native reading of "modal" this app can offer on every platform.
@@ -70,7 +73,8 @@ pub fn run() {
                 eprintln!("{error:#}; starting with the built-in defaults");
                 epik::config::Config::default()
             });
-            app.manage(config);
+            // Managed behind a lock: the settings window replaces it.
+            app.manage(std::sync::Mutex::new(config));
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.
             app.handle().set_theme(None);
@@ -106,6 +110,10 @@ pub fn run() {
             chat::answer_question,
             secrets::secret_reveal,
             secrets::secret_save,
+            config::config_read,
+            config::config_write,
+            config::models_list,
+            config::github_login,
             set_theme,
             settings_open,
             settings_close

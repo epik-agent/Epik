@@ -37,11 +37,11 @@ use epik::tools::{self, Registry, Tool};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The keystore entry the turn's key comes from.
-const API_KEY_NAME: &str = "ANTHROPIC_API_KEY";
+pub(crate) const API_KEY_NAME: &str = "ANTHROPIC_API_KEY";
 
 /// The keystore entry the GitHub verbs authenticate with. Optional: absent
 /// means public reads still work and the writing verbs refuse per-call.
-const GITHUB_TOKEN_NAME: &str = "GITHUB_TOKEN";
+pub(crate) const GITHUB_TOKEN_NAME: &str = "GITHUB_TOKEN";
 
 /// Where to send someone whose turn failed for want of a key.
 const SET_KEY_HINT: &str = "Set the Anthropic key in Settings (Cmd+,).";
@@ -282,9 +282,14 @@ pub async fn send_message(
         Resolved::Absent | Resolved::Unreachable(_) => None,
     };
 
-    // What the configuration file stated at startup: the models and the
-    // default owner. Cloned out of managed state so the thread owns it.
-    let config = app.state::<Config>().inner().clone();
+    // What the configuration states now — the file at startup, or the
+    // last write from the settings window. Cloned out of managed state
+    // so the thread owns it.
+    let config = app
+        .state::<Mutex<Config>>()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
 
     // The turn gets its own thread: an inline turn would hold this async
     // context — and the window's patience — for its whole duration.
