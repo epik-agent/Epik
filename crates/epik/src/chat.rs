@@ -364,12 +364,13 @@ impl Client {
     }
 
     /// The one provider constructor so far: Anthropic's OpenAI-compatible
-    /// endpoint, speaking to [`ANTHROPIC_MODEL`].
+    /// endpoint, speaking to `model` — or to [`ANTHROPIC_MODEL`], the
+    /// pinned default, when none is stated.
     #[must_use]
-    pub fn anthropic(key: Secret) -> Self {
+    pub fn anthropic(key: Secret, model: Option<String>) -> Self {
         Self::new(
             "https://api.anthropic.com/v1".to_owned(),
-            ANTHROPIC_MODEL.to_owned(),
+            model.unwrap_or_else(|| ANTHROPIC_MODEL.to_owned()),
             Some(key),
         )
     }
@@ -776,6 +777,15 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_resolves_an_absent_model_to_the_pinned_default() {
+        assert_eq!(Client::anthropic("k".into(), None).model, ANTHROPIC_MODEL);
+        assert_eq!(
+            Client::anthropic("k".into(), Some("other".to_owned())).model,
+            "other"
+        );
+    }
 
     fn message(role: Role, text: &str) -> TranscriptItem {
         TranscriptItem::Message {

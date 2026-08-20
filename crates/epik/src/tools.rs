@@ -449,10 +449,10 @@ mod tests {
 
         fn full() -> Registry {
             let mut registry = Registry::standard();
-            registry.extend(crate::github::tools::all(crate::github::GitHub::at(
-                "http://127.0.0.1:1",
+            registry.extend(crate::github::tools::all(
+                crate::github::GitHub::at("http://127.0.0.1:1", None),
                 None,
-            )));
+            ));
             registry.extend(crate::git::all());
             registry
         }

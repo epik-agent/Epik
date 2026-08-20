@@ -6,6 +6,8 @@ pub mod chat;
 pub mod check;
 #[cfg(feature = "native")]
 mod child;
+#[cfg(feature = "native")]
+pub mod config;
 pub mod feature;
 #[cfg(all(feature = "native", unix))]
 pub mod forge;

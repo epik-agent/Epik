@@ -20,20 +20,26 @@ use crate::tracker::Tracker;
 
 /// One tool per public GitHub verb — plus `feature_plan`, the
 /// [`Tracker`] seam's read of a whole feature — all speaking through
-/// `github`.
+/// `github`. Every verb takes a repository, settled once here against
+/// `owner`, the configured default a bare name completes with.
 #[must_use]
-pub fn all(github: GitHub) -> Vec<Tool> {
+pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
     let github = Arc::new(github);
-    let gh = |f: fn(&GitHub, &Value) -> Result<Value, String>| {
+    let owner = Arc::new(owner);
+    let gh = |f: fn(&GitHub, &Repo, &Value) -> Result<Value, String>| {
         let github = Arc::clone(&github);
-        Box::new(move |arguments: &Value| f(&github, arguments)) as crate::tools::Handler
+        let owner = Arc::clone(&owner);
+        Box::new(move |arguments: &Value| {
+            let repo = Repo::settle(string(arguments, "repo")?, owner.as_deref())?;
+            f(&github, &repo, arguments)
+        }) as crate::tools::Handler
     };
     vec![
         Tool::new(
             "github_default_branch",
             "The default branch name of a GitHub repository.",
             schema(&[repo_arg()], &["repo"]),
-            gh(|github, arguments| answer(github.default_branch(&repo(arguments)?))),
+            gh(|github, repo, _| answer(github.default_branch(repo))),
         ),
         Tool::new(
             "github_issue",
@@ -42,9 +48,7 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), number_arg("number", "The issue number.")],
                 &["repo", "number"],
             ),
-            gh(|github, arguments| {
-                answer(github.issue(&repo(arguments)?, number(arguments, "number")?))
-            }),
+            gh(|github, repo, arguments| answer(github.issue(repo, number(arguments, "number")?))),
         ),
         Tool::new(
             "github_create_issue",
@@ -57,9 +61,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "title", "body"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 answer(github.create_issue(
-                    &repo(arguments)?,
+                    repo,
                     string(arguments, "title")?,
                     string(arguments, "body")?,
                 ))
@@ -77,9 +81,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "number"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 answer(github.edit_issue(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "number")?,
                     optional(arguments, "title"),
                     optional(arguments, "body"),
@@ -97,9 +101,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "number", "body"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.comment(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "number")?,
                     string(arguments, "body")?,
                 ))
@@ -112,8 +116,8 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), number_arg("number", "The issue number.")],
                 &["repo", "number"],
             ),
-            gh(|github, arguments| {
-                answer(github.close_issue(&repo(arguments)?, number(arguments, "number")?))
+            gh(|github, repo, arguments| {
+                answer(github.close_issue(repo, number(arguments, "number")?))
             }),
         ),
         Tool::new(
@@ -129,9 +133,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "title", "head", "base", "body"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 answer(github.open_pull(
-                    &repo(arguments)?,
+                    repo,
                     string(arguments, "title")?,
                     string(arguments, "head")?,
                     string(arguments, "base")?,
@@ -146,9 +150,7 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), number_arg("number", "The pull request number.")],
                 &["repo", "number"],
             ),
-            gh(|github, arguments| {
-                answer(github.pull(&repo(arguments)?, number(arguments, "number")?))
-            }),
+            gh(|github, repo, arguments| answer(github.pull(repo, number(arguments, "number")?))),
         ),
         Tool::new(
             "github_pull_for",
@@ -157,9 +159,7 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), string_arg("head", "The branch name.")],
                 &["repo", "head"],
             ),
-            gh(|github, arguments| {
-                answer(github.pull_for(&repo(arguments)?, string(arguments, "head")?))
-            }),
+            gh(|github, repo, arguments| answer(github.pull_for(repo, string(arguments, "head")?))),
         ),
         Tool::new(
             "github_merge_pull",
@@ -179,10 +179,10 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "number", "method"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 let method: Merge = serde_json::from_value(arguments["method"].clone())
                     .map_err(|_| "method must be commit, squash, or rebase".to_owned())?;
-                done(github.merge_pull(&repo(arguments)?, number(arguments, "number")?, method))
+                done(github.merge_pull(repo, number(arguments, "number")?, method))
             }),
         ),
         Tool::new(
@@ -192,8 +192,8 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), string_arg("branch", "The branch name.")],
                 &["repo", "branch"],
             ),
-            gh(|github, arguments| {
-                answer(github.branch_sha(&repo(arguments)?, string(arguments, "branch")?))
+            gh(|github, repo, arguments| {
+                answer(github.branch_sha(repo, string(arguments, "branch")?))
             }),
         ),
         Tool::new(
@@ -207,12 +207,8 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "base", "head"],
             ),
-            gh(|github, arguments| {
-                answer(github.compare(
-                    &repo(arguments)?,
-                    string(arguments, "base")?,
-                    string(arguments, "head")?,
-                ))
+            gh(|github, repo, arguments| {
+                answer(github.compare(repo, string(arguments, "base")?, string(arguments, "head")?))
             }),
         ),
         Tool::new(
@@ -226,9 +222,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "branch", "sha"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.create_branch(
-                    &repo(arguments)?,
+                    repo,
                     string(arguments, "branch")?,
                     string(arguments, "sha")?,
                 ))
@@ -244,8 +240,8 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "ref"],
             ),
-            gh(|github, arguments| {
-                answer(github.check_conclusions(&repo(arguments)?, string(arguments, "ref")?))
+            gh(|github, repo, arguments| {
+                answer(github.check_conclusions(repo, string(arguments, "ref")?))
             }),
         ),
         Tool::new(
@@ -255,8 +251,8 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 &[repo_arg(), number_arg("number", "The issue number.")],
                 &["repo", "number"],
             ),
-            gh(|github, arguments| {
-                answer(github.issue_graph(&repo(arguments)?, number(arguments, "number")?))
+            gh(|github, repo, arguments| {
+                answer(github.issue_graph(repo, number(arguments, "number")?))
             }),
         ),
         Tool::new(
@@ -272,7 +268,7 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "feature"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 /// The whole [`Plan`] flattened into the answer — a field
                 /// added to it later reaches the model unasked — plus the
                 /// two readings taken of it.
@@ -283,7 +279,7 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                     ready: Vec<&'a crate::feature::Issue>,
                     problems: Vec<crate::feature::Problem>,
                 }
-                let tracker = GitHubTracker::new(github, repo(arguments)?);
+                let tracker = GitHubTracker::new(github, repo.clone());
                 let plan = tracker.plan(&IssueId::from(number(arguments, "feature")?))?;
                 let none = BTreeSet::new();
                 answer(Ok(Shown {
@@ -304,9 +300,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "parent", "child"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.add_sub_issue(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "parent")?,
                     number(arguments, "child")?,
                 ))
@@ -323,9 +319,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "parent", "child"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.remove_sub_issue(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "parent")?,
                     number(arguments, "child")?,
                 ))
@@ -342,9 +338,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "issue", "blocker"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.add_blocked_by(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "issue")?,
                     number(arguments, "blocker")?,
                 ))
@@ -361,9 +357,9 @@ pub fn all(github: GitHub) -> Vec<Tool> {
                 ],
                 &["repo", "issue", "blocker"],
             ),
-            gh(|github, arguments| {
+            gh(|github, repo, arguments| {
                 done(github.remove_blocked_by(
-                    &repo(arguments)?,
+                    repo,
                     number(arguments, "issue")?,
                     number(arguments, "blocker")?,
                 ))
@@ -379,7 +375,7 @@ fn repo_arg() -> (&'static str, Value) {
         "repo",
         json!({
             "type": "string",
-            "description": "The repository as one owner/name string, e.g. epik-agent/Epik.",
+            "description": "The repository as one owner/name string, e.g. epik-agent/Epik. A bare name is accepted when a default owner is configured.",
         }),
     )
 }
@@ -404,10 +400,6 @@ fn schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
         .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
         .collect();
     json!({ "type": "object", "properties": properties, "required": required })
-}
-
-fn repo(arguments: &Value) -> Result<Repo, String> {
-    Repo::settle(string(arguments, "repo")?)
 }
 
 fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
@@ -448,13 +440,13 @@ mod tests {
         // Port 1 is reserved; a handler that reached the wire would say
         // so rather than answer.
         let mut registry = crate::tools::Registry::default();
-        registry.extend(all(GitHub::at("http://127.0.0.1:1", None)));
+        registry.extend(all(GitHub::at("http://127.0.0.1:1", None), None));
         registry
     }
 
     #[test]
     fn one_tool_per_public_verb_plus_the_trackers_plan() {
-        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None)).len(), 20);
+        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None), None).len(), 20);
     }
 
     #[test]
@@ -474,6 +466,24 @@ mod tests {
             .dispatch("github_issue", r#"{"repo":"not a repo","number":1}"#)
             .unwrap_err();
         assert!(error.contains("owner/name"), "{error}");
+    }
+
+    #[test]
+    fn a_bare_name_settles_against_the_configured_owner() {
+        let mut with_owner = crate::tools::Registry::default();
+        with_owner.extend(all(
+            GitHub::at("http://127.0.0.1:1", None),
+            Some("epik-agent".to_owned()),
+        ));
+        // Past the spelling check and onto the wire, where port 1 refuses.
+        let error = with_owner
+            .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
+            .unwrap_err();
+        assert!(!error.contains("owner/name"), "{error}");
+        let error = registry()
+            .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
+            .unwrap_err();
+        assert!(error.contains("Settings"), "{error}");
     }
 
     #[test]

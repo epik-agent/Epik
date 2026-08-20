@@ -30,6 +30,7 @@ use epik::chat::{
     Answer, Ask, ChatError, Client, Conversation, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
     TranscriptItem,
 };
+use epik::config::Config;
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, OsKeyring, Resolved};
 use epik::tools::{self, Registry, Tool};
@@ -281,6 +282,10 @@ pub async fn send_message(
         Resolved::Absent | Resolved::Unreachable(_) => None,
     };
 
+    // What the configuration file stated at startup: the models and the
+    // default owner. Cloned out of managed state so the thread owns it.
+    let config = app.state::<Config>().inner().clone();
+
     // The turn gets its own thread: an inline turn would hold this async
     // context — and the window's patience — for its whole duration.
     std::thread::spawn(move || {
@@ -288,13 +293,20 @@ pub async fn send_message(
         // own logged-in auth would also do, but the one the user set here
         // is the one they mean.
         let agent_key = Some(key.clone());
-        let client = Client::anthropic(key);
+        let client = Client::anthropic(key, config.model.chat);
         // Assembled fresh each turn, so a token pasted mid-session
         // reaches the very next turn.
         let mut registry = Registry::standard();
-        registry.extend(epik::github::tools::all(GitHub::new(github_token.clone())));
+        registry.extend(epik::github::tools::all(
+            GitHub::new(github_token.clone()),
+            config.github.owner.clone(),
+        ));
         registry.extend(epik::git::all());
-        registry.extend(crate::build::tools(app.clone(), agent_key.clone()));
+        registry.extend(crate::build::tools(
+            app.clone(),
+            agent_key.clone(),
+            config.model.agent.clone(),
+        ));
         // The one question rail: whoever asks — the persona through
         // choose_repository, or the feature build machinery raising its
         // check card — blocks the turn's thread until the window answers.
@@ -314,7 +326,9 @@ pub async fn send_message(
         registry.extend(crate::build::feature_tools(
             &app,
             agent_key,
+            config.model.agent,
             github_token,
+            config.github.owner,
             asker(app.clone()),
         ));
         registry.register(choose_repository(asker(app.clone())));

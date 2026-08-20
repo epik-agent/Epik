@@ -165,7 +165,8 @@ fn claude() -> Result<PathBuf, String> {
 /// locate the binaries, provision, assemble Claude Code in the workspace
 /// with the brief as its prompt, launch. `api_key` rides into the
 /// Agent's environment when there is one; without it the CLI's own
-/// logged-in auth applies. The slot is held for the Agent's life
+/// logged-in auth applies. `model` is the configured agent model, or
+/// `None` to let the CLI pick its own. The slot is held for the Agent's life
 /// exactly: launch's exit hook releases it at the run's Finished
 /// transition, so a feature build alongside gets the slot back the
 /// moment the Agent is gone — and a drain that never ends cannot keep
@@ -173,6 +174,7 @@ fn claude() -> Result<PathBuf, String> {
 fn start_claude(
     order: Order,
     api_key: Option<Secret>,
+    model: Option<String>,
     budget: &Arc<Budget>,
 ) -> Result<Started, String> {
     let slot = budget.claim().ok_or(
@@ -186,7 +188,7 @@ fn start_claude(
         binary: claude.to_string_lossy().into_owned(),
         cwd: workspace.directory.to_string_lossy().into_owned(),
         prompt: workspace.brief(&order.prompt),
-        model: None,
+        model,
         api_key,
     };
     let record = Record::new(order, workspace);
@@ -347,15 +349,17 @@ impl Default for FeatureState {
 }
 
 /// The build tools as the app registers them each turn: the slot lives
-/// in managed state, the starter is Claude Code with `api_key`, and the
-/// Agent slot comes from the shared budget.
-pub fn tools(app: AppHandle, api_key: Option<Secret>) -> Vec<Tool> {
+/// in managed state, the starter is Claude Code with `api_key` speaking
+/// to the configured `model`, and the Agent slot comes from the shared
+/// budget.
+pub fn tools(app: AppHandle, api_key: Option<Secret>, model: Option<String>) -> Vec<Tool> {
     let starter = {
         let app = app.clone();
         move |order| {
             let budget = Arc::clone(&app.state::<FeatureState>().budget);
-            app.state::<BuildState>()
-                .start(order, |order| start_claude(order, api_key.clone(), &budget))
+            app.state::<BuildState>().start(order, |order| {
+                start_claude(order, api_key.clone(), model.clone(), &budget)
+            })
         }
     };
     vec![
@@ -368,11 +372,15 @@ pub fn tools(app: AppHandle, api_key: Option<Secret>) -> Vec<Tool> {
 /// `start_feature` and `feature_status` wired to GitHub as the tracker
 /// and the forge, Claude Code as the Agent, and the window's question
 /// rail as the asker. `github_token` reads the plan and pushes the
-/// feature branch; the writing side refuses in words without it.
+/// feature branch; the writing side refuses in words without it. `model`
+/// is the configured agent model, and `owner` the configured default a
+/// bare repository name settles against.
 pub fn feature_tools(
     app: &AppHandle,
     api_key: Option<Secret>,
+    model: Option<String>,
     github_token: Option<Secret>,
+    owner: Option<String>,
     asker: impl Fn(Ask) -> Answer + 'static,
 ) -> Vec<Tool> {
     let state = app.state::<FeatureState>();
@@ -380,9 +388,10 @@ pub fn feature_tools(
     let budget = Arc::clone(&state.budget);
     let plan = {
         let token = github_token.clone();
+        let owner = owner.clone();
         move |spec: &str, feature: &IssueId| -> Result<Plan, String> {
             let github = GitHub::new(token.clone());
-            GitHubTracker::new(&github, Repo::settle(spec)?).plan(feature)
+            GitHubTracker::new(&github, Repo::settle(spec, owner.as_deref())?).plan(feature)
         }
     };
     let forge = move |spec: &str| -> Result<epik::forge::GitHub, String> {
@@ -391,19 +400,20 @@ pub fn feature_tools(
              set the GitHub token in Settings (Cmd+,)",
         )?;
         Ok(epik::forge::GitHub {
-            repo: Repo::settle(spec)?,
+            repo: Repo::settle(spec, owner.as_deref())?,
             token,
         })
     };
     let agents = move || {
         let claude = claude()?.to_string_lossy().into_owned();
         let api_key = api_key.clone();
+        let model = model.clone();
         Ok(
             move |_issue: &Issue, workspace: &Workspace, brief: &str| ClaudeCode {
                 binary: claude.clone(),
                 cwd: workspace.directory.to_string_lossy().into_owned(),
                 prompt: brief.to_owned(),
-                model: None,
+                model: model.clone(),
                 api_key: api_key.clone(),
             },
         )
