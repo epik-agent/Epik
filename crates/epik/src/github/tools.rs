@@ -469,6 +469,24 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_name_settles_against_the_configured_owner() {
+        let mut with_owner = crate::tools::Registry::default();
+        with_owner.extend(all(
+            GitHub::at("http://127.0.0.1:1", None),
+            Some("epik-agent".to_owned()),
+        ));
+        // Past the spelling check and onto the wire, where port 1 refuses.
+        let error = with_owner
+            .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
+            .unwrap_err();
+        assert!(!error.contains("owner/name"), "{error}");
+        let error = registry()
+            .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
+            .unwrap_err();
+        assert!(error.contains("Settings"), "{error}");
+    }
+
+    #[test]
     fn a_writing_verb_without_a_token_answers_with_the_settings_pointer() {
         let error = registry()
             .dispatch(
