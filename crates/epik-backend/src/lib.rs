@@ -37,9 +37,12 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
 /// in a dev build that runs outside an app bundle.
 fn about(handle: &AppHandle) -> tauri::Result<PredefinedMenuItem<Wry>> {
     let info = handle.package_info();
+    let bundle = &handle.config().bundle;
     let metadata = AboutMetadata {
         name: Some(info.name.clone()),
         version: Some(info.version.to_string()),
+        copyright: bundle.copyright.clone(),
+        authors: bundle.publisher.clone().map(|publisher| vec![publisher]),
         icon: handle.default_window_icon().cloned(),
         ..Default::default()
     };
@@ -103,8 +106,11 @@ pub fn run() {
             // to one with the icon.
             for submenu in menu.items()?.iter().filter_map(|item| item.as_submenu()) {
                 let position = submenu.items()?.iter().position(|item| {
-                    item.as_predefined_menuitem()
-                        .is_some_and(|item| item.text().is_ok_and(|text| text.starts_with("About")))
+                    // "About Epik" here, "&About" on Linux.
+                    item.as_predefined_menuitem().is_some_and(|item| {
+                        item.text()
+                            .is_ok_and(|text| text.trim_start_matches('&').starts_with("About"))
+                    })
                 });
                 if let Some(position) = position {
                     submenu.remove_at(position)?;
