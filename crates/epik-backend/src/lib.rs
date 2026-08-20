@@ -70,6 +70,7 @@ pub fn run() {
         })
         .manage(chat::ChatState::default())
         .manage(build::BuildState::default())
+        .manage(build::FeatureState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             let settings =

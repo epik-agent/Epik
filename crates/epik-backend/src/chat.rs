@@ -164,7 +164,11 @@ fn choose_repository(asker: impl Fn(Ask) -> Answer + 'static) -> Tool {
                 .to_owned();
             Ok(match asker(Ask::Repository { prompt }) {
                 Answer::Repository { url } => serde_json::json!({ "url": url }),
-                Answer::Declined => serde_json::json!({ "declined": true }),
+                // A check answer never comes off a repository card; if
+                // one ever did, it is no location, which is a decline.
+                Answer::Check { .. } | Answer::Declined => {
+                    serde_json::json!({ "declined": true })
+                }
             })
         }),
     )
@@ -288,11 +292,13 @@ pub async fn send_message(
         // Assembled fresh each turn, so a token pasted mid-session
         // reaches the very next turn.
         let mut registry = Registry::standard();
-        registry.extend(epik::github::tools::all(GitHub::new(github_token)));
+        registry.extend(epik::github::tools::all(GitHub::new(github_token.clone())));
         registry.extend(epik::git::all());
-        registry.extend(crate::build::tools(app.clone(), agent_key));
-        registry.register(choose_repository({
-            let app = app.clone();
+        registry.extend(crate::build::tools(app.clone(), agent_key.clone()));
+        // The one question rail: whoever asks — the persona through
+        // choose_repository, or the feature build machinery raising its
+        // check card — blocks the turn's thread until the window answers.
+        let asker = |app: AppHandle| {
             move |question| {
                 let state = app.state::<ChatState>();
                 ask(
@@ -304,7 +310,14 @@ pub async fn send_message(
                     },
                 )
             }
-        }));
+        };
+        registry.extend(crate::build::feature_tools(
+            &app,
+            agent_key,
+            github_token,
+            asker(app.clone()),
+        ));
+        registry.register(choose_repository(asker(app.clone())));
         let stop = AtomicBool::new(false);
         let state = app.state::<ChatState>();
         turn(
@@ -775,7 +788,9 @@ mod tests {
     fn a_missing_prompt_gets_a_default_wording() {
         let mut registry = Registry::default();
         registry.register(choose_repository(|question| {
-            let Ask::Repository { prompt } = question;
+            let Ask::Repository { prompt } = question else {
+                panic!("a repository card asks for a repository");
+            };
             assert!(!prompt.is_empty());
             Answer::Repository { url: prompt }
         }));

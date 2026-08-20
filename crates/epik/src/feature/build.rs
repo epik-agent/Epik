@@ -5,9 +5,10 @@
 //!
 //! [`build`] starts the machinery and returns; the caller holds the
 //! shared [`Build`] record and watches the build proceed. The ready set
-//! fills whatever slots are free — [`CONCURRENCY`] of them — and a
-//! finished issue releases its slot at once: there is no round barrier,
-//! so a fast issue never waits on a slow sibling. Each issue's branch
+//! fills whatever slots are free — [`CONCURRENCY`] of them, drawn from
+//! the [`Budget`] the caller hands in, which a plain build alongside
+//! draws on too — and a finished issue releases its slot at once: there
+//! is no round barrier, so a fast issue never waits on a slow sibling. Each issue's branch
 //! is cut at dispatch from [`Branch::tip`] — the settled tip, read
 //! under the merge lock, so a commit a red check is about to reset away
 //! is never anyone's base — and an issue that starts late already
@@ -50,11 +51,82 @@ use crate::git::plumbing;
 /// honest until there is somewhere for a setting to live.
 pub const CONCURRENCY: usize = 4;
 
+/// A budget of [`CONCURRENCY`] Agent slots. One per host, so a feature
+/// build and a plain build drawing on the same budget never run more
+/// than four Agents between them. A claim is non-blocking — each caller
+/// keeps its own discipline: a feature build waits, a plain build
+/// refuses — and releasing a slot wakes every watcher, so a scheduler
+/// starved by another build's claims hears the slot come back.
+#[derive(Debug)]
+pub struct Budget {
+    free: Mutex<usize>,
+    watchers: Mutex<Vec<std::sync::Weak<Condvar>>>,
+}
+
+impl Budget {
+    /// A fresh budget of [`CONCURRENCY`] slots, shared from birth: every
+    /// claimant holds the same `Arc`.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            free: Mutex::new(CONCURRENCY),
+            watchers: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// One slot, held until the [`Slot`] drops — or `None` when all
+    /// four are out.
+    #[must_use]
+    pub fn claim(self: &Arc<Self>) -> Option<Slot> {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        if *free == 0 {
+            return None;
+        }
+        *free -= 1;
+        Some(Slot(Arc::clone(self)))
+    }
+
+    /// Registers `signal` to be notified whenever a slot comes free. A
+    /// watcher whose condvar has died is pruned on the next release.
+    pub fn watch(&self, signal: &Arc<Condvar>) {
+        self.watchers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(signal));
+    }
+
+    fn release(&self) {
+        *self.free.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        self.watchers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|watcher| {
+                watcher
+                    .upgrade()
+                    .map(|signal| signal.notify_all())
+                    .is_some()
+            });
+    }
+}
+
+/// A held Agent slot. Dropping it returns the slot to its [`Budget`]
+/// and wakes the watchers.
+#[derive(Debug)]
+pub struct Slot(Arc<Budget>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
 /// Where one issue stands: waiting on a slot or a blocker, running
 /// under an Agent, merging behind the lock, and three ends — landed,
 /// failed in its own right, or skipped because nothing this build can
-/// do would ever make it ready.
+/// do would ever make it ready. Serialized — `feature_status`'s answer
+/// on its way to a model — tagged by its state word.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum State {
     /// Not yet dispatched: blocked, or ready and out of slots.
     Waiting,
@@ -203,10 +275,18 @@ fn brief(issue: &Issue) -> String {
 /// Starts the feature build and returns; the caller holds the record
 /// while the build proceeds, and [`Build::finished`] is how it knows
 /// the build is over. `branch` is the feature branch as
-/// [`Branch::establish`] left it, `runner` the agent runner binary, and
+/// [`Branch::establish`] left it, `runner` the agent runner binary,
 /// `agents` turns one dispatched issue — with its provisioned workspace
-/// and assembled brief — into the Agent that implements it.
-pub fn build<F, A, M>(plan: Plan, branch: Branch<F>, runner: &Path, agents: M) -> Arc<Mutex<Build>>
+/// and assembled brief — into the Agent that implements it, and
+/// `budget` is where the Agent slots come from — the host's one budget,
+/// so a plain build running alongside draws on the same four.
+pub fn build<F, A, M>(
+    plan: Plan,
+    branch: Branch<F>,
+    runner: &Path,
+    agents: M,
+    budget: Arc<Budget>,
+) -> Arc<Mutex<Build>>
 where
     F: Forge + Send + Sync + 'static,
     A: Agent + 'static,
@@ -218,8 +298,10 @@ where
         branch: Arc::new(branch),
         runner: runner.to_path_buf(),
         agents: Arc::new(agents),
+        budget,
         _agent: PhantomData,
     };
+    machinery.budget.watch(&machinery.signal);
     let record = Arc::clone(&machinery.record);
     std::thread::spawn(move || machinery.schedule());
     record
@@ -227,13 +309,14 @@ where
 
 /// Everything a worker thread needs, cheap to clone: the shared record,
 /// the condvar that wakes the scheduler, the feature branch, the runner,
-/// and the Agent factory.
+/// the Agent factory, and the slot budget.
 struct Machinery<F: Forge, A, M> {
     record: Arc<Mutex<Build>>,
     signal: Arc<Condvar>,
     branch: Arc<Branch<F>>,
     runner: PathBuf,
     agents: Arc<M>,
+    budget: Arc<Budget>,
     _agent: PhantomData<fn() -> A>,
 }
 
@@ -245,6 +328,7 @@ impl<F: Forge, A, M> Clone for Machinery<F, A, M> {
             branch: Arc::clone(&self.branch),
             runner: self.runner.clone(),
             agents: Arc::clone(&self.agents),
+            budget: Arc::clone(&self.budget),
             _agent: PhantomData,
         }
     }
@@ -256,27 +340,26 @@ where
     A: Agent + 'static,
     M: Fn(&Issue, &Workspace, &str) -> A + Send + Sync + 'static,
 {
-    /// The slot loop: fill whatever slots are free from the ready set,
-    /// sleep when nothing can move, return when nothing is ready and
-    /// nothing is running. Issues are marked Running under the same
-    /// lock that read the ready set, so a slot is never promised twice.
+    /// The slot loop: fill whatever slots the budget yields from the
+    /// ready set, sleep when nothing can move, return when nothing is
+    /// ready and nothing is running. Issues are marked Running under
+    /// the same lock that read the ready set, so a slot is never
+    /// promised twice; a budget emptied by another build wakes this
+    /// loop through the watcher it registered.
     fn schedule(self) {
         loop {
             let batch = {
                 let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
-                    let running = build
-                        .states
-                        .values()
-                        .filter(|state| matches!(state, State::Running))
-                        .count();
-                    let batch: Vec<Issue> = build
-                        .dispatchable()
-                        .into_iter()
-                        .take(CONCURRENCY.saturating_sub(running))
-                        .collect();
+                    let mut batch: Vec<(Issue, Slot)> = Vec::new();
+                    for issue in build.dispatchable() {
+                        let Some(slot) = self.budget.claim() else {
+                            break;
+                        };
+                        batch.push((issue, slot));
+                    }
                     if !batch.is_empty() {
-                        for issue in &batch {
+                        for (issue, _) in &batch {
                             build.states.insert(issue.id.clone(), State::Running);
                         }
                         break batch;
@@ -290,9 +373,9 @@ where
                         .unwrap_or_else(PoisonError::into_inner);
                 }
             };
-            for issue in batch {
+            for (issue, slot) in batch {
                 let machinery = self.clone();
-                std::thread::spawn(move || machinery.work(&issue));
+                std::thread::spawn(move || machinery.work(&issue, slot));
             }
         }
     }
@@ -302,10 +385,12 @@ where
     /// that dooms — and wake the scheduler. A worker must never hang the
     /// build: the Agent factory is caller code, so a panic anywhere in
     /// the attempt becomes a Failed issue with the panic's words, and
-    /// the slot is released like any other end.
-    fn work(&self, issue: &Issue) {
-        let landed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(issue)))
-            .unwrap_or_else(|panic| Err(format!("the worker panicked: {}", words(&*panic))));
+    /// the slot is released like any other end — the attempt owns it,
+    /// and every exit drops it.
+    fn work(&self, issue: &Issue, slot: Slot) {
+        let landed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(issue, slot)))
+                .unwrap_or_else(|panic| Err(format!("the worker panicked: {}", words(&*panic))));
         {
             let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
             match landed {
@@ -324,8 +409,9 @@ where
     /// tip at this moment, an Agent launched in a workspace of it, the
     /// commit observation judged, and the branch merged. The slot is
     /// released — Merging said, scheduler woken — before queueing on
-    /// the merge lock, so no issue waits on a slower sibling's check.
-    fn attempt(&self, issue: &Issue) -> Result<(String, bool), String> {
+    /// the merge lock, so no issue waits on a slower sibling's check;
+    /// any earlier exit drops it on the way out.
+    fn attempt(&self, issue: &Issue, slot: Slot) -> Result<(String, bool), String> {
         let feature = self.branch.workspace();
         let order = Order {
             prompt: brief(issue),
@@ -388,6 +474,7 @@ where
                 .states
                 .insert(issue.id.clone(), State::Merging);
         }
+        drop(slot);
         self.signal.notify_all();
         match self.branch.merge(&branch)? {
             Outcome::Merged { commit, checked } => Ok((commit, checked)),
@@ -616,5 +703,52 @@ mod tests {
         assert_eq!(words(&"static words"), "static words");
         assert_eq!(words(&"owned words".to_owned()), "owned words");
         assert_eq!(words(&7_u64), "no words came with it");
+    }
+
+    #[test]
+    fn the_budget_yields_exactly_four_slots_and_a_drop_gives_one_back() {
+        let budget = Budget::new();
+        let held: Vec<Slot> = std::iter::from_fn(|| budget.claim()).collect();
+        assert_eq!(held.len(), CONCURRENCY);
+        assert!(budget.claim().is_none(), "the fifth claim is refused");
+        drop(held);
+        assert!(budget.claim().is_some(), "a dropped slot comes back");
+    }
+
+    /// The watcher rail: a scheduler asleep on its own condvar hears a
+    /// slot another claimant releases.
+    #[test]
+    fn releasing_a_slot_wakes_a_registered_watcher() {
+        let budget = Budget::new();
+        let signal = Arc::new(Condvar::new());
+        budget.watch(&signal);
+        let woken = Arc::new(Mutex::new(false));
+
+        let waiter = std::thread::spawn({
+            let signal = Arc::clone(&signal);
+            let woken = Arc::clone(&woken);
+            move || {
+                let mut woken = woken.lock().unwrap();
+                while !*woken {
+                    woken = signal.wait(woken).unwrap();
+                }
+            }
+        });
+        let slot = budget.claim().unwrap();
+        // The release notifies; the waiter's own flag is set first so
+        // the wait's exit condition is the notification's work.
+        *woken.lock().unwrap() = true;
+        drop(slot);
+        waiter.join().unwrap();
+    }
+
+    /// A watcher whose condvar died is pruned rather than notified into
+    /// a dangle.
+    #[test]
+    fn a_dead_watcher_is_pruned_on_release() {
+        let budget = Budget::new();
+        budget.watch(&Arc::new(Condvar::new()));
+        drop(budget.claim().unwrap());
+        assert!(budget.watchers.lock().unwrap().is_empty());
     }
 }

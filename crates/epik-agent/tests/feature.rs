@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use common::{Scratch, Shell, git, runner, seeded, tidy};
 use epik::build::Workspace;
 use epik::feature::merge::Branch;
-use epik::feature::{self, Build, Issue, IssueId, Node, Plan, State};
+use epik::feature::{self, Budget, Build, Issue, IssueId, Node, Plan, State};
 
 fn id(number: u64) -> IssueId {
     IssueId::from(number)
@@ -179,6 +179,7 @@ fn a_diamond_runs_its_middles_at_once_and_its_tail_only_after_both_land() {
                 format!("test -f issue-3.txt && test -f issue-4.txt && {}", lands(5)),
             ),
         ])),
+        Budget::new(),
     );
 
     eventually("the diamond finishes", || snapshot(&record).finished());
@@ -245,6 +246,7 @@ fn a_chain_of_five_runs_one_at_a_time_each_from_its_predecessors_tip() {
             (5, link(5)),
             (6, link(6)),
         ])),
+        Budget::new(),
     );
 
     eventually("the chain finishes", || snapshot(&record).finished());
@@ -320,6 +322,7 @@ fn a_plan_with_more_ready_issues_than_slots_never_runs_more_than_four_agents() {
         branch,
         runner(),
         scripted((2..=7).map(|number| (number, held(number))).collect()),
+        Budget::new(),
     );
 
     eventually("four Agents start", || started().len() == 4);
@@ -399,6 +402,7 @@ fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
             (4, lands(4)),
             (5, "exit 9".to_owned()), // must never be dispatched
         ])),
+        Budget::new(),
     );
 
     eventually("the build finishes around the failure", || {
@@ -462,6 +466,7 @@ fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
                 cwd: workspace.directory.to_string_lossy().into_owned(),
             }
         },
+        Budget::new(),
     );
 
     eventually("the build survives the panic", || {
@@ -499,6 +504,7 @@ fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() 
         branch,
         runner(),
         scripted(BTreeMap::from([(2, "exit 3".to_owned())])),
+        Budget::new(),
     );
     eventually("the first build fails", || snapshot(&record).finished());
     assert!(matches!(state(&record, 2), State::Failed { .. }));
@@ -515,6 +521,7 @@ fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() 
         branch,
         runner(),
         scripted(BTreeMap::from([(2, lands(2))])),
+        Budget::new(),
     );
     eventually("the rerun lands", || snapshot(&record).finished());
     assert!(
@@ -523,6 +530,80 @@ fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() 
         snapshot(&record).states
     );
     assert!(on_branch(&work, "feature/wumpus", "issue-2.txt"));
+
+    tidy(&work, &feature_workspace);
+}
+
+/// The budget is shared: a slot claimed outside the feature build — a
+/// plain build's, in the app — leaves it three Agents, and releasing
+/// the slot wakes the scheduler for the fourth. Marker files pin the
+/// count at rest, exactly as the slots test does.
+#[test]
+fn a_slot_claimed_outside_the_build_leaves_it_three_agents_until_released() {
+    let scratch = Scratch::new("budget");
+    let (work, forge) = seeded(&scratch);
+    let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+    let feature_workspace = branch.workspace().directory.clone();
+    let sync = scratch.join("sync");
+    std::fs::create_dir_all(&sync).unwrap();
+
+    let started = || std::fs::read_dir(&sync).unwrap().count();
+    let held = |mine: u64| {
+        format!(
+            "touch '{sync}/started-{mine}' && {} && {}",
+            until(&format!("{sync}/go-{mine}")),
+            lands(mine)
+        )
+    };
+    let budget = Budget::new();
+    let claimed = budget.claim().expect("a fresh budget has slots");
+    let record = feature::build(
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3, 4, 5], &[]),
+                node(2, false, &[], &[]),
+                node(3, false, &[], &[]),
+                node(4, false, &[], &[]),
+                node(5, false, &[], &[]),
+            ],
+        ),
+        branch,
+        runner(),
+        scripted((2..=5).map(|number| (number, held(number))).collect()),
+        std::sync::Arc::clone(&budget),
+    );
+
+    eventually("three Agents start", || started() >= 3);
+    assert_eq!(
+        counted(&record, &State::Running),
+        3,
+        "one slot is spoken for"
+    );
+    assert_eq!(
+        started(),
+        3,
+        "no fourth Agent while the outside claim holds"
+    );
+
+    // The outside claim ends — a plain build finished — and the freed
+    // slot wakes the scheduler for the fourth issue.
+    drop(claimed);
+    eventually("the fourth Agent starts", || started() >= 4);
+
+    for number in 2..=5 {
+        std::fs::write(format!("{sync}/go-{number}"), "").unwrap();
+    }
+    eventually("the whole plan lands", || snapshot(&record).finished());
+    let build = snapshot(&record);
+    assert!(
+        build
+            .states
+            .values()
+            .all(|state| matches!(state, State::Merged { .. })),
+        "{:?}",
+        build.states
+    );
 
     tidy(&work, &feature_workspace);
 }
