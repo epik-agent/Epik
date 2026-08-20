@@ -1,26 +1,41 @@
-//! Building from chat, host side: the one run slot, and the two tools
-//! through which the persona starts a build and asks after it.
+//! Building from chat, host side: the one run slot, the shared Agent
+//! budget, and the tools through which the persona starts builds and
+//! asks after them.
 //!
-//! [`BuildState`] holds one run at a time — the same claim discipline as
-//! a turn: a second `start_build` while one is in flight is refused in
-//! words — and keeps the last run's record after it finishes, so status
-//! outlives completion. Starting returns at once: an inline wait would
-//! hold the turn for the whole build. The record is the run's only sink;
-//! nothing an Agent says is ever emitted on the transcript channel.
-//! `build_status` and the git verbs are the persona's view of it.
+//! [`BuildState`] holds one plain run at a time — the same claim
+//! discipline as a turn: a second `start_build` while one is in flight
+//! is refused in words — and keeps the last run's record after it
+//! finishes, so status outlives completion. Starting returns at once:
+//! an inline wait would hold the turn for the whole build. The record
+//! is the run's only sink; nothing an Agent says is ever emitted on the
+//! transcript channel. `build_status` and the git verbs are the
+//! persona's view of it.
+//!
+//! [`FeatureState`] is the feature side: the record of feature builds
+//! and the one [`Budget`] of four Agent slots that plain builds and
+//! feature builds draw on together — a plain build claims a slot for
+//! its Agent's life, or refuses in words when all four are out. The
+//! feature tools themselves live in `epik::feature::tools`; this module
+//! only wires them to GitHub, Claude Code, and the window's question
+//! rail.
 //!
 //! The assembly — locating the runner and the `claude` binary, building
 //! the [`ClaudeCode`] Agent — is a closure handed to the tools, so tests
 //! substitute one that provisions without ever spawning a CLI.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use epik::agent::Handle;
 use epik::agent::claude_code::{ClaudeCode, Update};
 use epik::build::{self, Order, Phase, Record, Run, Workspace};
+use epik::chat::{Answer, Ask};
+use epik::feature::tools::{Builds, feature_status, start_feature};
+use epik::feature::{Budget, Issue, IssueId, Plan};
+use epik::github::{GitHub, GitHubTracker, Repo};
 use epik::keystore::Secret;
 use epik::tools::Tool;
+use epik::tracker::Tracker;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
@@ -146,11 +161,24 @@ fn claude() -> Result<PathBuf, String> {
         })
 }
 
-/// The production start: locate the binaries, provision, assemble Claude
-/// Code in the workspace with the brief as its prompt, launch. `api_key`
-/// rides into the Agent's environment when there is one; without it the
-/// CLI's own logged-in auth applies.
-fn start_claude(order: Order, api_key: Option<Secret>) -> Result<Started, String> {
+/// The production start: claim an Agent slot from the shared budget,
+/// locate the binaries, provision, assemble Claude Code in the workspace
+/// with the brief as its prompt, launch. `api_key` rides into the
+/// Agent's environment when there is one; without it the CLI's own
+/// logged-in auth applies. The slot is held for the Agent's life
+/// exactly: launch's exit hook releases it at the run's Finished
+/// transition, so a feature build alongside gets the slot back the
+/// moment the Agent is gone — and a drain that never ends cannot keep
+/// it.
+fn start_claude(
+    order: Order,
+    api_key: Option<Secret>,
+    budget: &Arc<Budget>,
+) -> Result<Started, String> {
+    let slot = budget.claim().ok_or(
+        "all four Agent slots are busy; wait for one to finish \
+         (build_status and feature_status say how they are going) before starting another",
+    )?;
     let runner = runner()?;
     let claude = claude()?;
     let workspace = build::provision(&order)?;
@@ -162,10 +190,11 @@ fn start_claude(order: Order, api_key: Option<Secret>) -> Result<Started, String
         api_key,
     };
     let record = Record::new(order, workspace);
-    // The drainer's join handle is dropped deliberately: the chat
-    // surface reads the record as it fills and never waits for the
-    // observation, so the drainer detaches and finishes on its own.
-    let (handle, _drainer) = build::launch(&agent, &runner, record.clone())
+    // The slot rides the launch's exit hook: released the moment the
+    // run reports finished — never held hostage by the drain, whose
+    // join handle is dropped as ever, since the chat surface reads the
+    // record as it fills and waits for nothing.
+    let (handle, _drainer) = build::launch(&agent, &runner, record.clone(), move || drop(slot))
         .map_err(|error| format!("could not launch the agent runner: {error}"))?;
     Ok((record, Some(handle)))
 }
@@ -301,19 +330,95 @@ fn build_status(record: impl Fn() -> Option<Record> + 'static) -> Tool {
     )
 }
 
+/// The feature side of the managed state: the record of feature builds,
+/// and the one budget of Agent slots every build in the app draws on.
+pub struct FeatureState {
+    pub builds: Arc<Builds>,
+    pub budget: Arc<Budget>,
+}
+
+impl Default for FeatureState {
+    fn default() -> Self {
+        Self {
+            builds: Arc::new(Builds::default()),
+            budget: Budget::new(),
+        }
+    }
+}
+
 /// The build tools as the app registers them each turn: the slot lives
-/// in managed state, the starter is Claude Code with `api_key`.
+/// in managed state, the starter is Claude Code with `api_key`, and the
+/// Agent slot comes from the shared budget.
 pub fn tools(app: AppHandle, api_key: Option<Secret>) -> Vec<Tool> {
     let starter = {
         let app = app.clone();
         move |order| {
+            let budget = Arc::clone(&app.state::<FeatureState>().budget);
             app.state::<BuildState>()
-                .start(order, |order| start_claude(order, api_key.clone()))
+                .start(order, |order| start_claude(order, api_key.clone(), &budget))
         }
     };
     vec![
         start_build(starter),
         build_status(move || app.state::<BuildState>().record()),
+    ]
+}
+
+/// The feature tools as the app registers them each turn: the library's
+/// `start_feature` and `feature_status` wired to GitHub as the tracker
+/// and the forge, Claude Code as the Agent, and the window's question
+/// rail as the asker. `github_token` reads the plan and pushes the
+/// feature branch; the writing side refuses in words without it.
+pub fn feature_tools(
+    app: &AppHandle,
+    api_key: Option<Secret>,
+    github_token: Option<Secret>,
+    asker: impl Fn(Ask) -> Answer + 'static,
+) -> Vec<Tool> {
+    let state = app.state::<FeatureState>();
+    let builds = Arc::clone(&state.builds);
+    let budget = Arc::clone(&state.budget);
+    let plan = {
+        let token = github_token.clone();
+        move |spec: &str, feature: &IssueId| -> Result<Plan, String> {
+            let github = GitHub::new(token.clone());
+            GitHubTracker::new(&github, Repo::settle(spec)?).plan(feature)
+        }
+    };
+    let forge = move |spec: &str| -> Result<epik::forge::GitHub, String> {
+        let token = github_token.clone().ok_or(
+            "no GitHub token: pushing the feature branch needs one — \
+             set the GitHub token in Settings (Cmd+,)",
+        )?;
+        Ok(epik::forge::GitHub {
+            repo: Repo::settle(spec)?,
+            token,
+        })
+    };
+    let agents = move || {
+        let claude = claude()?.to_string_lossy().into_owned();
+        let api_key = api_key.clone();
+        Ok(
+            move |_issue: &Issue, workspace: &Workspace, brief: &str| ClaudeCode {
+                binary: claude.clone(),
+                cwd: workspace.directory.to_string_lossy().into_owned(),
+                prompt: brief.to_owned(),
+                model: None,
+                api_key: api_key.clone(),
+            },
+        )
+    };
+    vec![
+        start_feature(
+            Arc::clone(&builds),
+            budget,
+            runner,
+            plan,
+            forge,
+            agents,
+            asker,
+        ),
+        feature_status(builds),
     ]
 }
 

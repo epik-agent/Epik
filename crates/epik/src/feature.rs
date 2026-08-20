@@ -20,16 +20,20 @@
 //! seam is where a real tracker plugs in. Everything here compiles with no
 //! features enabled: the vocabulary is the library's, not any provider's;
 //! the machinery is gated — the `merge` module by which work lands on a
-//! feature branch, and the build that folds a whole plan into work:
-//! [`build`], the verb, and [`Build`], its record.
+//! feature branch, the build that folds a whole plan into work —
+//! [`build`], the verb, and [`Build`], its record — and the `tools`
+//! module through which a chat window starts a feature build and reads
+//! how it is going.
 
 #[cfg(all(feature = "native", unix))]
 mod build;
 #[cfg(all(feature = "native", unix))]
 pub mod merge;
+#[cfg(all(feature = "native", unix))]
+pub mod tools;
 
 #[cfg(all(feature = "native", unix))]
-pub use build::{Build, CONCURRENCY, State, build};
+pub use build::{Budget, Build, CONCURRENCY, Slot, State, build};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

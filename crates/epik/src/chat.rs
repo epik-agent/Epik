@@ -89,6 +89,14 @@ pub enum Ask {
     /// Where a repository should live. `prompt` is the persona's own
     /// wording of the question.
     Repository { prompt: String },
+    /// The check command a feature build will be judged by. `prompt` is
+    /// the build machinery's wording — the card is raised as the build's
+    /// first act, never by the persona — and `proposal` is what
+    /// detection prefilled, absent when no marker matched.
+    Check {
+        prompt: String,
+        proposal: Option<String>,
+    },
 }
 
 /// What the user answered. A decline is a first-class answer — the
@@ -102,7 +110,10 @@ pub enum Ask {
 pub enum Answer {
     /// A repository location: a git URL, of which a path is one.
     Repository { url: String },
-    /// The user would rather not say.
+    /// The check command in force: the user confirmed or edited it.
+    Check { command: String },
+    /// The user would rather not say. For a check, the decline is the
+    /// skip: the build runs on observation alone.
     Declined,
 }
 
@@ -913,6 +924,19 @@ mod tests {
                     },
                     r#""kind":"question_resolved""#,
                 ),
+                (
+                    TranscriptItem::QuestionResolved {
+                        id: "3".to_owned(),
+                        ask: Ask::Check {
+                            prompt: "What says green?".to_owned(),
+                            proposal: Some("cargo test".to_owned()),
+                        },
+                        answer: Answer::Check {
+                            command: "cargo test --workspace".to_owned(),
+                        },
+                    },
+                    r#""kind":"question_resolved""#,
+                ),
             ] {
                 let wire = serde_json::to_string(&item).unwrap();
                 assert!(wire.contains(tag), "{wire}");
@@ -929,6 +953,22 @@ mod tests {
             })
             .unwrap();
             assert_eq!(ask, r#"{"kind":"repository","prompt":"Where?"}"#);
+            let check = serde_json::to_string(&Ask::Check {
+                prompt: "What says green?".to_owned(),
+                proposal: None,
+            })
+            .unwrap();
+            assert_eq!(
+                check,
+                r#"{"kind":"check","prompt":"What says green?","proposal":null}"#
+            );
+            assert_eq!(
+                serde_json::to_string(&Answer::Check {
+                    command: "make test".to_owned(),
+                })
+                .unwrap(),
+                r#"{"kind":"check","command":"make test"}"#
+            );
             assert_eq!(
                 serde_json::to_string(&Answer::Declined).unwrap(),
                 r#"{"kind":"declined"}"#
