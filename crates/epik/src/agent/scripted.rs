@@ -9,6 +9,7 @@
 
 use super::{Agent, Task};
 use crate::keystore::Secret;
+use std::collections::BTreeMap;
 
 /// A deterministic Agent, one behavior per constructor.
 pub struct Scripted(Task);
@@ -17,7 +18,7 @@ impl Scripted {
     fn shell(script: String) -> Self {
         Self(Task {
             argv: vec!["sh".to_owned(), "-c".to_owned(), script],
-            env: Vec::new(),
+            env: BTreeMap::new(),
             cwd: "/".to_owned(),
             stdin: None,
         })
@@ -42,7 +43,7 @@ impl Scripted {
     #[must_use]
     pub fn env_echo(name: &str, value: Secret) -> Self {
         let mut agent = Self::shell(format!("printf '%s\\n' \"${name}\""));
-        agent.0.env.push((name.to_owned(), value));
+        agent.0.env.insert(name.to_owned(), value);
         agent
     }
 

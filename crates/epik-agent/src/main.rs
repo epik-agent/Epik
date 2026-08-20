@@ -1,7 +1,7 @@
 //! The runner: launches one command line as a supervised child and
 //! frames what it observes.
 //!
-//! One JSON [`Spec`] arrives on stdin; the [`Event`] vocabulary leaves
+//! One JSON [`Task`] arrives on stdin; the [`Event`] vocabulary leaves
 //! on stdout as JSON lines — both defined once, in `epik`'s agent
 //! module, which is all this binary imports from that crate. By
 //! discipline it knows nothing else: no chat, no GitHub, no keystore, no
@@ -11,7 +11,7 @@
 //! Lines are the framing unit. A child emitting non-UTF-8 is decoded
 //! lossily; an absurdly long line is capped, with the truncation noted
 //! in the line itself — nothing a child says can wedge the runner. The
-//! runner's own stderr is reserved for its own faults — a bad spec, a
+//! runner's own stderr is reserved for its own faults — a bad task, a
 //! spawn failure — one human-readable line and a nonzero exit. The
 //! runner exits when the child does, after saying so.
 //!
@@ -40,7 +40,7 @@ mod unix {
     use std::process::{Command, Stdio};
     use std::sync::mpsc::{Sender, channel};
 
-    use epik::agent::{Event, Exit, Spec};
+    use epik::agent::{Event, Exit, Task};
 
     /// The most of one line the runner will carry. Generous — and a
     /// child that rambles past it gets the excess dropped and the drop
@@ -48,21 +48,21 @@ mod unix {
     const LINE_CAP: usize = 64 * 1024;
 
     pub(crate) fn supervise() -> Result<(), String> {
-        let mut spec_json = String::new();
+        let mut task_json = String::new();
         std::io::stdin()
-            .read_to_string(&mut spec_json)
-            .map_err(|error| format!("could not read the spec from stdin: {error}"))?;
-        let spec: Spec = serde_json::from_str(&spec_json)
-            .map_err(|error| format!("the spec is not valid JSON: {error}"))?;
-        let program = spec.argv.first().ok_or("the spec's argv is empty")?;
+            .read_to_string(&mut task_json)
+            .map_err(|error| format!("could not read the task from stdin: {error}"))?;
+        let task: Task = serde_json::from_str(&task_json)
+            .map_err(|error| format!("the task is not valid JSON: {error}"))?;
+        let program = task.argv.first().ok_or("the task's argv is empty")?;
 
         let mut child = Command::new(program)
-            .args(&spec.argv[1..])
+            .args(&task.argv[1..])
             // The one reveal: out of the Secret, straight into the
             // child's environment.
-            .envs(spec.env.iter().map(|(name, value)| (name, value.reveal())))
-            .current_dir(&spec.cwd)
-            .stdin(if spec.stdin.is_some() {
+            .envs(task.env.iter().map(|(name, value)| (name, value.reveal())))
+            .current_dir(&task.cwd)
+            .stdin(if task.stdin.is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -73,7 +73,7 @@ mod unix {
             .map_err(|error| format!("could not start {program}: {error}"))?;
         emit(&Event::Started { pid: child.id() });
 
-        if let Some(payload) = spec.stdin {
+        if let Some(payload) = task.stdin {
             let mut stdin = child.stdin.take().expect("the child's stdin was piped");
             // Written off-thread: a child that never reads must not
             // deadlock the runner. Dropping the handle closes the pipe.

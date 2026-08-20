@@ -2,6 +2,7 @@
 //! binary — located by cargo itself — and the scripted Agent. All
 //! deterministic; no network, no LLM.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
@@ -182,7 +183,7 @@ impl Agent for Bare {
 fn shell(script: &str) -> Bare {
     Bare(Task {
         argv: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
-        env: Vec::new(),
+        env: BTreeMap::new(),
         cwd: "/".to_owned(),
         stdin: None,
     })
@@ -192,7 +193,7 @@ fn shell(script: &str) -> Bare {
 fn a_nonexistent_program_is_a_legible_fault_not_a_hang() {
     let agent = Bare(Task {
         argv: vec!["/nonexistent/epik-no-such-program".to_owned()],
-        env: Vec::new(),
+        env: BTreeMap::new(),
         cwd: "/".to_owned(),
         stdin: None,
     });

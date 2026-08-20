@@ -8,13 +8,13 @@
 //! the runner — supervises the actual child process, and this module is
 //! the single source of truth for the wire between them, the same
 //! pattern as the Tauri IPC types: one vocabulary, no mirrored copies.
-//! [`Spec`] goes down the runner's stdin; [`Event`]s come back up its
+//! A [`Task`] goes down the runner's stdin; [`Event`]s come back up its
 //! stdout as JSON lines.
 //!
 //! [`run`] speaks to the runner from the launcher's side: spawn it in a
 //! fresh process group — which the child inherits, so one group holds
 //! the whole tree and [`Handle::kill`] can end all of it at once, even
-//! mid-spawn, with no pid bookkeeping to race — feed it the spec, and
+//! mid-spawn, with no pid bookkeeping to race — feed it the task, and
 //! stream the decoded events into one [`Sender`]. All routing beyond
 //! that is the caller's concern: clones of the `Sender` are the fan-out.
 //! Events flow out only; there is no command channel into an Agent.
@@ -67,49 +67,29 @@ pub enum Event {
     Unknown,
 }
 
-/// The spawn spec, as the runner reads it from its stdin. Environment
-/// values stay [`Secret`] even here: serializing the spec onto the
-/// runner's stdin is the one door their bytes leave through, and the
-/// runner reveals them only into the child's environment. Deliberately
-/// no `Debug` — a spec is a thing to send, not to print.
-#[derive(Deserialize, Serialize)]
-pub struct Spec {
+/// What to run: the launcher's recipe, and, serialized, exactly what
+/// goes down the runner's stdin. One struct on both sides of the wire —
+/// the runner imports this very type — so there is no separate wire
+/// shape to drift from it.
+///
+/// Constructing a Task touches no keystore: callers resolve secrets and
+/// hand them in. Environment values stay [`Secret`] throughout, and
+/// serialization is the one door their bytes leave through; the runner
+/// reveals them only into the child's environment. `Debug` is safe
+/// because a `Secret` redacts itself, not because anyone left the
+/// derive off.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Task {
     /// The child command line; `argv[0]` is the program.
     pub argv: Vec<String>,
-    /// Added to the environment the runner inherited.
+    /// Added to the environment the runner inherited. A map: one value
+    /// per name, serialized as a JSON object in a fixed order.
     pub env: BTreeMap<String, Secret>,
     /// The child's working directory. Absolute.
     pub cwd: String,
     /// Written to the child's stdin, which is then closed; `None` gives
     /// the child no stdin at all.
     pub stdin: Option<String>,
-}
-
-/// What to run: the launcher-side recipe a [`Spec`] is built from.
-///
-/// Environment values are [`Secret`]s, and stay that way through the
-/// spec: nothing in the library ever reveals them — the bytes leave
-/// through serialization to the runner, and nowhere else. Constructing a
-/// Task touches no keystore: callers resolve secrets and hand them in.
-#[derive(Clone, Debug)]
-pub struct Task {
-    pub argv: Vec<String>,
-    pub env: Vec<(String, Secret)>,
-    pub cwd: String,
-    pub stdin: Option<String>,
-}
-
-impl Task {
-    /// The spec the runner will read. Secrets ride along as themselves.
-    #[must_use]
-    pub fn spec(&self) -> Spec {
-        Spec {
-            argv: self.argv.clone(),
-            env: self.env.iter().cloned().collect(),
-            cwd: self.cwd.clone(),
-            stdin: self.stdin.clone(),
-        }
-    }
 }
 
 /// Something that can be run as an Agent: it yields the [`Task`]. That
@@ -154,7 +134,7 @@ mod native {
     ) -> std::io::Result<Handle> {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
-        let spec = serde_json::to_string(&agent.task().spec()).expect("the spawn spec serializes");
+        let task = serde_json::to_string(&agent.task()).expect("the task serializes");
         let mut child = Command::new(runner)
             .process_group(0)
             .stdin(Stdio::piped())
@@ -166,7 +146,7 @@ mod native {
 
         let mut stdin = child.stdin.take().expect("the runner's stdin was piped");
         std::thread::spawn(move || {
-            let _ = stdin.write_all(spec.as_bytes());
+            let _ = stdin.write_all(task.as_bytes());
         });
 
         let stdout = child.stdout.take().expect("the runner's stdout was piped");
@@ -259,7 +239,7 @@ mod native {
         ///
         /// # Errors
         ///
-        /// The runner faulted — bad spec, spawn failure — in its own one
+        /// The runner faulted — bad task, spawn failure — in its own one
         /// line.
         pub fn wait(self) -> Result<Exit, String> {
             self.outcome
@@ -323,7 +303,7 @@ mod tests {
     fn a_tasks_debug_never_shows_a_secrets_bytes() {
         let task = Task {
             argv: vec!["sh".to_owned()],
-            env: vec![("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))],
+            env: BTreeMap::from([("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))]),
             cwd: "/".to_owned(),
             stdin: None,
         };
@@ -332,20 +312,26 @@ mod tests {
         assert!(debugged.contains("API_KEY"), "the name is not the secret");
     }
 
-    /// Secrets stay `Secret` through the spec; serializing it for the
+    /// Secrets stay `Secret` through the task; serializing it for the
     /// runner is the one door their bytes leave through — and they come
-    /// back a `Secret` on the runner's side of the wire.
+    /// back a `Secret` on the runner's side of the wire. The runner reads
+    /// `env` as a JSON object keyed by name; that shape is pinned here.
     #[test]
     fn the_wire_to_the_runner_is_the_one_reveal() {
         let task = Task {
             argv: vec!["sh".to_owned()],
-            env: vec![("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))],
+            env: BTreeMap::from([("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))]),
             cwd: "/".to_owned(),
             stdin: Some("payload".to_owned()),
         };
-        let wire = serde_json::to_string(&task.spec()).unwrap();
+        let wire = serde_json::to_string(&task).unwrap();
         assert!(wire.contains("hush-hush-bytes"), "the wire carries bytes");
-        let read_back: Spec = serde_json::from_str(&wire).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert!(
+            shape["env"].is_object(),
+            "env is an object keyed by name: {wire}"
+        );
+        let read_back: Task = serde_json::from_str(&wire).unwrap();
         assert_eq!(read_back.env["API_KEY"], Secret::from("hush-hush-bytes"));
         assert_eq!(read_back.stdin.as_deref(), Some("payload"));
     }

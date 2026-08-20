@@ -10,6 +10,7 @@
 
 #![cfg(all(feature = "native", unix))]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 
@@ -56,7 +57,7 @@ fn canned(lines: &[&str], coda: &str) -> Task {
     let script = format!("printf '%s\\n' {}; {coda}", quoted.join(" "));
     Task {
         argv: vec!["sh".to_owned(), "-c".to_owned(), script],
-        env: Vec::new(),
+        env: BTreeMap::new(),
         cwd: "/".to_owned(),
         stdin: None,
     }

@@ -370,8 +370,10 @@ mod tests {
         fn the_key_is_in_the_env_exactly_when_supplied() {
             let task = agent().task();
             assert_eq!(task.env.len(), 1);
-            assert_eq!(task.env[0].0, "ANTHROPIC_API_KEY");
-            assert_eq!(task.env[0].1, Secret::from("sk-ant-hush-hush"));
+            assert_eq!(
+                task.env.get("ANTHROPIC_API_KEY"),
+                Some(&Secret::from("sk-ant-hush-hush"))
+            );
 
             let mut logged_in = agent();
             logged_in.api_key = None;

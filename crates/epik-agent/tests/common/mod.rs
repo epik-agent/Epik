@@ -3,6 +3,7 @@
 //! file-wide dead-code allowance.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use epik::agent::{Agent, Task};
@@ -94,7 +95,7 @@ impl Agent for Shell {
     fn task(&self) -> Task {
         Task {
             argv: vec!["sh".to_owned(), "-c".to_owned(), self.script.clone()],
-            env: Vec::new(),
+            env: BTreeMap::new(),
             cwd: self.cwd.clone(),
             stdin: None,
         }

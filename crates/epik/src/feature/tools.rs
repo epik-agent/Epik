@@ -594,7 +594,7 @@ mod tests {
         fn task(&self) -> Task {
             Task {
                 argv: vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
-                env: Vec::new(),
+                env: BTreeMap::new(),
                 cwd: "/".to_owned(),
                 stdin: None,
             }
