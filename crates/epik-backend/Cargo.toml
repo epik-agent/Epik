@@ -3,6 +3,12 @@ name = "epik-backend"
 version = "0.1.0"
 edition = "2024"
 
+# The binary carries the product name: macOS reads the running process's name
+# into "About …", "Hide …" and "Quit …", and a dev build runs outside a bundle.
+[[bin]]
+name = "Epik"
+path = "src/main.rs"
+
 [lib]
 # The `_lib` suffix keeps the lib name from colliding with the bin name on Windows.
 name = "epik_backend_lib"
