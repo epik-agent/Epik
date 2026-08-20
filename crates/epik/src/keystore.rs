@@ -30,7 +30,7 @@ pub const SERVICE: &str = "Epik";
 /// runner's stdin — as itself instead of decaying into a `String` on
 /// each side. That crossing is the accepted exposure — every place it
 /// can happen types itself `Secret` and is findable by that name.
-#[derive(Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Secret(String);
 
 impl Secret {

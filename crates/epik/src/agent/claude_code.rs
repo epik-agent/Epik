@@ -306,13 +306,14 @@ mod tests {
     #[cfg(feature = "native")]
     mod task {
         use super::super::*;
+        use crate::chat::ANTHROPIC_MODEL;
 
         fn agent() -> ClaudeCode {
             ClaudeCode {
                 binary: "/opt/homebrew/bin/claude".to_owned(),
                 cwd: "/work/repo".to_owned(),
                 prompt: "create a file\nnamed hello.txt".to_owned(),
-                model: Some("claude-sonnet-4-5".to_owned()),
+                model: Some(ANTHROPIC_MODEL.to_owned()),
                 api_key: Some(Secret::from("sk-ant-hush-hush")),
             }
         }
@@ -330,7 +331,7 @@ mod tests {
                     "stream-json",
                     "--verbose",
                     "--model",
-                    "claude-sonnet-4-5",
+                    ANTHROPIC_MODEL,
                     "--settings",
                     "{}",
                     "--strict-mcp-config",

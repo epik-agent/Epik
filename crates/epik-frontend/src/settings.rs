@@ -12,7 +12,7 @@
 //! dropdown offers — is pure and sits beside the components, where a test
 //! can reach it.
 
-use epik::chat::ModelInfo;
+use epik::chat::{ANTHROPIC_MODEL, ModelInfo};
 use epik::config::{self, Config};
 use epik::keystore::{Resolved, Secret};
 use leptos::ev;
@@ -95,60 +95,54 @@ impl Field {
         }
     }
 
+    /// The text in the box. A secret's is revealed here because the box
+    /// shows it; the render is its moment of use.
     fn of(self, fields: &Fields) -> &str {
         match self {
-            Field::Token => &fields.token,
+            Field::Token => fields.token.reveal(),
             Field::Owner => &fields.owner,
-            Field::Key => &fields.key,
+            Field::Key => fields.key.reveal(),
             Field::Chat => &fields.chat,
             Field::Agent => &fields.agent,
         }
     }
 
-    fn slot(self, fields: &mut Fields) -> &mut String {
+    fn set(self, fields: &mut Fields, text: String) {
         match self {
-            Field::Token => &mut fields.token,
-            Field::Owner => &mut fields.owner,
-            Field::Key => &mut fields.key,
-            Field::Chat => &mut fields.chat,
-            Field::Agent => &mut fields.agent,
+            Field::Token => fields.token = Secret::from(text),
+            Field::Owner => fields.owner = text,
+            Field::Key => fields.key = Secret::from(text),
+            Field::Chat => fields.chat = text,
+            Field::Agent => fields.agent = text,
         }
     }
 }
 
-/// What every box holds, as text. An absent configuration entry is the
-/// empty string here and `None` in the file, both ways.
-///
-/// Two of the boxes hold secrets, so `Debug` is by hand: the entries
-/// print, the secrets redact, in the manner of [`Secret`] itself.
-#[derive(Clone, Default, Eq, PartialEq)]
+/// What every box holds. An absent configuration entry is the empty
+/// string here and `None` in the file, both ways; the two secrets are
+/// [`Secret`]s, which is what keeps them out of a `{:?}`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Fields {
-    pub token: String,
+    pub token: Secret,
     pub owner: String,
-    pub key: String,
+    pub key: Secret,
     pub chat: String,
     pub agent: String,
 }
 
-impl std::fmt::Debug for Fields {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Fields")
-            .field("token", &"[redacted]")
-            .field("owner", &self.owner)
-            .field("key", &"[redacted]")
-            .field("chat", &self.chat)
-            .field("agent", &self.agent)
-            .finish()
-    }
-}
-
 impl Fields {
     /// The entries as the configuration states them; the secrets empty,
-    /// because they come from the keyring.
+    /// because they come from the keyring. An unstated chat model shows
+    /// as the one the chat window then speaks to, [`ANTHROPIC_MODEL`],
+    /// because the Chat box has no Default entry to show instead.
     pub(crate) fn from_config(config: &Config) -> Self {
         Self {
             owner: config.github.owner.clone().unwrap_or_default(),
-            chat: config.model.chat.clone().unwrap_or_default(),
+            chat: config
+                .model
+                .chat
+                .clone()
+                .unwrap_or_else(|| ANTHROPIC_MODEL.to_owned()),
             agent: config.model.agent.clone().unwrap_or_default(),
             ..Self::default()
         }
@@ -174,7 +168,7 @@ impl Fields {
     fn patched(&self, tab: Tab, current: &Fields) -> Fields {
         let mut patched = self.clone();
         for &field in tab.entries() {
-            *field.slot(&mut patched) = field.of(current).to_owned();
+            field.set(&mut patched, field.of(current).to_owned());
         }
         patched
     }
@@ -265,8 +259,8 @@ struct Panel {
 
 impl Panel {
     fn set_both(self, field: Field, text: &str) {
-        self.loaded.update(|f| *field.slot(f) = text.to_owned());
-        self.current.update(|f| *field.slot(f) = text.to_owned());
+        self.loaded.update(|f| field.set(f, text.to_owned()));
+        self.current.update(|f| field.set(f, text.to_owned()));
     }
 
     fn fetch_models(self) {
@@ -314,7 +308,7 @@ impl Panel {
             match ipc::save_secret(field.keystore_name(), secret).await {
                 Ok(()) => {
                     self.loaded
-                        .update(|l| *field.slot(l) = secret.reveal().to_owned());
+                        .update(|l| field.set(l, secret.reveal().to_owned()));
                     match tab {
                         Tab::Models => self.fetch_models(),
                         Tab::GitHub if self.current.with_untracked(|f| f.owner.is_empty()) => {
@@ -486,7 +480,7 @@ fn field_row(panel: Panel, field: Field) -> impl IntoView {
     let set = move |ev| {
         panel
             .current
-            .update(|f| *field.slot(f) = event_target_value(&ev))
+            .update(|f| field.set(f, event_target_value(&ev)))
     };
     let control = match field {
         Field::Token | Field::Key => secret_box(panel, field, id.clone()).into_any(),
@@ -538,7 +532,7 @@ fn secret_box(panel: Panel, field: Field, id: String) -> impl IntoView {
     let set = move |ev| {
         panel
             .current
-            .update(|f| *field.slot(f) = event_target_value(&ev))
+            .update(|f| field.set(f, event_target_value(&ev)))
     };
     view! {
         <input
@@ -580,9 +574,9 @@ mod tests {
 
     fn loaded() -> Fields {
         Fields {
-            token: "ghp-kept".to_owned(),
+            token: Secret::from("ghp-kept"),
             owner: "octo".to_owned(),
-            key: "sk-kept".to_owned(),
+            key: Secret::from("sk-kept"),
             chat: "claude-chat".to_owned(),
             agent: String::new(),
         }
@@ -609,8 +603,8 @@ mod tests {
     #[test]
     fn debug_formatting_the_fields_never_yields_the_secrets() {
         let fields = Fields {
-            token: "ghp-secret".to_owned(),
-            key: "sk-secret".to_owned(),
+            token: Secret::from("ghp-secret"),
+            key: Secret::from("sk-secret"),
             owner: "o".to_owned(),
             ..Fields::default()
         };
@@ -645,7 +639,7 @@ mod tests {
     #[test]
     fn a_changed_secret_is_saved_and_the_file_left_alone() {
         let mut current = loaded();
-        current.key = "sk-new".to_owned();
+        current.key = Secret::from("sk-new");
         assert_eq!(
             writes(Tab::Models, &loaded(), &current),
             Writes {
@@ -662,7 +656,7 @@ mod tests {
             ..Fields::default()
         };
         let mut current = start.clone();
-        current.token = "ghp-first".to_owned();
+        current.token = Secret::from("ghp-first");
         assert_eq!(
             writes(Tab::GitHub, &start, &current).secret,
             Some(Secret::from("ghp-first"))
@@ -672,7 +666,7 @@ mod tests {
     #[test]
     fn an_emptied_secret_is_not_cleared() {
         let mut current = loaded();
-        current.key = String::new();
+        current.key = Secret::default();
         assert_eq!(writes(Tab::Models, &loaded(), &current), Writes::default());
     }
 
@@ -730,12 +724,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unstated_chat_model_shows_as_the_pinned_one() {
+        let fields = Fields::from_config(&Config::default());
+        assert_eq!(fields.chat, ANTHROPIC_MODEL);
+        assert_eq!(fields.agent, "");
+        assert_eq!(dirty(Tab::Models, &fields, &fields), []);
+    }
+
+    #[test]
     fn fields_and_config_agree_both_ways() {
         let config = loaded().config();
         assert_eq!(config.model.agent, None);
         let back = Fields::from_config(&config);
-        assert_eq!(back.token, "");
-        assert_eq!(back.key, "");
+        assert_eq!(back.token, Secret::default());
+        assert_eq!(back.key, Secret::default());
         assert_eq!(
             (back.owner, back.chat, back.agent),
             (loaded().owner, loaded().chat, String::new())

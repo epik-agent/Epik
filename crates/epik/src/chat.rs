@@ -336,7 +336,7 @@ impl std::fmt::Display for ChatError {
 impl std::error::Error for ChatError {}
 
 /// The pinned Anthropic model [`Client::anthropic`] speaks to.
-pub const ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+pub const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
 
 /// A client for one OpenAI-compatible chat-completions endpoint: where to
 /// ask, what to ask for, and what to present at the door.

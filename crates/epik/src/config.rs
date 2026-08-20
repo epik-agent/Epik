@@ -44,8 +44,11 @@ pub fn home() -> Result<PathBuf> {
 }
 
 /// Everything the file can state. A section missing from the file is a
-/// section of `None`s.
+/// section of `None`s; a key the file states that is not named here is
+/// a parse error, so a file in some other shape is reported rather than
+/// quietly read as empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Model::is_default")]
     pub model: Model,
@@ -55,6 +58,7 @@ pub struct Config {
 
 /// `[model]`: which models the chat window and the build Agents speak to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Model {
     /// The chat window's model; `None` is [`ANTHROPIC_MODEL`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +70,7 @@ pub struct Model {
 
 /// `[github]`: where a bare repository name is looked for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitHub {
     /// The owner a bare repository name settles against; `None` refuses
     /// bare names.
@@ -273,6 +278,20 @@ mod tests {
         let error = converge_at(&root).unwrap_err().to_string();
         assert!(error.contains("could not parse"), "{error}");
         assert!(error.contains(FILE), "{error}");
+        assert_eq!(file(&root), text);
+    }
+
+    /// A file in a shape this `Config` does not know — an earlier Epik's,
+    /// say — is not read as empty; it is reported, and left alone.
+    #[test]
+    fn a_file_with_keys_this_config_does_not_know_is_reported() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "active = \"anthropic\"\n\n[providers.anthropic]\nmodel = \"x\"\n";
+        std::fs::write(root.join(FILE), text).unwrap();
+        let error = format!("{:#}", converge_at(&root).unwrap_err());
+        assert!(error.contains("could not parse"), "{error}");
+        assert!(error.contains("active"), "{error}");
         assert_eq!(file(&root), text);
     }
 }
