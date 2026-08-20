@@ -1,5 +1,12 @@
 # Check every push and pull request; bundle the app from main.
 #
+# Pushes to rewrite run too, and only those base-branch runs save the
+# build cache: a pull request can restore caches from its base branch
+# but not from other pull requests, so a base branch that never runs
+# leaves every pull request to build the whole dependency tree cold.
+# The frontend is a workspace of its own and checks in a job of its own,
+# in parallel with the native one, each job with a cache of its size.
+#
 # Both jobs run over an OS matrix. Only macOS is in it today; Linux is
 # a matter of adding `ubuntu-latest` — its system packages and its
 # artifact paths are already here, gated on runner.os.
@@ -24,7 +31,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, rewrite]
   pull_request:
   workflow_dispatch:
 
@@ -49,33 +56,51 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          # Two workspaces by design: the frontend is wasm and kept apart.
-          workspaces: |
-            . -> target
-            crates/epik-frontend -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: fmt
-        run: |
-          cargo fmt --all --check
-          cargo fmt --all --check --manifest-path crates/epik-frontend/Cargo.toml
+        run: cargo fmt --all --check
       - name: clippy
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --all-targets --manifest-path crates/epik-frontend/Cargo.toml -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         # The live tiers (EPIK_LIVE_*, EPIK_GITHUB_*) skip themselves when
         # their environment is unset, so this is the hermetic suite.
-        run: |
-          cargo test --workspace
-          cargo test --manifest-path crates/epik-frontend/Cargo.toml
+        run: cargo test --workspace
+
+  frontend:
+    name: frontend fmt, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: crates/epik-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/epik-frontend -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
 
   bundle:
     name: bundle (${{ matrix.os }})
-    needs: check
-    if: github.event_name != 'pull_request'
+    needs: [check, frontend]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +121,7 @@ jobs:
           workspaces: |
             . -> target
             crates/epik-frontend -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: cargo-bins/cargo-binstall@main
       - name: Install trunk and tauri-cli
         run: cargo binstall -y trunk tauri-cli@^2
