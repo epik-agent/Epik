@@ -1410,7 +1410,8 @@ mod tests {
 
         /// Serves `response` to one connection, after draining the
         /// request. Returns the base URL to aim the client at.
-        fn serve(response: &'static str) -> String {
+        fn serve(response: impl Into<String>) -> String {
+            let response = response.into();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/v1", listener.local_addr().unwrap());
             std::thread::spawn(move || {
@@ -1469,7 +1470,8 @@ mod tests {
         fn an_api_error_carries_the_bodys_message() {
             let body = r#"{"error":{"message":"Your credit balance is too low."}}"#;
             let base = serve(
-                "HTTP/1.1 402 Payment Required\r\ncontent-type: application/json\r\ncontent-length: 55\r\nconnection: close\r\n\r\n{\"error\":{\"message\":\"Your credit balance is too low.\"}}",
+                "HTTP/1.1 402 Payment Required\r\ncontent-type: application/json\r\ncontent-length: 55\r\nconnection: close\r\n\r\n{\"error\":{\"message\":\"Your credit balance is too low.\"}}"
+                    .to_owned(),
             );
             assert_eq!(body.len(), 55, "the scripted content-length is honest");
             let client = Client::new(base, "scripted".to_owned(), None);
@@ -1502,12 +1504,9 @@ mod tests {
         #[test]
         fn the_model_list_comes_back_in_the_apis_order_with_extra_fields_absorbed() {
             let body = r#"{"data":[{"id":"claude-new","display_name":"Claude New","type":"model","created_at":"2026-01-01T00:00:00Z"},{"id":"claude-old","display_name":"Claude Old"}],"has_more":false,"first_id":"claude-new","last_id":"claude-old"}"#;
-            let base = serve(Box::leak(
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .into_boxed_str(),
+            let base = serve(format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
             ));
 
             let models = models_at(&base, &Secret::from("sk-test")).unwrap();
@@ -1530,12 +1529,9 @@ mod tests {
         #[test]
         fn a_refused_model_list_carries_the_apis_words() {
             let body = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
-            let base = serve(Box::leak(
-                format!(
-                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .into_boxed_str(),
+            let base = serve(format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
             ));
 
             let error = models_at(&base, &Secret::from("sk-wrong")).unwrap_err();

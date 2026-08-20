@@ -59,26 +59,41 @@ pub async fn config_write(state: State<'_, Mutex<Config>>, config: Config) -> Re
     write(&home, &state, config)
 }
 
-/// The models the stored Anthropic key can see, newest first. Async
-/// because the keyring and the network both keep their own time.
-#[tauri::command]
-pub async fn models_list() -> Result<Vec<ModelInfo>, String> {
-    let key = key_from(&OsKeyring, API_KEY_NAME, ChatError::NoKey)?;
-    epik::chat::models(&key).map_err(|error| error.to_string())
+/// Runs a keyring-and-network lookup off the async runtime's workers:
+/// both are blocking, and the network can take its time, which is why
+/// `send_message` gives a turn its own thread.
+async fn blocking<T: Send + 'static>(
+    lookup: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(lookup)
+        .await
+        .map_err(|error| format!("the lookup did not finish: {error}"))?
 }
 
-/// The login of the account the stored GitHub token belongs to. Async
-/// for the same reason as [`models_list`].
+/// The models the stored Anthropic key can see, newest first.
+#[tauri::command]
+pub async fn models_list() -> Result<Vec<ModelInfo>, String> {
+    blocking(|| {
+        let key = key_from(&OsKeyring, API_KEY_NAME, ChatError::NoKey)?;
+        epik::chat::models(&key).map_err(|error| error.to_string())
+    })
+    .await
+}
+
+/// The login of the account the stored GitHub token belongs to.
 #[tauri::command]
 pub async fn github_login() -> Result<String, String> {
-    let token = key_from(
-        &OsKeyring,
-        GITHUB_TOKEN_NAME,
-        epik::github::Error::TokenAbsent,
-    )?;
-    GitHub::new(Some(token))
-        .login()
-        .map_err(|error| error.to_string())
+    blocking(|| {
+        let token = key_from(
+            &OsKeyring,
+            GITHUB_TOKEN_NAME,
+            epik::github::Error::TokenAbsent,
+        )?;
+        GitHub::new(Some(token))
+            .login()
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[cfg(test)]

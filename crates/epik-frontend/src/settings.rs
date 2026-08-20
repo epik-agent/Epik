@@ -118,13 +118,28 @@ impl Field {
 
 /// What every box holds, as text. An absent configuration entry is the
 /// empty string here and `None` in the file, both ways.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+///
+/// Two of the boxes hold secrets, so `Debug` is by hand: the entries
+/// print, the secrets redact, in the manner of [`Secret`] itself.
+#[derive(Clone, Default, Eq, PartialEq)]
 pub(crate) struct Fields {
     pub token: String,
     pub owner: String,
     pub key: String,
     pub chat: String,
     pub agent: String,
+}
+
+impl std::fmt::Debug for Fields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fields")
+            .field("token", &"[redacted]")
+            .field("owner", &self.owner)
+            .field("key", &"[redacted]")
+            .field("chat", &self.chat)
+            .field("agent", &self.agent)
+            .finish()
+    }
 }
 
 impl Fields {
@@ -589,6 +604,19 @@ mod tests {
         );
         assert_eq!(Tab::GitHub.secret().keystore_name(), "GITHUB_TOKEN");
         assert_eq!(Tab::Models.secret().keystore_name(), "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn debug_formatting_the_fields_never_yields_the_secrets() {
+        let fields = Fields {
+            token: "ghp-secret".to_owned(),
+            key: "sk-secret".to_owned(),
+            owner: "o".to_owned(),
+            ..Fields::default()
+        };
+        let debugged = format!("{fields:?}");
+        assert!(!debugged.contains("secret"), "{debugged}");
+        assert!(debugged.contains("\"o\""), "{debugged}");
     }
 
     #[test]
