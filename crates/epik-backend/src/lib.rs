@@ -1,5 +1,5 @@
-use tauri::menu::{Menu, MenuItem, Submenu};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 
 mod build;
 mod chat;
@@ -30,6 +30,20 @@ fn open_settings(app: &AppHandle) -> tauri::Result<()> {
         builder = builder.parent(&main)?;
     }
     builder.center().build().map(|_| ())
+}
+
+/// The About item, carrying the app icon. The default menu's omits it, and
+/// the About panel then falls back to the process's icon — the generic one
+/// in a dev build that runs outside an app bundle.
+fn about(handle: &AppHandle) -> tauri::Result<PredefinedMenuItem<Wry>> {
+    let info = handle.package_info();
+    let metadata = AboutMetadata {
+        name: Some(info.name.clone()),
+        version: Some(info.version.to_string()),
+        icon: handle.default_window_icon().cloned(),
+        ..Default::default()
+    };
+    PredefinedMenuItem::about(handle, None, Some(metadata))
 }
 
 /// What Cmd+, in the main window asks for. The window is the backend's to
@@ -85,6 +99,18 @@ pub fn run() {
         .manage(build::FeatureState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
+            // The default About, wherever this platform put it, gives way
+            // to one with the icon.
+            for submenu in menu.items()?.iter().filter_map(|item| item.as_submenu()) {
+                let position = submenu.items()?.iter().position(|item| {
+                    item.as_predefined_menuitem()
+                        .is_some_and(|item| item.text().is_ok_and(|text| text.starts_with("About")))
+                });
+                if let Some(position) = position {
+                    submenu.remove_at(position)?;
+                    submenu.insert(&about(handle)?, position)?;
+                }
+            }
             let settings =
                 MenuItem::with_id(handle, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
             let file = menu.items()?.into_iter().find_map(|item| {
