@@ -11,15 +11,23 @@
 //! leaves no empty `[table]` header behind. The file as first written is
 //! [`starting`]: the chat model, because the source names that default,
 //! and nothing else.
+//!
+//! The types are wire shape as well as file shape: [`Config`] crosses the
+//! IPC barrier to the settings window and back, so it is compiled
+//! everywhere `serde` is. The file itself — its path, its format, the
+//! startup that converges on it — is `native`.
 
+#[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "native")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::chat::ANTHROPIC_MODEL;
 
 /// The configuration file's name inside [`home`].
+#[cfg(feature = "native")]
 pub const FILE: &str = "config.toml";
 
 /// `~/.epik`: the one place that path is composed.
@@ -28,6 +36,7 @@ pub const FILE: &str = "config.toml";
 ///
 /// An operating system that names no home directory — never a `.epik`
 /// somewhere else.
+#[cfg(feature = "native")]
 pub fn home() -> Result<PathBuf> {
     std::env::home_dir()
         .map(|home| home.join(".epik"))
@@ -96,6 +105,7 @@ pub fn starting() -> Config {
 /// # Errors
 ///
 /// The write that failed, naming the path.
+#[cfg(feature = "native")]
 pub fn save(root: &Path, config: &Config) -> Result<()> {
     let path = root.join(FILE);
     let text = toml::to_string(config).context("could not serialize the configuration")?;
@@ -107,6 +117,7 @@ pub fn save(root: &Path, config: &Config) -> Result<()> {
 /// # Errors
 ///
 /// No home directory, or whatever `converge_at` reports.
+#[cfg(feature = "native")]
 pub fn converge() -> Result<Config> {
     converge_at(&home()?)
 }
@@ -118,6 +129,7 @@ pub fn converge() -> Result<Config> {
 /// # Errors
 ///
 /// Which of creating, writing, reading, or parsing failed, and where.
+#[cfg(feature = "native")]
 pub fn converge_at(root: &Path) -> Result<Config> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("could not create {}", root.display()))?;
@@ -130,7 +142,7 @@ pub fn converge_at(root: &Path) -> Result<Config> {
     toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

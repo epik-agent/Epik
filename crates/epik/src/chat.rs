@@ -376,6 +376,78 @@ impl Client {
     }
 }
 
+/// One model a provider will answer for: the id the configuration
+/// states and the name a dropdown shows.
+///
+/// Unknown fields are absorbed, in the manner of the other wire types:
+/// the Models endpoint says more about a model than a dropdown needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ModelInfo {
+    pub id: String,
+    pub display_name: String,
+}
+
+/// Anthropic's native API, where the Models endpoint lives. Distinct from
+/// the OpenAI-compatible `/v1` the chat client speaks to: each is used
+/// where it is documented.
+#[cfg(feature = "native")]
+const ANTHROPIC_API: &str = "https://api.anthropic.com/v1";
+
+/// The native API's version header, sent on every request to it.
+#[cfg(feature = "native")]
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The models Anthropic will answer for under `key`, newest first — the
+/// order the API returns and the order a dropdown shows.
+///
+/// A discovery affordance and never load-bearing: a caller that cannot
+/// get the list keeps whatever model it already had in mind.
+///
+/// # Errors
+///
+/// [`ChatError`], distinguishing transport failures, the API's own
+/// errors (verbatim), and an answer that was not a model list.
+#[cfg(feature = "native")]
+pub fn models(key: &Secret) -> Result<Vec<ModelInfo>, ChatError> {
+    models_at(ANTHROPIC_API, key)
+}
+
+/// [`models`], against a stated base — the prefix ending in `/v1` —
+/// which is how a test aims it at a loopback port.
+#[cfg(feature = "native")]
+fn models_at(base_url: &str, key: &Secret) -> Result<Vec<ModelInfo>, ChatError> {
+    #[derive(serde::Deserialize)]
+    struct Page {
+        data: Vec<ModelInfo>,
+    }
+    let url = format!("{}/models?limit=1000", base_url.trim_end_matches('/'));
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get(&url)
+        .header("x-api-key", key.reveal())
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .call()
+        .map_err(|error| ChatError::Transport(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| ChatError::Transport(error.to_string()))?;
+    if !status.is_success() {
+        return Err(ChatError::Api(wire::api_message(
+            &status.to_string(),
+            &body,
+        )));
+    }
+    let page: Page = serde_json::from_str(&body)
+        .map_err(|error| ChatError::MalformedStream(format!("not a model list: {error}")))?;
+    Ok(page.data)
+}
+
 /// Assembles server-sent-event lines into event data payloads.
 ///
 /// Fed one line at a time: `data:` lines accumulate, a blank line
@@ -1338,7 +1410,8 @@ mod tests {
 
         /// Serves `response` to one connection, after draining the
         /// request. Returns the base URL to aim the client at.
-        fn serve(response: &'static str) -> String {
+        fn serve(response: impl Into<String>) -> String {
+            let response = response.into();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/v1", listener.local_addr().unwrap());
             std::thread::spawn(move || {
@@ -1397,7 +1470,8 @@ mod tests {
         fn an_api_error_carries_the_bodys_message() {
             let body = r#"{"error":{"message":"Your credit balance is too low."}}"#;
             let base = serve(
-                "HTTP/1.1 402 Payment Required\r\ncontent-type: application/json\r\ncontent-length: 55\r\nconnection: close\r\n\r\n{\"error\":{\"message\":\"Your credit balance is too low.\"}}",
+                "HTTP/1.1 402 Payment Required\r\ncontent-type: application/json\r\ncontent-length: 55\r\nconnection: close\r\n\r\n{\"error\":{\"message\":\"Your credit balance is too low.\"}}"
+                    .to_owned(),
             );
             assert_eq!(body.len(), 55, "the scripted content-length is honest");
             let client = Client::new(base, "scripted".to_owned(), None);
@@ -1425,6 +1499,55 @@ mod tests {
                 .unwrap_err();
 
             assert!(matches!(error, ChatError::MalformedStream(_)), "{error}");
+        }
+
+        #[test]
+        fn the_model_list_comes_back_in_the_apis_order_with_extra_fields_absorbed() {
+            let body = r#"{"data":[{"id":"claude-new","display_name":"Claude New","type":"model","created_at":"2026-01-01T00:00:00Z"},{"id":"claude-old","display_name":"Claude Old"}],"has_more":false,"first_id":"claude-new","last_id":"claude-old"}"#;
+            let base = serve(format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            ));
+
+            let models = models_at(&base, &Secret::from("sk-test")).unwrap();
+
+            assert_eq!(
+                models,
+                [
+                    ModelInfo {
+                        id: "claude-new".to_owned(),
+                        display_name: "Claude New".to_owned(),
+                    },
+                    ModelInfo {
+                        id: "claude-old".to_owned(),
+                        display_name: "Claude Old".to_owned(),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn a_refused_model_list_carries_the_apis_words() {
+            let body = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+            let base = serve(format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            ));
+
+            let error = models_at(&base, &Secret::from("sk-wrong")).unwrap_err();
+
+            assert_eq!(error, ChatError::Api("invalid x-api-key".to_owned()));
+        }
+
+        #[test]
+        fn a_model_list_nobody_answers_is_a_transport_error() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}/v1", listener.local_addr().unwrap());
+            drop(listener);
+
+            let error = models_at(&base, &Secret::from("sk-test")).unwrap_err();
+
+            assert!(matches!(error, ChatError::Transport(_)), "{error}");
         }
     }
 

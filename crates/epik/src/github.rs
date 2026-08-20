@@ -354,6 +354,24 @@ impl GitHub {
 
     // ----- the REST verbs -----
 
+    /// The login of the account the token belongs to. Its one use is
+    /// filling an empty owner field in Settings.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`Error::TokenAbsent`] when there is no token — `/user`
+    /// answers nothing unauthenticated; otherwise an [`Error`] when GitHub
+    /// cannot be asked or answers no.
+    pub fn login(&self) -> Result<String, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            login: String,
+        }
+        self.needs_token()?;
+        let wire: Wire = self.get("user")?;
+        Ok(wire.login)
+    }
+
     /// The branch a pull request merges into by default.
     ///
     /// # Errors
@@ -1187,6 +1205,13 @@ mod tests {
         ] {
             assert_eq!(Repo::parse(wrong), None, "{wrong:?}");
         }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn login_refuses_without_a_token_before_asking() {
+        let github = GitHub::at("http://127.0.0.1:9", None);
+        assert!(matches!(github.login(), Err(Error::TokenAbsent)));
     }
 
     #[test]

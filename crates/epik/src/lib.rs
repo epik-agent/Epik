@@ -6,7 +6,7 @@ pub mod chat;
 pub mod check;
 #[cfg(feature = "native")]
 mod child;
-#[cfg(feature = "native")]
+#[cfg(feature = "serde")]
 pub mod config;
 pub mod feature;
 #[cfg(all(feature = "native", unix))]

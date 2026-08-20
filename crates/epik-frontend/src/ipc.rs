@@ -2,10 +2,11 @@
 //! bindings, the command names, and typed calls over them.
 //!
 //! The types on the wire are the library's own — [`Resolved`],
-//! [`Secret`], [`TranscriptItem`] — so nothing here re-declares what
-//! `epik` already says.
+//! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`] — so nothing
+//! here re-declares what `epik` already says.
 
-use epik::chat::{Answer, TRANSCRIPT_EVENT, TranscriptItem};
+use epik::chat::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
+use epik::config::Config;
 use epik::keystore::{Resolved, Secret};
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,11 @@ struct RevealArgs<'a> {
 struct SaveArgs<'a> {
     name: &'a str,
     value: &'a Secret,
+}
+
+#[derive(Serialize)]
+struct ConfigArgs<'a> {
+    config: &'a Config,
 }
 
 #[derive(Serialize)]
@@ -101,6 +107,48 @@ pub(crate) async fn save_secret(name: &str, value: &Secret) -> Result<(), String
         .await
         .map(|_| ())
         .map_err(|error| error_text(&error))
+}
+
+/// The backend's live configuration, as the file states it. The Err is
+/// a channel that would not answer — the file itself was read at startup.
+pub(crate) async fn read_config() -> Result<Config, String> {
+    let outcome = invoke("config_read", JsValue::UNDEFINED)
+        .await
+        .map_err(|error| error_text(&error))?;
+    serde_wasm_bindgen::from_value(outcome)
+        .map_err(|_| "an unintelligible answer from the backend".to_owned())
+}
+
+/// Writes `config` to the file and makes it the backend's live
+/// configuration, in one command.
+pub(crate) async fn write_config(config: &Config) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(&ConfigArgs { config })
+        .map_err(|_| "the request could not be encoded".to_owned())?;
+    invoke("config_write", args)
+        .await
+        .map(|_| ())
+        .map_err(|error| error_text(&error))
+}
+
+/// The models the provider will answer for, newest first. The backend
+/// reads the key from the keyring itself; the Err is why there is no list
+/// — no key yet, or the provider's own words.
+pub(crate) async fn list_models() -> Result<Vec<ModelInfo>, String> {
+    let outcome = invoke("models_list", JsValue::UNDEFINED)
+        .await
+        .map_err(|error| error_text(&error))?;
+    serde_wasm_bindgen::from_value(outcome)
+        .map_err(|_| "an unintelligible answer from the backend".to_owned())
+}
+
+/// The login of the account the stored GitHub token belongs to.
+pub(crate) async fn github_login() -> Result<String, String> {
+    let outcome = invoke("github_login", JsValue::UNDEFINED)
+        .await
+        .map_err(|error| error_text(&error))?;
+    outcome
+        .as_string()
+        .ok_or_else(|| "an unintelligible answer from the backend".to_owned())
 }
 
 /// Posts the user's message. The message becomes visible when it comes
