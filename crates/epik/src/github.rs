@@ -90,14 +90,26 @@ impl Repo {
 
     /// [`parse`](Self::parse), refused in words a model reads — the one
     /// spelling of that refusal, shared by every tool that takes a
-    /// repository argument.
+    /// repository argument. A spec with no slash settles against the
+    /// configured `owner` when there is one, so `Epik` becomes
+    /// `epik-agent/Epik`; without one, the refusal says where to set it.
     ///
     /// # Errors
     ///
     /// The refusal, naming the spec.
-    pub fn settle(spec: &str) -> Result<Self, String> {
-        Self::parse(spec)
-            .ok_or_else(|| format!("{spec:?} is not an owner/name repository spelling"))
+    pub fn settle(spec: &str, owner: Option<&str>) -> Result<Self, String> {
+        match (spec.contains('/'), owner) {
+            (true, _) => Self::parse(spec),
+            (false, Some(owner)) => Self::parse(&format!("{owner}/{spec}")),
+            (false, None) => None,
+        }
+        .ok_or_else(|| {
+            let refusal = format!("{spec:?} is not an owner/name repository spelling");
+            match owner {
+                Some(_) => refusal,
+                None => format!("{refusal}; a default owner can be set in Settings (Cmd+,)"),
+            }
+        })
     }
 }
 
@@ -1126,6 +1138,32 @@ mod tests {
 
     fn epik() -> Repo {
         Repo::new("epik-agent", "Epik")
+    }
+
+    #[test]
+    fn a_full_spelling_settles_with_or_without_a_default_owner() {
+        assert_eq!(Repo::settle("epik-agent/Epik", None), Ok(epik()));
+        assert_eq!(Repo::settle("epik-agent/Epik", Some("other")), Ok(epik()));
+    }
+
+    #[test]
+    fn a_bare_name_settles_against_the_default_owner() {
+        assert_eq!(Repo::settle("Epik", Some("epik-agent")), Ok(epik()));
+    }
+
+    #[test]
+    fn a_bare_name_without_a_default_owner_is_refused_naming_the_setting() {
+        let error = Repo::settle("Epik", None).unwrap_err();
+        assert!(error.contains("\"Epik\""), "{error}");
+        assert!(error.contains("Settings"), "{error}");
+    }
+
+    #[test]
+    fn a_bare_name_github_would_not_accept_is_refused_even_with_an_owner() {
+        assert!(Repo::settle("E pik", Some("epik-agent")).is_err());
+        assert!(Repo::settle("Epik.git", Some("epik-agent")).is_err());
+        let error = Repo::settle("Epik", Some("epik agent")).unwrap_err();
+        assert!(!error.contains("Settings"), "{error}");
     }
 
     #[test]
