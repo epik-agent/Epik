@@ -174,8 +174,10 @@ pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
 
 /// What both provisioners insist on before touching anything: an
 /// absolute path that is a git repository. Reads only; the answer is
-/// the repository's git dir, which the config work needs later.
-fn locate(repository: &str) -> Result<String, String> {
+/// the repository's git dir, which the config work needs later. Shared
+/// with `feature::tools`, so `start_feature` refuses a relative path in
+/// exactly `start_build`'s words.
+pub(crate) fn locate(repository: &str) -> Result<String, String> {
     if !Path::new(repository).is_absolute() {
         return Err(format!(
             "the repository must be an absolute local path for now, not {repository:?}"
@@ -453,6 +455,11 @@ fn abandon(workspace: &Workspace) {
 /// drainer writes — bounded by the work itself rather than by polling;
 /// dropping it detaches the drainer, which finishes on its own.
 ///
+/// `on_exit` runs on the drainer thread at the moment the run's end is
+/// folded — the [`Phase::Finished`] transition, before the commit
+/// observation — so a host can return an Agent slot the instant the
+/// Agent is gone, even when the drain itself outlives the run.
+///
 /// # Errors
 ///
 /// The spawn itself failing — the runner binary missing, chiefly. The
@@ -461,6 +468,7 @@ pub fn launch(
     agent: &impl Agent,
     runner: &Path,
     record: Run,
+    on_exit: impl FnOnce() + Send + 'static,
 ) -> io::Result<(Handle, std::thread::JoinHandle<()>)> {
     let (events_in, events) = channel();
     let handle = match crate::agent::run(agent, runner, events_in) {
@@ -476,6 +484,7 @@ pub fn launch(
         }
     };
     let drainer = std::thread::spawn(move || {
+        let mut on_exit = Some(on_exit);
         for event in events {
             let exited = matches!(event, Event::Exited(_));
             let workspace = {
@@ -483,6 +492,9 @@ pub fn launch(
                 record.absorb(event);
                 exited.then(|| record.workspace.clone())
             };
+            if exited && let Some(on_exit) = on_exit.take() {
+                on_exit();
+            }
             // Observed outside the lock: git takes its time.
             if let Some(workspace) = workspace {
                 let commits = observe(&workspace);

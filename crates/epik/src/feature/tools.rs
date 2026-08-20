@@ -2,11 +2,16 @@
 //! answers as soon as it is running; `feature_status` reads the record.
 //!
 //! The record — [`Builds`] — is a map keyed by [`RunId`], and
-//! [`Builds::admit`] refuses while a build is in flight. The map shape
-//! is deliberate: one feature at a time is policy, visibly the unstable
-//! part of the decision, so it lives in one refusal — a line to delete,
-//! never a shape to migrate. The refusal is typed, [`Refused::InFlight`],
-//! and names the build in flight.
+//! [`Builds::reserve`] refuses while a build is in flight. The map
+//! shape is deliberate: one feature at a time is policy, visibly the
+//! unstable part of the decision, so it lives in one refusal — a line
+//! to delete, never a shape to migrate. The refusal is typed,
+//! [`Refused`], and names the build in flight. Launching is
+//! two-phase: the run id is reserved before the check card is raised —
+//! so two concurrent starts can never both ask, and no answered card is
+//! ever discarded — and the flight fills the reservation once the build
+//! is running; the map lock is only ever held for the map itself, never
+//! across a card, a network push, or a git command.
 //!
 //! The check is a precondition, not an instruction: before anything is
 //! dispatched, `start_feature` raises the question itself —
@@ -60,94 +65,201 @@ pub struct Flight {
     /// The check command in force — `None` when the user declined: the
     /// branch is unchecked, and the record says so.
     pub check: Option<String>,
+    /// Reads the feature branch's settled tip — [`Branch::tip`], under
+    /// the merge lock, so a commit a red check is about to reset away
+    /// is never the answer.
+    pub tip: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
     pub record: Arc<Mutex<Build>>,
 }
 
-/// Why a feature build did not start.
+/// The typed refusal: one feature at a time, and this is the build in
+/// flight, named.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Refused {
-    /// One feature at a time: the build in flight, named.
-    InFlight {
-        run: RunId,
-        feature: IssueId,
-        branch: String,
-    },
-    /// The launch itself failed, in its own words.
-    Launch(String),
+pub struct Refused {
+    pub run: RunId,
+    pub feature: IssueId,
+    pub branch: String,
 }
 
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a feature build is already in flight: run {} is building feature \
+             {} on branch {}; feature_status says how it is going, and a \
+             second feature waits for the first to finish",
+            self.run, self.feature, self.branch
+        )
+    }
+}
+
+/// One entry of the record: a launch under way — reserved before the
+/// check card is raised, so a second start refuses before anyone is
+/// asked — or the build itself.
+enum Entry {
+    /// The reservation: the launch is validating, asking, establishing.
+    Starting {
+        feature: IssueId,
+        repository: String,
+        branch: String,
+    },
+    /// The build, running or finished.
+    Flight(Flight),
+}
+
+impl Entry {
+    /// Whether this entry blocks a new start: a reservation always
+    /// does; a flight does until its build finishes.
+    fn in_flight(&self) -> bool {
         match self {
-            Self::InFlight {
-                run,
-                feature,
-                branch,
-            } => write!(
-                f,
-                "a feature build is already in flight: run {run} is building feature \
-                 {feature} on branch {branch}; feature_status says how it is going, and a \
-                 second feature waits for the first to finish"
-            ),
-            Self::Launch(words) => write!(f, "{words}"),
+            Self::Starting { .. } => true,
+            Self::Flight(flight) => !flight
+                .record
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finished(),
+        }
+    }
+
+    const fn named(&self) -> (&IssueId, &str) {
+        match self {
+            Self::Starting {
+                feature, branch, ..
+            } => (feature, branch.as_str()),
+            Self::Flight(flight) => (&flight.feature, flight.branch.as_str()),
         }
     }
 }
 
 /// The record of feature builds, keyed by run id. Finished builds stay
-/// readable — status outlives completion — and only a build still in
-/// flight blocks admission.
-#[derive(Default)]
+/// readable — status outlives completion — and only a launch under way
+/// or a build still in flight blocks a reservation.
 pub struct Builds {
-    flights: Mutex<BTreeMap<RunId, Flight>>,
+    entries: Mutex<BTreeMap<RunId, Entry>>,
+    /// The next run id. A counter rather than the map's maximum, so a
+    /// released reservation never recycles its id onto a later build.
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl Default for Builds {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+            next: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
 }
 
 impl Builds {
-    /// The refusal a second `start_feature` answers with, when a build
-    /// is in flight.
+    /// The refusal a second `start_feature` answers with, when a launch
+    /// or a build is in flight.
     #[must_use]
     pub fn in_flight(&self) -> Option<Refused> {
-        refusal(&self.flights.lock().unwrap_or_else(PoisonError::into_inner))
+        refusal(&self.entries.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Admits `launch`'s build into the record under a fresh id. The
-    /// in-flight check and the launch run under one map lock — the
-    /// launch starts machinery and returns, so nothing here blocks long
-    /// — which is what makes it impossible for a build to run
-    /// unrecorded or for two launches to interleave.
+    /// Reserves the next run id for a launch, or refuses typed while
+    /// one is in flight — check and insert under one map lock, held for
+    /// nothing else. The reservation is what a second start runs into
+    /// from this moment on: before any card is raised, before any
+    /// branch is established. Fill it when the build is running; drop
+    /// it unfilled and the entry goes, though its id is never reused.
     ///
     /// # Errors
     ///
-    /// [`Refused::InFlight`] while a build is running, or the launch's
-    /// own words.
-    pub fn admit(&self, launch: impl FnOnce() -> Result<Flight, String>) -> Result<RunId, Refused> {
-        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(refused) = refusal(&flights) {
+    /// [`Refused`], naming the build in flight.
+    pub fn reserve(
+        self: &Arc<Self>,
+        feature: IssueId,
+        repository: String,
+        branch: String,
+    ) -> Result<Reservation, Refused> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(refused) = refusal(&entries) {
             return Err(refused);
         }
-        let run = RunId(flights.keys().next_back().map_or(1, |RunId(last)| last + 1));
-        flights.insert(run, launch().map_err(Refused::Launch)?);
-        Ok(run)
+        let run = RunId(self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        entries.insert(
+            run,
+            Entry::Starting {
+                feature,
+                repository,
+                branch,
+            },
+        );
+        Ok(Reservation {
+            builds: Arc::clone(self),
+            run,
+            filled: false,
+        })
     }
 }
 
-/// The build in flight, when one is: the newest unfinished flight,
-/// named for the refusal.
-fn refusal(flights: &BTreeMap<RunId, Flight>) -> Option<Refused> {
-    flights
-        .iter()
-        .rev()
-        .find(|(_, flight)| {
-            !flight
-                .record
+/// A run id held while a launch is under way: taken before the check
+/// card is raised, filled with the [`Flight`] once the build is
+/// running. Dropped unfilled — the launch failed — it releases its
+/// entry, and a new start may reserve again.
+pub struct Reservation {
+    builds: Arc<Builds>,
+    run: RunId,
+    filled: bool,
+}
+
+impl fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reservation")
+            .field("run", &self.run)
+            .field("filled", &self.filled)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Reservation {
+    /// The reserved run id.
+    #[must_use]
+    pub const fn run(&self) -> RunId {
+        self.run
+    }
+
+    /// The build is running: the flight takes the reservation's place
+    /// in the record.
+    pub fn fill(mut self, flight: Flight) -> RunId {
+        self.builds
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(self.run, Entry::Flight(flight));
+        self.filled = true;
+        self.run
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.filled {
+            self.builds
+                .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .finished()
-        })
-        .map(|(run, flight)| Refused::InFlight {
-            run: *run,
-            feature: flight.feature.clone(),
-            branch: flight.branch.clone(),
+                .remove(&self.run);
+        }
+    }
+}
+
+/// The build in flight, when one is: the newest entry still going,
+/// named for the refusal.
+fn refusal(entries: &BTreeMap<RunId, Entry>) -> Option<Refused> {
+    entries
+        .iter()
+        .rev()
+        .find(|(_, entry)| entry.in_flight())
+        .map(|(run, entry)| {
+            let (feature, branch) = entry.named();
+            Refused {
+                run: *run,
+                feature: feature.clone(),
+                branch: branch.to_owned(),
+            }
         })
 }
 
@@ -187,6 +299,20 @@ fn number(arguments: &Value, name: &str) -> Result<u64, String> {
     arguments[name]
         .as_u64()
         .ok_or_else(|| format!("the {name} argument must be a whole number"))
+}
+
+/// An optional string argument, held to the same non-empty rule as a
+/// required one: absent is fine, but an empty or blank value is a
+/// worded refusal — before any card is raised for a launch that could
+/// never start.
+fn optional<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+    match &arguments[name] {
+        Value::Null => Ok(None),
+        Value::String(value) if !value.trim().is_empty() => Ok(Some(value)),
+        _ => Err(format!(
+            "the {name} argument must be a non-empty string when given"
+        )),
+    }
 }
 
 /// The `start_feature` tool over the host's seams: `plan` reads a
@@ -249,23 +375,29 @@ where
             let repo = string(arguments, "repo")?;
             let repository = string(arguments, "repository")?.to_owned();
             let feature = IssueId::from(number(arguments, "feature")?);
-            if let Some(refused) = builds.in_flight() {
-                return Err(refused.to_string());
-            }
-            // The clone is read before anyone is asked anything:
-            // detection and the default base both need it to be real.
-            plumbing(&["-C", &repository, "rev-parse", "--absolute-git-dir"])
-                .map_err(|words| format!("{repository} is not a git repository: {words}"))?;
-            let branch = arguments["branch"]
-                .as_str()
-                .map_or_else(|| format!("feature-{feature}"), str::to_owned);
-            let base = match arguments["base"].as_str() {
-                Some(base) => base.to_owned(),
+            let branch = match optional(arguments, "branch")? {
+                Some(branch) => branch.to_owned(),
+                None => format!("feature-{feature}"),
+            };
+            let named_base = optional(arguments, "base")?.map(str::to_owned);
+            // The clone is read before anyone is asked anything —
+            // detection and the default base both need it to be real —
+            // under provisioning's own rule, so a relative path gets
+            // exactly start_build's refusal.
+            crate::build::locate(&repository)?;
+            let base = match named_base {
+                Some(base) => base,
                 None => plumbing(&["-C", &repository, "symbolic-ref", "--short", "HEAD"])
                     .map_err(|words| format!("the repository has no default branch: {words}"))?
                     .trim()
                     .to_owned(),
             };
+            // The reservation: from here a second start refuses — before
+            // any card is raised — and any failure below releases it on
+            // the way out.
+            let reservation = builds
+                .reserve(feature.clone(), repository.clone(), branch.clone())
+                .map_err(|refused| refused.to_string())?;
             let plan = plan(repo, &feature)?;
             let problems = plan.problems();
             let issues = plan.work(&BTreeSet::new()).len();
@@ -281,19 +413,29 @@ where
             });
             let check = confirmed(&answer);
             let command = check.as_ref().map(|check| check.command.clone());
-            let run = builds
-                .admit(|| {
-                    let established = Branch::establish(&repository, &branch, &base, forge, check)?;
-                    let record = build(plan, established, &runner, agents, Arc::clone(&budget));
-                    Ok(Flight {
-                        feature: feature.clone(),
-                        repository: repository.clone(),
-                        branch: branch.clone(),
-                        check: command.clone(),
-                        record,
-                    })
-                })
-                .map_err(|refused| refused.to_string())?;
+            // Establishing pushes over the network and the build starts
+            // machinery: both happen outside every map lock — the
+            // reservation is what keeps the door shut meanwhile.
+            let established = Arc::new(Branch::establish(
+                &repository,
+                &branch,
+                &base,
+                forge,
+                check,
+            )?);
+            let tip = {
+                let established = Arc::clone(&established);
+                move || established.tip()
+            };
+            let record = build(plan, established, &runner, agents, Arc::clone(&budget));
+            let run = reservation.fill(Flight {
+                feature: feature.clone(),
+                repository: repository.clone(),
+                branch: branch.clone(),
+                check: command.clone(),
+                tip: Arc::new(tip),
+                record,
+            });
             Ok(json!({
                 "started": true,
                 "run": run,
@@ -330,17 +472,18 @@ pub fn feature_status(builds: Arc<Builds>) -> Tool {
             },
         }),
         Box::new(move |arguments| {
-            // Cloned out under the map lock; git runs after it is gone.
-            let (run, feature, repository, branch, check, build) = {
-                let flights = builds
-                    .flights
+            // Cloned out under the map lock; the tip read — which waits
+            // on the merge lock — runs after it is gone.
+            let (run, feature, repository, branch, check, tip, build) = {
+                let entries = builds
+                    .entries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                let (run, flight) = match arguments["run"].as_u64() {
-                    Some(asked) => flights
+                let (run, entry) = match arguments["run"].as_u64() {
+                    Some(asked) => entries
                         .get_key_value(&RunId(asked))
                         .ok_or_else(|| format!("no feature build has run id {asked}"))?,
-                    None => match flights.iter().next_back() {
+                    None => match entries.iter().next_back() {
                         Some(latest) => latest,
                         None => {
                             return Ok(json!({
@@ -350,12 +493,31 @@ pub fn feature_status(builds: Arc<Builds>) -> Tool {
                         }
                     },
                 };
+                let flight = match entry {
+                    Entry::Starting {
+                        feature,
+                        repository,
+                        branch,
+                    } => {
+                        return Ok(json!({
+                            "run": run,
+                            "feature": feature,
+                            "repository": repository,
+                            "branch": branch,
+                            "finished": false,
+                            "note": "the build has not started: the check card is \
+                                     unanswered or the feature branch is being established",
+                        }));
+                    }
+                    Entry::Flight(flight) => flight,
+                };
                 (
                     *run,
                     flight.feature.clone(),
                     flight.repository.clone(),
                     flight.branch.clone(),
                     flight.check.clone(),
+                    Arc::clone(&flight.tip),
                     flight
                         .record
                         .lock()
@@ -382,14 +544,9 @@ pub fn feature_status(builds: Arc<Builds>) -> Tool {
                     entry
                 })
                 .collect();
-            let tip = plumbing(&[
-                "-C",
-                &repository,
-                "rev-parse",
-                &format!("refs/heads/{branch}"),
-            ])
-            .map(|tip| Value::String(tip.trim().to_owned()))
-            .unwrap_or(Value::Null);
+            // The settled tip, through the merge lock — never a raw read
+            // of a ref a red check may be about to reset.
+            let tip = tip().map(Value::String).unwrap_or(Value::Null);
             Ok(json!({
                 "run": run,
                 "feature": feature,
@@ -502,6 +659,7 @@ mod tests {
             repository: repository.to_owned(),
             branch: branch.to_owned(),
             check: None,
+            tip: Arc::new(|| Err("no branch was established".to_owned())),
             record: Arc::new(Mutex::new(build)),
         }
     }
@@ -551,7 +709,7 @@ mod tests {
 
     #[test]
     fn the_refusal_names_the_build_in_flight() {
-        let refused = Refused::InFlight {
+        let refused = Refused {
             run: RunId(3),
             feature: id(144),
             branch: "feature-144".to_owned(),
@@ -563,20 +721,34 @@ mod tests {
         assert!(words.contains("feature_status"), "{words}");
     }
 
+    /// Reserves for a fixture flight and fills at once — the shorthand
+    /// most map tests want.
+    fn admitted(builds: &Arc<Builds>, the_flight: Flight) -> RunId {
+        builds
+            .reserve(
+                the_flight.feature.clone(),
+                the_flight.repository.clone(),
+                the_flight.branch.clone(),
+            )
+            .unwrap()
+            .fill(the_flight)
+    }
+
     #[test]
-    fn admission_is_refused_typed_while_a_build_is_in_flight() {
-        let builds = Builds::default();
-        let first = builds
-            .admit(|| Ok(flight(7, "feature-7", "/r", &[(8, State::Running)])))
-            .unwrap();
+    fn a_reservation_or_a_running_build_refuses_the_next_start_typed() {
+        let builds = Arc::new(Builds::default());
+        let first = admitted(
+            &builds,
+            flight(7, "feature-7", "/r", &[(8, State::Running)]),
+        );
         assert_eq!(first, RunId(1));
 
         let refused = builds
-            .admit(|| panic!("the launch must not run"))
+            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
             .unwrap_err();
         assert_eq!(
             refused,
-            Refused::InFlight {
+            Refused {
                 run: RunId(1),
                 feature: id(7),
                 branch: "feature-7".to_owned(),
@@ -584,11 +756,14 @@ mod tests {
         );
         assert_eq!(builds.in_flight(), Some(refused));
 
-        // The build ends; the record stays; admission reopens with the
-        // next id.
+        // The build ends; the record stays; reservation reopens with
+        // the next id.
         {
-            let flights = builds.flights.lock().unwrap();
-            flights[&RunId(1)].record.lock().unwrap().states.insert(
+            let entries = builds.entries.lock().unwrap();
+            let Entry::Flight(flight) = &entries[&RunId(1)] else {
+                panic!("the filled entry is a flight");
+            };
+            flight.record.lock().unwrap().states.insert(
                 id(8),
                 State::Failed {
                     report: "boom".to_owned(),
@@ -596,20 +771,41 @@ mod tests {
             );
         }
         assert_eq!(builds.in_flight(), None);
-        let second = builds
-            .admit(|| Ok(flight(9, "feature-9", "/r", &[])))
-            .unwrap();
+        let second = admitted(&builds, flight(9, "feature-9", "/r", &[]));
         assert_eq!(second, RunId(2));
     }
 
+    /// The reservation itself is the refusal: taken before any card is
+    /// raised, a second start runs into it even though no flight has
+    /// filled it yet — so two starts can never both ask.
     #[test]
-    fn a_failed_launch_is_words_and_admits_nothing() {
-        let builds = Builds::default();
+    fn an_unfilled_reservation_already_refuses_the_next_start() {
+        let builds = Arc::new(Builds::default());
+        let reservation = builds
+            .reserve(id(7), "/r".to_owned(), "feature-7".to_owned())
+            .unwrap();
+        assert_eq!(reservation.run(), RunId(1));
+
         let refused = builds
-            .admit(|| Err("the forge is gone".to_owned()))
+            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
             .unwrap_err();
-        assert_eq!(refused, Refused::Launch("the forge is gone".to_owned()));
-        assert!(builds.flights.lock().unwrap().is_empty());
+        assert_eq!(
+            refused,
+            Refused {
+                run: RunId(1),
+                feature: id(7),
+                branch: "feature-7".to_owned(),
+            }
+        );
+
+        // The launch failed: the dropped reservation releases the door,
+        // and the spent id is never reused.
+        drop(reservation);
+        assert!(builds.entries.lock().unwrap().is_empty());
+        let next = builds
+            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
+            .unwrap();
+        assert_eq!(next.run(), RunId(2));
     }
 
     #[test]
@@ -771,9 +967,10 @@ mod tests {
         let scratch = Scratch::new("inflight");
         let (work, remote) = seeded(&scratch);
         let builds = Arc::new(Builds::default());
-        builds
-            .admit(|| Ok(flight(7, "feature-7", &work, &[(8, State::Running)])))
-            .unwrap();
+        admitted(
+            &builds,
+            flight(7, "feature-7", &work, &[(8, State::Running)]),
+        );
         let registry = registry(
             &builds,
             plan(9, vec![node(9, false, &[], &[])]),
@@ -809,7 +1006,29 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("not a git repository"), "{error}");
-        assert!(builds.flights.lock().unwrap().is_empty());
+        assert!(builds.entries.lock().unwrap().is_empty());
+
+        // A relative path gets provisioning's own refusal, not a
+        // cwd-dependent build.
+        let error = registry
+            .dispatch(
+                "start_feature",
+                &json!({ "repo": "o/r", "repository": "relative/clone", "feature": 7 }).to_string(),
+            )
+            .unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+
+        // An empty optional argument is a worded refusal, not a card.
+        let error = registry
+            .dispatch(
+                "start_feature",
+                &json!({ "repo": "o/r", "repository": "/nonexistent/clone", "feature": 7, "branch": " " })
+                    .to_string(),
+            )
+            .unwrap_err();
+        assert!(error.contains("branch"), "{error}");
+        assert!(error.contains("non-empty"), "{error}");
+        assert!(builds.entries.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -821,23 +1040,23 @@ mod tests {
             .trim()
             .to_owned();
         let builds = Arc::new(Builds::default());
-        builds
-            .admit(|| {
-                let mut flight = flight(
-                    100,
-                    "feature-100",
-                    &work,
-                    &[(
-                        101,
-                        State::Failed {
-                            report: "the wumpus got in".to_owned(),
-                        },
-                    )],
-                );
-                flight.check = Some("cargo test".to_owned());
-                Ok(flight)
-            })
-            .unwrap();
+        let mut settled = flight(
+            100,
+            "feature-100",
+            &work,
+            &[(
+                101,
+                State::Failed {
+                    report: "the wumpus got in".to_owned(),
+                },
+            )],
+        );
+        settled.check = Some("cargo test".to_owned());
+        settled.tip = Arc::new({
+            let tip = tip.clone();
+            move || Ok(tip.clone())
+        });
+        admitted(&builds, settled);
 
         let mut registry = Registry::default();
         registry.register(feature_status(Arc::clone(&builds)));
@@ -870,5 +1089,29 @@ mod tests {
         let status = registry.dispatch("feature_status", "{}").unwrap();
         assert_eq!(status["run"], Value::Null);
         assert_eq!(status["note"], json!("no feature build has been started"));
+    }
+
+    /// A launch still under way — the reservation phase, the card up or
+    /// the branch establishing — answers status without blocking on
+    /// anything the launch holds.
+    #[test]
+    fn status_of_a_reserved_launch_says_it_has_not_started() {
+        let builds = Arc::new(Builds::default());
+        let reservation = builds
+            .reserve(id(7), "/r".to_owned(), "feature-7".to_owned())
+            .unwrap();
+        let mut registry = Registry::default();
+        registry.register(feature_status(Arc::clone(&builds)));
+
+        let status = registry.dispatch("feature_status", "{}").unwrap();
+        assert_eq!(status["run"], json!(1));
+        assert_eq!(status["feature"], json!("7"));
+        assert_eq!(status["branch"], "feature-7");
+        assert_eq!(status["finished"], json!(false));
+        assert!(
+            status["note"].as_str().unwrap().contains("not started"),
+            "{status}"
+        );
+        drop(reservation);
     }
 }

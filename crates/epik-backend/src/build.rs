@@ -165,9 +165,11 @@ fn claude() -> Result<PathBuf, String> {
 /// locate the binaries, provision, assemble Claude Code in the workspace
 /// with the brief as its prompt, launch. `api_key` rides into the
 /// Agent's environment when there is one; without it the CLI's own
-/// logged-in auth applies. The slot is held for the Agent's life: a
-/// waiter joins the drainer — whose last act is the commit observation —
-/// and releases it, so a feature build alongside gets the slot back.
+/// logged-in auth applies. The slot is held for the Agent's life
+/// exactly: launch's exit hook releases it at the run's Finished
+/// transition, so a feature build alongside gets the slot back the
+/// moment the Agent is gone — and a drain that never ends cannot keep
+/// it.
 fn start_claude(
     order: Order,
     api_key: Option<Secret>,
@@ -188,15 +190,12 @@ fn start_claude(
         api_key,
     };
     let record = Record::new(order, workspace);
-    let (handle, drainer) = build::launch(&agent, &runner, record.clone())
+    // The slot rides the launch's exit hook: released the moment the
+    // run reports finished — never held hostage by the drain, whose
+    // join handle is dropped as ever, since the chat surface reads the
+    // record as it fills and waits for nothing.
+    let (handle, _drainer) = build::launch(&agent, &runner, record.clone(), move || drop(slot))
         .map_err(|error| format!("could not launch the agent runner: {error}"))?;
-    // The chat surface reads the record as it fills and never waits for
-    // the observation; the waiter exists only to hold the slot exactly
-    // as long as the run.
-    std::thread::spawn(move || {
-        let _held = slot;
-        let _ = drainer.join();
-    });
     Ok((record, Some(handle)))
 }
 
@@ -365,11 +364,6 @@ pub fn tools(app: AppHandle, api_key: Option<Secret>) -> Vec<Tool> {
     ]
 }
 
-/// An `owner/name` spelling settled, or refused in words the model reads.
-fn parsed(spec: &str) -> Result<Repo, String> {
-    Repo::parse(spec).ok_or_else(|| format!("{spec:?} is not an owner/name repository spelling"))
-}
-
 /// The feature tools as the app registers them each turn: the library's
 /// `start_feature` and `feature_status` wired to GitHub as the tracker
 /// and the forge, Claude Code as the Agent, and the window's question
@@ -388,7 +382,7 @@ pub fn feature_tools(
         let token = github_token.clone();
         move |spec: &str, feature: &IssueId| -> Result<Plan, String> {
             let github = GitHub::new(token.clone());
-            GitHubTracker::new(&github, parsed(spec)?).plan(feature)
+            GitHubTracker::new(&github, Repo::settle(spec)?).plan(feature)
         }
     };
     let forge = move |spec: &str| -> Result<epik::forge::GitHub, String> {
@@ -397,7 +391,7 @@ pub fn feature_tools(
              set the GitHub token in Settings (Cmd+,)",
         )?;
         Ok(epik::forge::GitHub {
-            repo: parsed(spec)?,
+            repo: Repo::settle(spec)?,
             token,
         })
     };

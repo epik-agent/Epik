@@ -87,6 +87,18 @@ impl Repo {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
         (owner_fits && name_fits).then(|| Self::new(owner, name))
     }
+
+    /// [`parse`](Self::parse), refused in words a model reads — the one
+    /// spelling of that refusal, shared by every tool that takes a
+    /// repository argument.
+    ///
+    /// # Errors
+    ///
+    /// The refusal, naming the spec.
+    pub fn settle(spec: &str) -> Result<Self, String> {
+        Self::parse(spec)
+            .ok_or_else(|| format!("{spec:?} is not an owner/name repository spelling"))
+    }
 }
 
 impl fmt::Display for Repo {

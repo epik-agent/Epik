@@ -168,7 +168,7 @@ fn a_diamond_runs_its_middles_at_once_and_its_tail_only_after_both_land() {
                 node(5, false, &[], &[(3, false), (4, false)]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted(BTreeMap::from([
             (2, lands(2)),
@@ -237,7 +237,7 @@ fn a_chain_of_five_runs_one_at_a_time_each_from_its_predecessors_tip() {
                 node(6, false, &[], &[(5, false)]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted(BTreeMap::from([
             (2, lands(2)),
@@ -319,7 +319,7 @@ fn a_plan_with_more_ready_issues_than_slots_never_runs_more_than_four_agents() {
                 node(7, false, &[], &[]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted((2..=7).map(|number| (number, held(number))).collect()),
         Budget::new(),
@@ -394,7 +394,7 @@ fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
                 node(5, false, &[], &[(3, false)]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted(BTreeMap::from([
             (2, "echo 'it all went wrong' >&2; exit 3".to_owned()),
@@ -457,7 +457,7 @@ fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
                 node(3, false, &[], &[]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         move |issue: &Issue, workspace: &Workspace, _brief: &str| {
             assert!(issue.id.0 != "3", "the factory had no Agent for issue 3");
@@ -501,7 +501,7 @@ fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() 
     let feature_workspace = branch.workspace().directory.clone();
     let record = feature::build(
         plan(1, nodes()),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted(BTreeMap::from([(2, "exit 3".to_owned())])),
         Budget::new(),
@@ -518,7 +518,7 @@ fn a_second_build_over_the_same_repository_supersedes_the_first_runs_branches() 
     let feature_workspace = branch.workspace().directory.clone();
     let record = feature::build(
         plan(1, nodes()),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted(BTreeMap::from([(2, lands(2))])),
         Budget::new(),
@@ -568,7 +568,7 @@ fn a_slot_claimed_outside_the_build_leaves_it_three_agents_until_released() {
                 node(5, false, &[], &[]),
             ],
         ),
-        branch,
+        Arc::new(branch),
         runner(),
         scripted((2..=5).map(|number| (number, held(number))).collect()),
         std::sync::Arc::clone(&budget),

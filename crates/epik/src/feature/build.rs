@@ -53,14 +53,15 @@ pub const CONCURRENCY: usize = 4;
 
 /// A budget of [`CONCURRENCY`] Agent slots. One per host, so a feature
 /// build and a plain build drawing on the same budget never run more
-/// than four Agents between them. A claim is non-blocking — each caller
-/// keeps its own discipline: a feature build waits, a plain build
-/// refuses — and releasing a slot wakes every watcher, so a scheduler
-/// starved by another build's claims hears the slot come back.
+/// than four Agents between them. Each caller keeps its own discipline
+/// — a plain build [`claim`](Self::claim)s and refuses, a feature
+/// scheduler [`take`](Self::take)s and waits — and both go through the
+/// budget's one mutex and condvar, so a release can never fall between
+/// a caller's check and its sleep.
 #[derive(Debug)]
 pub struct Budget {
     free: Mutex<usize>,
-    watchers: Mutex<Vec<std::sync::Weak<Condvar>>>,
+    freed: Condvar,
 }
 
 impl Budget {
@@ -70,12 +71,13 @@ impl Budget {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             free: Mutex::new(CONCURRENCY),
-            watchers: Mutex::new(Vec::new()),
+            freed: Condvar::new(),
         })
     }
 
     /// One slot, held until the [`Slot`] drops — or `None` when all
-    /// four are out.
+    /// four are out. Never waits: the plain build's discipline is to
+    /// refuse in words.
     #[must_use]
     pub fn claim(self: &Arc<Self>) -> Option<Slot> {
         let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
@@ -86,31 +88,32 @@ impl Budget {
         Some(Slot(Arc::clone(self)))
     }
 
-    /// Registers `signal` to be notified whenever a slot comes free. A
-    /// watcher whose condvar has died is pruned on the next release.
-    pub fn watch(&self, signal: &Arc<Condvar>) {
-        self.watchers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::downgrade(signal));
+    /// One slot, waited for: the feature scheduler's discipline. The
+    /// emptiness check and the sleep happen under the budget's own
+    /// mutex, and [`release`](Self::release) notifies under the same
+    /// one, so a slot freed at any moment is never missed.
+    #[must_use]
+    pub fn take(self: &Arc<Self>) -> Slot {
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        while *free == 0 {
+            free = self
+                .freed
+                .wait(free)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *free -= 1;
+        Slot(Arc::clone(self))
     }
 
     fn release(&self) {
-        *self.free.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-        self.watchers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|watcher| {
-                watcher
-                    .upgrade()
-                    .map(|signal| signal.notify_all())
-                    .is_some()
-            });
+        let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
+        *free += 1;
+        self.freed.notify_all();
     }
 }
 
 /// A held Agent slot. Dropping it returns the slot to its [`Budget`]
-/// and wakes the watchers.
+/// and wakes whoever waits there.
 #[derive(Debug)]
 pub struct Slot(Arc<Budget>);
 
@@ -275,14 +278,16 @@ fn brief(issue: &Issue) -> String {
 /// Starts the feature build and returns; the caller holds the record
 /// while the build proceeds, and [`Build::finished`] is how it knows
 /// the build is over. `branch` is the feature branch as
-/// [`Branch::establish`] left it, `runner` the agent runner binary,
-/// `agents` turns one dispatched issue — with its provisioned workspace
-/// and assembled brief — into the Agent that implements it, and
-/// `budget` is where the Agent slots come from — the host's one budget,
-/// so a plain build running alongside draws on the same four.
+/// [`Branch::establish`] left it — shared, so the caller can keep
+/// reading [`Branch::tip`] while the build runs — `runner` the agent
+/// runner binary, `agents` turns one dispatched issue — with its
+/// provisioned workspace and assembled brief — into the Agent that
+/// implements it, and `budget` is where the Agent slots come from — the
+/// host's one budget, so a plain build running alongside draws on the
+/// same four.
 pub fn build<F, A, M>(
     plan: Plan,
-    branch: Branch<F>,
+    branch: Arc<Branch<F>>,
     runner: &Path,
     agents: M,
     budget: Arc<Budget>,
@@ -295,13 +300,12 @@ where
     let machinery = Machinery {
         record: Arc::new(Mutex::new(Build::new(plan))),
         signal: Arc::new(Condvar::new()),
-        branch: Arc::new(branch),
+        branch,
         runner: runner.to_path_buf(),
         agents: Arc::new(agents),
         budget,
         _agent: PhantomData,
     };
-    machinery.budget.watch(&machinery.signal);
     let record = Arc::clone(&machinery.record);
     std::thread::spawn(move || machinery.schedule());
     record
@@ -340,42 +344,49 @@ where
     A: Agent + 'static,
     M: Fn(&Issue, &Workspace, &str) -> A + Send + Sync + 'static,
 {
-    /// The slot loop: fill whatever slots the budget yields from the
-    /// ready set, sleep when nothing can move, return when nothing is
-    /// ready and nothing is running. Issues are marked Running under
-    /// the same lock that read the ready set, so a slot is never
-    /// promised twice; a budget emptied by another build wakes this
-    /// loop through the watcher it registered.
+    /// The slot loop, three steps a turn. First, under the record lock:
+    /// wait — on the condvar the workers notify — until something is
+    /// dispatchable, or return when the build is over. Second, with no
+    /// lock of the record held: [`Budget::take`] a slot, waited for on
+    /// the budget's own condvar, so a slot freed by anyone — a sibling
+    /// worker, a plain build elsewhere — is never missed. Third, back
+    /// under the record lock: marry the slot to the first dispatchable
+    /// issue, marked Running under the same lock that judged it ready,
+    /// so a slot is never promised twice; the world may have moved while
+    /// the slot was waited for, and a slot with no issue left to take it
+    /// goes straight back.
     fn schedule(self) {
         loop {
-            let batch = {
+            {
                 let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
                 loop {
-                    let mut batch: Vec<(Issue, Slot)> = Vec::new();
-                    for issue in build.dispatchable() {
-                        let Some(slot) = self.budget.claim() else {
-                            break;
-                        };
-                        batch.push((issue, slot));
-                    }
-                    if !batch.is_empty() {
-                        for (issue, _) in &batch {
-                            build.states.insert(issue.id.clone(), State::Running);
-                        }
-                        break batch;
-                    }
                     if build.finished() {
                         return;
+                    }
+                    if !build.dispatchable().is_empty() {
+                        break;
                     }
                     build = self
                         .signal
                         .wait(build)
                         .unwrap_or_else(PoisonError::into_inner);
                 }
+            }
+            let slot = self.budget.take();
+            let dispatched = {
+                let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
+                let issue = build.dispatchable().into_iter().next();
+                if let Some(issue) = &issue {
+                    build.states.insert(issue.id.clone(), State::Running);
+                }
+                issue
             };
-            for (issue, slot) in batch {
-                let machinery = self.clone();
-                std::thread::spawn(move || machinery.work(&issue, slot));
+            match dispatched {
+                Some(issue) => {
+                    let machinery = self.clone();
+                    std::thread::spawn(move || machinery.work(&issue, slot));
+                }
+                None => drop(slot),
             }
         }
     }
@@ -431,7 +442,9 @@ where
         let agent = (self.agents)(issue, &workspace, &workspace.brief(&order.prompt));
         let branch = workspace.branch.clone();
         let run = Record::new(order, workspace);
-        let (handle, observer) = launch(&agent, &self.runner, Arc::clone(&run))
+        // The exit hook stays empty here: a feature issue's slot is
+        // released at the Merging transition below, not at the exit.
+        let (handle, observer) = launch(&agent, &self.runner, Arc::clone(&run), || {})
             .map_err(|error| format!("could not launch the agent runner: {error}"))?;
         self.record
             .lock()
@@ -715,40 +728,26 @@ mod tests {
         assert!(budget.claim().is_some(), "a dropped slot comes back");
     }
 
-    /// The watcher rail: a scheduler asleep on its own condvar hears a
-    /// slot another claimant releases.
+    /// The waited claim: `take` on an exhausted budget blocks and comes
+    /// back the moment a slot is released. The emptiness check and the
+    /// sleep share the budget's own mutex, so this holds whether the
+    /// release lands before, during, or after the taker's arrival —
+    /// there is no window for a lost wakeup.
     #[test]
-    fn releasing_a_slot_wakes_a_registered_watcher() {
+    fn take_waits_out_an_exhausted_budget_and_is_woken_by_a_release() {
         let budget = Budget::new();
-        let signal = Arc::new(Condvar::new());
-        budget.watch(&signal);
-        let woken = Arc::new(Mutex::new(false));
+        let mut held: Vec<Slot> = std::iter::from_fn(|| budget.claim()).collect();
+        assert_eq!(held.len(), CONCURRENCY);
 
-        let waiter = std::thread::spawn({
-            let signal = Arc::clone(&signal);
-            let woken = Arc::clone(&woken);
-            move || {
-                let mut woken = woken.lock().unwrap();
-                while !*woken {
-                    woken = signal.wait(woken).unwrap();
-                }
-            }
+        let taker = std::thread::spawn({
+            let budget = Arc::clone(&budget);
+            move || budget.take()
         });
-        let slot = budget.claim().unwrap();
-        // The release notifies; the waiter's own flag is set first so
-        // the wait's exit condition is the notification's work.
-        *woken.lock().unwrap() = true;
-        drop(slot);
-        waiter.join().unwrap();
-    }
+        drop(held.pop());
+        let taken = taker.join().unwrap();
 
-    /// A watcher whose condvar died is pruned rather than notified into
-    /// a dangle.
-    #[test]
-    fn a_dead_watcher_is_pruned_on_release() {
-        let budget = Budget::new();
-        budget.watch(&Arc::new(Condvar::new()));
-        drop(budget.claim().unwrap());
-        assert!(budget.watchers.lock().unwrap().is_empty());
+        assert!(budget.claim().is_none(), "the taken slot is really held");
+        drop(taken);
+        assert!(budget.claim().is_some());
     }
 }

@@ -53,7 +53,7 @@ fn build(repository: &str, branch: &str, script: &str) -> Run {
         cwd: workspace.directory.to_string_lossy().into_owned(),
     };
     let run = Record::new(order, workspace);
-    let (handle, observer) = launch(&agent, runner(), run.clone()).unwrap();
+    let (handle, observer) = launch(&agent, runner(), run.clone(), || {}).unwrap();
     handle.wait().unwrap();
     observer.join().unwrap();
     assert!(run.lock().unwrap().commits.is_some());
@@ -167,7 +167,7 @@ fn a_launch_that_cannot_spawn_removes_what_it_provisioned() {
     let directory = workspace.directory.clone();
     let run = Record::new(order, workspace);
 
-    let error = launch(&agent, Path::new("/nonexistent/epik-agent"), run).unwrap_err();
+    let error = launch(&agent, Path::new("/nonexistent/epik-agent"), run, || {}).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(!directory.exists(), "the worktree was abandoned");
     let verified = git2::Repository::open(&repository).unwrap();

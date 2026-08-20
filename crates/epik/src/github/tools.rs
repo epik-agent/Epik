@@ -407,8 +407,7 @@ fn schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
 }
 
 fn repo(arguments: &Value) -> Result<Repo, String> {
-    let spec = string(arguments, "repo")?;
-    Repo::parse(spec).ok_or_else(|| format!("{spec:?} is not an owner/name repository spelling"))
+    Repo::settle(string(arguments, "repo")?)
 }
 
 fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
