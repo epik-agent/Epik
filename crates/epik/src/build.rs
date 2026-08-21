@@ -424,8 +424,9 @@ fn observe(workspace: &Workspace) -> Commits {
 }
 
 /// Removes a provisioned worktree that never got its Agent, so a failed
-/// launch leaves nothing behind. Best effort.
-fn abandon(workspace: &Workspace) {
+/// launch — or a factory that never produced one — leaves nothing
+/// behind. Best effort.
+pub(crate) fn abandon(workspace: &Workspace) {
     let directory = workspace.directory.to_string_lossy().into_owned();
     let _ = plumbing(&[
         "-C",

@@ -440,13 +440,16 @@ fn a_failed_issue_leaves_its_dependents_skipped_and_its_siblings_merged() {
 
 /// The Agent factory is caller code and may panic; the worker catches
 /// it, the issue fails with the panic's words, the slot comes back, and
-/// the rest of the plan still builds to the end.
+/// the rest of the plan still builds to the end. The worktree
+/// provisioned for the Agent that never came is removed, and its branch
+/// with it.
 #[test]
 fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
     let scratch = Scratch::new("panic");
     let (work, forge) = seeded(&scratch);
     let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
     let feature_workspace = branch.workspace().directory.clone();
+    let provisioned = Arc::new(Mutex::new(None));
 
     let record = feature::build(
         plan(
@@ -459,11 +462,17 @@ fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
         ),
         Arc::new(branch),
         runner(),
-        move |issue: &Issue, workspace: &Workspace, _brief: &str| {
-            assert!(issue.id.0 != "3", "the factory had no Agent for issue 3");
-            Shell {
-                script: lands(2),
-                cwd: workspace.directory.to_string_lossy().into_owned(),
+        {
+            let provisioned = Arc::clone(&provisioned);
+            move |issue: &Issue, workspace: &Workspace, _brief: &str| {
+                if issue.id.0 == "3" {
+                    *provisioned.lock().unwrap() = Some(workspace.directory.clone());
+                    panic!("the factory had no Agent for issue 3");
+                }
+                Shell {
+                    script: lands(2),
+                    cwd: workspace.directory.to_string_lossy().into_owned(),
+                }
             }
         },
         Budget::new(),
@@ -482,6 +491,22 @@ fn a_panicking_agent_factory_fails_its_issue_and_the_build_still_ends() {
         matches!(build.states[&id(2)], State::Merged { .. }),
         "{:?}",
         build.states
+    );
+    let orphan = provisioned
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("issue 3 was provisioned");
+    assert!(
+        !orphan.exists(),
+        "the worktree for the Agent that never came is removed"
+    );
+    assert!(
+        git2::Repository::open(&work)
+            .unwrap()
+            .find_branch("issue/3", git2::BranchType::Local)
+            .is_err(),
+        "and its branch with it"
     );
 
     tidy(&work, &feature_workspace);
