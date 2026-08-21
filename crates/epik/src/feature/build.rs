@@ -42,7 +42,7 @@ use serde::Serialize;
 use super::merge::{Branch, Outcome};
 use super::{Issue, IssueId, Plan, Problem};
 use crate::agent::Agent;
-use crate::build::{Order, Record, Run, Workspace, launch, provision};
+use crate::build::{Order, Record, Run, Workspace, abandon, launch, provision};
 use crate::forge::Forge;
 use crate::git::plumbing;
 
@@ -439,7 +439,17 @@ where
         // below fails the issue with the corpse named.
         let _ = plumbing(&["-C", &order.repository, "branch", "-D", &order.branch]);
         let workspace = provision(&order)?;
-        let agent = (self.agents)(issue, &workspace, &workspace.brief(&order.prompt));
+        // The factory is caller code. A panic in it is the worker's to
+        // report, but the worktree just provisioned is this attempt's to
+        // remove first — a failed launch removes its own, and so does
+        // a launch that never happened.
+        let agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.agents)(issue, &workspace, &workspace.brief(&order.prompt))
+        }))
+        .unwrap_or_else(|panic| {
+            abandon(&workspace);
+            std::panic::resume_unwind(panic)
+        });
         let branch = workspace.branch.clone();
         let run = Record::new(order, workspace);
         // The exit hook stays empty here: a feature issue's slot is
