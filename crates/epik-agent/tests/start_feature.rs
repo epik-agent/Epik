@@ -125,19 +125,22 @@ fn finished(registry: &Registry) -> bool {
 /// Removes every linked worktree a build kept, so a scratch drop is
 /// enough.
 fn tidy(repository: &str) {
-    let listed = std::process::Command::new("git")
-        .args(["-C", repository, "worktree", "list", "--porcelain"])
-        .output()
-        .unwrap();
+    let listed = epik::spawn(
+        std::process::Command::new("git")
+            .args(["-C", repository, "worktree", "list", "--porcelain"])
+            .stdout(std::process::Stdio::piped()),
+    )
+    .unwrap()
+    .wait_with_output()
+    .unwrap();
     for line in String::from_utf8_lossy(&listed.stdout).lines() {
         if let Some(path) = line.strip_prefix("worktree ")
             && path != repository
         {
-            let _ = std::process::Command::new("git")
-                .args([
-                    "-C", repository, "worktree", "remove", "--force", "--", path,
-                ])
-                .status();
+            let _ = epik::spawn(std::process::Command::new("git").args([
+                "-C", repository, "worktree", "remove", "--force", "--", path,
+            ]))
+            .and_then(|mut git| git.wait());
         }
     }
 }

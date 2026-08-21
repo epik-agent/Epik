@@ -59,12 +59,15 @@ impl Forge for Local {
 
 /// Runs git and insists it worked; the output is nobody's business.
 pub fn git(args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
+    let status = epik::spawn(
+        std::process::Command::new("git")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+    .wait()
+    .unwrap();
     assert!(status.success(), "git {args:?} failed");
 }
 
@@ -104,15 +107,14 @@ impl Agent for Shell {
 
 /// Removes a worktree a build kept, so a scratch drop is enough.
 pub fn tidy(repository: &str, workspace: &Path) {
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            repository,
-            "worktree",
-            "remove",
-            "--force",
-            "--",
-            workspace.to_str().unwrap(),
-        ])
-        .status();
+    let _ = epik::spawn(std::process::Command::new("git").args([
+        "-C",
+        repository,
+        "worktree",
+        "remove",
+        "--force",
+        "--",
+        workspace.to_str().unwrap(),
+    ]))
+    .and_then(|mut git| git.wait());
 }

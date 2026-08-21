@@ -8,8 +8,29 @@
 //! [`git`](crate::git) runs its binary through it and
 //! [`check`](crate::check) runs its shell through it.
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+/// Spawns `command`, with no other spawn of this process in flight.
+///
+/// macOS makes a pipe in two steps — `pipe`, then `FD_CLOEXEC` on each
+/// end — and `posix_spawn` hands a child every descriptor not yet so
+/// marked. A spawn on another thread between those two steps gives
+/// its child the pipe ends this one is wiring, and that child — and
+/// everything it runs — holds them for as long as it lives: this one's
+/// stdin never reaches EOF, its stdout never closes. One lock over
+/// every spawn in the process leaves no such moment. Spawning takes
+/// microseconds; nothing waits behind the lock for longer than that.
+///
+/// # Errors
+///
+/// [`Command::spawn`]'s own.
+pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _held = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    command.spawn()
+}
 
 /// A child that ran to its end: whether it exited zero, and its own
 /// words — stdout and stderr both.
@@ -31,12 +52,13 @@ pub(crate) fn run(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<Finished, String> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run {name}: {error}"))?;
+    let mut child = spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| format!("could not run {name}: {error}"))?;
 
     let stdout = reader(child.stdout.take().expect("stdout was piped"));
     let stderr = reader(child.stderr.take().expect("stderr was piped"));

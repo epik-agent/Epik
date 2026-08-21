@@ -262,12 +262,16 @@ mod tests {
     fn the_askpass_script_answers_username_and_password_from_the_environment() {
         let askpass = Askpass::new().unwrap();
         let ask = |prompt: &str| {
-            let output = std::process::Command::new(askpass.path().unwrap())
-                .arg(prompt)
-                .env("EPIK_GIT_USERNAME", "x-access-token")
-                .env("EPIK_GIT_PASSWORD", "ghp_sesame")
-                .output()
-                .unwrap();
+            let output = crate::spawn(
+                std::process::Command::new(askpass.path().unwrap())
+                    .arg(prompt)
+                    .env("EPIK_GIT_USERNAME", "x-access-token")
+                    .env("EPIK_GIT_PASSWORD", "ghp_sesame")
+                    .stdout(std::process::Stdio::piped()),
+            )
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
             String::from_utf8(output.stdout).unwrap()
         };
         assert_eq!(

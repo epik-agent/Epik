@@ -6,6 +6,8 @@ pub mod chat;
 pub mod check;
 #[cfg(feature = "native")]
 mod child;
+#[cfg(feature = "native")]
+pub use child::spawn;
 #[cfg(feature = "serde")]
 pub mod config;
 pub mod feature;
