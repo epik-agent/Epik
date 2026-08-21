@@ -141,17 +141,16 @@ fn an_agent_that_writes_without_committing_leaves_a_dirty_worktree_in_place() {
 
     // Tidy what the harness deliberately left.
     let directory = record.workspace.directory.to_string_lossy().into_owned();
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repository,
-            "worktree",
-            "remove",
-            "--force",
-            "--",
-            &directory,
-        ])
-        .status();
+    let _ = epik::spawn(std::process::Command::new("git").args([
+        "-C",
+        &repository,
+        "worktree",
+        "remove",
+        "--force",
+        "--",
+        &directory,
+    ]))
+    .and_then(|mut git| git.wait());
 }
 
 #[test]

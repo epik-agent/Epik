@@ -110,6 +110,65 @@ fn an_env_secret_reaches_the_child_and_no_debug_output() {
     handle.wait().unwrap();
 }
 
+/// The Task is its one line, not everything to EOF: a runner whose
+/// stdin stays open — as it does when another process was handed a copy
+/// of the pipe's write end, which macOS does to a child spawned while
+/// the pipe was being made — starts its child and runs to Exited all
+/// the same.
+#[test]
+fn the_runner_takes_its_task_from_one_line_and_needs_no_eof() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let mut runner = epik::spawn(
+        Command::new(runner())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .expect("the runner spawns");
+    let mut stdin = runner.stdin.take().unwrap();
+    let task = serde_json::to_string(&Scripted::counting(2).task()).unwrap();
+    writeln!(stdin, "{task}").unwrap();
+    stdin.flush().unwrap();
+    // stdin stays open in this hand: no EOF until the assertions are in.
+
+    let stdout = BufReader::new(runner.stdout.take().unwrap());
+    let (lines_in, lines) = channel();
+    std::thread::spawn(move || {
+        for line in stdout.lines().map_while(Result::ok) {
+            if lines_in.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(remaining)
+            .expect("the runner ran its child without waiting for EOF on its stdin");
+        let event: Event = serde_json::from_str(&line).unwrap();
+        let ended = matches!(event, Event::Exited(_));
+        seen.push(event);
+        if ended {
+            break;
+        }
+    }
+    assert_eq!(stdout_lines(&seen), ["line 1", "line 2"]);
+    assert_eq!(
+        seen.last(),
+        Some(&Event::Exited(Exit {
+            code: Some(0),
+            signal: None,
+        }))
+    );
+
+    drop(stdin);
+    assert!(runner.wait().unwrap().success());
+}
+
 #[test]
 fn kill_ends_the_whole_tree_and_the_stream_still_settles() {
     let (events, handle) = launch(&Scripted::hanging());
@@ -159,10 +218,14 @@ fn settles(check: impl Fn() -> bool, complaint: &str) {
 }
 
 fn no_orphaned_sleep() -> bool {
-    let listing = std::process::Command::new("ps")
-        .args(["-axo", "command"])
-        .output()
-        .expect("ps runs");
+    let listing = epik::spawn(
+        std::process::Command::new("ps")
+            .args(["-axo", "command"])
+            .stdout(std::process::Stdio::piped()),
+    )
+    .expect("ps runs")
+    .wait_with_output()
+    .expect("ps ends");
     // Whole-command matches only: a shell or editor merely *mentioning*
     // the marker (a grep, this file open in a tool) is not an orphan.
     !String::from_utf8_lossy(&listing.stdout)

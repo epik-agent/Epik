@@ -1,9 +1,13 @@
 //! The runner: launches one command line as a supervised child and
 //! frames what it observes.
 //!
-//! One JSON [`Task`] arrives on stdin; the [`Event`] vocabulary leaves
-//! on stdout as JSON lines — both defined once, in `epik`'s agent
-//! module, which is all this binary imports from that crate. By
+//! One JSON [`Task`] arrives as the first line of stdin; the [`Event`]
+//! vocabulary leaves on stdout as JSON lines — both defined once, in
+//! `epik`'s agent module, which is all this binary imports from that
+//! crate. The line, not EOF, is the end of the Task: a descriptor for
+//! this stdin that some other process happens to hold — macOS hands
+//! them out to children spawned at the wrong moment — then delays
+//! nothing. By
 //! discipline it knows nothing else: no chat, no GitHub, no keystore, no
 //! domain types. The runner is generic; anything launched through it is
 //! an Agent.
@@ -50,27 +54,29 @@ mod unix {
     pub(crate) fn supervise() -> Result<(), String> {
         let mut task_json = String::new();
         std::io::stdin()
-            .read_to_string(&mut task_json)
+            .lock()
+            .read_line(&mut task_json)
             .map_err(|error| format!("could not read the task from stdin: {error}"))?;
         let task: Task = serde_json::from_str(&task_json)
             .map_err(|error| format!("the task is not valid JSON: {error}"))?;
         let program = task.argv.first().ok_or("the task's argv is empty")?;
 
-        let mut child = Command::new(program)
-            .args(&task.argv[1..])
-            // The one reveal: out of the Secret, straight into the
-            // child's environment.
-            .envs(task.env.iter().map(|(name, value)| (name, value.reveal())))
-            .current_dir(&task.cwd)
-            .stdin(if task.stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not start {program}: {error}"))?;
+        let mut child = epik::spawn(
+            Command::new(program)
+                .args(&task.argv[1..])
+                // The one reveal: out of the Secret, straight into the
+                // child's environment.
+                .envs(task.env.iter().map(|(name, value)| (name, value.reveal())))
+                .current_dir(&task.cwd)
+                .stdin(if task.stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .map_err(|error| format!("could not start {program}: {error}"))?;
         emit(&Event::Started { pid: child.id() });
 
         if let Some(payload) = task.stdin {

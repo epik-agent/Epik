@@ -134,13 +134,17 @@ mod native {
     ) -> std::io::Result<Handle> {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
-        let task = serde_json::to_string(&agent.task()).expect("the task serializes");
-        let mut child = Command::new(runner)
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        // One line: the runner reads to the newline, not to EOF, so
+        // nothing else holding its stdin open can keep the Task from it.
+        let mut task = serde_json::to_string(&agent.task()).expect("the task serializes");
+        task.push('\n');
+        let mut child = crate::spawn(
+            Command::new(runner)
+                .process_group(0)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )?;
         #[allow(clippy::cast_possible_wrap)]
         let group = child.id() as i32;
 
@@ -164,16 +168,27 @@ mod native {
                         // not an event at all: not this build's business.
                         Ok(Event::Unknown) | Err(_) => {}
                         Ok(event) => {
+                            let ended = matches!(event, Event::Exited(_));
                             if let Event::Exited(seen) = &event {
                                 exit = Some(*seen);
                             }
                             let _ = events.send(event);
+                            // Exited is the runner's last word: the
+                            // stream ends here, not at EOF, which anyone
+                            // else holding the pipe could postpone.
+                            if ended {
+                                break;
+                            }
                         }
                     }
                 }
-                // Runner faults are one stderr line; read after EOF.
+                // Runner faults are one stderr line, written only by a
+                // runner that never got to Exited — so only then is the
+                // pipe read to its end.
                 let mut fault = String::new();
-                let _ = stderr.read_to_string(&mut fault);
+                if exit.is_none() {
+                    let _ = stderr.read_to_string(&mut fault);
+                }
                 let status = child.wait();
                 finished.store(true, Ordering::SeqCst);
                 let settled = match (exit, status) {
