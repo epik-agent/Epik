@@ -518,11 +518,46 @@ pub(crate) mod fixtures {
             ],
         )
     }
+
+    /// The same two, each waiting on the other: nothing can ever be
+    /// ready, and the cycle is the plan's problem to name.
+    pub(crate) fn two_and_three_in_a_cycle() -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3], &[]),
+                node(2, false, &[], &[(3, false)]),
+                node(3, false, &[], &[(2, false)]),
+            ],
+        )
+    }
+
+    /// A chain, 2 then 3 then 5, beside 4, which waits on nothing:
+    /// what a loss at the head takes down, and what it spares.
+    pub(crate) fn a_chain_beside_a_loner() -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3, 4, 5], &[]),
+                node(2, false, &[], &[]),
+                node(3, false, &[], &[(2, false)]),
+                node(4, false, &[], &[]),
+                node(5, false, &[], &[(3, false)]),
+            ],
+        )
+    }
+
+    /// Feature 7 with one leaf, 8: the least plan a tool can act on.
+    pub(crate) fn seven_holding_eight() -> Plan {
+        plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{id, issue, node, plan, two_then_three};
+    use super::fixtures::{
+        a_chain_beside_a_loner, id, issue, node, plan, two_and_three_in_a_cycle, two_then_three,
+    };
     use super::*;
 
     fn ready_ids(plan: &Plan) -> Vec<&str> {
@@ -694,14 +729,7 @@ mod tests {
 
     #[test]
     fn a_cycle_is_named_and_nothing_on_it_is_ready() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[(3, false)]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        );
+        let plan = two_and_three_in_a_cycle();
         assert!(ready_ids(&plan).is_empty());
         assert_eq!(
             plan.problems(),
@@ -824,16 +852,7 @@ mod tests {
 
     #[test]
     fn a_lost_leaf_dooms_its_dependents_transitively_and_spares_the_rest() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3, 4, 5], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-                node(4, false, &[], &[]),
-                node(5, false, &[], &[(3, false)]),
-            ],
-        );
+        let plan = a_chain_beside_a_loner();
         assert!(doomed_pairs(&plan, &[]).is_empty(), "a healthy chain lives");
         assert_eq!(
             doomed_pairs(&plan, &[2]),
@@ -886,14 +905,7 @@ mod tests {
 
     #[test]
     fn a_cycle_dooms_both_sides_rather_than_propping_them_up() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[(3, false)]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        );
+        let plan = two_and_three_in_a_cycle();
         assert_eq!(
             doomed_pairs(&plan, &[]),
             [

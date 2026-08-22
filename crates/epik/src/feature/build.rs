@@ -521,7 +521,9 @@ fn words(panic: &(dyn std::any::Any + Send)) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::fixtures::{id, issue, node, plan, two_then_three};
+    use crate::feature::fixtures::{
+        a_chain_beside_a_loner, id, issue, node, plan, two_and_three_in_a_cycle, two_then_three,
+    };
 
     #[test]
     fn a_new_build_states_only_the_open_reachable_leaves() {
@@ -567,14 +569,7 @@ mod tests {
 
     #[test]
     fn a_cycle_is_skipped_at_the_start_and_named_in_the_problems() {
-        let build = Build::new(plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[(3, false)]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        ));
+        let build = Build::new(two_and_three_in_a_cycle());
         assert!(
             build
                 .states
@@ -596,16 +591,7 @@ mod tests {
 
     #[test]
     fn a_failure_skips_its_dependents_transitively_and_spares_the_rest() {
-        let mut build = Build::new(plan(
-            1,
-            vec![
-                node(1, false, &[2, 3, 4, 5], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-                node(4, false, &[], &[]),
-                node(5, false, &[], &[(3, false)]),
-            ],
-        ));
+        let mut build = Build::new(a_chain_beside_a_loner());
         build.fail(&id(2), "the wumpus got in".to_owned());
         assert_eq!(
             build.states[&id(2)],
