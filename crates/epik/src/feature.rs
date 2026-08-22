@@ -564,6 +564,9 @@ pub(crate) mod fixtures {
     }
 
     /// Feature 7 with one leaf, 8: the least plan a tool can act on.
+    /// Gated as the tools are, so a build without them has no unused
+    /// fixture to warn about.
+    #[cfg(all(feature = "native", unix))]
     pub(crate) fn seven_holding_eight() -> Plan {
         plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
     }
