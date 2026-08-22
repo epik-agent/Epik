@@ -521,7 +521,7 @@ fn words(panic: &(dyn std::any::Any + Send)) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::fixtures::{id, issue, node, plan};
+    use crate::feature::fixtures::{id, issue, node, plan, two_then_three};
 
     #[test]
     fn a_new_build_states_only_the_open_reachable_leaves() {
@@ -653,14 +653,7 @@ mod tests {
 
     #[test]
     fn skipping_never_overwrites_a_state_an_issue_earned() {
-        let mut build = Build::new(plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        ));
+        let mut build = Build::new(two_then_three());
         build.states.insert(
             id(3),
             State::Merged {
@@ -674,14 +667,7 @@ mod tests {
 
     #[test]
     fn the_build_ends_when_nothing_is_ready_and_nothing_is_running() {
-        let mut build = Build::new(plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        ));
+        let mut build = Build::new(two_then_three());
         assert!(!build.finished(), "2 is ready");
         build.states.insert(id(2), State::Running);
         assert!(!build.finished(), "an Agent is out");

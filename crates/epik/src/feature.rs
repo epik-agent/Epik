@@ -504,11 +504,25 @@ pub(crate) mod fixtures {
         })
         .unwrap()
     }
+
+    /// The smallest plan with an order in it: feature 1 holds 2 and 3,
+    /// and 3 waits on 2. Two ready states, one edge — enough to watch
+    /// one issue's end change another's standing.
+    pub(crate) fn two_then_three() -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3], &[]),
+                node(2, false, &[], &[]),
+                node(3, false, &[], &[(2, false)]),
+            ],
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{id, issue, node, plan};
+    use super::fixtures::{id, issue, node, plan, two_then_three};
     use super::*;
 
     fn ready_ids(plan: &Plan) -> Vec<&str> {
@@ -735,14 +749,7 @@ mod tests {
 
     #[test]
     fn the_done_set_settles_an_issue_the_tracker_still_calls_open() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        );
+        let plan = two_then_three();
         let done: BTreeSet<IssueId> = [id(2)].into();
         assert!(plan.settled(&id(2), &done));
         assert_eq!(
@@ -930,14 +937,7 @@ mod tests {
 
     #[test]
     fn the_done_set_keeps_a_blocker_settleable() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        );
+        let plan = two_then_three();
         let done: BTreeSet<IssueId> = [id(2)].into();
         assert!(plan.doomed(&done, &BTreeSet::new()).is_empty());
     }
