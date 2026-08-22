@@ -547,6 +547,22 @@ pub(crate) mod fixtures {
         )
     }
 
+    /// Feature 1 holds a container, 7, with leaves 2 and 8 — and a leaf
+    /// of its own, 9, that waits on the container: what a loss inside 7
+    /// means for whoever waited on 7 as a whole.
+    pub(crate) fn nine_waiting_on_container_seven() -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[7, 9], &[]),
+                node(7, false, &[2, 8], &[]),
+                node(2, false, &[], &[]),
+                node(8, false, &[], &[]),
+                node(9, false, &[], &[(7, false)]),
+            ],
+        )
+    }
+
     /// Feature 7 with one leaf, 8: the least plan a tool can act on.
     pub(crate) fn seven_holding_eight() -> Plan {
         plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
@@ -556,7 +572,8 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::fixtures::{
-        a_chain_beside_a_loner, id, issue, node, plan, two_and_three_in_a_cycle, two_then_three,
+        a_chain_beside_a_loner, id, issue, nine_waiting_on_container_seven, node, plan,
+        two_and_three_in_a_cycle, two_then_three,
     };
     use super::*;
 
@@ -866,16 +883,7 @@ mod tests {
 
     #[test]
     fn a_lost_leaf_under_a_container_dooms_whoever_waits_on_the_container() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[7, 9], &[]),
-                node(7, false, &[2, 8], &[]),
-                node(2, false, &[], &[]),
-                node(8, false, &[], &[]),
-                node(9, false, &[], &[(7, false)]),
-            ],
-        );
+        let plan = nine_waiting_on_container_seven();
         assert_eq!(
             doomed_pairs(&plan, &[2]),
             [("9".to_owned(), "7".to_owned())],

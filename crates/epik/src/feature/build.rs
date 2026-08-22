@@ -522,7 +522,8 @@ fn words(panic: &(dyn std::any::Any + Send)) -> &str {
 mod tests {
     use super::*;
     use crate::feature::fixtures::{
-        a_chain_beside_a_loner, id, issue, node, plan, two_and_three_in_a_cycle, two_then_three,
+        a_chain_beside_a_loner, id, issue, nine_waiting_on_container_seven, node, plan,
+        two_and_three_in_a_cycle, two_then_three,
     };
 
     #[test]
@@ -615,16 +616,7 @@ mod tests {
 
     #[test]
     fn a_failure_under_a_container_strands_whoever_waits_on_the_container() {
-        let mut build = Build::new(plan(
-            1,
-            vec![
-                node(1, false, &[7, 9], &[]),
-                node(7, false, &[2, 8], &[]),
-                node(2, false, &[], &[]),
-                node(8, false, &[], &[]),
-                node(9, false, &[], &[(7, false)]),
-            ],
-        ));
+        let mut build = Build::new(nine_waiting_on_container_seven());
         build.fail(&id(2), "boom".to_owned());
         let State::Skipped { reason } = &build.states[&id(9)] else {
             panic!("7 can never settle: {:?}", build.states);
