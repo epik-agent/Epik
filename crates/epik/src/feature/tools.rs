@@ -565,7 +565,7 @@ pub fn feature_status(builds: Arc<Builds>) -> Tool {
 #[cfg(test)]
 mod tests {
     use super::super::State;
-    use super::super::fixtures::{id, node, plan};
+    use super::super::fixtures::{id, node, plan, seven_holding_eight};
     use super::*;
     use crate::agent::Task;
     use crate::testing::Scratch;
@@ -836,12 +836,7 @@ mod tests {
             .trim()
             .to_owned();
         let builds = Arc::new(Builds::default());
-        let registry = registry(
-            &builds,
-            plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])]),
-            remote,
-            |_| Answer::Declined,
-        );
+        let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
         let started = registry
             .dispatch(
@@ -881,20 +876,15 @@ mod tests {
         .unwrap();
         let asked = Arc::new(Mutex::new(None::<Ask>));
         let builds = Arc::new(Builds::default());
-        let registry = registry(
-            &builds,
-            plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])]),
-            remote,
-            {
-                let asked = Arc::clone(&asked);
-                move |question| {
-                    *asked.lock().unwrap() = Some(question);
-                    Answer::Check {
-                        command: "cargo test --workspace".to_owned(),
-                    }
+        let registry = registry(&builds, seven_holding_eight(), remote, {
+            let asked = Arc::clone(&asked);
+            move |question| {
+                *asked.lock().unwrap() = Some(question);
+                Answer::Check {
+                    command: "cargo test --workspace".to_owned(),
                 }
-            },
-        );
+            }
+        });
 
         let started = registry
             .dispatch(
@@ -942,12 +932,7 @@ mod tests {
         )
         .unwrap();
         let builds = Arc::new(Builds::default());
-        let registry = registry(
-            &builds,
-            plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])]),
-            remote,
-            |_| Answer::Declined,
-        );
+        let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
         let started = registry
             .dispatch(
