@@ -7,7 +7,7 @@
 //! arrives; a thin trait that names the right boundary beats a fat one
 //! that names the wrong boundary.
 //!
-//! [`GitHub`] implements it with the token already on the
+//! [`github::GitHub`] implements it with the token already on the
 //! [`keystore`](crate::keystore) rails, so pushing needs nothing
 //! installed on the machine. [`push`] is the one writing verb: the
 //! credentials answer git's askpass through a script that dies with the
@@ -20,6 +20,9 @@
 use std::path::Path;
 
 use crate::keystore::Secret;
+use crate::temp;
+
+pub mod github;
 
 /// Where refs live and how to write them: the remote, and the
 /// credentials git pushes with.
@@ -37,31 +40,8 @@ pub trait Forge {
 /// for it.
 #[derive(Clone, Debug)]
 pub struct Credentials {
-    pub username: String,
-    pub secret: Secret,
-}
-
-/// GitHub as a forge: one repository, written over HTTPS as the
-/// `x-access-token` user with the token from the keystore. The API
-/// client in [`github`](crate::github) is the same system's other face;
-/// this one only knows where the refs are.
-#[derive(Clone, Debug)]
-pub struct GitHub {
-    pub repo: crate::github::Repo,
-    pub token: Secret,
-}
-
-impl Forge for GitHub {
-    fn remote(&self) -> String {
-        format!("https://github.com/{}.git", self.repo)
-    }
-
-    fn credentials(&self) -> Option<Credentials> {
-        Some(Credentials {
-            username: "x-access-token".to_owned(),
-            secret: self.token.clone(),
-        })
-    }
+    username: String,
+    secret: Secret,
 }
 
 /// The askpass script: git calls it once for the username and once for
@@ -79,19 +59,9 @@ struct Askpass(std::path::PathBuf);
 impl Askpass {
     fn new() -> Result<Self, String> {
         use std::os::unix::fs::PermissionsExt;
-        // The clock alone can collide when two pushes start in the same
-        // tick, and a shared path would let one Drop delete the other's
-        // live script mid-auth — a process-wide count settles it.
-        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "epik-askpass-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|since| since.as_nanos())
-                .unwrap_or_default(),
-            NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        // A shared path would let one Drop delete another push's live
+        // script mid-auth; a unique one cannot.
+        let path = temp::unique("epik-askpass");
         std::fs::write(&path, ASKPASS)
             .map_err(|error| format!("could not write the askpass script: {error}"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
@@ -163,19 +133,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
 
-    /// A forge for tests: a bare directory, no credentials — pushing to
-    /// it is pushing to a path.
-    struct Local(String);
-
-    impl Forge for Local {
-        fn remote(&self) -> String {
-            self.0.clone()
-        }
-
-        fn credentials(&self) -> Option<Credentials> {
-            None
-        }
-    }
+    use crate::testing::{Local, Scratch, seeded};
 
     /// A forge whose remote is a loopback HTTP listener that demands
     /// authentication — how the askpass rails are proven without any
@@ -195,27 +153,9 @@ mod tests {
         }
     }
 
-    use crate::testing::Scratch;
-
-    /// A working repository with one commit, plus a bare remote.
-    fn seeded(scratch: &Scratch) -> (String, String) {
-        let work = scratch.join("work");
-        let bare = scratch.join("remote.git");
-        let git = |args: &[&str]| crate::git::plumbing(args).unwrap();
-        git(&["init", "--initial-branch=main", &work]);
-        git(&["-C", &work, "config", "user.name", "Test"]);
-        git(&["-C", &work, "config", "user.email", "test@example.com"]);
-        git(&["-C", &work, "config", "commit.gpgsign", "false"]);
-        std::fs::write(std::path::Path::new(&work).join("hello.txt"), "hello\n").unwrap();
-        git(&["-C", &work, "add", "hello.txt"]);
-        git(&["-C", &work, "commit", "-m", "the first commit"]);
-        git(&["init", "--bare", "--initial-branch=main", &bare]);
-        (work, bare)
-    }
-
     #[test]
     fn github_pushes_its_repository_over_https_as_the_token_user() {
-        let forge = GitHub {
+        let forge = github::GitHub {
             repo: crate::github::Repo::new("epik-agent", "Epik"),
             token: "ghp_sesame".into(),
         };
@@ -230,7 +170,7 @@ mod tests {
         let scratch = Scratch::new("push");
         let (work, bare) = seeded(&scratch);
 
-        push(std::path::Path::new(&work), "main", &Local(bare.clone())).unwrap();
+        push(Path::new(&work), "main", &Local(bare.clone())).unwrap();
 
         let verified = git2::Repository::open(&bare).unwrap();
         let pushed = verified
@@ -254,7 +194,7 @@ mod tests {
         let (work, _) = seeded(&scratch);
         let gone = scratch.join("gone.git");
 
-        let error = push(std::path::Path::new(&work), "main", &Local(gone)).unwrap_err();
+        let error = push(Path::new(&work), "main", &Local(gone)).unwrap_err();
         assert!(error.contains("gone.git"), "{error}");
     }
 
@@ -326,7 +266,7 @@ mod tests {
             }
         });
 
-        let error = push(std::path::Path::new(&work), "main", &Guarded(url)).unwrap_err();
+        let error = push(Path::new(&work), "main", &Guarded(url)).unwrap_err();
         assert!(
             !error.contains("ghp_sesame"),
             "the failure never quotes the secret: {error}"

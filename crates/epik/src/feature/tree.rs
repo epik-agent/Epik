@@ -13,15 +13,15 @@ use serde::Serialize;
 /// A value and the subtrees beneath it. Output vocabulary: it serializes
 /// on its way to a model or a window and is never read back in.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct Tree<T> {
-    pub value: T,
-    pub children: Vec<Self>,
+pub(super) struct Tree<T> {
+    pub(super) value: T,
+    pub(super) children: Vec<Self>,
 }
 
 impl<T> Tree<T> {
-    /// A tree of one node.
-    #[must_use]
-    pub const fn new(value: T) -> Self {
+    /// A tree of one node, as tests state one.
+    #[cfg(test)]
+    pub(super) const fn new(value: T) -> Self {
         Self {
             value,
             children: Vec::new(),
@@ -29,7 +29,7 @@ impl<T> Tree<T> {
     }
 
     /// Every value in the tree, this node first, depth-first.
-    pub fn nodes(&self) -> impl Iterator<Item = &T> {
+    pub(super) fn nodes(&self) -> impl Iterator<Item = &T> {
         let mut stack = vec![self];
         std::iter::from_fn(move || {
             let tree = stack.pop()?;
@@ -40,7 +40,7 @@ impl<T> Tree<T> {
 
     /// The values at the childless nodes, in [`nodes`](Self::nodes) order.
     /// Where the tree is a plan, these are the work.
-    pub fn leaves(&self) -> impl Iterator<Item = &T> {
+    pub(super) fn leaves(&self) -> impl Iterator<Item = &T> {
         let mut stack = vec![self];
         std::iter::from_fn(move || {
             loop {
@@ -59,7 +59,7 @@ impl<T> Tree<T> {
     /// subtree, everything before it is an ancestor, and the last
     /// element's `nodes` are the match and its descendants: one result,
     /// every direction.
-    pub fn find_path(&self, found: impl Fn(&T) -> bool) -> Option<Vec<&Self>> {
+    pub(super) fn find_path(&self, found: impl Fn(&T) -> bool) -> Option<Vec<&Self>> {
         fn descend<'a, T>(
             tree: &'a Tree<T>,
             found: &impl Fn(&T) -> bool,

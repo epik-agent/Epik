@@ -1,3 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/epik", "crates/epik-agent", "crates/epik-backend"]
+members = ["crates/epik", "crates/epik-backend"]
+
+# A path spelled out where its import already reaches is noise; the
+# frontend, its own workspace, says the same in its own manifest.
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
+# These crates' docs are read with private items: a link from a public
+# item to a private one resolves there, and is worth more than a code
+# span that does not.
+[workspace.lints.rustdoc]
+private_intra_doc_links = "allow"

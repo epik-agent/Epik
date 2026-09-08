@@ -7,9 +7,10 @@
 //! model as the tool's output. Never a crash, never a turn failure.
 //!
 //! [`run`] is the turn: call the model, dispatch whatever tools it asks
-//! for, tell it what happened, and repeat until it answers in text. A
-//! later slice registers the git and GitHub verbs here; today the only
-//! resident is [`current_time`], the wire's canary.
+//! for, tell it what happened, and repeat until it answers in text. The
+//! providers' verbs live beside this port — [`git`] and [`github`], one
+//! tool per verb — and [`current_time`], the wire's canary, is the one
+//! built-in.
 
 #[cfg(feature = "native")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,9 +19,74 @@ use crate::chat::ToolSpec;
 #[cfg(feature = "native")]
 use crate::chat::{ChatError, ChatMessage, Client, Reply, ToolCall, TranscriptItem};
 
+#[cfg(feature = "native")]
+pub mod git;
+#[cfg(feature = "native")]
+pub mod github;
+
+/// The typed reads of a tool's JSON arguments, shared by every tool
+/// module. Each refusal is words for the model: which argument, and
+/// what it had to be.
+pub mod arg {
+    use serde_json::Value;
+
+    /// A required string.
+    ///
+    /// # Errors
+    ///
+    /// The argument is absent or not a string.
+    pub(super) fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+        arguments[name]
+            .as_str()
+            .ok_or_else(|| format!("the {name} argument must be a string"))
+    }
+
+    /// A required string with something in it.
+    ///
+    /// # Errors
+    ///
+    /// The argument is absent, not a string, or blank.
+    pub fn non_empty<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
+        arguments[name]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("the {name} argument must be a non-empty string"))
+    }
+
+    /// A required whole number.
+    ///
+    /// # Errors
+    ///
+    /// The argument is absent or not a non-negative integer.
+    pub(crate) fn number(arguments: &Value, name: &str) -> Result<u64, String> {
+        arguments[name]
+            .as_u64()
+            .ok_or_else(|| format!("the {name} argument must be a whole number"))
+    }
+
+    /// A string that may be absent, held to the non-empty rule when it
+    /// is there: absent is fine, but a blank value is a refusal.
+    ///
+    /// # Errors
+    ///
+    /// The argument is present and not a non-blank string.
+    pub(crate) fn optional<'a>(
+        arguments: &'a Value,
+        name: &str,
+    ) -> Result<Option<&'a str>, String> {
+        match &arguments[name] {
+            Value::Null => Ok(None),
+            Value::String(value) if !value.trim().is_empty() => Ok(Some(value)),
+            _ => Err(format!(
+                "the {name} argument must be a non-empty string when given"
+            )),
+        }
+    }
+}
+
 /// What a tool does with its parsed arguments: a JSON answer, or its
 /// failure in words — which the model reads, so say what went wrong.
-pub type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
+type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
 
 /// One tool: what to call it, what to tell the model about it, the JSON
 /// Schema of its arguments, and what it does.
@@ -75,7 +141,7 @@ impl Registry {
 
     /// The request's tools array.
     #[must_use]
-    pub fn to_wire(&self) -> Vec<ToolSpec> {
+    fn to_wire(&self) -> Vec<ToolSpec> {
         self.0
             .iter()
             .map(|tool| {
@@ -110,7 +176,7 @@ impl Registry {
 
 /// The most rounds of tool calls one turn may take before it is a turn
 /// failure. A model that hasn't answered in this many is not going to.
-pub const MAX_TOOL_ITERATIONS: usize = 16;
+const MAX_TOOL_ITERATIONS: usize = 16;
 
 /// One whole turn, run until the model answers in text.
 ///
@@ -169,7 +235,7 @@ pub fn run(
 /// as JSON. It proves the round trip, and afterwards it tells the time.
 #[cfg(feature = "native")]
 #[must_use]
-pub fn current_time() -> Tool {
+fn current_time() -> Tool {
     Tool::new(
         "current_time",
         "The current local date and time, with the UTC offset.",
@@ -201,10 +267,16 @@ mod tests {
         )
     }
 
-    #[test]
-    fn dispatch_hands_parsed_arguments_to_the_handler() {
+    /// A registry of exactly [`echo`].
+    fn echoing() -> Registry {
         let mut registry = Registry::default();
         registry.register(echo());
+        registry
+    }
+
+    #[test]
+    fn dispatch_hands_parsed_arguments_to_the_handler() {
+        let registry = echoing();
         assert_eq!(
             registry.dispatch("echo", r#"{"text":"hi"}"#),
             Ok(serde_json::json!({ "echo": "hi" }))
@@ -219,8 +291,7 @@ mod tests {
 
     #[test]
     fn malformed_arguments_are_an_err_result_not_a_panic() {
-        let mut registry = Registry::default();
-        registry.register(echo());
+        let registry = echoing();
         let error = registry.dispatch("echo", "{\"text\":").unwrap_err();
         assert!(error.contains("not valid JSON"), "{error}");
     }
@@ -245,8 +316,7 @@ mod tests {
 
     #[test]
     fn the_registry_advertises_its_tools_in_the_wire_shape() {
-        let mut registry = Registry::default();
-        registry.register(echo());
+        let registry = echoing();
         let wire = serde_json::to_value(registry.to_wire()).unwrap();
         assert_eq!(wire[0]["type"], "function");
         assert_eq!(wire[0]["function"]["name"], "echo");
@@ -255,11 +325,11 @@ mod tests {
 
     /// The loop end to end, against the scripted model: a real client, a
     /// loopback socket, and a script the test controls exactly.
-    #[cfg(feature = "scripted")]
+    #[cfg(feature = "testing")]
     mod looped {
         use super::*;
-        use crate::chat::scripted::{Fragment, Scripted, Turn};
         use crate::chat::{Role, TranscriptItem};
+        use crate::testing::model::{Fragment, Scripted, Turn};
 
         fn transcript() -> Vec<TranscriptItem> {
             vec![TranscriptItem::Message {
@@ -294,8 +364,7 @@ mod tests {
                 ]),
                 Turn::text(&["done"]),
             ]);
-            let mut registry = Registry::default();
-            registry.register(echo());
+            let registry = echoing();
             let mut observed = Vec::new();
 
             let text = run_against(&model, &registry, |call, result| {
@@ -353,8 +422,7 @@ mod tests {
                 ]]),
                 Turn::text(&["done"]),
             ]);
-            let mut registry = Registry::default();
-            registry.register(echo());
+            let registry = echoing();
             let mut observed = Vec::new();
 
             let text = run_against(&model, &registry, |call, result| {
@@ -412,8 +480,7 @@ mod tests {
             )
             .collect();
             let model = Scripted::spawn(script);
-            let mut registry = Registry::default();
-            registry.register(echo());
+            let registry = echoing();
 
             let error = run_against(&model, &registry, |_, _| {}).unwrap_err();
 
@@ -449,11 +516,11 @@ mod tests {
 
         fn full() -> Registry {
             let mut registry = Registry::standard();
-            registry.extend(crate::github::tools::all(
+            registry.extend(github::all(
                 crate::github::GitHub::at("http://127.0.0.1:1", None),
                 None,
             ));
-            registry.extend(crate::git::all());
+            registry.extend(git::all());
             registry
         }
 

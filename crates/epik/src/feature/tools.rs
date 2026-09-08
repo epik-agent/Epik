@@ -33,20 +33,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::check::{self, Check};
 use super::merge::Branch;
-use super::{Budget, Build, Issue, IssueId, Plan, build};
+use super::{Budget, Build, Feature, Issue, IssueId, Plan, build};
 use crate::agent::Agent;
-use crate::build::Workspace;
 use crate::chat::{Answer, Ask};
-use crate::check::{self, Check};
 use crate::forge::Forge;
 use crate::git::plumbing;
+use crate::job::Workspace;
 use crate::tools::Tool;
+use crate::tools::arg;
 
 /// The key of the feature-build record: one per launched build,
 /// counting up from 1.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct RunId(pub u64);
+struct RunId(u64);
 
 impl fmt::Display for RunId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,29 +57,29 @@ impl fmt::Display for RunId {
 
 /// One launched feature build, as the record keeps it: the build in
 /// flight, and afterwards the build that flew.
-pub struct Flight {
-    pub feature: IssueId,
+struct Flight {
+    pub feature: Feature,
     /// The local clone the build runs in.
-    pub repository: String,
+    repository: String,
     /// The feature branch the merges land on.
-    pub branch: String,
+    branch: String,
     /// The check command in force — `None` when the user declined: the
     /// branch is unchecked, and the record says so.
-    pub check: Option<String>,
+    check: Option<String>,
     /// Reads the feature branch's settled tip — [`Branch::tip`], under
     /// the merge lock, so a commit a red check is about to reset away
     /// is never the answer.
-    pub tip: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
-    pub record: Arc<Mutex<Build>>,
+    pub(super) tip: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
+    record: Arc<Mutex<Build>>,
 }
 
 /// The typed refusal: one feature at a time, and this is the build in
 /// flight, named.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Refused {
+struct Refused {
     pub run: RunId,
-    pub feature: IssueId,
-    pub branch: String,
+    pub feature: Feature,
+    branch: String,
 }
 
 impl fmt::Display for Refused {
@@ -99,7 +100,7 @@ impl fmt::Display for Refused {
 enum Entry {
     /// The reservation: the launch is validating, asking, establishing.
     Starting {
-        feature: IssueId,
+        feature: Feature,
         repository: String,
         branch: String,
     },
@@ -121,7 +122,7 @@ impl Entry {
         }
     }
 
-    const fn named(&self) -> (&IssueId, &str) {
+    const fn named(&self) -> (&Feature, &str) {
         match self {
             Self::Starting {
                 feature, branch, ..
@@ -153,8 +154,8 @@ impl Default for Builds {
 impl Builds {
     /// The refusal a second `start_feature` answers with, when a launch
     /// or a build is in flight.
-    #[must_use]
-    pub fn in_flight(&self) -> Option<Refused> {
+    #[cfg(test)]
+    fn in_flight(&self) -> Option<Refused> {
         refusal(&self.entries.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
@@ -168,9 +169,9 @@ impl Builds {
     /// # Errors
     ///
     /// [`Refused`], naming the build in flight.
-    pub fn reserve(
+    fn reserve(
         self: &Arc<Self>,
-        feature: IssueId,
+        feature: Feature,
         repository: String,
         branch: String,
     ) -> Result<Reservation, Refused> {
@@ -199,7 +200,7 @@ impl Builds {
 /// card is raised, filled with the [`Flight`] once the build is
 /// running. Dropped unfilled — the launch failed — it releases its
 /// entry, and a new start may reserve again.
-pub struct Reservation {
+struct Reservation {
     builds: Arc<Builds>,
     run: RunId,
     filled: bool,
@@ -216,14 +217,14 @@ impl fmt::Debug for Reservation {
 
 impl Reservation {
     /// The reserved run id.
-    #[must_use]
-    pub const fn run(&self) -> RunId {
+    #[cfg(test)]
+    const fn run(&self) -> RunId {
         self.run
     }
 
     /// The build is running: the flight takes the reservation's place
     /// in the record.
-    pub fn fill(mut self, flight: Flight) -> RunId {
+    fn fill(mut self, flight: Flight) -> RunId {
         self.builds
             .entries
             .lock()
@@ -265,7 +266,7 @@ fn refusal(entries: &BTreeMap<RunId, Entry>) -> Option<Refused> {
 
 /// The wording of the check card, composed by the machinery — the
 /// persona never decides whether or how to ask.
-fn asked(feature: &IssueId, branch: &str) -> String {
+fn asked(feature: &Feature, branch: &str) -> String {
     format!(
         "Feature {feature} builds on branch {branch}, and every merge onto it is judged by \
          one command run in the feature workspace: the merge lands only when the command \
@@ -288,33 +289,6 @@ fn confirmed(answer: &Answer) -> Option<Check> {
     }
 }
 
-fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
-    arguments[name]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("the {name} argument must be a non-empty string"))
-}
-
-fn number(arguments: &Value, name: &str) -> Result<u64, String> {
-    arguments[name]
-        .as_u64()
-        .ok_or_else(|| format!("the {name} argument must be a whole number"))
-}
-
-/// An optional string argument, held to the same non-empty rule as a
-/// required one: absent is fine, but an empty or blank value is a
-/// worded refusal — before any card is raised for a launch that could
-/// never start.
-fn optional<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
-    match &arguments[name] {
-        Value::Null => Ok(None),
-        Value::String(value) if !value.trim().is_empty() => Ok(Some(value)),
-        _ => Err(format!(
-            "the {name} argument must be a non-empty string when given"
-        )),
-    }
-}
-
 /// The `start_feature` tool over the host's seams: `plan` reads a
 /// feature's shape out of the tracker, `forge` names where the feature
 /// branch's pushes go, `runner` locates the agent runner binary,
@@ -326,7 +300,7 @@ pub fn start_feature<F, A, M>(
     builds: Arc<Builds>,
     budget: Arc<Budget>,
     runner: impl Fn() -> Result<PathBuf, String> + 'static,
-    plan: impl Fn(&str, &IssueId) -> Result<Plan, String> + 'static,
+    plan: impl Fn(&str, &Feature) -> Result<Plan, String> + 'static,
     forge: impl Fn(&str) -> Result<F, String> + 'static,
     agents: impl Fn() -> Result<M, String> + 'static,
     asker: impl Fn(Ask) -> Answer + 'static,
@@ -372,19 +346,19 @@ where
             "required": ["repo", "repository", "feature"],
         }),
         Box::new(move |arguments| {
-            let repo = string(arguments, "repo")?;
-            let repository = string(arguments, "repository")?.to_owned();
-            let feature = IssueId::from(number(arguments, "feature")?);
-            let branch = match optional(arguments, "branch")? {
+            let repo = arg::non_empty(arguments, "repo")?;
+            let repository = arg::non_empty(arguments, "repository")?.to_owned();
+            let feature = Feature(IssueId::from(arg::number(arguments, "feature")?));
+            let branch = match arg::optional(arguments, "branch")? {
                 Some(branch) => branch.to_owned(),
-                None => format!("feature-{feature}"),
+                None => feature.branch(),
             };
-            let named_base = optional(arguments, "base")?.map(str::to_owned);
+            let named_base = arg::optional(arguments, "base")?.map(str::to_owned);
             // The clone is read before anyone is asked anything —
             // detection and the default base both need it to be real —
             // under provisioning's own rule, so a relative path gets
             // exactly start_build's refusal.
-            crate::build::locate(&repository)?;
+            crate::job::locate(&repository)?;
             let base = match named_base {
                 Some(base) => base,
                 None => plumbing(&["-C", &repository, "symbolic-ref", "--short", "HEAD"])
@@ -568,21 +542,8 @@ mod tests {
     use super::super::fixtures::{id, node, plan, seven_holding_eight};
     use super::*;
     use crate::agent::Task;
-    use crate::testing::Scratch;
+    use crate::testing::{Local, Scratch, seeded};
     use crate::tools::Registry;
-
-    /// A forge for tests: a bare directory, no credentials.
-    struct Local(String);
-
-    impl Forge for Local {
-        fn remote(&self) -> String {
-            self.0.clone()
-        }
-
-        fn credentials(&self) -> Option<crate::forge::Credentials> {
-            None
-        }
-    }
 
     /// An Agent that is never reached in these tests: the runner path is
     /// bogus, so every dispatch fails at launch — which is exactly what
@@ -592,32 +553,15 @@ mod tests {
 
     impl Agent for Unreachable {
         fn task(&self) -> Task {
-            Task {
-                argv: vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
-                env: BTreeMap::new(),
-                cwd: "/".to_owned(),
-                stdin: None,
-            }
+            Task::new(
+                vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
+                "/",
+            )
         }
     }
 
     fn git(args: &[&str]) -> String {
         plumbing(args).unwrap()
-    }
-
-    /// A working repository with one commit on main, and a bare remote.
-    fn seeded(scratch: &Scratch) -> (String, String) {
-        let work = scratch.join("work");
-        let remote = scratch.join("remote.git");
-        git(&["init", "--initial-branch=main", &work]);
-        git(&["-C", &work, "config", "user.name", "Test"]);
-        git(&["-C", &work, "config", "user.email", "test@example.com"]);
-        git(&["-C", &work, "config", "commit.gpgsign", "false"]);
-        std::fs::write(std::path::Path::new(&work).join("hello.txt"), "hello\n").unwrap();
-        git(&["-C", &work, "add", "hello.txt"]);
-        git(&["-C", &work, "commit", "-m", "the first commit"]);
-        git(&["init", "--bare", "--initial-branch=main", &remote]);
-        (work, remote)
     }
 
     /// Removes every linked worktree a build left behind, so a scratch
@@ -655,7 +599,7 @@ mod tests {
             build.states.insert(id(*number), state.clone());
         }
         Flight {
-            feature: id(feature),
+            feature: Feature(id(feature)),
             repository: repository.to_owned(),
             branch: branch.to_owned(),
             check: None,
@@ -707,13 +651,51 @@ mod tests {
         }
     }
 
+    /// A reservation for feature `feature`, named as a start names it.
+    fn reserve(builds: &Arc<Builds>, feature: u64) -> Result<Reservation, Refused> {
+        builds.reserve(
+            Feature(id(feature)),
+            "/r".to_owned(),
+            format!("feature-{feature}"),
+        )
+    }
+
+    /// The refusal a start meets while run `run` builds `feature`.
+    fn refusal(run: u64, feature: u64) -> Refused {
+        Refused {
+            run: RunId(run),
+            feature: Feature(id(feature)),
+            branch: format!("feature-{feature}"),
+        }
+    }
+
+    /// `start_feature` with only its required arguments.
+    fn start(registry: &Registry, repository: &str, feature: u64) -> Result<Value, String> {
+        registry.dispatch(
+            "start_feature",
+            &json!({ "repo": "o/r", "repository": repository, "feature": feature }).to_string(),
+        )
+    }
+
+    /// A Cargo.toml at `work`, so detection has a check to propose.
+    fn cargo_crate(work: &str) {
+        std::fs::write(
+            Path::new(work).join("Cargo.toml"),
+            "[package]\nname = \"wumpus\"\n",
+        )
+        .unwrap();
+    }
+
+    /// A registry carrying only `feature_status` over `builds`.
+    fn status_registry(builds: &Arc<Builds>) -> Registry {
+        let mut registry = Registry::default();
+        registry.register(feature_status(Arc::clone(builds)));
+        registry
+    }
+
     #[test]
     fn the_refusal_names_the_build_in_flight() {
-        let refused = Refused {
-            run: RunId(3),
-            feature: id(144),
-            branch: "feature-144".to_owned(),
-        };
+        let refused = refusal(3, 144);
         let words = refused.to_string();
         assert!(words.contains("run 3"), "{words}");
         assert!(words.contains("feature 144"), "{words}");
@@ -743,17 +725,8 @@ mod tests {
         );
         assert_eq!(first, RunId(1));
 
-        let refused = builds
-            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
-            .unwrap_err();
-        assert_eq!(
-            refused,
-            Refused {
-                run: RunId(1),
-                feature: id(7),
-                branch: "feature-7".to_owned(),
-            }
-        );
+        let refused = reserve(&builds, 9).unwrap_err();
+        assert_eq!(refused, refusal(1, 7));
         assert_eq!(builds.in_flight(), Some(refused));
 
         // The build ends; the record stays; reservation reopens with
@@ -781,30 +754,17 @@ mod tests {
     #[test]
     fn an_unfilled_reservation_already_refuses_the_next_start() {
         let builds = Arc::new(Builds::default());
-        let reservation = builds
-            .reserve(id(7), "/r".to_owned(), "feature-7".to_owned())
-            .unwrap();
+        let reservation = reserve(&builds, 7).unwrap();
         assert_eq!(reservation.run(), RunId(1));
 
-        let refused = builds
-            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
-            .unwrap_err();
-        assert_eq!(
-            refused,
-            Refused {
-                run: RunId(1),
-                feature: id(7),
-                branch: "feature-7".to_owned(),
-            }
-        );
+        let refused = reserve(&builds, 9).unwrap_err();
+        assert_eq!(refused, refusal(1, 7));
 
         // The launch failed: the dropped reservation releases the door,
         // and the spent id is never reused.
         drop(reservation);
         assert!(builds.entries.lock().unwrap().is_empty());
-        let next = builds
-            .reserve(id(9), "/r".to_owned(), "feature-9".to_owned())
-            .unwrap();
+        let next = reserve(&builds, 9).unwrap();
         assert_eq!(next.run(), RunId(2));
     }
 
@@ -838,12 +798,7 @@ mod tests {
         let builds = Arc::new(Builds::default());
         let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
-        let started = registry
-            .dispatch(
-                "start_feature",
-                &json!({ "repo": "o/r", "repository": work, "feature": 7 }).to_string(),
-            )
-            .unwrap();
+        let started = start(&registry, &work, 7).unwrap();
         assert_eq!(started["started"], json!(true));
         assert_eq!(started["run"], json!(1));
         assert_eq!(started["branch"], "feature-7", "named for the issue");
@@ -869,11 +824,7 @@ mod tests {
     fn the_check_card_is_prefilled_from_detection_and_the_answer_is_in_force() {
         let scratch = Scratch::new("prefill");
         let (work, remote) = seeded(&scratch);
-        std::fs::write(
-            std::path::Path::new(&work).join("Cargo.toml"),
-            "[package]\nname = \"wumpus\"\n",
-        )
-        .unwrap();
+        cargo_crate(&work);
         let asked = Arc::new(Mutex::new(None::<Ask>));
         let builds = Arc::new(Builds::default());
         let registry = registry(&builds, seven_holding_eight(), remote, {
@@ -926,20 +877,11 @@ mod tests {
     fn a_decline_skips_the_check_and_the_record_says_unchecked() {
         let scratch = Scratch::new("decline");
         let (work, remote) = seeded(&scratch);
-        std::fs::write(
-            std::path::Path::new(&work).join("Cargo.toml"),
-            "[package]\nname = \"wumpus\"\n",
-        )
-        .unwrap();
+        cargo_crate(&work);
         let builds = Arc::new(Builds::default());
         let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
-        let started = registry
-            .dispatch(
-                "start_feature",
-                &json!({ "repo": "o/r", "repository": work, "feature": 7 }).to_string(),
-            )
-            .unwrap();
+        let started = start(&registry, &work, 7).unwrap();
         assert_eq!(started["check"], Value::Null, "unchecked, and said so");
 
         let status = eventually_finished(&registry);
@@ -963,12 +905,7 @@ mod tests {
             |_| panic!("no card is raised for a refused start"),
         );
 
-        let refused = registry
-            .dispatch(
-                "start_feature",
-                &json!({ "repo": "o/r", "repository": work, "feature": 9 }).to_string(),
-            )
-            .unwrap_err();
+        let refused = start(&registry, &work, 9).unwrap_err();
         assert!(refused.contains("run 1"), "{refused}");
         assert!(refused.contains("feature 7"), "{refused}");
         assert!(refused.contains("feature-7"), "{refused}");
@@ -983,24 +920,13 @@ mod tests {
             "/nonexistent/remote.git".to_owned(),
             |_| panic!("no card is raised for a bad repository"),
         );
-        let error = registry
-            .dispatch(
-                "start_feature",
-                &json!({ "repo": "o/r", "repository": "/nonexistent/clone", "feature": 7 })
-                    .to_string(),
-            )
-            .unwrap_err();
+        let error = start(&registry, "/nonexistent/clone", 7).unwrap_err();
         assert!(error.contains("not a git repository"), "{error}");
         assert!(builds.entries.lock().unwrap().is_empty());
 
         // A relative path gets provisioning's own refusal, not a
         // cwd-dependent build.
-        let error = registry
-            .dispatch(
-                "start_feature",
-                &json!({ "repo": "o/r", "repository": "relative/clone", "feature": 7 }).to_string(),
-            )
-            .unwrap_err();
+        let error = start(&registry, "relative/clone", 7).unwrap_err();
         assert!(error.contains("absolute"), "{error}");
 
         // An empty optional argument is a worded refusal, not a card.
@@ -1043,8 +969,7 @@ mod tests {
         });
         admitted(&builds, settled);
 
-        let mut registry = Registry::default();
-        registry.register(feature_status(Arc::clone(&builds)));
+        let registry = status_registry(&builds);
         let status = registry.dispatch("feature_status", "{}").unwrap();
         assert_eq!(status["run"], json!(1));
         assert_eq!(status["feature"], json!("100"));
@@ -1069,8 +994,7 @@ mod tests {
 
     #[test]
     fn status_with_no_builds_says_so_in_an_ok_answer() {
-        let mut registry = Registry::default();
-        registry.register(feature_status(Arc::new(Builds::default())));
+        let registry = status_registry(&Arc::new(Builds::default()));
         let status = registry.dispatch("feature_status", "{}").unwrap();
         assert_eq!(status["run"], Value::Null);
         assert_eq!(status["note"], json!("no feature build has been started"));
@@ -1082,11 +1006,8 @@ mod tests {
     #[test]
     fn status_of_a_reserved_launch_says_it_has_not_started() {
         let builds = Arc::new(Builds::default());
-        let reservation = builds
-            .reserve(id(7), "/r".to_owned(), "feature-7".to_owned())
-            .unwrap();
-        let mut registry = Registry::default();
-        registry.register(feature_status(Arc::clone(&builds)));
+        let reservation = reserve(&builds, 7).unwrap();
+        let registry = status_registry(&builds);
 
         let status = registry.dispatch("feature_status", "{}").unwrap();
         assert_eq!(status["run"], json!(1));

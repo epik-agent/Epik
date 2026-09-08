@@ -4,10 +4,10 @@
 //! [`Branch::establish`] cuts the feature branch at its base and pushes
 //! it to the [`Forge`] — a branch already standing is used as it stands
 //! — and keeps one workspace of it for merging, provisioned by
-//! [`adopt`](crate::build::adopt), distinct from the per-issue
+//! [`adopt`](job::adopt), distinct from the per-issue
 //! workspaces. [`Branch::merge`] then brings issue branches in one at a
 //! time: `--no-ff` under a lock, the repository's own
-//! [`Check`](crate::check::Check) run on the result while the lock is
+//! [`Check`] run on the result while the lock is
 //! still held — after the merge, not before, so it catches both an
 //! Agent that lied and two siblings that build alone and not together —
 //! and the branch pushed on green. A conflict aborts the merge, leaves
@@ -28,10 +28,10 @@
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
-use crate::build::{self, Workspace, positional};
-use crate::check::{self, Check};
+use super::check::{self, Check};
 use crate::forge::{self, Forge};
-use crate::git::plumbing;
+use crate::git::{base_commit, plumbing};
+use crate::job::{self, Workspace, positional};
 
 /// The feature branch as a build holds it: the workspace kept for
 /// merging, the forge its pushes write to, the check that judges every
@@ -48,7 +48,7 @@ pub struct Branch<F: Forge> {
 /// faults: the branch has been put back where it stood, and the caller
 /// has an issue to fail with these words.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Outcome {
+pub(super) enum Outcome {
     /// Merged, judged, pushed. `checked` is false when there was no
     /// check to run — the record must say the branch is unchecked.
     Merged { commit: String, checked: bool },
@@ -73,7 +73,7 @@ impl<F: Forge> Branch<F> {
     /// Words for the model: the repository is not one, the base does
     /// not name a commit, the branch could not be pushed, or git failed
     /// along the way.
-    pub fn establish(
+    pub(super) fn establish(
         repository: &str,
         name: &str,
         base: &str,
@@ -99,17 +99,7 @@ impl<F: Forge> Branch<F> {
         .any(|line| line.trim() == ref_name);
         if !standing {
             let base = positional("base", base)?;
-            let base_commit = plumbing(&[
-                "-C",
-                repository,
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &format!("{base}^{{commit}}"),
-            ])
-            .map_err(|words| format!("the base {base:?} does not name a commit: {words}"))?
-            .trim()
-            .to_owned();
+            let base_commit = base_commit(repository, base)?;
             plumbing(&["-C", repository, "branch", "--", name, &base_commit])?;
             // A branch created but never pushed must not read as
             // standing on retry — unwind it, so the retry re-creates
@@ -119,7 +109,7 @@ impl<F: Forge> Branch<F> {
                 return Err(words);
             }
         }
-        let workspace = build::adopt(repository, name)?;
+        let workspace = job::adopt(repository, name)?;
         Ok(Self {
             workspace,
             forge,
@@ -131,7 +121,7 @@ impl<F: Forge> Branch<F> {
     /// The workspace the branch is held through — where the check runs,
     /// and the mark the branch stood on when established.
     #[must_use]
-    pub fn workspace(&self) -> &Workspace {
+    pub(super) fn workspace(&self) -> &Workspace {
         &self.workspace
     }
 
@@ -144,7 +134,7 @@ impl<F: Forge> Branch<F> {
     /// # Errors
     ///
     /// Git failing to read the ref, in its own words.
-    pub fn tip(&self) -> Result<String, String> {
+    pub(super) fn tip(&self) -> Result<String, String> {
         let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let directory = self
             .workspace
@@ -178,7 +168,7 @@ impl<F: Forge> Branch<F> {
     /// is back on its pre-merge commit and the issue branch stands
     /// intact, so an error always means nothing landed and a retry can
     /// merge again.
-    pub fn merge(&self, branch: &str) -> Result<Outcome, String> {
+    pub(super) fn merge(&self, branch: &str) -> Result<Outcome, String> {
         let branch = positional("branch", branch)?;
         let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let directory = self
@@ -263,43 +253,31 @@ impl<F: Forge> Branch<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{Order, provision};
-    use crate::forge::Credentials;
+    use crate::job::{Order, provision};
 
-    /// A forge for tests: a bare directory, no credentials.
-    #[derive(Debug)]
-    struct Local(String);
-
-    impl Forge for Local {
-        fn remote(&self) -> String {
-            self.0.clone()
-        }
-
-        fn credentials(&self) -> Option<Credentials> {
-            None
-        }
-    }
-
-    use crate::testing::Scratch;
+    use crate::testing::{Local, Scratch, seeded};
 
     fn git(args: &[&str]) -> String {
         plumbing(args).unwrap()
     }
 
-    /// A working repository with one commit on main, and a bare remote
-    /// for the forge.
-    fn seeded(scratch: &Scratch) -> (String, Local) {
-        let work = scratch.join("work");
-        let remote = scratch.join("remote.git");
-        git(&["init", "--initial-branch=main", &work]);
-        git(&["-C", &work, "config", "user.name", "Test"]);
-        git(&["-C", &work, "config", "user.email", "test@example.com"]);
-        git(&["-C", &work, "config", "commit.gpgsign", "false"]);
-        std::fs::write(std::path::Path::new(&work).join("hello.txt"), "hello\n").unwrap();
-        git(&["-C", &work, "add", "hello.txt"]);
-        git(&["-C", &work, "commit", "-m", "the first commit"]);
-        git(&["init", "--bare", "--initial-branch=main", &remote]);
-        (work, Local(remote))
+    /// A seeded repository with the feature branch established over it,
+    /// `check` in force: the work and remote paths, and the branch. How
+    /// most merge tests open.
+    fn established(scratch: &Scratch, check: Option<Check>) -> (String, String, Branch<Local>) {
+        let (work, remote) = seeded(scratch);
+        let forge = Local(remote.clone());
+        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, check).unwrap();
+        (work, remote, branch)
+    }
+
+    /// The commit at the tip of `branch`, as git2 reads it.
+    fn commit_of<'r>(repo: &'r git2::Repository, branch: &str) -> git2::Commit<'r> {
+        repo.find_branch(branch, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
     }
 
     /// The scripted Agent: cuts an issue branch from the feature tip,
@@ -330,16 +308,7 @@ mod tests {
 
     /// Removes a worktree so the scratch dir's drop is enough.
     fn tidy(workspace: &Workspace) {
-        let directory = workspace.directory.to_string_lossy().into_owned();
-        let _ = plumbing(&[
-            "-C",
-            &workspace.repository,
-            "worktree",
-            "remove",
-            "--force",
-            "--",
-            &directory,
-        ]);
+        job::remove_worktree(workspace);
     }
 
     fn tip(repository: &str, branch: &str) -> String {
@@ -356,10 +325,7 @@ mod tests {
     #[test]
     fn establishing_cuts_the_branch_at_the_base_and_pushes_it() {
         let scratch = Scratch::new("establish");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
-
-        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+        let (work, remote, branch) = established(&scratch, None);
 
         let base = tip(&work, "main");
         assert_eq!(tip(&work, "feature/wumpus"), base);
@@ -368,11 +334,8 @@ mod tests {
 
         // The remote already holds the branch, before any merge.
         let verified = git2::Repository::open(&remote).unwrap();
-        let pushed = verified
-            .find_branch("feature/wumpus", git2::BranchType::Local)
-            .unwrap();
         assert_eq!(
-            pushed.get().peel_to_commit().unwrap().id().to_string(),
+            commit_of(&verified, "feature/wumpus").id().to_string(),
             base
         );
 
@@ -382,15 +345,15 @@ mod tests {
     #[test]
     fn a_branch_already_standing_is_used_as_it_stands() {
         let scratch = Scratch::new("standing");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
+        let (work, remote) = seeded(&scratch);
         // The branch predates the build, one commit behind main.
         let old = git(&["-C", &work, "rev-parse", "HEAD"]).trim().to_owned();
-        std::fs::write(std::path::Path::new(&work).join("later.txt"), "later\n").unwrap();
+        std::fs::write(Path::new(&work).join("later.txt"), "later\n").unwrap();
         git(&["-C", &work, "add", "later.txt"]);
         git(&["-C", &work, "commit", "-m", "later"]);
         git(&["-C", &work, "branch", "feature/wumpus", &old]);
 
+        let forge = Local(remote.clone());
         let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
 
         assert_eq!(branch.workspace().base_commit, old, "not moved to main");
@@ -411,8 +374,7 @@ mod tests {
     #[test]
     fn a_failed_push_unwinds_the_created_branch_so_a_retry_reaches_the_remote() {
         let scratch = Scratch::new("unwind");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
+        let (work, remote) = seeded(&scratch);
 
         let gone = Local(scratch.join("gone.git"));
         let error = Branch::establish(&work, "feature/wumpus", "main", gone, None).unwrap_err();
@@ -421,6 +383,7 @@ mod tests {
         assert_eq!(listed.trim(), "", "the created branch was unwound");
 
         // The retry, against a forge that answers, creates and pushes.
+        let forge = Local(remote.clone());
         let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
         let verified = git2::Repository::open(&remote).unwrap();
         assert!(
@@ -435,9 +398,7 @@ mod tests {
     #[test]
     fn two_siblings_from_the_same_tip_both_merge_when_their_edits_do_not_overlap() {
         let scratch = Scratch::new("siblings");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
-        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+        let (work, remote, branch) = established(&scratch, None);
 
         // Both Agents cut from the same tip.
         let first = agent(&work, "issue-1", "one.txt", "one\n");
@@ -455,12 +416,7 @@ mod tests {
         // Both edits are on the branch, each behind a --no-ff merge
         // commit — even the first, which was fast-forwardable.
         let verified = git2::Repository::open(&work).unwrap();
-        let head = verified
-            .find_branch("feature/wumpus", git2::BranchType::Local)
-            .unwrap()
-            .get()
-            .peel_to_commit()
-            .unwrap();
+        let head = commit_of(&verified, "feature/wumpus");
         assert_eq!(head.parent_count(), 2);
         assert_eq!(head.parent(0).unwrap().id().to_string(), commit);
         assert_eq!(head.parent(0).unwrap().parent_count(), 2);
@@ -470,10 +426,7 @@ mod tests {
 
         // The remote kept pace, one push per merge.
         let mirrored = git2::Repository::open(&remote).unwrap();
-        let far = mirrored
-            .find_branch("feature/wumpus", git2::BranchType::Local)
-            .unwrap();
-        assert_eq!(far.get().peel_to_commit().unwrap().id(), head.id());
+        assert_eq!(commit_of(&mirrored, "feature/wumpus").id(), head.id());
 
         tidy(&first);
         tidy(&second);
@@ -483,8 +436,7 @@ mod tests {
     #[test]
     fn the_second_overlapping_sibling_is_refused_with_its_conflicting_paths_named() {
         let scratch = Scratch::new("conflict");
-        let (work, forge) = seeded(&scratch);
-        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+        let (work, _, branch) = established(&scratch, None);
 
         let first = agent(&work, "issue-1", "hello.txt", "first words\n");
         let second = agent(&work, "issue-2", "hello.txt", "second words\n");
@@ -527,13 +479,10 @@ mod tests {
     #[test]
     fn a_check_that_dirties_the_workspace_on_green_does_not_reach_the_next_merge() {
         let scratch = Scratch::new("dirty");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
         let check = Check {
             command: "echo dirt >> hello.txt".to_owned(),
         };
-        let branch =
-            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+        let (work, remote, branch) = established(&scratch, Some(check));
 
         let first = agent(&work, "issue-1", "one.txt", "one\n");
         let second = agent(&work, "issue-2", "two.txt", "two\n");
@@ -553,14 +502,7 @@ mod tests {
         // The dirt itself was never committed: what landed is history's
         // hello.txt, not the check's scribbles.
         let verified = git2::Repository::open(&work).unwrap();
-        let tree = verified
-            .find_branch("feature/wumpus", git2::BranchType::Local)
-            .unwrap()
-            .get()
-            .peel_to_commit()
-            .unwrap()
-            .tree()
-            .unwrap();
+        let tree = commit_of(&verified, "feature/wumpus").tree().unwrap();
         let hello = tree.get_name("hello.txt").unwrap();
         let blob = verified.find_blob(hello.id()).unwrap();
         assert_eq!(blob.content(), b"hello\n");
@@ -573,14 +515,11 @@ mod tests {
     #[test]
     fn a_red_check_resets_the_branch_and_leaves_the_remote_unchanged() {
         let scratch = Scratch::new("red");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
         // The repository's own idea of green: the poison file is absent.
         let check = Check {
             command: "test ! -f poison.txt || { echo the wumpus got in; exit 1; }".to_owned(),
         };
-        let branch =
-            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+        let (work, remote, branch) = established(&scratch, Some(check));
         let before = tip(&work, "feature/wumpus");
         let far_before = tip(&remote, "feature/wumpus");
 
@@ -601,13 +540,10 @@ mod tests {
     #[test]
     fn a_green_check_keeps_the_merge_and_advances_the_remote() {
         let scratch = Scratch::new("green");
-        let (work, forge) = seeded(&scratch);
-        let remote = forge.0.clone();
         let check = Check {
             command: "test -f hello.txt".to_owned(),
         };
-        let branch =
-            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+        let (work, remote, branch) = established(&scratch, Some(check));
 
         let issue = agent(&work, "issue-1", "one.txt", "one\n");
         let Outcome::Merged { commit, checked } = branch.merge("issue-1").unwrap() else {
@@ -664,7 +600,6 @@ mod tests {
     #[test]
     fn the_tip_never_answers_with_a_commit_a_red_check_is_about_to_reset() {
         let scratch = Scratch::new("tip");
-        let (work, forge) = seeded(&scratch);
         let sync = scratch.join("sync");
         std::fs::create_dir_all(&sync).unwrap();
         // The check announces itself, holds until released, then goes
@@ -675,20 +610,19 @@ mod tests {
                  i=$((i+1)); if [ \"$i\" -gt 600 ]; then exit 1; fi; sleep 0.05; done; exit 1"
             ),
         };
-        let branch =
-            Branch::establish(&work, "feature/wumpus", "main", forge, Some(check)).unwrap();
+        let (work, _, branch) = established(&scratch, Some(check));
         let before = tip(&work, "feature/wumpus");
         let issue = agent(&work, "issue-1", "one.txt", "one\n");
 
         std::thread::scope(|scope| {
             let merging = scope.spawn(|| branch.merge("issue-1"));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while !std::path::Path::new(&sync).join("checking").exists() {
+            while !Path::new(&sync).join("checking").exists() {
                 assert!(std::time::Instant::now() < deadline, "the check never ran");
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let asked = scope.spawn(|| branch.tip());
-            std::fs::write(std::path::Path::new(&sync).join("release"), "").unwrap();
+            std::fs::write(Path::new(&sync).join("release"), "").unwrap();
             assert!(matches!(
                 merging.join().unwrap().unwrap(),
                 Outcome::Red { .. }
@@ -709,8 +643,7 @@ mod tests {
     #[test]
     fn concurrent_merges_are_serialized_and_both_land() {
         let scratch = Scratch::new("threads");
-        let (work, forge) = seeded(&scratch);
-        let branch = Branch::establish(&work, "feature/wumpus", "main", forge, None).unwrap();
+        let (work, _, branch) = established(&scratch, None);
 
         let first = agent(&work, "issue-1", "one.txt", "one\n");
         let second = agent(&work, "issue-2", "two.txt", "two\n");
@@ -729,14 +662,7 @@ mod tests {
         });
 
         let verified = git2::Repository::open(&work).unwrap();
-        let tree = verified
-            .find_branch("feature/wumpus", git2::BranchType::Local)
-            .unwrap()
-            .get()
-            .peel_to_commit()
-            .unwrap()
-            .tree()
-            .unwrap();
+        let tree = commit_of(&verified, "feature/wumpus").tree().unwrap();
         assert!(tree.get_name("one.txt").is_some());
         assert!(tree.get_name("two.txt").is_some());
 

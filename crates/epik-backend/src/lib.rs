@@ -5,6 +5,8 @@ mod build;
 mod chat;
 mod config;
 mod secrets;
+#[cfg(test)]
+mod testing;
 
 /// The settings window, opened over the main one. One per app: a second
 /// Cmd+, focuses the window that is already there.
@@ -83,10 +85,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // First act: converge on ~/.epik/config.toml. A file that
+            // First act: converge on the configuration file. A file that
             // cannot be read is left exactly as it is; the reason goes to
             // stderr and the built-in defaults apply.
-            let config = epik::config::converge().unwrap_or_else(|error| {
+            let config = config::converge(app.handle()).unwrap_or_else(|error| {
                 eprintln!("{error:#}; starting with the built-in defaults");
                 epik::config::Config::default()
             });

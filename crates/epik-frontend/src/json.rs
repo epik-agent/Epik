@@ -29,30 +29,30 @@ use serde_json::Value;
 
 /// One rendered line.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Row {
+pub struct Row {
     /// Indent level; 0 is the outermost container's brace.
-    pub(crate) depth: usize,
+    pub depth: usize,
     /// Left-to-right tokens on this line.
-    pub(crate) spans: Vec<Span>,
+    pub spans: Vec<Span>,
     /// Present when this line can be folded: a JSON Pointer naming what
     /// folds, and whether it currently is.
-    pub(crate) fold: Option<Fold>,
+    pub fold: Option<Fold>,
 }
 
 /// One token on a line: its class from the `.hl-*` palette, or `None`
 /// for plain.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Span {
-    pub(crate) class: Option<&'static str>,
-    pub(crate) text: String,
+pub struct Span {
+    pub class: Option<&'static str>,
+    pub text: String,
 }
 
 /// What a foldable line folds: the RFC 6901 pointer of the container or
 /// long string, and whether it is currently folded.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Fold {
-    pub(crate) pointer: String,
-    pub(crate) folded: bool,
+pub struct Fold {
+    pub pointer: String,
+    pub folded: bool,
 }
 
 /// The palette, by role.
@@ -65,16 +65,16 @@ const NOTE: &str = "hl-cm";
 /// A string value longer than this many characters folds on its own
 /// row: unfolded in full, folded to its first `VALUE_CAP` characters
 /// and an ellipsis.
-pub(crate) const VALUE_CAP: usize = 120;
+pub const VALUE_CAP: usize = 120;
 
 /// The most rows one document renders. Past it, one final row counts
 /// the rest — a pathological payload degrades instead of freezing the
 /// window.
-pub(crate) const MAX_ROWS: usize = 2000;
+pub const MAX_ROWS: usize = 2000;
 
 /// The lines of `text` as a tree with `folded` pointers folded — or
 /// `None` when `text` is not a JSON object or array, even after repair.
-pub(crate) fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
+pub fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
     let (value, truncated) = parse(text)?;
     let mut walk = Walk {
         folded,
@@ -103,7 +103,7 @@ pub(crate) fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
 /// The fold policy for a fresh rendering of `text`: every non-empty
 /// container at depth ≥ 1, and every string longer than [`VALUE_CAP`].
 /// The root stays open. Empty when the text does not parse.
-pub(crate) fn initial_folds(text: &str) -> HashSet<String> {
+pub fn initial_folds(text: &str) -> HashSet<String> {
     let mut folds = HashSet::new();
     if let Some((value, _)) = parse(text) {
         collect_folds(&value, String::new(), 0, &mut folds);
@@ -538,7 +538,7 @@ fn open_frames(prefix: &str) -> Vec<u8> {
 /// position when the set changes, and attributes are patched on rebuild
 /// where a per-row closure would go stale.
 #[component]
-pub(crate) fn JsonTree(text: String) -> impl IntoView {
+pub fn JsonTree(text: String) -> impl IntoView {
     let folded = RwSignal::new(initial_folds(&text));
     let text = StoredValue::new(text);
     let toggle = move |event: leptos::ev::MouseEvent| {

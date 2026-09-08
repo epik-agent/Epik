@@ -23,7 +23,7 @@ use crate::ipc;
 
 /// The two tabs, in display order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Tab {
+pub enum Tab {
     GitHub,
     Models,
 }
@@ -62,7 +62,7 @@ impl Tab {
 /// are the same kind of thing to dirt and to Apply: text, compared with
 /// what was loaded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Field {
+pub enum Field {
     /// `GITHUB_TOKEN`, in the keyring.
     Token,
     /// `[github] owner`.
@@ -122,7 +122,7 @@ impl Field {
 /// string here and `None` in the file, both ways; the two secrets are
 /// [`Secret`]s, which is what keeps them out of a `{:?}`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Fields {
+pub struct Fields {
     pub token: Secret,
     pub owner: String,
     pub key: Secret,
@@ -135,7 +135,7 @@ impl Fields {
     /// because they come from the keyring. An unstated chat model shows
     /// as the one the chat window then speaks to, [`ANTHROPIC_MODEL`],
     /// because the Chat box has no Default entry to show instead.
-    pub(crate) fn from_config(config: &Config) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         Self {
             owner: config.github.owner.clone().unwrap_or_default(),
             chat: config
@@ -149,7 +149,7 @@ impl Fields {
     }
 
     /// The configuration these boxes state: an emptied entry is omitted.
-    pub(crate) fn config(&self) -> Config {
+    pub fn config(&self) -> Config {
         let entry = |text: &str| (!text.is_empty()).then(|| text.to_owned());
         Config {
             model: config::Model {
@@ -175,7 +175,7 @@ impl Fields {
 }
 
 /// The fields of `tab` that differ from what was loaded.
-pub(crate) fn dirty(tab: Tab, loaded: &Fields, current: &Fields) -> Vec<Field> {
+pub fn dirty(tab: Tab, loaded: &Fields, current: &Fields) -> Vec<Field> {
     tab.fields()
         .iter()
         .copied()
@@ -185,7 +185,7 @@ pub(crate) fn dirty(tab: Tab, loaded: &Fields, current: &Fields) -> Vec<Field> {
 
 /// What Apply writes for one tab, to the two stores it reaches.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(crate) struct Writes {
+pub struct Writes {
     /// The keyring write: the secret when it is dirty and non-empty.
     /// Unchanged means no pointless keychain touch — on macOS a write can
     /// mean a permission prompt. Emptied means nothing, because clearing
@@ -196,7 +196,7 @@ pub(crate) struct Writes {
     pub config: Option<Config>,
 }
 
-pub(crate) fn writes(tab: Tab, loaded: &Fields, current: &Fields) -> Writes {
+pub fn writes(tab: Tab, loaded: &Fields, current: &Fields) -> Writes {
     let secret = tab.secret().of(current);
     let patched = loaded.patched(tab, current);
     Writes {
@@ -209,7 +209,7 @@ pub(crate) fn writes(tab: Tab, loaded: &Fields, current: &Fields) -> Writes {
 /// One entry a dropdown offers: the text the configuration would state,
 /// and the text shown for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Choice {
+pub struct Choice {
     pub value: String,
     pub shown: String,
 }
@@ -219,7 +219,7 @@ pub(crate) struct Choice {
 /// omitted entry. A configured model the list does not contain heads the
 /// list shown by its id, so the list is never a reason a selection
 /// changes; an empty list still offers the configured value.
-pub(crate) fn choices(configured: &str, fetched: &[ModelInfo], default: bool) -> Vec<Choice> {
+pub fn choices(configured: &str, fetched: &[ModelInfo], default: bool) -> Vec<Choice> {
     let choice = |value: &str, shown: &str| Choice {
         value: value.to_owned(),
         shown: shown.to_owned(),
@@ -473,15 +473,22 @@ fn tab_button(panel: Panel, tab: Tab) -> impl IntoView {
 
 const INPUT: &str = "min-w-0 flex-1 rounded-md border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 focus:border-[#00b377] focus:outline-none dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100 dark:focus:border-[#00e599]";
 
-/// One labeled row: the label, then the control the field calls for.
-fn field_row(panel: Panel, field: Field) -> impl IntoView {
-    let id = format!("field-{}", field.label().to_lowercase().replace(' ', "-"));
+/// A control's two ends of `field`: what it shows, and what an edit
+/// writes back.
+fn binding(panel: Panel, field: Field) -> (impl Fn() -> String + Copy, impl Fn(ev::Event) + Copy) {
     let value = move || panel.current.with(|f| field.of(f).to_owned());
-    let set = move |ev| {
+    let set = move |ev: ev::Event| {
         panel
             .current
             .update(|f| field.set(f, event_target_value(&ev)))
     };
+    (value, set)
+}
+
+/// One labeled row: the label, then the control the field calls for.
+fn field_row(panel: Panel, field: Field) -> impl IntoView {
+    let id = format!("field-{}", field.label().to_lowercase().replace(' ', "-"));
+    let (value, set) = binding(panel, field);
     let control = match field {
         Field::Token | Field::Key => secret_box(panel, field, id.clone()).into_any(),
         Field::Owner => view! {
@@ -528,12 +535,7 @@ fn field_row(panel: Panel, field: Field) -> impl IntoView {
 /// A password box and its eyeball.
 fn secret_box(panel: Panel, field: Field, id: String) -> impl IntoView {
     let revealed = RwSignal::new(false);
-    let value = move || panel.current.with(|f| field.of(f).to_owned());
-    let set = move |ev| {
-        panel
-            .current
-            .update(|f| field.set(f, event_target_value(&ev)))
-    };
+    let (value, set) = binding(panel, field);
     view! {
         <input
             id=id

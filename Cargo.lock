@@ -1015,22 +1015,10 @@ dependencies = [
  "chrono",
  "git2",
  "include-crypt",
- "keyring",
  "libc",
  "serde",
  "serde_json",
- "toml 1.1.4+spec-1.1.0",
  "ureq",
-]
-
-[[package]]
-name = "epik-agent"
-version = "0.1.0"
-dependencies = [
- "epik",
- "git2",
- "libc",
- "serde_json",
 ]
 
 [[package]]
@@ -1039,11 +1027,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "epik",
+ "keyring",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

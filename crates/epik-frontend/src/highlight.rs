@@ -26,7 +26,7 @@ use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 /// and file extensions; this list is the set the drift test pins
 /// against the built dump — its only reader, which is the point.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const LANGUAGES: [&str; 18] = [
+pub const LANGUAGES: [&str; 18] = [
     "rust",
     "python",
     "javascript",
@@ -49,18 +49,18 @@ pub(crate) const LANGUAGES: [&str; 18] = [
 
 /// How much of a block gets highlighted. Generous — past it, the rest
 /// of the block renders plain rather than freezing the UI.
-pub(crate) const CAP: usize = 64 * 1024;
+pub const CAP: usize = 64 * 1024;
 
 /// One run of code: its highlight class, or `None` for plain text.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Chunk {
-    pub(crate) class: Option<&'static str>,
-    pub(crate) text: String,
+pub struct Chunk {
+    pub class: Option<&'static str>,
+    pub text: String,
 }
 
 /// Highlights `code` as `language`, or `None` when the language is
 /// unknown — the caller renders its plain block exactly as before.
-pub(crate) fn highlight(language: &str, code: &str) -> Option<Vec<Chunk>> {
+pub fn highlight(language: &str, code: &str) -> Option<Vec<Chunk>> {
     if language.is_empty() {
         return None;
     }

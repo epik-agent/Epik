@@ -7,21 +7,17 @@
 //! fork/exec race on freshly written scripts, and inline sidesteps it
 //! entirely.
 
-use super::{Agent, Task};
+use crate::agent::{Agent, Task};
 use crate::keystore::Secret;
-use std::collections::BTreeMap;
-
 /// A deterministic Agent, one behavior per constructor.
 pub struct Scripted(Task);
 
 impl Scripted {
-    fn shell(script: String) -> Self {
-        Self(Task {
-            argv: vec!["sh".to_owned(), "-c".to_owned(), script],
-            env: BTreeMap::new(),
-            cwd: "/".to_owned(),
-            stdin: None,
-        })
+    /// Runs `script` under `sh -c`, from `/`, with nothing in its
+    /// environment or on its stdin.
+    #[must_use]
+    pub fn shell(script: String) -> Self {
+        Self(sh(script))
     }
 
     /// Emits `line 1` through `line N` on stdout, then exits 0.
@@ -42,17 +38,13 @@ impl Scripted {
     /// [`Secret`] — the deliberate exposure the env test observes.
     #[must_use]
     pub fn env_echo(name: &str, value: Secret) -> Self {
-        let mut agent = Self::shell(format!("printf '%s\\n' \"${name}\""));
-        agent.0.env.insert(name.to_owned(), value);
-        agent
+        Self(sh(format!("printf '%s\\n' \"${name}\"")).env(name, value))
     }
 
     /// Echoes its stdin payload back on stdout.
     #[must_use]
     pub fn stdin_echo(payload: &str) -> Self {
-        let mut agent = Self::shell("cat".to_owned());
-        agent.0.stdin = Some(payload.to_owned());
-        agent
+        Self(sh("cat".to_owned()).stdin(payload))
     }
 
     /// Hangs — a long sleep. The kill test's subject; the odd duration
@@ -61,6 +53,11 @@ impl Scripted {
     pub fn hanging() -> Self {
         Self::shell("sleep 6371".to_owned())
     }
+}
+
+/// `script` under `sh -c`, from `/`.
+fn sh(script: String) -> Task {
+    Task::new(vec!["sh".to_owned(), "-c".to_owned(), script], "/")
 }
 
 impl Agent for Scripted {

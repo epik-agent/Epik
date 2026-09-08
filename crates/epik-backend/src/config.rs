@@ -1,9 +1,20 @@
-//! The configuration's door to the settings window, and the two lookups
-//! the window makes on the configuration's behalf.
+//! The configuration file, the startup that converges on it, and its
+//! door to the settings window.
+//!
+//! Epik keeps one file, [`FILE`], in the platform's configuration
+//! directory for the app — Tauri's `app_config_dir`, so each operating
+//! system's own convention holds. [`converge`] makes the directory and
+//! the file appear when they are absent and reads a file that is already
+//! there without touching it, so a first run and a deleted directory are
+//! the same case. The file as
+//! first written is [`starting`]: the chat model, because the source
+//! names that default, and nothing else. What the file can state is
+//! [`Config`], the library's shape; the path and the format are this
+//! crate's.
 //!
 //! [`config_read`] and [`config_write`] carry a [`Config`] across IPC —
 //! no secrets in it, nothing to guard. A write reaches two places in one
-//! command: the file, through [`epik::config::save`], and the `Config`
+//! command: the file, through [`save`], and the `Config`
 //! in managed state, replaced only once the file has taken the new
 //! values, so the next chat turn and the next build use them with no
 //! restart and a failed write leaves what was running untouched.
@@ -15,21 +26,92 @@
 //! Their results are discovery, never load-bearing: a provider that will
 //! not answer is a reason the tab renders, and nothing else changes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use epik::chat::{ChatError, ModelInfo};
-use epik::config::Config;
+use anyhow::Context;
+use epik::chat::{ANTHROPIC_MODEL, ChatError, ModelInfo};
+use epik::config::{Config, Model};
 use epik::github::GitHub;
-use epik::keystore::{KeyStore, OsKeyring, Resolved, Secret};
-use tauri::State;
+use epik::keystore::{KeyStore, Resolved, Secret};
+use tauri::{AppHandle, Manager, State};
 
 use crate::chat::{API_KEY_NAME, GITHUB_TOKEN_NAME};
+use crate::secrets::OsKeyring;
+
+/// The configuration file's name inside [`root`].
+const FILE: &str = "config.toml";
+
+/// The app's configuration directory, as the platform has it: the one
+/// place that path is asked for.
+///
+/// # Errors
+///
+/// A platform that names no configuration directory — never a fallback
+/// somewhere else.
+fn root(app: &AppHandle) -> anyhow::Result<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .context("no configuration directory on this platform")
+}
+
+/// The file as first written: the chat model, spelled from the constant,
+/// and nothing else — no constant in the source names an agent model.
+fn starting() -> Config {
+    Config {
+        model: Model {
+            chat: Some(ANTHROPIC_MODEL.to_owned()),
+            agent: None,
+        },
+        github: epik::config::GitHub::default(),
+    }
+}
+
+/// Writes `config` to `root/config.toml`. The one writer of the file's
+/// format, so convergence and anything that edits the configuration
+/// afterward can never disagree about what the file looks like.
+///
+/// # Errors
+///
+/// The write that failed, naming the path.
+fn save(root: &Path, config: &Config) -> anyhow::Result<()> {
+    let path = root.join(FILE);
+    let text = toml::to_string(config).context("could not serialize the configuration")?;
+    std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))
+}
+
+/// [`converge_at`] over [`root`].
+///
+/// # Errors
+///
+/// No configuration directory, or whatever `converge_at` reports.
+pub(crate) fn converge(app: &AppHandle) -> anyhow::Result<Config> {
+    converge_at(&root(app)?)
+}
+
+/// Creates `root`, writes [`starting`] when `root/config.toml` is absent,
+/// then reads and parses whatever file is there. A file that cannot be
+/// parsed is left exactly as it is.
+///
+/// # Errors
+///
+/// Which of creating, writing, reading, or parsing failed, and where.
+fn converge_at(root: &Path) -> anyhow::Result<Config> {
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("could not create {}", root.display()))?;
+    let path = root.join(FILE);
+    if !path.exists() {
+        save(root, &starting())?;
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("could not parse {}", path.display()))
+}
 
 /// [`config_write`] against any root and state, which is what makes it
 /// testable. The file first; the state only once the file holds it.
 fn write(root: &Path, state: &Mutex<Config>, config: Config) -> Result<(), String> {
-    epik::config::save(root, &config).map_err(|error| format!("{error:#}"))?;
+    save(root, &config).map_err(|error| format!("{error:#}"))?;
     *state.lock().unwrap_or_else(PoisonError::into_inner) = config;
     Ok(())
 }
@@ -52,11 +134,15 @@ pub fn config_read(state: State<'_, Mutex<Config>>) -> Config {
     state.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
-/// Writes `config` to `~/.epik/config.toml` and makes it the running one.
+/// Writes `config` to the configuration file and makes it the running one.
 #[tauri::command]
-pub async fn config_write(state: State<'_, Mutex<Config>>, config: Config) -> Result<(), String> {
-    let home = epik::config::home().map_err(|error| format!("{error:#}"))?;
-    write(&home, &state, config)
+pub async fn config_write(
+    app: AppHandle,
+    state: State<'_, Mutex<Config>>,
+    config: Config,
+) -> Result<(), String> {
+    let root = root(&app).map_err(|error| format!("{error:#}"))?;
+    write(&root, &state, config)
 }
 
 /// Runs a keyring-and-network lookup off the async runtime's workers:
@@ -99,46 +185,12 @@ pub async fn github_login() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use anyhow::anyhow;
-    use epik::config::{GitHub, Model};
+    use epik::config::GitHub;
     use epik::keystore::InMemory;
 
-    /// A fresh directory under the system's temp dir, removed on drop.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new() -> Self {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
-                "epik-backend-config-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::SeqCst)
-            ));
-            std::fs::create_dir_all(&root).unwrap();
-            Self(root)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    struct Broken;
-
-    impl KeyStore for Broken {
-        fn get(&self, _: &str) -> anyhow::Result<Option<Secret>> {
-            Err(anyhow!("the keychain is locked"))
-        }
-
-        fn set(&mut self, _: &str, _: Secret) -> anyhow::Result<()> {
-            Err(anyhow!("the keychain is locked"))
-        }
-    }
+    use crate::testing::Broken;
+    use epik::testing::Scratch;
 
     fn chosen() -> Config {
         Config {
@@ -154,13 +206,13 @@ mod tests {
 
     #[test]
     fn a_write_states_the_config_in_the_file_and_replaces_the_running_one() {
-        let scratch = Scratch::new();
-        let state = Mutex::new(epik::config::starting());
+        let scratch = Scratch::new("config");
+        let state = Mutex::new(starting());
 
         write(&scratch.0, &state, chosen()).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(scratch.0.join(epik::config::FILE)).unwrap(),
+            std::fs::read_to_string(scratch.0.join(FILE)).unwrap(),
             "[model]\nchat = \"c\"\n\n[github]\nowner = \"o\"\n"
         );
         assert_eq!(*state.lock().unwrap(), chosen());
@@ -168,16 +220,16 @@ mod tests {
 
     #[test]
     fn a_write_that_fails_names_the_path_and_leaves_the_running_config_alone() {
-        let scratch = Scratch::new();
+        let scratch = Scratch::new("config");
         let root = scratch.0.join("a-file");
         std::fs::write(&root, "").unwrap();
-        let state = Mutex::new(epik::config::starting());
+        let state = Mutex::new(starting());
 
         let error = write(&root, &state, chosen()).unwrap_err();
 
         assert!(error.contains("could not write"), "{error}");
         assert!(error.contains("a-file"), "{error}");
-        assert_eq!(*state.lock().unwrap(), epik::config::starting());
+        assert_eq!(*state.lock().unwrap(), starting());
     }
 
     #[test]
@@ -197,5 +249,147 @@ mod tests {
     fn an_unreachable_store_is_its_own_reason() {
         let error = key_from(&Broken, "k", "absent").unwrap_err();
         assert!(error.contains("locked"), "{error}");
+    }
+
+    fn root() -> (Scratch, PathBuf) {
+        let scratch = Scratch::new("config");
+        let root = scratch.0.join("app").join("config");
+        (scratch, root)
+    }
+
+    fn file(root: &Path) -> String {
+        std::fs::read_to_string(root.join(FILE)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_root_gains_the_directory_and_the_starting_file() {
+        let (_dir, root) = root();
+        let config = converge_at(&root).unwrap();
+        assert!(root.join(FILE).is_file());
+        assert_eq!(config, starting());
+        assert_eq!(config.model.chat.as_deref(), Some(ANTHROPIC_MODEL));
+        assert_eq!(config.model.agent, None);
+        assert_eq!(config.github.owner, None);
+    }
+
+    #[test]
+    fn the_first_file_states_the_chat_constant_and_nothing_else() {
+        let (_dir, root) = root();
+        converge_at(&root).unwrap();
+        assert_eq!(
+            file(&root),
+            format!("[model]\nchat = \"{ANTHROPIC_MODEL}\"\n")
+        );
+    }
+
+    #[test]
+    fn converging_twice_leaves_the_bytes_unchanged() {
+        let (_dir, root) = root();
+        converge_at(&root).unwrap();
+        let before = file(&root);
+        converge_at(&root).unwrap();
+        assert_eq!(file(&root), before);
+    }
+
+    #[test]
+    fn an_existing_file_is_read_and_left_alone() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "# mine\n[model]\nagent = \"a\"\n\n[github]\nowner = \"o\"\n";
+        std::fs::write(root.join(FILE), text).unwrap();
+        let config = converge_at(&root).unwrap();
+        assert_eq!(
+            config,
+            Config {
+                model: Model {
+                    chat: None,
+                    agent: Some("a".to_owned()),
+                },
+                github: GitHub {
+                    owner: Some("o".to_owned()),
+                },
+            }
+        );
+        assert_eq!(file(&root), text);
+    }
+
+    #[test]
+    fn every_config_survives_a_save_and_a_read_back() {
+        let full = Config {
+            model: Model {
+                chat: Some("c".to_owned()),
+                agent: Some("a".to_owned()),
+            },
+            github: GitHub {
+                owner: Some("o".to_owned()),
+            },
+        };
+        let chat_only = starting();
+        let owner_only = Config {
+            github: GitHub {
+                owner: Some("o".to_owned()),
+            },
+            ..Config::default()
+        };
+        for config in [full, chat_only, owner_only, Config::default()] {
+            let (_dir, root) = root();
+            std::fs::create_dir_all(&root).unwrap();
+            save(&root, &config).unwrap();
+            assert_eq!(converge_at(&root).unwrap(), config, "{config:?}");
+        }
+    }
+
+    #[test]
+    fn a_config_of_defaults_writes_an_empty_file() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        save(&root, &Config::default()).unwrap();
+        assert_eq!(file(&root), "");
+    }
+
+    #[test]
+    fn omissions_read_as_defaults_throughout() {
+        for text in ["", "[model]\n", "[github]\n", "[model]\n[github]\n"] {
+            let (_dir, root) = root();
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(FILE), text).unwrap();
+            assert_eq!(converge_at(&root).unwrap(), Config::default(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_stating_only_agent_reads_none_for_chat() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(FILE), "[model]\nagent = \"a\"\n").unwrap();
+        let config = converge_at(&root).unwrap();
+        assert_eq!(config.model.chat, None);
+        assert_eq!(config.model.agent.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_toml_is_left_as_it_was_and_reported() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "this is not = = toml";
+        std::fs::write(root.join(FILE), text).unwrap();
+        let error = converge_at(&root).unwrap_err().to_string();
+        assert!(error.contains("could not parse"), "{error}");
+        assert!(error.contains(FILE), "{error}");
+        assert_eq!(file(&root), text);
+    }
+
+    /// A file in a shape this `Config` does not know — an earlier Epik's,
+    /// say — is not read as empty; it is reported, and left alone.
+    #[test]
+    fn a_file_with_keys_this_config_does_not_know_is_reported() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "active = \"anthropic\"\n\n[providers.anthropic]\nmodel = \"x\"\n";
+        std::fs::write(root.join(FILE), text).unwrap();
+        let error = format!("{:#}", converge_at(&root).unwrap_err());
+        assert!(error.contains("could not parse"), "{error}");
+        assert!(error.contains("active"), "{error}");
+        assert_eq!(file(&root), text);
     }
 }

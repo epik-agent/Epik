@@ -25,7 +25,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag};
 /// One node of a rendered message. What the renderer maps 1:1 into the
 /// view, and what the golden tests pin down.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Node {
+pub enum Node {
     /// Plain text, newlines included. Always a DOM text node — escaped
     /// by construction.
     Text(String),
@@ -70,14 +70,14 @@ pub(crate) enum Node {
 /// One list item; `checked` is a task-list marker, rendered as a
 /// disabled checkbox — nothing in a bubble is interactive.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Item {
-    pub(crate) checked: Option<bool>,
-    pub(crate) children: Vec<Node>,
+pub struct Item {
+    pub checked: Option<bool>,
+    pub children: Vec<Node>,
 }
 
 /// Message text in, structure out. Deterministic, side-effect free, and
 /// total: nothing a message says can make it fail.
-pub(crate) fn parse(text: &str) -> Vec<Node> {
+pub fn parse(text: &str) -> Vec<Node> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut builder = Builder {

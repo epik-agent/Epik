@@ -1,9 +1,9 @@
 //! Where secrets live: not here.
 //!
-//! Secrets belong to the OS keyring — Keychain, Credential Manager, secret
-//! service — under service [`SERVICE`], as a set of (name, secret) pairs.
-//! Names are the callers' to choose; this module attaches no meaning to any
-//! of them. Values exist to be *used*, at runtime, and for nothing else:
+//! Secrets belong to the OS keyring, as a set of (name, secret) pairs;
+//! which keyring, and under what service, is the host's to say. Names are
+//! the callers' to choose; this module attaches no meaning to any of
+//! them. Values exist to be *used*, at runtime, and for nothing else:
 //! never printed, never logged, never written to a file. [`Secret`] is the
 //! type that keeps that promise, and keeps every exception to it greppable.
 //!
@@ -14,9 +14,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::Result;
-
-/// The keyring service every Epik secret is filed under.
-pub const SERVICE: &str = "Epik";
 
 /// A secret in hand: usable anywhere, visible nowhere.
 ///
@@ -118,8 +115,8 @@ pub enum Resolved {
 
 impl Resolved {
     /// The secret, if there is one. What a caller about to use it takes.
-    #[must_use]
-    pub fn key(self) -> Option<Secret> {
+    #[cfg(test)]
+    fn key(self) -> Option<Secret> {
         match self {
             Self::Found(secret) => Some(secret),
             Self::Absent | Self::Unreachable(_) => None,
@@ -150,7 +147,7 @@ impl KeyStore for InMemory {
 /// runner. The unit tests unplug it to show the library coping.
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct Unplugged;
+struct Unplugged;
 
 #[cfg(test)]
 impl KeyStore for Unplugged {
@@ -160,41 +157,6 @@ impl KeyStore for Unplugged {
 
     fn set(&mut self, _: &str, _: Secret) -> Result<()> {
         Err(anyhow::anyhow!("no default store has been set"))
-    }
-}
-
-/// The operating system's own secret holder.
-#[cfg(feature = "native")]
-#[derive(Debug, Default)]
-pub struct OsKeyring;
-
-#[cfg(feature = "native")]
-impl OsKeyring {
-    fn entry(name: &str) -> Result<keyring::Entry> {
-        keyring::Entry::new(SERVICE, name)
-            .map_err(|error| anyhow::anyhow!("opening the {SERVICE}/{name} keyring entry: {error}"))
-    }
-}
-
-#[cfg(feature = "native")]
-impl KeyStore for OsKeyring {
-    fn get(&self, name: &str) -> Result<Option<Secret>> {
-        match Self::entry(name)?.get_password() {
-            Ok(secret) => Ok(Some(secret.into())),
-            // No entry is the ordinary state of a fresh install, not a fault.
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(anyhow::anyhow!(
-                "reading the {SERVICE}/{name} secret from the keyring: {error}"
-            )),
-        }
-    }
-
-    fn set(&mut self, name: &str, secret: Secret) -> Result<()> {
-        Self::entry(name)?
-            .set_password(secret.reveal())
-            .map_err(|error| {
-                anyhow::anyhow!("storing the {SERVICE}/{name} secret in the keyring: {error}")
-            })
     }
 }
 

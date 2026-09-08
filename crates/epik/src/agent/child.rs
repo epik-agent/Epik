@@ -6,7 +6,7 @@
 //! and the child killed — and said so, in words — when the deadline
 //! passes rather than held forever. It is stated once, here;
 //! [`git`](crate::git) runs its binary through it and
-//! [`check`](crate::check) runs its shell through it.
+//! the feature build's `check` runs its shell through it.
 
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -34,7 +34,7 @@ pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
 
 /// A child that ran to its end: whether it exited zero, and its own
 /// words — stdout and stderr both.
-pub(crate) struct Finished {
+pub struct Finished {
     pub success: bool,
     pub output: String,
 }
@@ -47,11 +47,7 @@ pub(crate) struct Finished {
 ///
 /// The child could not be started or waited on, or the deadline killed
 /// it — each in words naming `name`.
-pub(crate) fn run(
-    name: &str,
-    command: &mut Command,
-    timeout: Duration,
-) -> Result<Finished, String> {
+pub fn run(name: &str, command: &mut Command, timeout: Duration) -> Result<Finished, String> {
     let mut child = spawn(
         command
             .stdin(Stdio::null())

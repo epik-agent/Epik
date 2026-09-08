@@ -9,6 +9,7 @@ use epik::chat::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::config::Config;
 use epik::keystore::{Resolved, Secret};
 use leptos::task::spawn_local;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -86,8 +87,29 @@ fn error_text(error: &JsValue) -> String {
         .unwrap_or_else(|| "the backend would not answer".to_owned())
 }
 
+/// A command that answers with a value: the Err is the channel's
+/// refusal, or an answer the page cannot read.
+async fn ask<T: DeserializeOwned>(command: &str) -> Result<T, String> {
+    let outcome = invoke(command, JsValue::UNDEFINED)
+        .await
+        .map_err(|error| error_text(&error))?;
+    serde_wasm_bindgen::from_value(outcome)
+        .map_err(|_| "an unintelligible answer from the backend".to_owned())
+}
+
+/// A command that answers with nothing: `args` encoded, sent, and the
+/// Err is the channel's refusal.
+async fn tell(command: &str, args: &impl Serialize) -> Result<(), String> {
+    let args = serde_wasm_bindgen::to_value(args)
+        .map_err(|_| "the request could not be encoded".to_owned())?;
+    invoke(command, args)
+        .await
+        .map(|_| ())
+        .map_err(|error| error_text(&error))
+}
+
 /// Where the secret filed under `name` stands, by asking the backend.
-pub(crate) async fn reveal_secret(name: &str) -> Resolved {
+pub async fn reveal_secret(name: &str) -> Resolved {
     let Ok(args) = serde_wasm_bindgen::to_value(&RevealArgs { name }) else {
         return Resolved::Unreachable("the request could not be encoded".to_owned());
     };
@@ -100,89 +122,56 @@ pub(crate) async fn reveal_secret(name: &str) -> Resolved {
 }
 
 /// Files `value` under `name`, through the backend.
-pub(crate) async fn save_secret(name: &str, value: &Secret) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&SaveArgs { name, value })
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke("secret_save", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+pub async fn save_secret(name: &str, value: &Secret) -> Result<(), String> {
+    tell("secret_save", &SaveArgs { name, value }).await
 }
 
 /// The backend's live configuration, as the file states it. The Err is
 /// a channel that would not answer — the file itself was read at startup.
-pub(crate) async fn read_config() -> Result<Config, String> {
-    let outcome = invoke("config_read", JsValue::UNDEFINED)
-        .await
-        .map_err(|error| error_text(&error))?;
-    serde_wasm_bindgen::from_value(outcome)
-        .map_err(|_| "an unintelligible answer from the backend".to_owned())
+pub async fn read_config() -> Result<Config, String> {
+    ask("config_read").await
 }
 
 /// Writes `config` to the file and makes it the backend's live
 /// configuration, in one command.
-pub(crate) async fn write_config(config: &Config) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&ConfigArgs { config })
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke("config_write", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+pub async fn write_config(config: &Config) -> Result<(), String> {
+    tell("config_write", &ConfigArgs { config }).await
 }
 
 /// The models the provider will answer for, newest first. The backend
 /// reads the key from the keyring itself; the Err is why there is no list
 /// — no key yet, or the provider's own words.
-pub(crate) async fn list_models() -> Result<Vec<ModelInfo>, String> {
-    let outcome = invoke("models_list", JsValue::UNDEFINED)
-        .await
-        .map_err(|error| error_text(&error))?;
-    serde_wasm_bindgen::from_value(outcome)
-        .map_err(|_| "an unintelligible answer from the backend".to_owned())
+pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
+    ask("models_list").await
 }
 
 /// The login of the account the stored GitHub token belongs to.
-pub(crate) async fn github_login() -> Result<String, String> {
-    let outcome = invoke("github_login", JsValue::UNDEFINED)
-        .await
-        .map_err(|error| error_text(&error))?;
-    outcome
-        .as_string()
-        .ok_or_else(|| "an unintelligible answer from the backend".to_owned())
+pub async fn github_login() -> Result<String, String> {
+    ask("github_login").await
 }
 
 /// Posts the user's message. The message becomes visible when it comes
 /// back around as a transcript event; the Err is the command channel's
 /// refusal, distinct from a turn that fails.
-pub(crate) async fn send_message(text: String) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&SendArgs { text: &text })
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke("send_message", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+pub async fn send_message(text: String) -> Result<(), String> {
+    tell("send_message", &SendArgs { text: &text }).await
 }
 
 /// Answers the pending question `id`. The card that asked shows nothing
 /// on its own account: the resolution comes back around as a
 /// `QuestionResolved` event. The Err is the command channel's refusal —
 /// a stale card, a double answer.
-pub(crate) async fn answer_question(id: &str, answer: &Answer) -> Result<(), String> {
-    let args = serde_wasm_bindgen::to_value(&AnswerArgs { id, answer })
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke("answer_question", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+pub async fn answer_question(id: &str, answer: &Answer) -> Result<(), String> {
+    tell("answer_question", &AnswerArgs { id, answer }).await
 }
 
 /// The default name the Browse dialog offers for a repository-to-be.
-pub(crate) const DEFAULT_REPOSITORY_NAME: &str = "repository.git";
+pub const DEFAULT_REPOSITORY_NAME: &str = "repository.git";
 
 /// Opens the native save dialog to name a repository directory that need
 /// not exist yet, and returns the chosen path — `None` when the user
 /// cancels, or when the dialog could not be opened at all.
-pub(crate) async fn browse_repository() -> Option<String> {
+pub async fn browse_repository() -> Option<String> {
     let args = serde_wasm_bindgen::to_value(&SaveDialogArgs {
         options: SaveDialogOptions {
             title: "Where should the repository live?",
@@ -195,7 +184,7 @@ pub(crate) async fn browse_repository() -> Option<String> {
 }
 
 /// The whole transcript so far, for a window that has just mounted.
-pub(crate) async fn get_transcript() -> Vec<TranscriptItem> {
+pub async fn get_transcript() -> Vec<TranscriptItem> {
     match invoke("get_transcript", JsValue::UNDEFINED).await {
         Ok(items) => serde_wasm_bindgen::from_value(items).unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -204,7 +193,7 @@ pub(crate) async fn get_transcript() -> Vec<TranscriptItem> {
 
 /// Hands every arriving transcript item to `fold`, for the lifetime of the
 /// window — which is why the closure is forgotten rather than dropped.
-pub(crate) fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
+pub fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
     spawn_local(async move {
         let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
             if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {
@@ -218,7 +207,7 @@ pub(crate) fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
 
 /// Opens `url` in the system browser through the opener plugin — the app's
 /// webview is never a place to browse the web.
-pub(crate) fn open_url(url: String) {
+pub fn open_url(url: String) {
     spawn_local(async move {
         let Ok(args) = serde_wasm_bindgen::to_value(&OpenUrlArgs { url: &url }) else {
             return;
@@ -228,7 +217,7 @@ pub(crate) fn open_url(url: String) {
 }
 
 /// Asks the backend to dress every window in `theme` — "light" or "dark".
-pub(crate) fn set_theme(theme: &'static str) {
+pub fn set_theme(theme: &'static str) {
     spawn_local(async move {
         let Ok(args) = serde_wasm_bindgen::to_value(&ThemeArgs { theme }) else {
             return;
@@ -240,14 +229,14 @@ pub(crate) fn set_theme(theme: &'static str) {
 /// Asks the backend for the settings window. The window is the backend's
 /// to make, so this only asks — and fire-and-forget is the right shape for
 /// a keystroke.
-pub(crate) fn open_settings() {
+pub fn open_settings() {
     spawn_local(async {
         let _ = invoke("settings_open", JsValue::UNDEFINED).await;
     });
 }
 
 /// Asks the backend to close the settings window, the same way.
-pub(crate) fn close_settings() {
+pub fn close_settings() {
     spawn_local(async {
         let _ = invoke("settings_close", JsValue::UNDEFINED).await;
     });

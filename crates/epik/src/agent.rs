@@ -30,20 +30,19 @@ use serde::{Deserialize, Serialize};
 
 // Task's env values are Secrets, so the type is part of this vocabulary:
 // re-exported so agent callers need nothing beyond this module.
-pub use crate::keystore::Secret;
+use crate::keystore::Secret;
 
+#[cfg(feature = "native")]
+pub(crate) mod child;
 pub mod claude_code;
-#[cfg(feature = "scripted")]
-pub mod scripted;
-#[cfg(feature = "scripted")]
-pub use scripted::Scripted;
-
-/// How a child ended: an exit code, or the signal that took it. Exactly
-/// one is set.
+/// How a child ended: an exit code, or the signal that took it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Exit {
-    pub code: Option<i32>,
-    pub signal: Option<i32>,
+#[serde(rename_all = "snake_case")]
+pub enum Exit {
+    /// The child exited on its own, with this code.
+    Code(i32),
+    /// A signal took the child.
+    Signal(i32),
 }
 
 /// One observation from the runner, in the order it happened. The tag is
@@ -81,15 +80,44 @@ pub enum Event {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Task {
     /// The child command line; `argv[0]` is the program.
-    pub argv: Vec<String>,
+    argv: Vec<String>,
     /// Added to the environment the runner inherited. A map: one value
     /// per name, serialized as a JSON object in a fixed order.
-    pub env: BTreeMap<String, Secret>,
+    env: BTreeMap<String, Secret>,
     /// The child's working directory. Absolute.
-    pub cwd: String,
+    cwd: String,
     /// Written to the child's stdin, which is then closed; `None` gives
     /// the child no stdin at all.
-    pub stdin: Option<String>,
+    stdin: Option<String>,
+}
+
+impl Task {
+    /// A task with only its command line and working directory:
+    /// `argv[0]` is the program, `cwd` is absolute, and the child gets
+    /// no environment beyond the runner's own and no stdin.
+    #[must_use]
+    pub fn new(argv: Vec<String>, cwd: impl Into<String>) -> Self {
+        Self {
+            argv,
+            env: BTreeMap::new(),
+            cwd: cwd.into(),
+            stdin: None,
+        }
+    }
+
+    /// One more name in the child's environment.
+    #[must_use]
+    pub fn env(mut self, name: impl Into<String>, value: Secret) -> Self {
+        self.env.insert(name.into(), value);
+        self
+    }
+
+    /// What the child reads on its stdin before it is closed.
+    #[must_use]
+    pub fn stdin(mut self, payload: impl Into<String>) -> Self {
+        self.stdin = Some(payload.into());
+        self
+    }
 }
 
 /// Something that can be run as an Agent: it yields the [`Task`]. That
@@ -197,13 +225,9 @@ mod native {
                     // one process group — so the child's end is the same
                     // signal; say so on the stream, which always ends
                     // with Exited.
-                    (None, Ok(status)) if status.signal().is_some() => {
-                        let exit = Exit {
-                            code: None,
-                            signal: status.signal(),
-                        };
-                        let _ = events.send(Event::Exited(exit));
-                        Ok(exit)
+                    (None, Ok(status)) if let Some(signal) = status.signal() => {
+                        let _ = events.send(Event::Exited(Exit::Signal(signal)));
+                        Ok(Exit::Signal(signal))
                     }
                     (None, Ok(status)) => Err(if fault.trim().is_empty() {
                         format!("the runner exited ({status}) without reporting")
@@ -290,13 +314,8 @@ mod tests {
                 },
                 r#""event":"stderr""#,
             ),
-            (
-                Event::Exited(Exit {
-                    code: Some(0),
-                    signal: None,
-                }),
-                r#""event":"exited""#,
-            ),
+            (Event::Exited(Exit::Code(0)), r#""event":"exited""#),
+            (Event::Exited(Exit::Signal(9)), r#""signal":9"#),
         ] {
             let wire = serde_json::to_string(&event).unwrap();
             assert!(wire.contains(tag), "{wire}");
@@ -314,14 +333,14 @@ mod tests {
         assert_eq!(received, Event::Unknown);
     }
 
+    /// A task carrying one secret in its env.
+    fn hushed() -> Task {
+        Task::new(vec!["sh".to_owned()], "/").env("API_KEY", Secret::from("hush-hush-bytes"))
+    }
+
     #[test]
     fn a_tasks_debug_never_shows_a_secrets_bytes() {
-        let task = Task {
-            argv: vec!["sh".to_owned()],
-            env: BTreeMap::from([("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))]),
-            cwd: "/".to_owned(),
-            stdin: None,
-        };
+        let task = hushed();
         let debugged = format!("{task:?}");
         assert!(!debugged.contains("hush-hush-bytes"), "{debugged}");
         assert!(debugged.contains("API_KEY"), "the name is not the secret");
@@ -333,12 +352,7 @@ mod tests {
     /// `env` as a JSON object keyed by name; that shape is pinned here.
     #[test]
     fn the_wire_to_the_runner_is_the_one_reveal() {
-        let task = Task {
-            argv: vec!["sh".to_owned()],
-            env: BTreeMap::from([("API_KEY".to_owned(), Secret::from("hush-hush-bytes"))]),
-            cwd: "/".to_owned(),
-            stdin: Some("payload".to_owned()),
-        };
+        let task = hushed().stdin("payload");
         let wire = serde_json::to_string(&task).unwrap();
         assert!(wire.contains("hush-hush-bytes"), "the wire carries bytes");
         let shape: serde_json::Value = serde_json::from_str(&wire).unwrap();

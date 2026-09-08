@@ -27,7 +27,7 @@ use crate::json::{self, JsonTree};
 
 /// How a card carries itself: matter-of-fact, or bad news.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Tone {
+pub enum Tone {
     Neutral,
     Error,
 }
@@ -35,16 +35,16 @@ pub(crate) enum Tone {
 /// Everything a card is, decided before any rendering: the pure mapping
 /// the tests pin down.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Spec {
-    pub(crate) title: Option<String>,
-    pub(crate) body: String,
-    pub(crate) tone: Tone,
+pub struct Spec {
+    pub title: Option<String>,
+    pub body: String,
+    pub tone: Tone,
     /// Machine text — arguments, results — is monospace; prose is not.
-    pub(crate) mono: bool,
+    pub mono: bool,
 }
 
 /// A card title for `ask`: what kind of thing was asked for.
-pub(crate) const fn ask_title(ask: &Ask) -> &'static str {
+pub const fn ask_title(ask: &Ask) -> &'static str {
     match ask {
         Ask::Repository { .. } => "repository",
         Ask::Check { .. } => "check",
@@ -54,7 +54,7 @@ pub(crate) const fn ask_title(ask: &Ask) -> &'static str {
 /// The card for `item`, if `item` is card-shaped: tool calls, tool
 /// results, failures, and settled questions are; speech is not, and
 /// neither is a pending question, which is a [`QuestionCard`].
-pub(crate) fn spec(item: &TranscriptItem) -> Option<Spec> {
+pub fn spec(item: &TranscriptItem) -> Option<Spec> {
     match item {
         TranscriptItem::QuestionResolved { ask, answer, .. } => Some(Spec {
             title: Some(ask_title(ask).to_owned()),
@@ -92,12 +92,12 @@ pub(crate) fn spec(item: &TranscriptItem) -> Option<Spec> {
 }
 
 /// How many characters of body a folded card shows.
-pub(crate) const PREVIEW_CAP: usize = 200;
+pub const PREVIEW_CAP: usize = 200;
 
 /// The state logic of the expand toggle, as a pure function: what the
 /// card displays for `body` at `expanded`, and whether there is a toggle
 /// at all. A body within [`PREVIEW_CAP`] has nothing to expand.
-pub(crate) fn shown(body: &str, expanded: bool) -> (String, bool) {
+pub fn shown(body: &str, expanded: bool) -> (String, bool) {
     if body.chars().count() <= PREVIEW_CAP {
         return (body.to_owned(), false);
     }
@@ -132,7 +132,7 @@ const fn tone_class(tone: Tone) -> &'static str {
 /// A mono body that is a JSON document renders as a folding
 /// [`JsonTree`]; every other body is the folded-or-whole text.
 #[component]
-pub(crate) fn Card(spec: Spec) -> impl IntoView {
+pub fn Card(spec: Spec) -> impl IntoView {
     let tone = tone_class(spec.tone);
     let title = spec
         .title
@@ -203,7 +203,7 @@ const FIELD: &str = "min-w-0 flex-1 rounded-md border border-neutral-300 bg-whit
 /// Each ask kind is its own live card — the backend says what it wants,
 /// and the modality is entirely here.
 #[component]
-pub(crate) fn QuestionCard(id: String, ask: Ask) -> impl IntoView {
+pub fn QuestionCard(id: String, ask: Ask) -> impl IntoView {
     match ask {
         Ask::Repository { prompt } => view! { <RepositoryQuestion id prompt /> }.into_any(),
         Ask::Check { prompt, proposal } => {
@@ -212,14 +212,21 @@ pub(crate) fn QuestionCard(id: String, ask: Ask) -> impl IntoView {
     }
 }
 
-/// One door for a card's answers: claims the card, sends, and stays
-/// disabled — the reply, or the refusal, is the backend's to give.
-fn answerer(
-    id: StoredValue<String>,
-    submitted: RwSignal<bool>,
-    note: RwSignal<Option<String>>,
-) -> impl Fn(Answer) + Copy {
-    move |answer: Answer| {
+/// A pending question's standing — whether it has been answered, and
+/// the refusal if the backend gave one — and the one door for its
+/// answers: claims the card, sends, and stays disabled, since the reply
+/// or the refusal is the backend's to give.
+fn pending(
+    id: String,
+) -> (
+    RwSignal<bool>,
+    RwSignal<Option<String>>,
+    impl Fn(Answer) + Copy,
+) {
+    let id = StoredValue::new(id);
+    let submitted = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let answer_with = move |answer: Answer| {
         if submitted.get_untracked() {
             return;
         }
@@ -229,6 +236,27 @@ fn answerer(
                 note.set(Some(reason));
             }
         });
+    };
+    (submitted, note, answer_with)
+}
+
+/// Enter in a question's field is its confirm.
+fn on_enter(confirm: impl Fn() + Copy + 'static) -> impl Fn(ev::KeyboardEvent) {
+    move |event| {
+        if event.key() == "Enter" {
+            event.prevent_default();
+            confirm();
+        }
+    }
+}
+
+/// The backend's refusal, under the controls, once there is one.
+#[component]
+fn Note(note: RwSignal<Option<String>>) -> impl IntoView {
+    view! {
+        <Show when=move || note.get().is_some()>
+            <p class="mt-1 text-xs text-[#d4940a] dark:text-[#f5a623]">{move || note.get()}</p>
+        </Show>
     }
 }
 
@@ -237,9 +265,7 @@ fn answerer(
 #[component]
 fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
     let path = RwSignal::new(String::new());
-    let submitted = RwSignal::new(false);
-    let note = RwSignal::new(None::<String>);
-    let answer_with = answerer(StoredValue::new(id), submitted, note);
+    let (submitted, note, answer_with) = pending(id);
     let confirm = move || {
         let url = path.get_untracked().trim().to_owned();
         if !url.is_empty() {
@@ -268,12 +294,7 @@ fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
                     prop:value=path
                     prop:disabled=submitted
                     on:input=move |event| path.set(event_target_value(&event))
-                    on:keydown=move |event: ev::KeyboardEvent| {
-                        if event.key() == "Enter" {
-                            event.prevent_default();
-                            confirm();
-                        }
-                    }
+                    on:keydown=on_enter(confirm)
                 />
                 <button type="button" class=BUTTON prop:disabled=submitted on:click=browse>
                     "Browse…"
@@ -295,9 +316,7 @@ fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
                     "Never mind"
                 </button>
             </div>
-            <Show when=move || note.get().is_some()>
-                <p class="mt-1 text-xs text-[#d4940a] dark:text-[#f5a623]">{move || note.get()}</p>
-            </Show>
+            <Note note />
         </li>
     }
 }
@@ -309,9 +328,7 @@ fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
 #[component]
 fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl IntoView {
     let command = RwSignal::new(proposal.unwrap_or_default());
-    let submitted = RwSignal::new(false);
-    let note = RwSignal::new(None::<String>);
-    let answer_with = answerer(StoredValue::new(id), submitted, note);
+    let (submitted, note, answer_with) = pending(id);
     let confirm = move || {
         let command = command.get_untracked().trim().to_owned();
         if !command.is_empty() {
@@ -333,12 +350,7 @@ fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl I
                     prop:value=command
                     prop:disabled=submitted
                     on:input=move |event| command.set(event_target_value(&event))
-                    on:keydown=move |event: ev::KeyboardEvent| {
-                        if event.key() == "Enter" {
-                            event.prevent_default();
-                            confirm();
-                        }
-                    }
+                    on:keydown=on_enter(confirm)
                 />
                 <button
                     type="button"
@@ -357,9 +369,7 @@ fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl I
                     "Skip the check"
                 </button>
             </div>
-            <Show when=move || note.get().is_some()>
-                <p class="mt-1 text-xs text-[#d4940a] dark:text-[#f5a623]">{move || note.get()}</p>
-            </Show>
+            <Note note />
         </li>
     }
 }

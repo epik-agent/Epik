@@ -17,6 +17,15 @@
 //! variant for the same reason: "come back later" and "no" call for
 //! different behavior, so they are different values.
 //!
+//! GitHub is two systems wearing one hat, and this client speaks for
+//! both. Issues, their edges, comments, closing — that is the tracker,
+//! the part Linear or Jira would implement, and
+//! [`tracker::github`](crate::tracker::github) is that face. Branches,
+//! pushes, and pull requests are the forge's, and
+//! [`forge::github`](crate::forge::github) is that one. Each face takes
+//! only its own verbs from here, so the fault line the two seams are
+//! cut along runs through this module too.
+//!
 //! Everything here is blocking, on purpose, like the rest of the library.
 //! Async is the host's problem.
 //!
@@ -29,16 +38,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-#[cfg(feature = "native")]
-use crate::feature::Plan;
 use crate::feature::{self, IssueId};
 #[cfg(feature = "native")]
 use crate::keystore::Secret;
-#[cfg(feature = "native")]
-use crate::tracker::Tracker;
-
-#[cfg(feature = "native")]
-pub mod tools;
 
 /// Where GitHub is. One value, because Epik talks to one GitHub; tests point
 /// [`GitHub::at`] somewhere else.
@@ -59,7 +61,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Repo {
     pub owner: String,
-    pub name: String,
+    name: String,
 }
 
 impl Repo {
@@ -76,7 +78,7 @@ impl Repo {
     /// alphanumerics and hyphens, names add underscores and dots, and a
     /// `.git` suffix is a clone URL's decoration, not a name.
     #[must_use]
-    pub fn parse(spec: &str) -> Option<Self> {
+    fn parse(spec: &str) -> Option<Self> {
         let (owner, name) = spec.split_once('/')?;
         let owner_fits =
             !owner.is_empty() && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
@@ -126,7 +128,7 @@ impl fmt::Display for Repo {
 /// Serialization — a tool result on its way to a model — always spells them
 /// the REST way.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum State {
+enum State {
     #[serde(rename = "open", alias = "OPEN")]
     Open,
     #[serde(rename = "closed", alias = "CLOSED")]
@@ -136,35 +138,35 @@ pub enum State {
 /// An issue, as Epik reads one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Issue {
-    pub number: u64,
-    pub title: String,
+    number: u64,
+    pub(crate) title: String,
     /// GitHub sends `null` for an issue with no description; to Epik that is
     /// the same as an empty one.
     #[serde(default, deserialize_with = "null_is_empty")]
-    pub body: String,
-    pub state: State,
+    body: String,
+    state: State,
 }
 
 /// One end of a pull request: a branch name and the commit it points at.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Branch {
+struct Branch {
     #[serde(rename = "ref")]
-    pub name: String,
-    pub sha: String,
+    name: String,
+    sha: String,
 }
 
 /// A pull request, as Epik reads one. `head.sha` is what
 /// [`check_conclusions`](GitHub::check_conclusions) wants.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Pull {
-    pub number: u64,
+pub(crate) struct Pull {
+    number: u64,
     pub title: String,
-    pub state: State,
+    state: State,
     /// A merged pull request is `Closed` with this set; GitHub does not
     /// distinguish merged from closed in `state`.
-    pub merged: bool,
-    pub head: Branch,
-    pub base: Branch,
+    merged: bool,
+    head: Branch,
+    base: Branch,
 }
 
 /// How one ref stands relative to another — `head` against `base`, in
@@ -172,7 +174,7 @@ pub struct Pull {
 /// holds commits the other lacks.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Comparison {
+pub(crate) enum Comparison {
     Identical,
     Ahead,
     Behind,
@@ -183,7 +185,7 @@ pub enum Comparison {
 /// GitHub's own UI uses, which is how a tool argument names one.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum Merge {
+pub(crate) enum Merge {
     Commit,
     Squash,
     Rebase,
@@ -203,10 +205,10 @@ impl Merge {
 
 /// One check run's verdict on a commit.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Check {
-    pub name: String,
+pub(crate) struct Check {
+    name: String,
     /// `None` while the check is still running.
-    pub conclusion: Option<Conclusion>,
+    conclusion: Option<Conclusion>,
 }
 
 /// How a finished check run ended. `Other` absorbs conclusions GitHub
@@ -214,7 +216,7 @@ pub struct Check {
 /// decoding, and it is nobody's green.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Conclusion {
+enum Conclusion {
     Success,
     Failure,
     Neutral,
@@ -232,8 +234,8 @@ impl Conclusion {
     /// conclusions a required check waves through — neutral and skipped.
     /// Everything else — [`Other`](Self::Other), the verdict invented
     /// after this enum was written, included — is nobody's green.
-    #[must_use]
-    pub const fn green(self) -> bool {
+    #[cfg(test)]
+    const fn green(self) -> bool {
         matches!(self, Self::Success | Self::Neutral | Self::Skipped)
     }
 }
@@ -241,14 +243,14 @@ impl Conclusion {
 impl Check {
     /// Still running: nothing concluded yet, so the check is
     /// not-yet-judgeable — neither green nor [`red`](Self::red).
-    #[must_use]
-    pub const fn pending(&self) -> bool {
+    #[cfg(test)]
+    const fn pending(&self) -> bool {
         self.conclusion.is_none()
     }
 
     /// Concluded, and not [green](Conclusion::green).
-    #[must_use]
-    pub fn red(&self) -> bool {
+    #[cfg(test)]
+    fn red(&self) -> bool {
         self.conclusion
             .is_some_and(|conclusion| !conclusion.green())
     }
@@ -257,10 +259,10 @@ impl Check {
 /// An issue as it appears at the far end of an edge: enough to schedule
 /// against, not the whole issue.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Edge {
-    pub number: u64,
-    pub title: String,
-    pub state: State,
+struct Edge {
+    number: u64,
+    title: String,
+    state: State,
 }
 
 /// One issue and the edges around it: the children it decomposes into, and
@@ -269,10 +271,10 @@ pub struct Edge {
 /// This is what the scheduler folds over — and, as a tool result, what a
 /// model reads to answer for an issue's place in a plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct IssueGraph {
+pub(crate) struct IssueGraph {
     pub issue: Issue,
-    pub sub_issues: Vec<Edge>,
-    pub blocked_by: Vec<Edge>,
+    sub_issues: Vec<Edge>,
+    blocked_by: Vec<Edge>,
 }
 
 /// What went wrong, as a value. Doors render these; nothing here is meant to
@@ -337,7 +339,7 @@ impl GitHub {
     /// [`new`](Self::new), aimed at a stated API base — which is how a test
     /// talks to a fake GitHub on a loopback port.
     #[must_use]
-    pub fn at(api: impl Into<String>, token: Option<Secret>) -> Self {
+    pub(crate) fn at(api: impl Into<String>, token: Option<Secret>) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(TIMEOUT))
             // Epik reports GitHub's own words, so it needs the body of a
@@ -377,7 +379,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn default_branch(&self, repo: &Repo) -> Result<String, Error> {
+    pub(crate) fn default_branch(&self, repo: &Repo) -> Result<String, Error> {
         #[derive(Deserialize)]
         struct Wire {
             default_branch: String,
@@ -391,7 +393,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
+    pub(crate) fn issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
         self.get(&format!("repos/{repo}/issues/{number}"))
     }
 
@@ -401,7 +403,12 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn create_issue(&self, repo: &Repo, title: &str, body: &str) -> Result<Issue, Error> {
+    pub(crate) fn create_issue(
+        &self,
+        repo: &Repo,
+        title: &str,
+        body: &str,
+    ) -> Result<Issue, Error> {
         self.needs_token()?;
         self.send(
             Method::Post,
@@ -417,7 +424,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn edit_issue(
+    pub(crate) fn edit_issue(
         &self,
         repo: &Repo,
         number: u64,
@@ -446,7 +453,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<(), Error> {
+    pub(crate) fn comment(&self, repo: &Repo, number: u64, body: &str) -> Result<(), Error> {
         self.needs_token()?;
         self.send::<Value>(
             Method::Post,
@@ -462,7 +469,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn close_issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
+    pub(crate) fn close_issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
         self.needs_token()?;
         self.send(
             Method::Patch,
@@ -477,7 +484,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn open_pull(
+    pub(crate) fn open_pull(
         &self,
         repo: &Repo,
         title: &str,
@@ -498,7 +505,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn pull(&self, repo: &Repo, number: u64) -> Result<Pull, Error> {
+    pub(crate) fn pull(&self, repo: &Repo, number: u64) -> Result<Pull, Error> {
         self.get(&format!("repos/{repo}/pulls/{number}"))
     }
 
@@ -515,7 +522,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn pull_for(&self, repo: &Repo, head: &str) -> Result<Option<Pull>, Error> {
+    pub(crate) fn pull_for(&self, repo: &Repo, head: &str) -> Result<Option<Pull>, Error> {
         #[derive(Deserialize)]
         struct Wire {
             number: u64,
@@ -539,7 +546,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn merge_pull(&self, repo: &Repo, number: u64, method: Merge) -> Result<(), Error> {
+    pub(crate) fn merge_pull(&self, repo: &Repo, number: u64, method: Merge) -> Result<(), Error> {
         self.needs_token()?;
         self.send::<Value>(
             Method::Put,
@@ -555,7 +562,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn branch_sha(&self, repo: &Repo, branch: &str) -> Result<Option<String>, Error> {
+    pub(crate) fn branch_sha(&self, repo: &Repo, branch: &str) -> Result<Option<String>, Error> {
         #[derive(Deserialize)]
         struct Wire {
             object: Object,
@@ -580,7 +587,7 @@ impl GitHub {
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no — a
     /// ref that does not exist, chiefly.
-    pub fn compare(&self, repo: &Repo, base: &str, head: &str) -> Result<Comparison, Error> {
+    pub(crate) fn compare(&self, repo: &Repo, base: &str, head: &str) -> Result<Comparison, Error> {
         #[derive(Deserialize)]
         struct Wire {
             status: Comparison,
@@ -603,7 +610,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no — a branch
     /// that already exists, chiefly.
-    pub fn create_branch(&self, repo: &Repo, branch: &str, sha: &str) -> Result<(), Error> {
+    pub(crate) fn create_branch(&self, repo: &Repo, branch: &str, sha: &str) -> Result<(), Error> {
         self.needs_token()?;
         self.send::<Value>(
             Method::Post,
@@ -626,7 +633,11 @@ impl GitHub {
     /// # Errors
     ///
     /// Returns an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn check_conclusions(&self, repo: &Repo, git_ref: &str) -> Result<Vec<Check>, Error> {
+    pub(crate) fn check_conclusions(
+        &self,
+        repo: &Repo,
+        git_ref: &str,
+    ) -> Result<Vec<Check>, Error> {
         #[derive(Deserialize)]
         struct Wire {
             check_runs: Vec<Check>,
@@ -648,7 +659,7 @@ impl GitHub {
     /// Refuses with [`Error::TokenAbsent`] when there is no token — GraphQL
     /// answers nothing unauthenticated, even about a public repository.
     /// Otherwise an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn issue_graph(&self, repo: &Repo, number: u64) -> Result<IssueGraph, Error> {
+    pub(crate) fn issue_graph(&self, repo: &Repo, number: u64) -> Result<IssueGraph, Error> {
         let data = self.graphql(GRAPH_QUERY, &variables(repo, number))?;
         graph(data)
     }
@@ -659,7 +670,7 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn add_sub_issue(&self, repo: &Repo, parent: u64, child: u64) -> Result<(), Error> {
+    pub(crate) fn add_sub_issue(&self, repo: &Repo, parent: u64, child: u64) -> Result<(), Error> {
         self.link(ADD_SUB_ISSUE, repo, parent, child)
     }
 
@@ -669,7 +680,12 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn remove_sub_issue(&self, repo: &Repo, parent: u64, child: u64) -> Result<(), Error> {
+    pub(crate) fn remove_sub_issue(
+        &self,
+        repo: &Repo,
+        parent: u64,
+        child: u64,
+    ) -> Result<(), Error> {
         self.link(REMOVE_SUB_ISSUE, repo, parent, child)
     }
 
@@ -679,7 +695,12 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn add_blocked_by(&self, repo: &Repo, issue: u64, blocker: u64) -> Result<(), Error> {
+    pub(crate) fn add_blocked_by(
+        &self,
+        repo: &Repo,
+        issue: u64,
+        blocker: u64,
+    ) -> Result<(), Error> {
         self.link(ADD_BLOCKED_BY, repo, issue, blocker)
     }
 
@@ -689,7 +710,12 @@ impl GitHub {
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn remove_blocked_by(&self, repo: &Repo, issue: u64, blocker: u64) -> Result<(), Error> {
+    pub(crate) fn remove_blocked_by(
+        &self,
+        repo: &Repo,
+        issue: u64,
+        blocker: u64,
+    ) -> Result<(), Error> {
         self.link(REMOVE_BLOCKED_BY, repo, issue, blocker)
     }
 
@@ -782,66 +808,13 @@ impl GitHub {
     }
 }
 
-// ----- the tracker seam -----
-
-/// The [`Tracker`] seam, spoken by GitHub: issue verbs only, each one of
-/// this module's verbs with its errors rendered in words a model reads.
-/// It holds the repository, because a bare [`IssueId`] — `154` — names an
-/// issue only inside one.
-#[cfg(feature = "native")]
-#[derive(Debug)]
-pub struct GitHubTracker<'a> {
-    github: &'a GitHub,
-    repo: Repo,
-}
-
-#[cfg(feature = "native")]
-impl<'a> GitHubTracker<'a> {
-    #[must_use]
-    pub const fn new(github: &'a GitHub, repo: Repo) -> Self {
-        Self { github, repo }
-    }
-
-    /// The number behind an id. GitHub numbers its issues; an id that is
-    /// not a number belongs to some other tracker.
-    fn number(id: &IssueId) -> Result<u64, String> {
-        id.0.parse()
-            .map_err(|_| format!("{id} is not a GitHub issue number"))
-    }
-}
-
-#[cfg(feature = "native")]
-impl Tracker for GitHubTracker<'_> {
-    fn plan(&self, feature: &IssueId) -> Result<Plan, String> {
-        Plan::descend(feature, |id| {
-            self.github
-                .issue_graph(&self.repo, Self::number(id)?)
-                .map(fetched)
-                .map_err(|error| error.to_string())
-        })
-    }
-
-    fn note(&self, issue: &IssueId, body: &str) -> Result<(), String> {
-        self.github
-            .comment(&self.repo, Self::number(issue)?, body)
-            .map_err(|error| error.to_string())
-    }
-
-    fn close(&self, issue: &IssueId) -> Result<(), String> {
-        self.github
-            .close_issue(&self.repo, Self::number(issue)?)
-            .map(drop)
-            .map_err(|error| error.to_string())
-    }
-}
-
 /// An [`IssueGraph`] in the plan's vocabulary: numbers become ids, the
 /// edges keep title and state, and the body stays behind — a plan carries
 /// what schedules and renders, nothing more.
 // Driven by the tracker under `native`; compiled — and tested —
 // everywhere serde is.
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
-fn fetched(graph: IssueGraph) -> feature::Node {
+pub(crate) fn fetched(graph: IssueGraph) -> feature::Node {
     feature::Node {
         issue: domain(graph.issue.number, graph.issue.title, graph.issue.state),
         children: graph
@@ -1408,32 +1381,6 @@ mod tests {
         // The captured payloads were taken before the query asked for
         // `pageInfo`; absence means nothing overflowed.
         assert!(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).is_ok());
-    }
-
-    #[cfg(feature = "native")]
-    #[test]
-    fn the_tracker_renders_a_github_refusal_in_words() {
-        // No token, so GraphQL refuses before any wire is touched — and
-        // the tracker's answer is that refusal as a sentence, not a value
-        // the model cannot read.
-        let github = GitHub::at("http://127.0.0.1:1", None);
-        let tracker = GitHubTracker::new(&github, epik());
-        let plan = tracker.plan(&IssueId::from(154)).unwrap_err();
-        assert!(plan.contains("Settings (Cmd+,)"), "{plan}");
-        let note = tracker.note(&IssueId::from(154), "hi").unwrap_err();
-        assert!(note.contains("Settings (Cmd+,)"), "{note}");
-        let close = tracker.close(&IssueId::from(154)).unwrap_err();
-        assert!(close.contains("Settings (Cmd+,)"), "{close}");
-    }
-
-    #[cfg(feature = "native")]
-    #[test]
-    fn an_id_from_another_tracker_is_refused_in_words() {
-        let github = GitHub::at("http://127.0.0.1:1", None);
-        let tracker = GitHubTracker::new(&github, epik());
-        let error = tracker.plan(&IssueId::from("EPK-12")).unwrap_err();
-        assert!(error.contains("EPK-12"), "{error}");
-        assert!(error.contains("not a GitHub issue number"), "{error}");
     }
 
     #[test]

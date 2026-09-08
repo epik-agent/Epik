@@ -187,17 +187,12 @@ impl Agent for ClaudeCode {
             ]
             .map(str::to_owned),
         );
-        Task {
-            argv,
-            env: self
-                .api_key
-                .iter()
-                .map(|key| ("ANTHROPIC_API_KEY".to_owned(), key.clone()))
-                .collect(),
-            cwd: self.cwd.clone(),
-            // The prompt is stdin, never an argument: file-like, any
-            // length, any number of lines.
-            stdin: Some(self.prompt.clone()),
+        // The prompt is stdin, never an argument: file-like, any
+        // length, any number of lines.
+        let task = Task::new(argv, self.cwd.clone()).stdin(self.prompt.clone());
+        match &self.api_key {
+            Some(key) => task.env("ANTHROPIC_API_KEY", key.clone()),
+            None => task,
         }
     }
 }

@@ -20,8 +20,8 @@ use std::time::Duration;
 
 /// A repository's own idea of green: a command, judged by its exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Check {
-    pub command: String,
+pub(super) struct Check {
+    pub(super) command: String,
 }
 
 /// How long a check may run before it is killed and judged red.
@@ -29,14 +29,14 @@ pub struct Check {
 /// same, because the check runs under the merge lock, and a hung check
 /// — a deadlocked test, a tool that prompts despite a closed stdin —
 /// must not hold every future merge hostage.
-pub const DEADLINE: Duration = Duration::from_secs(60 * 60);
+const DEADLINE: Duration = Duration::from_secs(60 * 60);
 
 /// What one run of the check said: green or not, and the command's own
 /// words — stdout and stderr both — for the record when it is not.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Verdict {
-    pub green: bool,
-    pub output: String,
+pub(super) struct Verdict {
+    pub(super) green: bool,
+    pub(super) output: String,
 }
 
 /// Runs `check` in `workspace` through `sh -c` and judges the exit
@@ -44,7 +44,7 @@ pub struct Verdict {
 /// or one still running at the [`DEADLINE`] is nobody's green; the
 /// verdict says why in words.
 #[must_use]
-pub fn run(check: &Check, workspace: &Path) -> Verdict {
+pub(super) fn run(check: &Check, workspace: &Path) -> Verdict {
     run_within(check, workspace, DEADLINE)
 }
 
@@ -53,7 +53,7 @@ pub fn run(check: &Check, workspace: &Path) -> Verdict {
 fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
     let mut command = Command::new("sh");
     command.arg("-c").arg(&check.command).current_dir(workspace);
-    match crate::child::run("the check", &mut command, deadline) {
+    match crate::agent::child::run("the check", &mut command, deadline) {
         Ok(finished) => Verdict {
             green: finished.success,
             output: finished.output,
@@ -70,7 +70,7 @@ fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
 /// nothing. A proposal, always — the command in force is the one the
 /// build is handed.
 #[must_use]
-pub fn detect(worktree: &Path) -> Option<Check> {
+pub(super) fn detect(worktree: &Path) -> Option<Check> {
     let marker = |name: &str| worktree.join(name).is_file();
     let command = if npm_test(worktree) {
         "npm test"

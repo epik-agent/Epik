@@ -32,9 +32,11 @@ use epik::chat::{
 };
 use epik::config::Config;
 use epik::github::GitHub;
-use epik::keystore::{KeyStore, OsKeyring, Resolved};
+use epik::keystore::{KeyStore, Resolved};
 use epik::tools::{self, Registry, Tool};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::secrets::OsKeyring;
 
 /// The keystore entry the turn's key comes from.
 pub(crate) const API_KEY_NAME: &str = "ANTHROPIC_API_KEY";
@@ -191,14 +193,44 @@ fn post(conversation: &mut Conversation, text: String, emit: impl FnOnce(&Transc
 /// messages — then the completed message, appended before it is emitted,
 /// or `TurnFailed` with the reason. Generic over the replier and both
 /// effects, which is what makes it testable without a wire or a window.
-fn turn(
-    reply: impl FnOnce(
-        &mut dyn FnMut(&str),
-        &mut dyn FnMut(TranscriptItem),
-    ) -> Result<String, ChatError>,
-    append: impl Fn(&TranscriptItem),
-    emit: impl Fn(&TranscriptItem),
-) {
+/// What answers a [`turn`]: handed the delta and record sinks, it comes
+/// back with the model's final text, or why there is none.
+trait Replier:
+    FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, ChatError>
+{
+}
+
+impl<F> Replier for F where
+    F: FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, ChatError>
+{
+}
+
+/// The replier every real turn uses: the library loop over `registry`,
+/// with every tool call and its result recorded as they happen.
+fn replying_with<'a>(
+    client: &'a Client,
+    system: &'a str,
+    transcript: &'a [TranscriptItem],
+    registry: &'a Registry,
+    stop: &'a AtomicBool,
+) -> impl Replier + 'a {
+    move |on_delta, record| {
+        tools::run(
+            client,
+            system,
+            transcript,
+            registry,
+            on_delta,
+            |call, result| {
+                record(TranscriptItem::tool_call(call));
+                record(TranscriptItem::tool_result(&call.name, result));
+            },
+            stop,
+        )
+    }
+}
+
+fn turn(reply: impl Replier, append: impl Fn(&TranscriptItem), emit: impl Fn(&TranscriptItem)) {
     let mut on_delta = |delta: &str| {
         emit(&TranscriptItem::AssistantDelta {
             text: delta.to_owned(),
@@ -302,11 +334,11 @@ pub async fn send_message(
         // Assembled fresh each turn, so a token pasted mid-session
         // reaches the very next turn.
         let mut registry = Registry::standard();
-        registry.extend(epik::github::tools::all(
+        registry.extend(tools::github::all(
             GitHub::new(github_token.clone()),
             config.github.owner.clone(),
         ));
-        registry.extend(epik::git::all());
+        registry.extend(tools::git::all());
         registry.extend(crate::build::tools(
             app.clone(),
             agent_key.clone(),
@@ -340,20 +372,7 @@ pub async fn send_message(
         let stop = AtomicBool::new(false);
         let state = app.state::<ChatState>();
         turn(
-            |on_delta, record| {
-                tools::run(
-                    &client,
-                    &SYSTEM_PROMPT,
-                    &snapshot,
-                    &registry,
-                    on_delta,
-                    |call, result| {
-                        record(TranscriptItem::tool_call(call));
-                        record(TranscriptItem::tool_result(&call.name, result));
-                    },
-                    &stop,
-                )
-            },
+            replying_with(&client, &SYSTEM_PROMPT, &snapshot, &registry, &stop),
             |item| state.append(item),
             |item| {
                 let _ = app.emit(TRANSCRIPT_EVENT, item);
@@ -392,19 +411,43 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    fn user(text: &str) -> TranscriptItem {
+        TranscriptItem::Message {
+            role: Role::User,
+            text: text.to_owned(),
+        }
+    }
+
+    /// An observer that keeps what it sees, for `turn`'s append and emit.
+    fn into(sink: &RefCell<Vec<TranscriptItem>>) -> impl Fn(&TranscriptItem) + '_ {
+        |item| sink.borrow_mut().push(item.clone())
+    }
+
+    /// Each item's kind in a word — the order of a turn's events, read
+    /// without their content.
+    fn kinds(items: &[TranscriptItem]) -> Vec<&'static str> {
+        items
+            .iter()
+            .map(|item| match item {
+                TranscriptItem::Question { .. } => "question",
+                TranscriptItem::QuestionResolved { .. } => "resolved",
+                TranscriptItem::ToolCall { .. } => "call",
+                TranscriptItem::ToolResult { ok: true, .. } => "ok",
+                TranscriptItem::AssistantDelta { .. } => "delta",
+                TranscriptItem::Message { .. } => "message",
+                _ => "other",
+            })
+            .collect()
+    }
+
     #[test]
     fn a_posted_message_is_appended_and_emitted_as_the_same_item() {
         let mut conversation = Conversation::default();
         let emitted = RefCell::new(Vec::new());
 
-        post(&mut conversation, "hello".to_owned(), |item| {
-            emitted.borrow_mut().push(item.clone());
-        });
+        post(&mut conversation, "hello".to_owned(), into(&emitted));
 
-        let expected = TranscriptItem::Message {
-            role: Role::User,
-            text: "hello".to_owned(),
-        };
+        let expected = user("hello");
         let kept: Vec<_> = conversation.items().cloned().collect();
         assert_eq!(kept, std::slice::from_ref(&expected));
         assert_eq!(*emitted.borrow(), [expected]);
@@ -421,8 +464,8 @@ mod tests {
                 on_delta("lo");
                 Ok("Hello".to_owned())
             },
-            |message| appended.borrow_mut().push(message.clone()),
-            |item| emitted.borrow_mut().push(item.clone()),
+            into(&appended),
+            into(&emitted),
         );
 
         let reply = TranscriptItem::Message {
@@ -451,8 +494,8 @@ mod tests {
 
         turn(
             |_, _| Err(ChatError::Api("Your credit balance is too low.".to_owned())),
-            |message| appended.borrow_mut().push(message.clone()),
-            |item| emitted.borrow_mut().push(item.clone()),
+            into(&appended),
+            into(&emitted),
         );
 
         assert_eq!(
@@ -484,8 +527,8 @@ mod tests {
                 record(result.clone());
                 Ok("It's noon.".to_owned())
             },
-            |item| appended.borrow_mut().push(item.clone()),
-            |item| emitted.borrow_mut().push(item.clone()),
+            into(&appended),
+            into(&emitted),
         );
 
         let reply = TranscriptItem::Message {
@@ -505,7 +548,7 @@ mod tests {
     /// loop drives a real client, and the turn observes it into items.
     #[test]
     fn a_scripted_tool_turn_flows_through_the_turn_as_items() {
-        use epik::chat::scripted::{Fragment, Scripted, Turn as Script};
+        use epik::testing::model::{Fragment, Scripted, Turn as Script};
 
         let model = Scripted::spawn(vec![
             Script::ToolCalls(vec![vec![Fragment::open(
@@ -522,39 +565,21 @@ mod tests {
         let emitted = RefCell::new(Vec::new());
 
         turn(
-            |on_delta, record| {
-                tools::run(
-                    &client,
-                    "system",
-                    &[TranscriptItem::Message {
-                        role: Role::User,
-                        text: "what time is it?".to_owned(),
-                    }],
-                    &registry,
-                    on_delta,
-                    |call, result| {
-                        record(TranscriptItem::tool_call(call));
-                        record(TranscriptItem::tool_result(&call.name, result));
-                    },
-                    &stop,
-                )
-            },
+            replying_with(
+                &client,
+                "system",
+                &[user("what time is it?")],
+                &registry,
+                &stop,
+            ),
             |_| {},
-            |item| emitted.borrow_mut().push(item.clone()),
+            into(&emitted),
         );
 
-        let kinds: Vec<_> = emitted
-            .borrow()
-            .iter()
-            .map(|item| match item {
-                TranscriptItem::ToolCall { .. } => "call",
-                TranscriptItem::ToolResult { ok: true, .. } => "ok",
-                TranscriptItem::AssistantDelta { .. } => "delta",
-                TranscriptItem::Message { .. } => "message",
-                _ => "other",
-            })
-            .collect();
-        assert_eq!(kinds, ["call", "ok", "delta", "delta", "message"]);
+        assert_eq!(
+            kinds(&emitted.borrow()),
+            ["call", "ok", "delta", "delta", "message"]
+        );
         assert_eq!(
             model.requests()[1]["messages"]
                 .as_array()
@@ -682,7 +707,7 @@ mod tests {
     /// where a turn is suspended on a question and resumed.
     #[test]
     fn a_scripted_choose_repository_turn_suspends_until_the_user_answers() {
-        use epik::chat::scripted::{Fragment, Scripted, Turn as Script};
+        use epik::testing::model::{Fragment, Scripted, Turn as Script};
         use std::sync::Arc;
 
         let model = Scripted::spawn(vec![
@@ -718,23 +743,13 @@ mod tests {
                     }
                 }));
                 turn(
-                    |on_delta, record| {
-                        tools::run(
-                            &client,
-                            "system",
-                            &[TranscriptItem::Message {
-                                role: Role::User,
-                                text: "write me hunt the wumpus".to_owned(),
-                            }],
-                            &registry,
-                            on_delta,
-                            |call, result| {
-                                record(TranscriptItem::tool_call(call));
-                                record(TranscriptItem::tool_result(&call.name, result));
-                            },
-                            &AtomicBool::new(false),
-                        )
-                    },
+                    replying_with(
+                        &client,
+                        "system",
+                        &[user("write me hunt the wumpus")],
+                        &registry,
+                        &AtomicBool::new(false),
+                    ),
                     |item| state.append(item),
                     |item| {
                         let _ = events_in.send(item.clone());
@@ -757,23 +772,14 @@ mod tests {
         .unwrap();
         turning.join().unwrap();
 
-        let kinds: Vec<_> = std::iter::once(TranscriptItem::Question {
+        let events: Vec<_> = std::iter::once(TranscriptItem::Question {
             id: id.clone(),
             ask: asked,
         })
         .chain(events.try_iter())
-        .map(|item| match item {
-            TranscriptItem::Question { .. } => "question",
-            TranscriptItem::QuestionResolved { .. } => "resolved",
-            TranscriptItem::ToolCall { .. } => "call",
-            TranscriptItem::ToolResult { ok: true, .. } => "ok",
-            TranscriptItem::AssistantDelta { .. } => "delta",
-            TranscriptItem::Message { .. } => "message",
-            _ => "other",
-        })
         .collect();
         assert_eq!(
-            kinds,
+            kinds(&events),
             ["question", "resolved", "call", "ok", "delta", "message"]
         );
 

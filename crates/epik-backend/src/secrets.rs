@@ -8,11 +8,49 @@
 //! [`Secret`] in — so the wire shape is defined once, in `epik`, for both
 //! sides of the barrier.
 //!
-//! The commands are wiring and nothing more. Everything they do is a
-//! keystore call, so everything they do is testable against
+//! The store itself is [`OsKeyring`]: the operating system's own secret
+//! holder — Keychain, Credential Manager, secret service — with every
+//! Epik secret filed under service [`SERVICE`]. The commands are wiring
+//! and nothing more. Everything they do is a keystore call, so
+//! everything they do is testable against
 //! [`InMemory`](epik::keystore::InMemory) without a keychain in sight.
 
-use epik::keystore::{KeyStore, OsKeyring, Resolved, Secret};
+use epik::keystore::{KeyStore, Resolved, Secret};
+
+/// The keyring service every Epik secret is filed under.
+const SERVICE: &str = "Epik";
+
+/// The operating system's own secret holder.
+#[derive(Debug, Default)]
+pub(crate) struct OsKeyring;
+
+impl OsKeyring {
+    fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
+        keyring::Entry::new(SERVICE, name)
+            .map_err(|error| anyhow::anyhow!("opening the {SERVICE}/{name} keyring entry: {error}"))
+    }
+}
+
+impl KeyStore for OsKeyring {
+    fn get(&self, name: &str) -> anyhow::Result<Option<Secret>> {
+        match Self::entry(name)?.get_password() {
+            Ok(secret) => Ok(Some(secret.into())),
+            // No entry is the ordinary state of a fresh install, not a fault.
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(anyhow::anyhow!(
+                "reading the {SERVICE}/{name} secret from the keyring: {error}"
+            )),
+        }
+    }
+
+    fn set(&mut self, name: &str, secret: Secret) -> anyhow::Result<()> {
+        Self::entry(name)?
+            .set_password(secret.reveal())
+            .map_err(|error| {
+                anyhow::anyhow!("storing the {SERVICE}/{name} secret in the keyring: {error}")
+            })
+    }
+}
 
 /// [`secret_save`] against any store, which is what makes it testable.
 fn save(store: &mut impl KeyStore, name: &str, secret: Secret) -> Result<(), String> {
@@ -40,22 +78,9 @@ pub async fn secret_save(name: String, value: Secret) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::anyhow;
     use epik::keystore::InMemory;
 
-    /// The backend's own broken store: `Unplugged` is private to the
-    /// library's tests, and this crate's coping deserves its own proof.
-    struct Broken;
-
-    impl KeyStore for Broken {
-        fn get(&self, _: &str) -> anyhow::Result<Option<Secret>> {
-            Err(anyhow!("the keychain is locked"))
-        }
-
-        fn set(&mut self, _: &str, _: Secret) -> anyhow::Result<()> {
-            Err(anyhow!("the keychain is locked"))
-        }
-    }
+    use crate::testing::Broken;
 
     #[test]
     fn save_writes_through_to_the_store() {

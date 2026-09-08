@@ -13,8 +13,29 @@
 //! today, [`Client::anthropic`]. The library is synchronous; running a
 //! turn somewhere it won't block anything is the host's problem.
 
-#[cfg(feature = "scripted")]
-pub mod scripted;
+/// Drains one HTTP request off `socket` — headers, then content-length's
+/// worth of body — and answers with the body. What every loopback stand-in
+/// for the API does first: the scripted model, and the client's own
+/// tests' one-shot servers.
+#[cfg(any(all(test, feature = "native"), feature = "testing"))]
+pub(crate) fn read_request(socket: &mut std::net::TcpStream) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        socket.read_exact(&mut byte).ok()?;
+        head.push(byte[0]);
+    }
+    let headers = String::from_utf8_lossy(&head).to_lowercase();
+    let length: usize = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .and_then(|length| length.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    socket.read_exact(&mut body).ok()?;
+    Some(body)
+}
 
 #[cfg(feature = "native")]
 use std::sync::atomic::AtomicBool;
@@ -161,14 +182,15 @@ impl Conversation {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: String,
+    pub(crate) arguments: String,
 }
 
 /// What a reply turned out to be: the model either spoke or reached for
 /// tools, never both.
 #[cfg(feature = "serde")]
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Reply {
+pub(crate) enum Reply {
     /// The final text, assembled from the deltas.
     Text(String),
     /// The calls the model wants made, in index order.
@@ -178,7 +200,7 @@ pub enum Reply {
 /// One tool as the wire advertises it: the OpenAI function-tool shape.
 #[cfg(feature = "serde")]
 #[derive(Clone, Debug, serde::Serialize)]
-pub struct ToolSpec {
+pub(crate) struct ToolSpec {
     #[serde(rename = "type")]
     kind: &'static str,
     function: ToolFunction,
@@ -196,7 +218,11 @@ struct ToolFunction {
 impl ToolSpec {
     /// A function tool: `parameters` is its arguments' JSON Schema.
     #[must_use]
-    pub fn function(name: String, description: String, parameters: serde_json::Value) -> Self {
+    pub(crate) fn function(
+        name: String,
+        description: String,
+        parameters: serde_json::Value,
+    ) -> Self {
         Self {
             kind: "function",
             function: ToolFunction {
@@ -214,8 +240,9 @@ impl ToolSpec {
 ///
 /// [`Text`]: ChatMessage::Text
 #[cfg(feature = "serde")]
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ChatMessage {
+pub(crate) enum ChatMessage {
     /// An utterance, from the transcript.
     Text { role: Role, text: String },
     /// The assistant's turn that was tool calls instead of words.
@@ -232,8 +259,8 @@ impl ChatMessage {
     /// transcript's record of past turns, already summarized by the
     /// assistant text that followed them, and carry no call ids — so
     /// none of them go to the wire.
-    #[must_use]
-    pub fn from_transcript(transcript: &[TranscriptItem]) -> Vec<Self> {
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    pub(crate) fn from_transcript(transcript: &[TranscriptItem]) -> Vec<Self> {
         transcript
             .iter()
             .filter_map(|item| match item {
@@ -249,7 +276,8 @@ impl ChatMessage {
 
 /// How much of a tool's answer the transcript keeps. The model always
 /// gets all of it; this cap is only for what a window shows and stores.
-pub const TOOL_RESULT_CAP: usize = 2000;
+#[cfg(feature = "serde")]
+const TOOL_RESULT_CAP: usize = 2000;
 
 /// The first `cap` characters of `text`, with a note about the rest —
 /// or `text` itself when it already fits.
@@ -763,7 +791,7 @@ impl Client {
     ///
     /// [`ChatError`], distinguishing transport failures, the API's own
     /// errors (verbatim), and a stream that stopped making sense.
-    pub fn reply(
+    pub(super) fn reply(
         &self,
         system: &str,
         messages: &[ChatMessage],
@@ -849,6 +877,20 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One reply from the model at `base` to an empty conversation: the
+    /// least a client can ask, for tests about the stream rather than
+    /// the messages.
+    #[cfg(feature = "native")]
+    fn reply_to_nothing(base: String) -> Result<Reply, ChatError> {
+        Client::new(base, "scripted".to_owned(), None).reply(
+            "system",
+            &[],
+            &[],
+            |_| {},
+            &AtomicBool::new(false),
+        )
+    }
 
     #[test]
     fn anthropic_resolves_an_absent_model_to_the_pinned_default() {
@@ -1226,23 +1268,29 @@ mod tests {
             assert_eq!(step, Step::ToolsFinished);
         }
 
-        /// The id and name arrive once per index; the arguments string
-        /// accumulates across as many fragments as the stream likes.
-        #[test]
-        fn fragmented_arguments_accumulate_into_one_call() {
+        /// The calls a stream of tool-call `payloads` assembles into.
+        fn assembled(payloads: &[&str]) -> Vec<ToolCall> {
             let mut calls = wire::Calls::default();
-            for payload in [
-                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":""}}]}}]}"#,
-                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]}"#,
-                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#,
-            ] {
+            for payload in payloads {
                 let Step::ToolCalls(fragments) = wire::step(payload).unwrap() else {
                     panic!("expected fragments");
                 };
                 calls.absorb(fragments);
             }
+            calls.finish()
+        }
+
+        /// The id and name arrive once per index; the arguments string
+        /// accumulates across as many fragments as the stream likes.
+        #[test]
+        fn fragmented_arguments_accumulate_into_one_call() {
+            let calls = assembled(&[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":""}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}"#,
+            ]);
             assert_eq!(
-                calls.finish(),
+                calls,
                 [ToolCall {
                     id: "call_1".to_owned(),
                     name: "f".to_owned(),
@@ -1255,19 +1303,13 @@ mod tests {
         /// index order.
         #[test]
         fn interleaved_indexes_assemble_into_ordered_calls() {
-            let mut calls = wire::Calls::default();
-            for payload in [
+            let calls = assembled(&[
                 r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"beta","arguments":"{\"b\""}}]}}]}"#,
                 r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"alpha","arguments":"{}"}}]}}]}"#,
                 r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":":2}"}}]}}]}"#,
-            ] {
-                let Step::ToolCalls(fragments) = wire::step(payload).unwrap() else {
-                    panic!("expected fragments");
-                };
-                calls.absorb(fragments);
-            }
+            ]);
             assert_eq!(
-                calls.finish(),
+                calls,
                 [
                     ToolCall {
                         id: "call_a".to_owned(),
@@ -1404,7 +1446,7 @@ mod tests {
     #[cfg(feature = "native")]
     mod scripted {
         use super::*;
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         use std::sync::atomic::AtomicBool;
 
@@ -1416,22 +1458,7 @@ mod tests {
             let base = format!("http://{}/v1", listener.local_addr().unwrap());
             std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                // Read to the end of the body: headers, then the JSON the
-                // client said it would send.
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    socket.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                }
-                let headers = String::from_utf8_lossy(&request).to_lowercase();
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length: "))
-                    .and_then(|length| length.trim().parse().ok())
-                    .unwrap_or(0);
-                let mut body = vec![0u8; length];
-                socket.read_exact(&mut body).unwrap();
+                read_request(&mut socket).expect("a whole request");
                 socket.write_all(response.as_bytes()).unwrap();
             });
             base
@@ -1474,11 +1501,8 @@ mod tests {
                     .to_owned(),
             );
             assert_eq!(body.len(), 55, "the scripted content-length is honest");
-            let client = Client::new(base, "scripted".to_owned(), None);
 
-            let error = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap_err();
+            let error = reply_to_nothing(base).unwrap_err();
 
             assert_eq!(
                 error,
@@ -1492,11 +1516,8 @@ mod tests {
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
                  data: what protocol\n\n",
             );
-            let client = Client::new(base, "scripted".to_owned(), None);
 
-            let error = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap_err();
+            let error = reply_to_nothing(base).unwrap_err();
 
             assert!(matches!(error, ChatError::MalformedStream(_)), "{error}");
         }
@@ -1541,7 +1562,7 @@ mod tests {
 
         #[test]
         fn a_model_list_nobody_answers_is_a_transport_error() {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}/v1", listener.local_addr().unwrap());
             drop(listener);
 
@@ -1553,11 +1574,10 @@ mod tests {
 
     /// The scripted-model fixture driving the real client: the stream's
     /// tool-call grammar, fragment by fragment, over an actual socket.
-    #[cfg(feature = "scripted")]
+    #[cfg(feature = "testing")]
     mod fixture {
         use super::*;
-        use crate::chat::scripted::{Fragment, Scripted, Turn};
-        use std::sync::atomic::AtomicBool;
+        use crate::testing::model::{Fragment, Scripted, Turn};
 
         #[test]
         fn interleaved_fragmented_tool_calls_come_back_whole_and_ordered() {
@@ -1566,11 +1586,8 @@ mod tests {
                 vec![Fragment::open(1, "call_b", "beta", "")],
                 vec![Fragment::more(0, ":1}"), Fragment::more(1, "{}")],
             ])]);
-            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
 
-            let reply = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap();
+            let reply = reply_to_nothing(model.base_url()).unwrap();
 
             assert_eq!(
                 reply,
@@ -1595,11 +1612,8 @@ mod tests {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"
                     .to_owned(),
             )]);
-            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
 
-            let reply = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap();
+            let reply = reply_to_nothing(model.base_url()).unwrap();
 
             assert_eq!(reply, Reply::Text("Hello".to_owned()));
         }
@@ -1607,11 +1621,8 @@ mod tests {
         #[test]
         fn garbage_json_is_a_malformed_stream_error() {
             let model = Scripted::spawn(vec![Turn::Malformed("data: {not json\n\n".to_owned())]);
-            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
 
-            let error = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap_err();
+            let error = reply_to_nothing(model.base_url()).unwrap_err();
 
             assert!(matches!(error, ChatError::MalformedStream(_)), "{error}");
         }
@@ -1619,11 +1630,8 @@ mod tests {
         #[test]
         fn a_request_beyond_the_script_fails_with_a_useful_message() {
             let model = Scripted::spawn(vec![]);
-            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
 
-            let error = client
-                .reply("system", &[], &[], |_| {}, &AtomicBool::new(false))
-                .unwrap_err();
+            let error = reply_to_nothing(model.base_url()).unwrap_err();
 
             assert_eq!(
                 error,
@@ -1638,6 +1646,15 @@ mod tests {
     /// EPIK_LIVE_MODEL point at — which also proves the client is not
     /// Anthropic-specific. Skipped silently when the environment says
     /// nothing.
+    ///
+    /// Two ways this surprises. It skips only when the variables are unset,
+    /// so a `.cargo/config.toml` that always sets them makes the test fail
+    /// with `Transport("io: Connection refused")` at the `reply` call
+    /// whenever the local server behind them is down — start the server,
+    /// not the debugger. And it lives behind the `native` feature, which is
+    /// off by default: `cargo test --package epik` compiles it out, while
+    /// `cargo test --workspace` gets it through feature unification with the
+    /// crates that enable `native`.
     #[cfg(feature = "native")]
     mod live {
         use super::*;

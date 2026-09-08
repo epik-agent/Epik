@@ -19,18 +19,22 @@
 //! over an injected fetch closure; the [`Tracker`](crate::tracker::Tracker)
 //! seam is where a real tracker plugs in. Everything here compiles with no
 //! features enabled: the vocabulary is the library's, not any provider's;
-//! the machinery is gated — the `merge` module by which work lands on a
+//! the machinery is gated — the `check` module holding the repository's
+//! own idea of green, the `merge` module by which work lands on a
 //! feature branch, the build that folds a whole plan into work —
-//! [`build`], the verb, and [`Build`], its record — and the `tools`
+//! [`build()`], the verb, and [`Build`], its record — and the `tools`
 //! module through which a chat window starts a feature build and reads
 //! how it is going.
 
 #[cfg(all(feature = "native", unix))]
 mod build;
 #[cfg(all(feature = "native", unix))]
-pub mod merge;
+mod check;
+#[cfg(all(feature = "native", unix))]
+mod merge;
 #[cfg(all(feature = "native", unix))]
 pub mod tools;
+mod tree;
 
 #[cfg(all(feature = "native", unix))]
 pub use build::{Budget, Build, CONCURRENCY, Slot, State, build};
@@ -40,7 +44,7 @@ use std::fmt;
 
 use serde::{Serialize, Serializer};
 
-use crate::tree::Tree;
+use tree::Tree;
 
 /// A tracker's name for an issue. A string, because a Linear key is not a
 /// number; GitHub's numbers ride in as their decimal spelling.
@@ -65,13 +69,34 @@ impl From<u64> for IssueId {
     }
 }
 
+/// An issue with issues beneath it: the root a [`Plan`] descends from,
+/// and the name a feature build goes by. Made only from a tool's
+/// argument or a fixture, never from a bare id, so the role is never
+/// assumed.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct Feature(pub(crate) IssueId);
+
+impl Feature {
+    /// The feature branch's name when nobody names one: `feature-<id>`.
+    #[must_use]
+    pub(crate) fn branch(&self) -> String {
+        format!("feature-{}", self.0)
+    }
+}
+
+impl fmt::Display for Feature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// An issue as a plan carries one: enough to schedule and render — title
 /// and state, no body.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Issue {
-    pub id: IssueId,
-    pub title: String,
-    pub closed: bool,
+    pub(crate) id: IssueId,
+    pub(crate) title: String,
+    pub(crate) closed: bool,
 }
 
 /// One ordering edge: `issue` waits until `blocker` settles. Edges cross
@@ -79,9 +104,9 @@ pub struct Issue {
 /// docs wait on the whole API" is the natural thing to say — or an issue
 /// outside the tree altogether.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct Blocking {
+pub(crate) struct Blocking {
     pub issue: IssueId,
-    pub blocker: IssueId,
+    blocker: IssueId,
 }
 
 /// One issue and the edges around it, as one fetch answers during the
@@ -90,7 +115,7 @@ pub struct Blocking {
 /// outside the tree is never fetched and must carry its state on the
 /// edge.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Node {
+pub(crate) struct Node {
     pub issue: Issue,
     pub children: Vec<IssueId>,
     pub blockers: Vec<Issue>,
@@ -100,7 +125,7 @@ pub struct Node {
 /// around. Serialized — a tool result on its way to a model — as its
 /// [`Display`](fmt::Display) words.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Problem {
+pub(crate) enum Problem {
     /// Blocked-by edges that chase each other's tails: the ids around the
     /// loop, first one repeated at the end. Nothing on a cycle can ever
     /// start.
@@ -156,12 +181,12 @@ const CAP: usize = 500;
 pub struct Plan {
     /// The feature issue at the root, its decomposition beneath it.
     /// Interior nodes are containers, not work; only leaves get an Agent.
-    pub tree: Tree<Issue>,
+    tree: Tree<Issue>,
     /// The blocked-by edges, every `issue` an id in the tree.
-    pub blocking: Vec<Blocking>,
+    blocking: Vec<Blocking>,
     /// Blockers outside the tree, recorded from the edges that name them,
     /// each carrying the state that decides whether it holds.
-    pub outside: Vec<Issue>,
+    outside: Vec<Issue>,
 }
 
 impl Plan {
@@ -175,15 +200,15 @@ impl Plan {
     /// # Errors
     ///
     /// Whatever `fetch` fails with, passed through; or the cap's refusal.
-    pub fn descend(
-        feature: &IssueId,
+    pub(crate) fn descend(
+        feature: &Feature,
         mut fetch: impl FnMut(&IssueId) -> Result<Node, String>,
     ) -> Result<Self, String> {
         let mut visited = BTreeSet::new();
         let mut blocking = Vec::new();
         let mut blockers = BTreeMap::new();
         let tree = gather(
-            feature,
+            &feature.0,
             &mut fetch,
             &mut visited,
             &mut blocking,
@@ -206,32 +231,19 @@ impl Plan {
     /// settled — and [`problems`](Self::problems) names the edge that
     /// asked.
     #[must_use]
-    pub fn settled(&self, id: &IssueId, done: &BTreeSet<IssueId>) -> bool {
-        done.contains(id)
-            || self.tree.find_path(|issue| &issue.id == id).map_or_else(
-                || {
-                    self.outside
-                        .iter()
-                        .any(|issue| &issue.id == id && issue.closed)
-                },
-                |path| settled(path.last().expect("a found path reaches its match"), done),
-            )
+    fn settled(&self, id: &IssueId, done: &BTreeSet<IssueId>) -> bool {
+        self.settles(id, done, &BTreeSet::new())
     }
 
-    /// The plan's work: the open leaves under no settled ancestor —
-    /// everything a build could run, now or later. An abandoned subtree
-    /// needs no rule of its own; it is the ancestor clause.
+    /// The plan's work: the open leaves under no settled ancestor — the
+    /// leaves whose chain from the root is not [`covered`] — everything
+    /// a build could run, now or later. An abandoned subtree needs no
+    /// rule of its own; it is the ancestor clause.
     #[must_use]
-    pub fn work(&self, done: &BTreeSet<IssueId>) -> Vec<&Issue> {
-        self.tree
-            .leaves()
-            .filter(|leaf| {
-                self.tree
-                    .find_path(|issue| issue.id == leaf.id)
-                    .expect("a leaf is in its own tree")
-                    .iter()
-                    .all(|node| !settled(node, done))
-            })
+    fn work(&self, done: &BTreeSet<IssueId>) -> Vec<&Issue> {
+        chains(&self.tree)
+            .filter(|(_, chain)| !covered(chain, done))
+            .map(|(leaf, _)| leaf)
             .collect()
     }
 
@@ -239,15 +251,13 @@ impl Plan {
     /// [`settled`](Self::settled) is true for every blocker — the same
     /// predicate applied three ways.
     #[must_use]
-    pub fn ready(&self, done: &BTreeSet<IssueId>) -> Vec<&Issue> {
+    pub(crate) fn ready(&self, done: &BTreeSet<IssueId>) -> Vec<&Issue> {
         let blockers = self.blockers();
         self.work(done)
             .into_iter()
             .filter(|leaf| {
                 blockers
-                    .get(&leaf.id)
-                    .into_iter()
-                    .flatten()
+                    .of(&leaf.id)
                     .all(|blocker| self.settled(blocker, done))
             })
             .collect()
@@ -264,23 +274,25 @@ impl Plan {
     /// fixpoint over the leaves that still can land, so mutual blocking
     /// dooms both sides rather than propping them up.
     #[must_use]
-    pub fn doomed(
+    fn doomed(
         &self,
         done: &BTreeSet<IssueId>,
         lost: &BTreeSet<IssueId>,
     ) -> BTreeMap<IssueId, IssueId> {
         let blockers = self.blockers();
-        let work = self.work(done);
+        let pending: Vec<&Issue> = self
+            .work(done)
+            .into_iter()
+            .filter(|leaf| !lost.contains(&leaf.id))
+            .collect();
         let mut alive: BTreeSet<&IssueId> = BTreeSet::new();
         loop {
-            let grown: Vec<&IssueId> = work
+            let grown: Vec<&IssueId> = pending
                 .iter()
-                .filter(|leaf| !alive.contains(&leaf.id) && !lost.contains(&leaf.id))
+                .filter(|leaf| !alive.contains(&leaf.id))
                 .filter(|leaf| {
                     blockers
-                        .get(&leaf.id)
-                        .into_iter()
-                        .flatten()
+                        .of(&leaf.id)
                         .all(|blocker| self.settles(blocker, done, &alive))
                 })
                 .map(|leaf| &leaf.id)
@@ -290,25 +302,24 @@ impl Plan {
             }
             alive.extend(grown);
         }
-        work.iter()
-            .filter(|leaf| !lost.contains(&leaf.id) && !alive.contains(&leaf.id))
+        pending
+            .iter()
+            .filter(|leaf| !alive.contains(&leaf.id))
             .filter_map(|leaf| {
                 blockers
-                    .get(&leaf.id)
-                    .into_iter()
-                    .flatten()
+                    .of(&leaf.id)
                     .find(|blocker| !self.settles(blocker, done, &alive))
-                    .map(|blocker| (leaf.id.clone(), (*blocker).clone()))
+                    .map(|blocker| (leaf.id.clone(), blocker.clone()))
             })
             .collect()
     }
 
-    /// Whether a build can ever count `id` settled, given the `alive`
-    /// leaves it will still run: already done or closed — an outside
-    /// issue by the state its edge recorded — or a tree node each of
-    /// whose leaves is alive or already covered by a done or closed
-    /// step. An id the plan does not know never settles, which is also
-    /// what [`problems`](Self::problems) says of its edge.
+    /// [`settled`](Self::settled), given the `alive` leaves a build will
+    /// still run: done, or closed — an outside issue by the state its
+    /// edge recorded — or a tree node each of whose chains ends at an
+    /// alive leaf or is [`covered`]. An id the plan does not know never
+    /// settles, which is also what [`problems`](Self::problems) says of
+    /// its edge.
     fn settles(&self, id: &IssueId, done: &BTreeSet<IssueId>, alive: &BTreeSet<&IssueId>) -> bool {
         done.contains(id)
             || match self.tree.find_path(|issue| &issue.id == id) {
@@ -316,17 +327,11 @@ impl Plan {
                     .outside
                     .iter()
                     .any(|issue| &issue.id == id && issue.closed),
-                Some(path) => {
-                    let node = path.last().expect("a found path reaches its match");
-                    node.leaves().all(|leaf| {
-                        alive.contains(&leaf.id)
-                            || node
-                                .find_path(|issue| issue.id == leaf.id)
-                                .expect("a leaf is in its own subtree")
-                                .iter()
-                                .any(|step| done.contains(&step.value.id) || step.value.closed)
-                    })
-                }
+                Some(path) => settled(
+                    path.last().expect("a found path reaches its match"),
+                    done,
+                    alive,
+                ),
             }
     }
 
@@ -335,7 +340,7 @@ impl Plan {
     /// set, and a plan with no work in it. Terminates on any graph — a
     /// broken plan is precisely when this answer matters.
     #[must_use]
-    pub fn problems(&self) -> Vec<Problem> {
+    pub(crate) fn problems(&self) -> Vec<Problem> {
         let known: BTreeSet<&IssueId> = self
             .tree
             .nodes()
@@ -350,7 +355,7 @@ impl Plan {
             .map(Problem::Dangling)
             .collect();
         problems.extend(self.cycles().into_iter().map(Problem::Cycle));
-        if settled(&self.tree, &BTreeSet::new()) {
+        if self.settled(&self.tree.value.id, &BTreeSet::new()) {
             problems.push(Problem::NoWork);
         }
         problems
@@ -358,12 +363,12 @@ impl Plan {
 
     /// The blocked-by edges indexed by their `issue` side, built once per
     /// query so no caller rescans the whole edge list per node.
-    fn blockers(&self) -> BTreeMap<&IssueId, Vec<&IssueId>> {
+    fn blockers(&self) -> Blockers<'_> {
         let mut index: BTreeMap<&IssueId, Vec<&IssueId>> = BTreeMap::new();
         for edge in &self.blocking {
             index.entry(&edge.issue).or_default().push(&edge.blocker);
         }
-        index
+        Blockers(index)
     }
 
     /// Every cycle among the blocked-by edges, each found once: a
@@ -381,11 +386,20 @@ impl Plan {
     }
 }
 
+/// [`Plan::blockers`]: who each issue waits on, by the issue's id.
+struct Blockers<'a>(BTreeMap<&'a IssueId, Vec<&'a IssueId>>);
+
+impl<'a> Blockers<'a> {
+    fn of(&self, id: &IssueId) -> impl Iterator<Item = &'a IssueId> {
+        self.0.get(id).into_iter().flatten().copied()
+    }
+}
+
 /// One step of the cycle hunt: an id already on the path closes a loop;
 /// an id already finished has told everything it knows.
 fn chase<'a>(
     id: &'a IssueId,
-    blockers: &BTreeMap<&'a IssueId, Vec<&'a IssueId>>,
+    blockers: &Blockers<'a>,
     path: &mut Vec<&'a IssueId>,
     finished: &mut BTreeSet<&'a IssueId>,
     cycles: &mut Vec<Vec<IssueId>>,
@@ -400,25 +414,40 @@ fn chase<'a>(
         return;
     }
     path.push(id);
-    for blocker in blockers.get(id).into_iter().flatten() {
+    for blocker in blockers.of(id) {
         chase(blocker, blockers, path, finished, cycles);
     }
     path.pop();
     finished.insert(id);
 }
 
-/// [`Plan::settled`], said of a subtree: every chain from this node down
-/// to one of its leaves passes through an issue that is done or closed.
-/// That is the recursive rule — done, or closed in the tracker, or a
-/// container whose every child is settled — unrolled onto the one
-/// navigation primitive, so containment is read and never re-derived.
-fn settled(node: &Tree<Issue>, done: &BTreeSet<IssueId>) -> bool {
-    node.leaves().all(|leaf| {
-        node.find_path(|issue| issue.id == leaf.id)
-            .expect("a leaf is in its own subtree")
-            .iter()
-            .any(|step| done.contains(&step.value.id) || step.value.closed)
+/// [`Plan::settled`], said of a subtree, with the `alive` leaves a build
+/// will still run: every chain from this node down to one of its leaves
+/// ends at an alive leaf or is [`covered`]. With nothing alive, that is
+/// the recursive rule — done, or closed in the tracker, or a container
+/// whose every child is settled — unrolled onto the one navigation
+/// primitive, so containment is read and never re-derived.
+fn settled(node: &Tree<Issue>, done: &BTreeSet<IssueId>, alive: &BTreeSet<&IssueId>) -> bool {
+    chains(node).all(|(leaf, chain)| alive.contains(&leaf.id) || covered(&chain, done))
+}
+
+/// Every chain from `node` down to one of its leaves, as `find_path`
+/// gives it — the node first, the leaf last — paired with that leaf.
+fn chains(node: &Tree<Issue>) -> impl Iterator<Item = (&Issue, Vec<&Tree<Issue>>)> {
+    node.leaves().map(move |leaf| {
+        let chain = node
+            .find_path(|issue| issue.id == leaf.id)
+            .expect("a leaf is in its own subtree");
+        (leaf, chain)
     })
+}
+
+/// Whether a chain passes through an issue that is done or closed: the
+/// one step that settles everything beneath it, the leaf included.
+fn covered(chain: &[&Tree<Issue>], done: &BTreeSet<IssueId>) -> bool {
+    chain
+        .iter()
+        .any(|step| done.contains(&step.value.id) || step.value.closed)
 }
 
 /// One step of the descent: fetch `id`, record the edges around it, and
@@ -461,14 +490,14 @@ fn gather(
 /// numbered issues, the nodes a fetch would answer with, and a descent
 /// over them — no network, no tracker, just the graph a test states.
 #[cfg(test)]
-pub(crate) mod fixtures {
-    use super::{Issue, IssueId, Node, Plan};
+mod fixtures {
+    use super::{Feature, Issue, IssueId, Node, Plan};
 
-    pub(crate) fn id(number: u64) -> IssueId {
+    pub(super) fn id(number: u64) -> IssueId {
         IssueId::from(number)
     }
 
-    pub(crate) fn issue(number: u64, closed: bool) -> Issue {
+    pub(super) fn issue(number: u64, closed: bool) -> Issue {
         Issue {
             id: id(number),
             title: format!("issue {number}"),
@@ -478,7 +507,7 @@ pub(crate) mod fixtures {
 
     /// One fixture node: the issue, who it contains, and who blocks it —
     /// blockers as (id, closed) pairs, exactly what an edge carries.
-    pub(crate) fn node(
+    pub(super) fn node(
         number: u64,
         closed: bool,
         children: &[u64],
@@ -494,8 +523,8 @@ pub(crate) mod fixtures {
         }
     }
 
-    pub(crate) fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
-        Plan::descend(&id(feature), |asked| {
+    pub(super) fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
+        Plan::descend(&Feature(id(feature)), |asked| {
             nodes
                 .iter()
                 .find(|node| &node.issue.id == asked)
@@ -508,7 +537,7 @@ pub(crate) mod fixtures {
     /// The smallest plan with an order in it: feature 1 holds 2 and 3,
     /// and 3 waits on 2. Two ready states, one edge — enough to watch
     /// one issue's end change another's standing.
-    pub(crate) fn two_then_three() -> Plan {
+    pub(super) fn two_then_three() -> Plan {
         plan(
             1,
             vec![
@@ -521,7 +550,7 @@ pub(crate) mod fixtures {
 
     /// The same two, each waiting on the other: nothing can ever be
     /// ready, and the cycle is the plan's problem to name.
-    pub(crate) fn two_and_three_in_a_cycle() -> Plan {
+    pub(super) fn two_and_three_in_a_cycle() -> Plan {
         plan(
             1,
             vec![
@@ -534,7 +563,7 @@ pub(crate) mod fixtures {
 
     /// A chain, 2 then 3 then 5, beside 4, which waits on nothing:
     /// what a loss at the head takes down, and what it spares.
-    pub(crate) fn a_chain_beside_a_loner() -> Plan {
+    pub(super) fn a_chain_beside_a_loner() -> Plan {
         plan(
             1,
             vec![
@@ -550,7 +579,7 @@ pub(crate) mod fixtures {
     /// Feature 1 holds a container, 7, with leaves 2 and 8 — and a leaf
     /// of its own, 9, that waits on the container: what a loss inside 7
     /// means for whoever waited on 7 as a whole.
-    pub(crate) fn nine_waiting_on_container_seven() -> Plan {
+    pub(super) fn nine_waiting_on_container_seven() -> Plan {
         plan(
             1,
             vec![
@@ -567,7 +596,7 @@ pub(crate) mod fixtures {
     /// Gated as the tools are, so a build without them has no unused
     /// fixture to warn about.
     #[cfg(all(feature = "native", unix))]
-    pub(crate) fn seven_holding_eight() -> Plan {
+    pub(super) fn seven_holding_eight() -> Plan {
         plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
     }
 }
@@ -580,11 +609,31 @@ mod tests {
     };
     use super::*;
 
-    fn ready_ids(plan: &Plan) -> Vec<&str> {
-        plan.ready(&BTreeSet::new())
-            .iter()
+    fn ids<'a>(issues: impl IntoIterator<Item = &'a Issue>) -> Vec<&'a str> {
+        issues
+            .into_iter()
             .map(|issue| issue.id.0.as_str())
             .collect()
+    }
+
+    fn ready_ids(plan: &Plan) -> Vec<&str> {
+        ids(plan.ready(&BTreeSet::new()))
+    }
+
+    /// Feature 1 holds 2, which waits on 9 — an id in neither the tree
+    /// nor the outside set, so no descent could have produced it.
+    fn two_waiting_on_unknown_nine() -> Plan {
+        Plan {
+            tree: Tree {
+                value: issue(1, false),
+                children: vec![Tree::new(issue(2, false))],
+            },
+            blocking: vec![Blocking {
+                issue: id(2),
+                blocker: id(9),
+            }],
+            outside: Vec::new(),
+        }
     }
 
     #[test]
@@ -692,12 +741,8 @@ mod tests {
             plan.settled(&id(102), &done),
             "a container's doneness is its children's, never asserted"
         );
-        let ready = plan.ready(&done);
         assert_eq!(
-            ready
-                .iter()
-                .map(|issue| issue.id.0.as_str())
-                .collect::<Vec<_>>(),
+            ids(plan.ready(&done)),
             ["107"],
             "the docs waited on the whole API"
         );
@@ -764,17 +809,7 @@ mod tests {
 
     #[test]
     fn a_dangling_edge_is_named_rather_than_scheduled_around() {
-        let plan = Plan {
-            tree: Tree {
-                value: issue(1, false),
-                children: vec![Tree::new(issue(2, false))],
-            },
-            blocking: vec![Blocking {
-                issue: id(2),
-                blocker: id(9),
-            }],
-            outside: Vec::new(),
-        };
+        let plan = two_waiting_on_unknown_nine();
         assert_eq!(
             plan.problems(),
             [Problem::Dangling(Blocking {
@@ -800,19 +835,13 @@ mod tests {
         let plan = two_then_three();
         let done: BTreeSet<IssueId> = [id(2)].into();
         assert!(plan.settled(&id(2), &done));
-        assert_eq!(
-            plan.ready(&done)
-                .iter()
-                .map(|issue| issue.id.0.as_str())
-                .collect::<Vec<_>>(),
-            ["3"]
-        );
+        assert_eq!(ids(plan.ready(&done)), ["3"]);
     }
 
     #[test]
     fn an_exhausted_cap_is_a_refusal_in_words() {
         // An endless chain of containers: node n holds node n + 1.
-        let error = Plan::descend(&id(0), |asked| {
+        let error = Plan::descend(&Feature(id(0)), |asked| {
             let number: u64 = asked.0.parse().unwrap();
             Ok(node(number, false, &[number + 1], &[]))
         })
@@ -827,15 +856,20 @@ mod tests {
             1,
             vec![node(1, false, &[2], &[]), node(2, false, &[1], &[])],
         );
-        let ids: Vec<&str> = plan.tree.nodes().map(|issue| issue.id.0.as_str()).collect();
-        assert_eq!(ids, ["1", "2"], "the revisit is dropped, not recursed");
+        assert_eq!(
+            ids(plan.tree.nodes()),
+            ["1", "2"],
+            "the revisit is dropped, not recursed"
+        );
         assert_eq!(ready_ids(&plan), ["2"]);
     }
 
     #[test]
     fn a_fetch_failure_passes_through_in_its_own_words() {
-        let error =
-            Plan::descend(&id(1), |asked| Err(format!("no such issue: {asked}"))).unwrap_err();
+        let error = Plan::descend(&Feature(id(1)), |asked| {
+            Err(format!("no such issue: {asked}"))
+        })
+        .unwrap_err();
         assert_eq!(error, "no such issue: 1");
     }
 
@@ -850,23 +884,20 @@ mod tests {
     #[test]
     fn the_work_is_the_open_leaves_under_no_settled_ancestor() {
         let plan = payments();
-        let work: Vec<&str> = plan
-            .work(&BTreeSet::new())
-            .iter()
-            .map(|issue| issue.id.0.as_str())
-            .collect();
         assert_eq!(
-            work,
+            ids(plan.work(&BTreeSet::new())),
             ["103", "104", "107"],
             "no containers, no closed leaves, no abandoned subtrees"
         );
     }
 
-    fn doomed_pairs(plan: &Plan, lost: &[u64]) -> Vec<(String, String)> {
+    /// [`Plan::doomed`] over numbered fixtures, as (leaf, blocker) numbers.
+    fn doomed_pairs(plan: &Plan, lost: &[u64]) -> Vec<(u64, u64)> {
         let lost: BTreeSet<IssueId> = lost.iter().copied().map(id).collect();
+        let number = |id: IssueId| id.0.parse().unwrap();
         plan.doomed(&BTreeSet::new(), &lost)
             .into_iter()
-            .map(|(leaf, blocker)| (leaf.0, blocker.0))
+            .map(|(leaf, blocker)| (number(leaf), number(blocker)))
             .collect()
     }
 
@@ -876,10 +907,7 @@ mod tests {
         assert!(doomed_pairs(&plan, &[]).is_empty(), "a healthy chain lives");
         assert_eq!(
             doomed_pairs(&plan, &[2]),
-            [
-                ("3".to_owned(), "2".to_owned()),
-                ("5".to_owned(), "3".to_owned())
-            ],
+            [(3, 2), (5, 3)],
             "each stuck on the first blocker it waits for; 4 waited on no one"
         );
     }
@@ -889,7 +917,7 @@ mod tests {
         let plan = nine_waiting_on_container_seven();
         assert_eq!(
             doomed_pairs(&plan, &[2]),
-            [("9".to_owned(), "7".to_owned())],
+            [(9, 7)],
             "7 can never settle; 8 is still work"
         );
     }
@@ -906,10 +934,7 @@ mod tests {
         );
         assert_eq!(
             doomed_pairs(&plan, &[]),
-            [
-                ("2".to_owned(), "55".to_owned()),
-                ("3".to_owned(), "2".to_owned())
-            ],
+            [(2, 55), (3, 2)],
             "nothing in a build closes an outside issue"
         );
     }
@@ -917,29 +942,13 @@ mod tests {
     #[test]
     fn a_cycle_dooms_both_sides_rather_than_propping_them_up() {
         let plan = two_and_three_in_a_cycle();
-        assert_eq!(
-            doomed_pairs(&plan, &[]),
-            [
-                ("2".to_owned(), "3".to_owned()),
-                ("3".to_owned(), "2".to_owned())
-            ]
-        );
+        assert_eq!(doomed_pairs(&plan, &[]), [(2, 3), (3, 2)]);
     }
 
     #[test]
     fn a_dangling_blocker_dooms_the_leaf_that_waits_on_it() {
-        let plan = Plan {
-            tree: Tree {
-                value: issue(1, false),
-                children: vec![Tree::new(issue(2, false))],
-            },
-            blocking: vec![Blocking {
-                issue: id(2),
-                blocker: id(9),
-            }],
-            outside: Vec::new(),
-        };
-        assert_eq!(doomed_pairs(&plan, &[]), [("2".to_owned(), "9".to_owned())]);
+        let plan = two_waiting_on_unknown_nine();
+        assert_eq!(doomed_pairs(&plan, &[]), [(2, 9)]);
     }
 
     #[test]
@@ -955,7 +964,7 @@ mod tests {
                 node(6, false, &[], &[]),
             ],
         );
-        assert_eq!(doomed_pairs(&plan, &[]), [("3".to_owned(), "6".to_owned())]);
+        assert_eq!(doomed_pairs(&plan, &[]), [(3, 6)]);
     }
 
     #[test]

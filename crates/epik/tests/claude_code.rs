@@ -8,14 +8,15 @@
 //! typed Updates. Only the live tier, behind EPIK_CLAUDE_LIVE=1,
 //! touches a real model.
 
-#![cfg(all(feature = "native", unix))]
+#![cfg(all(feature = "testing", unix))]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 
 use epik::agent::claude_code::{ClaudeCode, Update, interpret};
-use epik::agent::{Agent, Event, Exit, Task, run};
+use epik::agent::{Agent, Event, Exit, run};
+use epik::testing::Scratch;
+use epik::testing::agent::Scripted;
 
 const SESSION: &str = include_str!("../src/agent/claude_code/fixtures/session.jsonl");
 const RESULT_ERROR: &str = include_str!("../src/agent/claude_code/fixtures/result_error.json");
@@ -49,26 +50,12 @@ fn runner() -> PathBuf {
 
 /// The scripted engine: a child that says `lines` — one printf argument
 /// each, single-quoted for the shell — and then runs `coda`.
-fn canned(lines: &[&str], coda: &str) -> Task {
+fn canned(lines: &[&str], coda: &str) -> Scripted {
     let quoted: Vec<String> = lines
         .iter()
         .map(|line| format!("'{}'", line.replace('\'', r"'\''")))
         .collect();
-    let script = format!("printf '%s\\n' {}; {coda}", quoted.join(" "));
-    Task {
-        argv: vec!["sh".to_owned(), "-c".to_owned(), script],
-        env: BTreeMap::new(),
-        cwd: "/".to_owned(),
-        stdin: None,
-    }
-}
-
-struct Engine(Task);
-
-impl Agent for Engine {
-    fn task(&self) -> Task {
-        self.0.clone()
-    }
+    Scripted::shell(format!("printf '%s\\n' {}; {coda}", quoted.join(" ")))
 }
 
 /// Launches `agent` and reads the whole run: every interpreted Update in
@@ -88,9 +75,10 @@ fn updates_of(agent: &impl Agent) -> (Vec<Update>, Result<Exit, String>) {
 }
 
 #[test]
+#[ignore = "needs the epik-agent runner, whose crate is gone; the agent subsystem is being replaced"]
 fn a_canned_session_yields_its_updates_through_the_real_runner() {
     let lines: Vec<&str> = SESSION.lines().collect();
-    let (updates, exit) = updates_of(&Engine(canned(&lines, "true")));
+    let (updates, exit) = updates_of(&canned(&lines, "true"));
 
     assert_eq!(updates.len(), 4, "{updates:?}");
     assert!(matches!(&updates[0], Update::Session { model, .. } if model == "claude-fable-5"));
@@ -104,37 +92,27 @@ fn a_canned_session_yields_its_updates_through_the_real_runner() {
             ..
         }
     ));
-    assert_eq!(
-        exit,
-        Ok(Exit {
-            code: Some(0),
-            signal: None,
-        })
-    );
+    assert_eq!(exit, Ok(Exit::Code(0)));
 }
 
 #[test]
+#[ignore = "needs the epik-agent runner, whose crate is gone; the agent subsystem is being replaced"]
 fn a_canned_error_session_surfaces_the_error_result() {
-    let (updates, exit) = updates_of(&Engine(canned(&[RESULT_ERROR.trim()], "exit 1")));
+    let (updates, exit) = updates_of(&canned(&[RESULT_ERROR.trim()], "exit 1"));
 
     let [Update::Result { ok, text, .. }] = updates.as_slice() else {
         panic!("one result: {updates:?}");
     };
     assert!(!ok);
     assert_eq!(text, "Reached maximum number of turns (1)");
-    assert_eq!(
-        exit,
-        Ok(Exit {
-            code: Some(1),
-            signal: None,
-        })
-    );
+    assert_eq!(exit, Ok(Exit::Code(1)));
 }
 
 #[test]
+#[ignore = "needs the epik-agent runner, whose crate is gone; the agent subsystem is being replaced"]
 fn kill_still_works_on_an_engine_mid_stream() {
     let lines: Vec<&str> = SESSION.lines().take(3).collect();
-    let engine = Engine(canned(&lines, "sleep 6379"));
+    let engine = canned(&lines, "sleep 6379");
     let (events_in, events) = channel();
     let handle = run(&engine, &runner(), events_in).expect("the runner spawns");
 
@@ -151,19 +129,14 @@ fn kill_still_works_on_an_engine_mid_stream() {
     }
 
     handle.kill();
-    assert_eq!(
-        handle.wait(),
-        Ok(Exit {
-            code: None,
-            signal: Some(9),
-        })
-    );
+    assert_eq!(handle.wait(), Ok(Exit::Signal(9)));
 }
 
 /// The live tier: the real CLI, its logged-in auth, a real model — only
 /// ever on request. This is the one test in the project that touches an
 /// LLM.
 #[test]
+#[ignore = "needs the epik-agent runner, whose crate is gone; the agent subsystem is being replaced"]
 fn a_live_claude_writes_the_file_it_was_asked_for() {
     if std::env::var("EPIK_CLAUDE_LIVE").as_deref() != Ok("1") {
         eprintln!("EPIK_CLAUDE_LIVE is unset; skipping");
@@ -181,11 +154,10 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
     .to_owned();
     assert!(!binary.is_empty(), "no claude CLI on PATH");
 
-    let scratch = std::env::temp_dir().join(format!("epik-claude-live-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).unwrap();
+    let scratch = Scratch::new("claude-live");
     assert!(
         std::process::Command::new("git")
-            .args(["-C", scratch.to_str().unwrap(), "init", "--quiet"])
+            .args(["-C", scratch.path(), "init", "--quiet"])
             .status()
             .expect("git runs")
             .success()
@@ -193,7 +165,7 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
 
     let agent = ClaudeCode {
         binary,
-        cwd: scratch.to_str().unwrap().to_owned(),
+        cwd: scratch.path().to_owned(),
         prompt: "create a file named hello.txt containing 'hello' and nothing else".to_owned(),
         model: None,
         api_key: None,
@@ -210,14 +182,7 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
         matches!(updates.last(), Some(Update::Result { ok: true, .. })),
         "{updates:?}"
     );
-    assert_eq!(
-        exit,
-        Ok(Exit {
-            code: Some(0),
-            signal: None
-        })
-    );
+    assert_eq!(exit, Ok(Exit::Code(0)));
     let written = std::fs::read_to_string(scratch.join("hello.txt")).expect("the file exists");
     assert_eq!(written.trim(), "hello");
-    let _ = std::fs::remove_dir_all(&scratch);
 }

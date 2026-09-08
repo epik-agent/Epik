@@ -31,7 +31,7 @@ use crate::markdown::{self, Item, Node};
 /// replaces the pending question with its id, or appends when none is
 /// pending (a window that mounted mid-question and caught only the
 /// resolution) — replace-or-append is the whole rule.
-pub(crate) fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
+pub fn fold(transcript: &mut Vec<TranscriptItem>, item: TranscriptItem) {
     match item {
         TranscriptItem::QuestionResolved { ref id, .. }
             if let Some(pending) = transcript.iter().position(

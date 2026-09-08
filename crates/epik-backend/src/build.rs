@@ -28,14 +28,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use epik::agent::Handle;
 use epik::agent::claude_code::{ClaudeCode, Update};
-use epik::build::{self, Order, Phase, Record, Run, Workspace};
 use epik::chat::{Answer, Ask};
 use epik::feature::tools::{Builds, feature_status, start_feature};
-use epik::feature::{Budget, Issue, IssueId, Plan};
-use epik::github::{GitHub, GitHubTracker, Repo};
+use epik::feature::{Budget, Feature, Issue, Plan};
+use epik::github::{GitHub, Repo};
+use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
-use epik::tools::Tool;
+use epik::tools::{Tool, arg};
 use epik::tracker::Tracker;
+use epik::tracker::github::GitHubTracker;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
@@ -183,7 +184,7 @@ fn start_claude(
     )?;
     let runner = runner()?;
     let claude = claude()?;
-    let workspace = build::provision(&order)?;
+    let workspace = job::provision(&order)?;
     let agent = ClaudeCode {
         binary: claude.to_string_lossy().into_owned(),
         cwd: workspace.directory.to_string_lossy().into_owned(),
@@ -196,16 +197,9 @@ fn start_claude(
     // run reports finished — never held hostage by the drain, whose
     // join handle is dropped as ever, since the chat surface reads the
     // record as it fills and waits for nothing.
-    let (handle, _drainer) = build::launch(&agent, &runner, record.clone(), move || drop(slot))
+    let (handle, _drainer) = job::launch(&agent, &runner, record.clone(), move || drop(slot))
         .map_err(|error| format!("could not launch the agent runner: {error}"))?;
     Ok((record, Some(handle)))
-}
-
-fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
-    arguments[name]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("the {name} argument must be a non-empty string"))
 }
 
 /// The `start_build` tool over any starter — the slot's claim and the
@@ -245,9 +239,9 @@ fn start_build(start: impl Fn(Order) -> Result<Workspace, String> + 'static) -> 
         }),
         Box::new(move |arguments| {
             let order = Order {
-                prompt: string(arguments, "prompt")?.to_owned(),
-                repository: string(arguments, "repository")?.to_owned(),
-                branch: string(arguments, "branch")?.to_owned(),
+                prompt: arg::non_empty(arguments, "prompt")?.to_owned(),
+                repository: arg::non_empty(arguments, "repository")?.to_owned(),
+                branch: arg::non_empty(arguments, "branch")?.to_owned(),
                 base: arguments["base"].as_str().map(str::to_owned),
             };
             let workspace = start(order)?;
@@ -269,10 +263,7 @@ const NARRATION_SHOWN: usize = 30;
 fn status(record: &Record) -> Value {
     let (phase, exit) = match &record.phase {
         Phase::Running => ("running", Value::Null),
-        Phase::Finished(exit) => (
-            "finished",
-            json!({ "code": exit.code, "signal": exit.signal }),
-        ),
+        Phase::Finished(exit) => ("finished", json!(exit)),
     };
     let result = record.result().map(|update| match update {
         Update::Result {
@@ -389,17 +380,17 @@ pub fn feature_tools(
     let plan = {
         let token = github_token.clone();
         let owner = owner.clone();
-        move |spec: &str, feature: &IssueId| -> Result<Plan, String> {
+        move |spec: &str, feature: &Feature| -> Result<Plan, String> {
             let github = GitHub::new(token.clone());
             GitHubTracker::new(&github, Repo::settle(spec, owner.as_deref())?).plan(feature)
         }
     };
-    let forge = move |spec: &str| -> Result<epik::forge::GitHub, String> {
+    let forge = move |spec: &str| -> Result<epik::forge::github::GitHub, String> {
         let token = github_token.clone().ok_or(
             "no GitHub token: pushing the feature branch needs one — \
              set the GitHub token in Settings (Cmd+,)",
         )?;
-        Ok(epik::forge::GitHub {
+        Ok(epik::forge::github::GitHub {
             repo: Repo::settle(spec, owner.as_deref())?,
             token,
         })
@@ -435,42 +426,15 @@ pub fn feature_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use epik::testing::Scratch;
     use epik::tools::Registry;
     use std::sync::Arc;
-
-    /// A scratch directory that cleans up after itself.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "epik-backend-build-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn join(&self, name: &str) -> String {
-            self.0.join(name).to_str().unwrap().to_owned()
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     /// The test starter: provisions for real, launches nothing. The
     /// record it hands back is a build that will never finish — enough
     /// for the slot to consider it in flight.
     fn provision_only(order: Order) -> Result<Started, String> {
-        let workspace = build::provision(&order)?;
+        let workspace = job::provision(&order)?;
         Ok((Record::new(order, workspace), None))
     }
 
@@ -492,7 +456,7 @@ mod tests {
     /// have them.
     fn registry(state: &Arc<BuildState>) -> Registry {
         let mut registry = Registry::default();
-        registry.extend(epik::git::all());
+        registry.extend(epik::tools::git::all());
         registry.register(start_build({
             let state = Arc::clone(state);
             move |order| state.start(order, provision_only)
@@ -541,7 +505,7 @@ mod tests {
         assert_eq!(status["phase"], "running");
         assert_eq!(status["branch"], "one");
 
-        tidy(&build::Workspace {
+        tidy(&Workspace {
             repository: repository.clone(),
             branch: "one".to_owned(),
             base_commit: String::new(),
@@ -612,11 +576,8 @@ mod tests {
                 input_tokens: None,
                 output_tokens: Some(7),
             });
-            record.phase = Phase::Finished(epik::agent::Exit {
-                code: Some(0),
-                signal: None,
-            });
-            record.commits = Some(build::Commits {
+            record.phase = Phase::Finished(epik::agent::Exit::Code(0));
+            record.commits = Some(job::Commits {
                 head: "tip".to_owned(),
                 advanced: true,
                 clean: true,
@@ -640,8 +601,8 @@ mod tests {
     /// while the "build" is nominally running.
     #[test]
     fn a_scripted_turn_inits_a_repository_starts_a_build_and_answers() {
-        use epik::chat::scripted::{Fragment, Scripted, Turn as Script};
         use epik::chat::{Client, Role, TranscriptItem};
+        use epik::testing::model::{Fragment, Scripted, Turn as Script};
 
         let scratch = Scratch::new("turn");
         let repository = scratch.join("wumpus.git");

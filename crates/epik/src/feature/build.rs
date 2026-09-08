@@ -1,7 +1,7 @@
 //! A feature build folds a plan into work: as many as four Agents at
-//! once, each on its own branch cut from the feature branch as it
-//! stands at dispatch, landing through the merge as they finish, until
-//! nothing is ready and nothing is running.
+//! once, each a [`job`](crate::job) on its own branch cut from the
+//! feature branch as it stands at dispatch, landing through the merge
+//! as they finish, until nothing is ready and nothing is running.
 //!
 //! [`build`] starts the machinery and returns; the caller holds the
 //! shared [`Build`] record and watches the build proceed. The ready set
@@ -41,10 +41,10 @@ use serde::Serialize;
 
 use super::merge::{Branch, Outcome};
 use super::{Issue, IssueId, Plan, Problem};
-use crate::agent::Agent;
-use crate::build::{Order, Record, Run, Workspace, abandon, launch, provision};
+use crate::agent::{Agent, Exit};
 use crate::forge::Forge;
 use crate::git::plumbing;
+use crate::job::{Order, Record, Run, Workspace, abandon, launch, provision};
 
 /// The most Agents a feature build runs at once. A constant, not a
 /// setting: configuration is its own unbuilt subject, and a number is
@@ -93,7 +93,7 @@ impl Budget {
     /// mutex, and [`release`](Self::release) notifies under the same
     /// one, so a slot freed at any moment is never missed.
     #[must_use]
-    pub fn take(self: &Arc<Self>) -> Slot {
+    fn take(self: &Arc<Self>) -> Slot {
         let mut free = self.free.lock().unwrap_or_else(PoisonError::into_inner);
         while *free == 0 {
             free = self
@@ -157,13 +157,13 @@ pub enum State {
 /// `Arc<Mutex<_>>`: [`build`]'s workers write it, the caller reads it.
 #[derive(Clone, Debug)]
 pub struct Build {
-    pub plan: Plan,
+    pub(super) plan: Plan,
     /// [`Plan::problems`], taken once at the start: cycles and dangling
     /// edges are named here, and the work they strand is Skipped rather
     /// than silently left Waiting.
-    pub problems: Vec<Problem>,
-    pub states: BTreeMap<IssueId, State>,
-    pub runs: BTreeMap<IssueId, Run>,
+    pub(super) problems: Vec<Problem>,
+    pub(super) states: BTreeMap<IssueId, State>,
+    pub(super) runs: BTreeMap<IssueId, Run>,
 }
 
 impl Build {
@@ -201,7 +201,7 @@ impl Build {
     /// Every state is terminal by then: what could not end any other
     /// way was Skipped when its fate was sealed.
     #[must_use]
-    pub fn finished(&self) -> bool {
+    pub(super) fn finished(&self) -> bool {
         !self
             .states
             .values()
@@ -461,12 +461,10 @@ where
             .unwrap_or_else(PoisonError::into_inner)
             .runs
             .insert(issue.id.clone(), Arc::clone(&run));
-        let exit = handle.wait()?;
-        match (exit.code, exit.signal) {
-            (Some(0), _) => {}
-            (Some(code), _) => return Err(format!("the Agent exited with code {code}")),
-            (None, Some(signal)) => return Err(format!("the Agent was killed by signal {signal}")),
-            (None, None) => return Err("the Agent ended without saying how".to_owned()),
+        match handle.wait()? {
+            Exit::Code(0) => {}
+            Exit::Code(code) => return Err(format!("the Agent exited with code {code}")),
+            Exit::Signal(signal) => return Err(format!("the Agent was killed by signal {signal}")),
         }
         // The observation is the last thing the drainer writes; joining
         // it waits exactly as long as that takes, no polling.

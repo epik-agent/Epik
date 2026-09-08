@@ -13,10 +13,11 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::{GitHub, GitHubTracker, Merge, Repo};
-use crate::feature::{IssueId, Plan};
-use crate::tools::Tool;
+use super::{Tool, arg};
+use crate::feature::{Feature, IssueId, Plan};
+use crate::github::{Error, GitHub, Merge, Repo};
 use crate::tracker::Tracker;
+use crate::tracker::github::GitHubTracker;
 
 /// One tool per public GitHub verb — plus `feature_plan`, the
 /// [`Tracker`] seam's read of a whole feature — all speaking through
@@ -30,7 +31,7 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
         let github = Arc::clone(&github);
         let owner = Arc::clone(&owner);
         Box::new(move |arguments: &Value| {
-            let repo = Repo::settle(string(arguments, "repo")?, owner.as_deref())?;
+            let repo = Repo::settle(arg::string(arguments, "repo")?, owner.as_deref())?;
             f(&github, &repo, arguments)
         }) as crate::tools::Handler
     };
@@ -44,11 +45,10 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
         Tool::new(
             "github_issue",
             "One GitHub issue by number: title, body, and open/closed state.",
-            schema(
-                &[repo_arg(), number_arg("number", "The issue number.")],
-                &["repo", "number"],
-            ),
-            gh(|github, repo, arguments| answer(github.issue(repo, number(arguments, "number")?))),
+            issue_schema(),
+            gh(|github, repo, arguments| {
+                answer(github.issue(repo, arg::number(arguments, "number")?))
+            }),
         ),
         Tool::new(
             "github_create_issue",
@@ -64,8 +64,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 answer(github.create_issue(
                     repo,
-                    string(arguments, "title")?,
-                    string(arguments, "body")?,
+                    arg::string(arguments, "title")?,
+                    arg::string(arguments, "body")?,
                 ))
             }),
         ),
@@ -84,9 +84,9 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 answer(github.edit_issue(
                     repo,
-                    number(arguments, "number")?,
-                    optional(arguments, "title"),
-                    optional(arguments, "body"),
+                    arg::number(arguments, "number")?,
+                    arguments["title"].as_str(),
+                    arguments["body"].as_str(),
                 ))
             }),
         ),
@@ -104,20 +104,17 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.comment(
                     repo,
-                    number(arguments, "number")?,
-                    string(arguments, "body")?,
+                    arg::number(arguments, "number")?,
+                    arg::string(arguments, "body")?,
                 ))
             }),
         ),
         Tool::new(
             "github_close_issue",
             "Closes a GitHub issue. Needs the GitHub token.",
-            schema(
-                &[repo_arg(), number_arg("number", "The issue number.")],
-                &["repo", "number"],
-            ),
+            issue_schema(),
             gh(|github, repo, arguments| {
-                answer(github.close_issue(repo, number(arguments, "number")?))
+                answer(github.close_issue(repo, arg::number(arguments, "number")?))
             }),
         ),
         Tool::new(
@@ -136,10 +133,10 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 answer(github.open_pull(
                     repo,
-                    string(arguments, "title")?,
-                    string(arguments, "head")?,
-                    string(arguments, "base")?,
-                    string(arguments, "body")?,
+                    arg::string(arguments, "title")?,
+                    arg::string(arguments, "head")?,
+                    arg::string(arguments, "base")?,
+                    arg::string(arguments, "body")?,
                 ))
             }),
         ),
@@ -150,7 +147,9 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                 &[repo_arg(), number_arg("number", "The pull request number.")],
                 &["repo", "number"],
             ),
-            gh(|github, repo, arguments| answer(github.pull(repo, number(arguments, "number")?))),
+            gh(|github, repo, arguments| {
+                answer(github.pull(repo, arg::number(arguments, "number")?))
+            }),
         ),
         Tool::new(
             "github_pull_for",
@@ -159,7 +158,9 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                 &[repo_arg(), string_arg("head", "The branch name.")],
                 &["repo", "head"],
             ),
-            gh(|github, repo, arguments| answer(github.pull_for(repo, string(arguments, "head")?))),
+            gh(|github, repo, arguments| {
+                answer(github.pull_for(repo, arg::string(arguments, "head")?))
+            }),
         ),
         Tool::new(
             "github_merge_pull",
@@ -182,7 +183,7 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 let method: Merge = serde_json::from_value(arguments["method"].clone())
                     .map_err(|_| "method must be commit, squash, or rebase".to_owned())?;
-                done(github.merge_pull(repo, number(arguments, "number")?, method))
+                done(github.merge_pull(repo, arg::number(arguments, "number")?, method))
             }),
         ),
         Tool::new(
@@ -193,7 +194,7 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                 &["repo", "branch"],
             ),
             gh(|github, repo, arguments| {
-                answer(github.branch_sha(repo, string(arguments, "branch")?))
+                answer(github.branch_sha(repo, arg::string(arguments, "branch")?))
             }),
         ),
         Tool::new(
@@ -208,7 +209,11 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                 &["repo", "base", "head"],
             ),
             gh(|github, repo, arguments| {
-                answer(github.compare(repo, string(arguments, "base")?, string(arguments, "head")?))
+                answer(github.compare(
+                    repo,
+                    arg::string(arguments, "base")?,
+                    arg::string(arguments, "head")?,
+                ))
             }),
         ),
         Tool::new(
@@ -225,8 +230,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.create_branch(
                     repo,
-                    string(arguments, "branch")?,
-                    string(arguments, "sha")?,
+                    arg::string(arguments, "branch")?,
+                    arg::string(arguments, "sha")?,
                 ))
             }),
         ),
@@ -241,18 +246,15 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                 &["repo", "ref"],
             ),
             gh(|github, repo, arguments| {
-                answer(github.check_conclusions(repo, string(arguments, "ref")?))
+                answer(github.check_conclusions(repo, arg::string(arguments, "ref")?))
             }),
         ),
         Tool::new(
             "github_issue_graph",
             "A GitHub issue with its edges: the sub-issues it decomposes into and the issues blocking it. Needs the GitHub token.",
-            schema(
-                &[repo_arg(), number_arg("number", "The issue number.")],
-                &["repo", "number"],
-            ),
+            issue_schema(),
             gh(|github, repo, arguments| {
-                answer(github.issue_graph(repo, number(arguments, "number")?))
+                answer(github.issue_graph(repo, arg::number(arguments, "number")?))
             }),
         ),
         Tool::new(
@@ -280,7 +282,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
                     problems: Vec<crate::feature::Problem>,
                 }
                 let tracker = GitHubTracker::new(github, repo.clone());
-                let plan = tracker.plan(&IssueId::from(number(arguments, "feature")?))?;
+                let plan =
+                    tracker.plan(&Feature(IssueId::from(arg::number(arguments, "feature")?)))?;
                 let none = BTreeSet::new();
                 answer(Ok(Shown {
                     ready: plan.ready(&none),
@@ -303,8 +306,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.add_sub_issue(
                     repo,
-                    number(arguments, "parent")?,
-                    number(arguments, "child")?,
+                    arg::number(arguments, "parent")?,
+                    arg::number(arguments, "child")?,
                 ))
             }),
         ),
@@ -322,8 +325,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.remove_sub_issue(
                     repo,
-                    number(arguments, "parent")?,
-                    number(arguments, "child")?,
+                    arg::number(arguments, "parent")?,
+                    arg::number(arguments, "child")?,
                 ))
             }),
         ),
@@ -341,8 +344,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.add_blocked_by(
                     repo,
-                    number(arguments, "issue")?,
-                    number(arguments, "blocker")?,
+                    arg::number(arguments, "issue")?,
+                    arg::number(arguments, "blocker")?,
                 ))
             }),
         ),
@@ -360,8 +363,8 @@ pub fn all(github: GitHub, owner: Option<String>) -> Vec<Tool> {
             gh(|github, repo, arguments| {
                 done(github.remove_blocked_by(
                     repo,
-                    number(arguments, "issue")?,
-                    number(arguments, "blocker")?,
+                    arg::number(arguments, "issue")?,
+                    arg::number(arguments, "blocker")?,
                 ))
             }),
         ),
@@ -394,6 +397,15 @@ fn number_arg(name: &'static str, description: &str) -> (&'static str, Value) {
     )
 }
 
+/// The arguments every verb about one issue takes: the repository and
+/// the issue's number.
+fn issue_schema() -> Value {
+    schema(
+        &[repo_arg(), number_arg("number", "The issue number.")],
+        &["repo", "number"],
+    )
+}
+
 fn schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
     let properties: serde_json::Map<String, Value> = properties
         .iter()
@@ -402,25 +414,9 @@ fn schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
-fn string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
-    arguments[name]
-        .as_str()
-        .ok_or_else(|| format!("the {name} argument must be a string"))
-}
-
-fn optional<'a>(arguments: &'a Value, name: &str) -> Option<&'a str> {
-    arguments[name].as_str()
-}
-
-fn number(arguments: &Value, name: &str) -> Result<u64, String> {
-    arguments[name]
-        .as_u64()
-        .ok_or_else(|| format!("the {name} argument must be a whole number"))
-}
-
 /// A verb's answer as a tool result: the value as JSON, or the error's
 /// own rendering.
-fn answer<T: serde::Serialize>(result: Result<T, super::Error>) -> Result<Value, String> {
+fn answer<T: serde::Serialize>(result: Result<T, Error>) -> Result<Value, String> {
     match result {
         Ok(value) => serde_json::to_value(value).map_err(|error| error.to_string()),
         Err(error) => Err(error.to_string()),
@@ -428,7 +424,7 @@ fn answer<T: serde::Serialize>(result: Result<T, super::Error>) -> Result<Value,
 }
 
 /// The same, for verbs whose success has nothing to say.
-fn done(result: Result<(), super::Error>) -> Result<Value, String> {
+fn done(result: Result<(), Error>) -> Result<Value, String> {
     answer(result.map(|()| json!({ "done": true })))
 }
 

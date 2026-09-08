@@ -37,6 +37,10 @@ web-sys = { version = "0.3", features = [
 # workspace targets native, so it must not attach to the root.
 [workspace]
 
+# Matches the root workspace's lint, which this manifest cannot inherit.
+[lints.rust]
+unused_qualifications = "warn"
+
 [build-dependencies]
 # build.rs compiles grammars/ into the pruned SyntaxSet dump the
 # highlighter embeds. Same pure-Rust regex backend as the runtime.

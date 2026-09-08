@@ -1,9 +1,10 @@
-//! Building from chat: provisioning a private worktree, launching a
-//! coding Agent in it, and keeping the run record the persona reports
-//! from.
+//! A job: one coding Agent, launched in a private worktree, and the
+//! record of how it went. A feature build is many jobs, one per issue;
+//! a build ordered on its own is exactly one. The word is the unit's
+//! name throughout — a job is ordered, provisioned, launched, and read.
 //!
-//! An [`Order`] is the build as the persona asked for it — the tool's
-//! arguments, exactly. [`provision`] turns it into a [`Workspace`]: a
+//! An [`Order`] is the job as it was asked for, exactly, wherever the
+//! asking came from. [`provision`] turns it into a [`Workspace`]: a
 //! fresh worktree of the repository on a new branch at the base, under
 //! the system temp dir, never a checkout of the repository itself, with
 //! the Epik persona's identity set per-worktree so every commit the
@@ -14,7 +15,7 @@
 //! repository's `core.bare` moves into its main-tree `config.worktree`
 //! as git requires; that is plumbing, not identity.) [`adopt`] is its
 //! sibling for a branch that already stands: the feature workspace a
-//! build keeps for itself, distinct from the per-issue workspaces.
+//! feature build keeps for itself, distinct from the jobs' own.
 //!
 //! [`launch`] runs any [`Agent`] in the workspace through the runner —
 //! `ClaudeCode` in production, an inline shell script in tests, the same
@@ -26,8 +27,8 @@
 //! worktree is removed; a dirty one is left where it is and its path
 //! noted. Remediation is deliberately unbuilt.
 //!
-//! Nothing here emits on the chat channel. The record is the sink; the
-//! persona's tools read it.
+//! Nothing here reports anywhere. The record is the sink; whoever
+//! ordered the job reads it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,9 +37,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::agent::claude_code::{self, Update};
 use crate::agent::{Agent, Event, Exit, Handle};
-use crate::git::{PERSONA_EMAIL, PERSONA_NAME, plumbing};
+use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
+use crate::temp;
 
-/// A build as ordered: the prompt, the repository — a git URL, of which
+/// A job as ordered: the prompt, the repository — a git URL, of which
 /// a local path is one — the branch to build on, and the base to start
 /// it from, the repository's default branch when unnamed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,7 +65,7 @@ pub struct Workspace {
 /// The standing preface every build prompt opens with. What the Agent
 /// needs to know about where it is and what it must not do; the branch
 /// is named in the line [`Workspace::brief`] adds beneath it.
-pub const PREAMBLE: &str = "You are working in a git worktree that has been prepared for you, \
+const PREAMBLE: &str = "You are working in a git worktree that has been prepared for you, \
 on the branch named below, which is already checked out. Implement the instructions that \
 follow. Commit your work as you go, with clear commit messages, so that the branch tells the \
 story of what you built. Do not push, do not create or switch branches, and do not touch git \
@@ -108,17 +110,7 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
             .trim()
             .to_owned(),
     };
-    let base_commit = plumbing(&[
-        "-C",
-        repository,
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        &format!("{base}^{{commit}}"),
-    ])
-    .map_err(|words| format!("the base {base:?} does not name a commit: {words}"))?
-    .trim()
-    .to_owned();
+    let base_commit = base_commit(repository, &base)?;
 
     enable_worktree_config(repository, &git_dir)?;
     let directory = furnish(
@@ -147,7 +139,7 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
 /// Words for the model: the repository is not one, the branch does not
 /// exist (this function creates nothing), the branch is already checked
 /// out somewhere (git's own refusal), or git failed along the way.
-pub fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
+pub(crate) fn adopt(repository: &str, branch: &str) -> Result<Workspace, String> {
     let git_dir = locate(repository)?;
     let branch = valid_branch(repository, branch)?;
     let tip = plumbing(&[
@@ -267,19 +259,9 @@ impl Checkout<'_> {
 /// persona without touching the identity the repository's own config
 /// keeps.
 fn furnish(repository: &str, checkout: Checkout) -> Result<PathBuf, String> {
-    // The clock alone can collide when two workspaces are furnished in
-    // the same tick — concurrent builds do that — so a process-wide
-    // count settles it.
-    static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let directory = std::env::temp_dir().join(format!(
-        "epik-build-{}-{}-{}-{}",
-        checkout.branch().replace(['/', '\\'], "-"),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default(),
-        NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    let directory = temp::unique(&format!(
+        "epik-build-{}",
+        checkout.branch().replace(['/', '\\'], "-")
     ));
     let directory_str = directory
         .to_str()
@@ -326,9 +308,9 @@ pub struct Commits {
 }
 
 /// The most narration updates a record retains; the oldest go first.
-pub const NARRATION_CAP: usize = 1000;
+const NARRATION_CAP: usize = 1000;
 /// The most stderr lines a record retains; the oldest go first.
-pub const STDERR_CAP: usize = 50;
+const STDERR_CAP: usize = 50;
 
 /// The run record: everything about one build, behind the shared
 /// [`Run`] handle.
@@ -348,7 +330,7 @@ pub struct Record {
 }
 
 /// The shared handle to a [`Record`]: cloned by whoever needs to read
-/// the run — the drainer writes it, the persona's tools read it.
+/// the run — the drainer writes it, whoever ordered the job reads it.
 pub type Run = Arc<Mutex<Record>>;
 
 impl Record {
@@ -423,10 +405,9 @@ fn observe(workspace: &Workspace) -> Commits {
     }
 }
 
-/// Removes a provisioned worktree that never got its Agent, so a failed
-/// launch — or a factory that never produced one — leaves nothing
-/// behind. Best effort.
-pub(crate) fn abandon(workspace: &Workspace) {
+/// Removes a workspace's worktree, force and all. Best effort: this is
+/// cleanup, and a refusal has nobody to tell.
+pub(crate) fn remove_worktree(workspace: &Workspace) {
     let directory = workspace.directory.to_string_lossy().into_owned();
     let _ = plumbing(&[
         "-C",
@@ -437,6 +418,13 @@ pub(crate) fn abandon(workspace: &Workspace) {
         "--",
         &directory,
     ]);
+}
+
+/// Removes a provisioned worktree that never got its Agent, so a failed
+/// launch — or a factory that never produced one — leaves nothing
+/// behind. Best effort.
+pub(crate) fn abandon(workspace: &Workspace) {
+    remove_worktree(workspace);
     let _ = plumbing(&[
         "-C",
         &workspace.repository,
@@ -524,7 +512,7 @@ mod tests {
     fn bare(scratch: &Scratch) -> String {
         let directory = scratch.join("repo.git");
         let mut registry = crate::tools::Registry::default();
-        registry.extend(crate::git::all());
+        registry.extend(crate::tools::git::all());
         let made = registry
             .dispatch(
                 "git_init",
@@ -731,20 +719,11 @@ mod tests {
             line: r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#
                 .to_owned(),
         });
-        record.absorb(Event::Exited(Exit {
-            code: Some(0),
-            signal: None,
-        }));
+        record.absorb(Event::Exited(Exit::Code(0)));
         assert!(matches!(
             record.result(),
             Some(Update::Result { ok: true, .. })
         ));
-        assert_eq!(
-            record.phase,
-            Phase::Finished(Exit {
-                code: Some(0),
-                signal: None
-            })
-        );
+        assert_eq!(record.phase, Phase::Finished(Exit::Code(0)));
     }
 }
