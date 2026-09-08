@@ -19,14 +19,14 @@
 //! only wires them to GitHub, Claude Code, and the window's question
 //! rail.
 //!
-//! The assembly — locating the runner and the `claude` binary, building
-//! the [`ClaudeCode`] Agent — is a closure handed to the tools, so tests
+//! The assembly — locating the `claude` binary and starting the
+//! [`ClaudeCode`] Agent — is a closure handed to the tools, so tests
 //! substitute one that provisions without ever spawning a CLI.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use epik::agent::Handle;
+use epik::agent::Agent;
 use epik::agent::claude_code::{ClaudeCode, Update};
 use epik::chat::{Answer, Ask};
 use epik::feature::tools::{Builds, feature_status, start_feature};
@@ -40,24 +40,12 @@ use epik::tracker::github::GitHubTracker;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
-/// One run: its record, and the handle that is its life. Dropping the
-/// handle kills the Agent, so the slot keeps it for as long as the record
-/// is the current one.
-struct Build {
-    record: Run,
-    _handle: Option<Handle>,
-}
-
 /// The run slot: at most one build in flight, and the last one's record
 /// afterwards.
 #[derive(Default)]
 pub struct BuildState {
-    current: Mutex<Option<Build>>,
+    current: Mutex<Option<Run>>,
 }
-
-/// What `start` hands back: the record to keep, and the handle when a
-/// process was actually launched.
-pub type Started = (Run, Option<Handle>);
 
 impl BuildState {
     /// Claims the slot and starts a build through `start` — which
@@ -68,11 +56,11 @@ impl BuildState {
     pub fn start(
         &self,
         order: Order,
-        start: impl FnOnce(Order) -> Result<Started, String>,
+        start: impl FnOnce(Order) -> Result<Run, String>,
     ) -> Result<Workspace, String> {
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(build) = current.as_ref() {
-            let record = build.record.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(run) = current.as_ref() {
+            let record = run.lock().unwrap_or_else(PoisonError::into_inner);
             if record.phase == Phase::Running {
                 return Err(format!(
                     "a build is already running on branch {} of {}; wait for it to finish \
@@ -81,16 +69,13 @@ impl BuildState {
                 ));
             }
         }
-        let (record, handle) = start(order)?;
+        let record = start(order)?;
         let workspace = record
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .workspace
             .clone();
-        *current = Some(Build {
-            record,
-            _handle: handle,
-        });
+        *current = Some(record);
         Ok(workspace)
     }
 
@@ -102,33 +87,7 @@ impl BuildState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .map(|build| {
-                build
-                    .record
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone()
-            })
-    }
-}
-
-/// The agent runner: `epik-agent` beside the running executable — true
-/// in a dev `target/debug`, and in a bundle once the runner ships as a
-/// sidecar.
-fn runner() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("could not locate the running executable: {error}"))?;
-    let runner = exe
-        .parent()
-        .ok_or("the running executable has no parent directory")?
-        .join("epik-agent");
-    if runner.is_file() {
-        Ok(runner)
-    } else {
-        Err(format!(
-            "the agent runner is not beside the app: expected {}",
-            runner.display()
-        ))
+            .map(|run| run.lock().unwrap_or_else(PoisonError::into_inner).clone())
     }
 }
 
@@ -163,43 +122,62 @@ fn claude() -> Result<PathBuf, String> {
 }
 
 /// The production start: claim an Agent slot from the shared budget,
-/// locate the binaries, provision, assemble Claude Code in the workspace
-/// with the brief as its prompt, launch. `api_key` rides into the
-/// Agent's environment when there is one; without it the CLI's own
-/// logged-in auth applies. `model` is the configured agent model, or
-/// `None` to let the CLI pick its own. The slot is held for the Agent's life
-/// exactly: launch's exit hook releases it at the run's Finished
+/// locate the binary, provision, start Claude Code in the workspace with
+/// the brief as its prompt, and attach it to the record. `api_key` rides
+/// into the Agent's environment when there is one; without it the CLI's
+/// own logged-in auth applies. `model` is the configured agent model, or
+/// `None` to let the CLI pick its own. The slot is held for the Agent's
+/// life exactly: launch's exit hook releases it at the run's Finished
 /// transition, so a feature build alongside gets the slot back the
-/// moment the Agent is gone — and a drain that never ends cannot keep
-/// it.
+/// moment the Agent is gone — and an observation that outlives the run
+/// cannot keep it.
 fn start_claude(
     order: Order,
     api_key: Option<Secret>,
     model: Option<String>,
     budget: &Arc<Budget>,
-) -> Result<Started, String> {
+) -> Result<Run, String> {
     let slot = budget.claim().ok_or(
         "all four Agent slots are busy; wait for one to finish \
          (build_status and feature_status say how they are going) before starting another",
     )?;
-    let runner = runner()?;
     let claude = claude()?;
     let workspace = job::provision(&order)?;
-    let agent = ClaudeCode {
-        binary: claude.to_string_lossy().into_owned(),
-        cwd: workspace.directory.to_string_lossy().into_owned(),
-        prompt: workspace.brief(&order.prompt),
+    let agent = start(
+        &claude,
+        &workspace,
+        workspace.brief(&order.prompt),
         model,
         api_key,
-    };
+    )
+    .inspect_err(|_| job::abandon(&workspace))?;
     let record = Record::new(order, workspace);
     // The slot rides the launch's exit hook: released the moment the
-    // run reports finished — never held hostage by the drain, whose
-    // join handle is dropped as ever, since the chat surface reads the
-    // record as it fills and waits for nothing.
-    let (handle, _drainer) = job::launch(&agent, &runner, record.clone(), move || drop(slot))
-        .map_err(|error| format!("could not launch the agent runner: {error}"))?;
-    Ok((record, Some(handle)))
+    // run reports finished — never held hostage by the observation,
+    // whose join handle is dropped as ever, since the chat surface
+    // reads the record as it fills and waits for nothing.
+    job::launch(agent, record.clone(), move || drop(slot));
+    Ok(record)
+}
+
+/// Claude Code, started in `workspace` with `prompt`; a failure to start
+/// is words for the model.
+fn start(
+    claude: &Path,
+    workspace: &Workspace,
+    prompt: String,
+    model: Option<String>,
+    api_key: Option<Secret>,
+) -> Result<Agent, String> {
+    ClaudeCode {
+        binary: claude.to_string_lossy().into_owned(),
+        cwd: workspace.directory.to_string_lossy().into_owned(),
+        prompt,
+        model,
+        api_key,
+    }
+    .start()
+    .map_err(|error| format!("could not start the Agent: {error:#}"))
 }
 
 /// The `start_build` tool over any starter — the slot's claim and the
@@ -264,6 +242,7 @@ fn status(record: &Record) -> Value {
     let (phase, exit) = match &record.phase {
         Phase::Running => ("running", Value::Null),
         Phase::Finished(exit) => ("finished", json!(exit)),
+        Phase::Lost(words) => ("lost", json!({ "lost": words })),
     };
     let result = record.result().map(|update| match update {
         Update::Result {
@@ -396,29 +375,21 @@ pub fn feature_tools(
         })
     };
     let agents = move || {
-        let claude = claude()?.to_string_lossy().into_owned();
+        let claude = claude()?;
         let api_key = api_key.clone();
         let model = model.clone();
-        Ok(
-            move |_issue: &Issue, workspace: &Workspace, brief: &str| ClaudeCode {
-                binary: claude.clone(),
-                cwd: workspace.directory.to_string_lossy().into_owned(),
-                prompt: brief.to_owned(),
-                model: model.clone(),
-                api_key: api_key.clone(),
-            },
-        )
+        Ok(move |_issue: &Issue, workspace: &Workspace, brief: &str| {
+            start(
+                &claude,
+                workspace,
+                brief.to_owned(),
+                model.clone(),
+                api_key.clone(),
+            )
+        })
     };
     vec![
-        start_feature(
-            Arc::clone(&builds),
-            budget,
-            runner,
-            plan,
-            forge,
-            agents,
-            asker,
-        ),
+        start_feature(Arc::clone(&builds), budget, plan, forge, agents, asker),
         feature_status(builds),
     ]
 }
@@ -433,9 +404,9 @@ mod tests {
     /// The test starter: provisions for real, launches nothing. The
     /// record it hands back is a build that will never finish — enough
     /// for the slot to consider it in flight.
-    fn provision_only(order: Order) -> Result<Started, String> {
+    fn provision_only(order: Order) -> Result<Run, String> {
         let workspace = job::provision(&order)?;
-        Ok((Record::new(order, workspace), None))
+        Ok(Record::new(order, workspace))
     }
 
     fn tidy(workspace: &Workspace) {

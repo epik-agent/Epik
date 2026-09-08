@@ -23,9 +23,8 @@ use anyhow::Result;
 /// message, a panic, or a log line just by being formatted along the way.
 ///
 /// Serialization is the one other door: the bare bytes, which is what
-/// lets a secret cross a process boundary — the IPC barrier, an agent
-/// runner's stdin — as itself instead of decaying into a `String` on
-/// each side. That crossing is the accepted exposure — every place it
+/// lets a secret cross a process boundary — the IPC barrier — as itself
+/// instead of decaying into a `String` on each side. That crossing is the accepted exposure — every place it
 /// can happen types itself `Secret` and is findable by that name.
 #[derive(Clone, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Secret(String);

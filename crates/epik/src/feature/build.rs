@@ -33,8 +33,6 @@
 //! and the record is the sink.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use serde::Serialize;
@@ -44,7 +42,7 @@ use super::{Issue, IssueId, Plan, Problem};
 use crate::agent::{Agent, Exit};
 use crate::forge::Forge;
 use crate::git::plumbing;
-use crate::job::{Order, Record, Run, Workspace, abandon, launch, provision};
+use crate::job::{Order, Phase, Record, Run, Workspace, abandon, launch, provision};
 
 /// The most Agents a feature build runs at once. A constant, not a
 /// setting: configuration is its own unbuilt subject, and a number is
@@ -279,32 +277,27 @@ fn brief(issue: &Issue) -> String {
 /// while the build proceeds, and [`Build::finished`] is how it knows
 /// the build is over. `branch` is the feature branch as
 /// [`Branch::establish`] left it — shared, so the caller can keep
-/// reading [`Branch::tip`] while the build runs — `runner` the agent
-/// runner binary, `agents` turns one dispatched issue — with its
-/// provisioned workspace and assembled brief — into the Agent that
-/// implements it, and `budget` is where the Agent slots come from — the
-/// host's one budget, so a plain build running alongside draws on the
-/// same four.
-pub fn build<F, A, M>(
+/// reading [`Branch::tip`] while the build runs — `agents` starts, for
+/// one dispatched issue — with its provisioned workspace and assembled
+/// brief — the Agent that implements it, or refuses in words, and
+/// `budget` is where the Agent slots come from — the host's one budget,
+/// so a plain build running alongside draws on the same four.
+pub fn build<F, M>(
     plan: Plan,
     branch: Arc<Branch<F>>,
-    runner: &Path,
     agents: M,
     budget: Arc<Budget>,
 ) -> Arc<Mutex<Build>>
 where
     F: Forge + Send + Sync + 'static,
-    A: Agent + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> A + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
 {
     let machinery = Machinery {
         record: Arc::new(Mutex::new(Build::new(plan))),
         signal: Arc::new(Condvar::new()),
         branch,
-        runner: runner.to_path_buf(),
         agents: Arc::new(agents),
         budget,
-        _agent: PhantomData,
     };
     let record = Arc::clone(&machinery.record);
     std::thread::spawn(move || machinery.schedule());
@@ -312,37 +305,32 @@ where
 }
 
 /// Everything a worker thread needs, cheap to clone: the shared record,
-/// the condvar that wakes the scheduler, the feature branch, the runner,
-/// the Agent factory, and the slot budget.
-struct Machinery<F: Forge, A, M> {
+/// the condvar that wakes the scheduler, the feature branch, the Agent
+/// factory, and the slot budget.
+struct Machinery<F: Forge, M> {
     record: Arc<Mutex<Build>>,
     signal: Arc<Condvar>,
     branch: Arc<Branch<F>>,
-    runner: PathBuf,
     agents: Arc<M>,
     budget: Arc<Budget>,
-    _agent: PhantomData<fn() -> A>,
 }
 
-impl<F: Forge, A, M> Clone for Machinery<F, A, M> {
+impl<F: Forge, M> Clone for Machinery<F, M> {
     fn clone(&self) -> Self {
         Self {
             record: Arc::clone(&self.record),
             signal: Arc::clone(&self.signal),
             branch: Arc::clone(&self.branch),
-            runner: self.runner.clone(),
             agents: Arc::clone(&self.agents),
             budget: Arc::clone(&self.budget),
-            _agent: PhantomData,
         }
     }
 }
 
-impl<F, A, M> Machinery<F, A, M>
+impl<F, M> Machinery<F, M>
 where
     F: Forge + Send + Sync + 'static,
-    A: Agent + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> A + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
 {
     /// The slot loop, three steps a turn. First, under the record lock:
     /// wait — on the condvar the workers notify — until something is
@@ -439,44 +427,49 @@ where
         // below fails the issue with the corpse named.
         let _ = plumbing(&["-C", &order.repository, "branch", "-D", &order.branch]);
         let workspace = provision(&order)?;
-        // The factory is caller code. A panic in it is the worker's to
-        // report, but the worktree just provisioned is this attempt's to
-        // remove first — a failed launch removes its own, and so does
-        // a launch that never happened.
+        // The factory is caller code. A panic in it, or a refusal, is
+        // the worker's to report, but the worktree just provisioned is
+        // this attempt's to remove first — an Agent that never started
+        // leaves nothing behind.
         let agent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.agents)(issue, &workspace, &workspace.brief(&order.prompt))
         }))
         .unwrap_or_else(|panic| {
             abandon(&workspace);
             std::panic::resume_unwind(panic)
-        });
+        })
+        .inspect_err(|_| abandon(&workspace))?;
         let branch = workspace.branch.clone();
         let run = Record::new(order, workspace);
         // The exit hook stays empty here: a feature issue's slot is
         // released at the Merging transition below, not at the exit.
-        let (handle, observer) = launch(&agent, &self.runner, Arc::clone(&run), || {})
-            .map_err(|error| format!("could not launch the agent runner: {error}"))?;
+        let observer = launch(agent, Arc::clone(&run), || {});
         self.record
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .runs
             .insert(issue.id.clone(), Arc::clone(&run));
-        match handle.wait()? {
-            Exit::Code(0) => {}
-            Exit::Code(code) => return Err(format!("the Agent exited with code {code}")),
-            Exit::Signal(signal) => return Err(format!("the Agent was killed by signal {signal}")),
-        }
         // The observation is the last thing the drainer writes; joining
         // it waits exactly as long as that takes, no polling.
         observer
             .join()
             .map_err(|_| "the run's observer died unsettled".to_owned())?;
-        let commits = run
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .commits
-            .clone()
-            .ok_or("the run ended with no commit observation")?;
+        let (phase, commits) = {
+            let run = run.lock().unwrap_or_else(PoisonError::into_inner);
+            (run.phase.clone(), run.commits.clone())
+        };
+        match phase {
+            Phase::Finished(Exit::Code(0)) => {}
+            Phase::Finished(Exit::Code(code)) => {
+                return Err(format!("the Agent exited with code {code}"));
+            }
+            Phase::Finished(Exit::Signal(signal)) => {
+                return Err(format!("the Agent was killed by signal {signal}"));
+            }
+            Phase::Lost(words) => return Err(words),
+            Phase::Running => return Err("the run ended without an exit".to_owned()),
+        }
+        let commits = commits.ok_or("the run ended with no commit observation")?;
         if !commits.advanced {
             return Err(
                 "the Agent committed nothing: the branch never advanced past its base".to_owned(),

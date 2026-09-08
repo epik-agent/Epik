@@ -1,18 +1,20 @@
-//! Claude Code, the first real engine: an [`Agent`] whose child is the
+//! Claude Code, the first real engine: an [`Agent`] whose process is the
 //! `claude` CLI in headless print mode, and a typed reading of what it
 //! says.
 //!
 //! [`ClaudeCode`] is data — a binary path, a working directory, a
-//! prompt, and optionally a model and an API key. Its Task pins Epik's
-//! settled isolation posture: the agent runs with Epik's configuration
+//! prompt, and optionally a model and an API key — and [`start`] is the
+//! one place it becomes a command line. That line pins Epik's settled
+//! isolation posture: the agent runs with Epik's configuration
 //! (`--settings '{}'`, `--strict-mcp-config`), never the machine-wide
 //! Claude Code setup, and with `--dangerously-skip-permissions` —
 //! deliberate autonomy, because events only flow *out* of an agent;
 //! there is no channel to answer a permission prompt, so the agent must
 //! never ask one. Its containment is the working directory and the
-//! environment it is handed. The prompt rides the Task's stdin payload,
-//! not argv: stdin is the CLI's file-like channel, the right fit for
-//! multi-line prompts of arbitrary length.
+//! environment it is handed. The prompt is the last argument: the CLI
+//! takes it positionally, and an Agent has no stdin.
+//!
+//! [`start`]: ClaudeCode::start
 //!
 //! The CLI's stream-json arrives as the generic `Stdout { line }`
 //! events; the generic channel stays generic, and [`interpret`] layers
@@ -24,7 +26,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
-use super::{Agent, Secret, Task};
+use super::Agent;
+#[cfg(feature = "native")]
+use crate::keystore::Secret;
 
 /// One thing Epik understands from a Claude Code stream, in the order
 /// said. The typed view is deliberately small: enough to narrate
@@ -160,8 +164,24 @@ pub struct ClaudeCode {
 }
 
 #[cfg(feature = "native")]
-impl Agent for ClaudeCode {
-    fn task(&self) -> Task {
+impl ClaudeCode {
+    /// Starts the CLI in its working directory, the key in its
+    /// environment when there is one.
+    ///
+    /// # Errors
+    ///
+    /// The spawn itself failing — the binary missing, chiefly.
+    pub fn start(self) -> anyhow::Result<Agent> {
+        let argv = self.argv();
+        let env = self
+            .api_key
+            .map(|key| ("ANTHROPIC_API_KEY".to_owned(), key));
+        Agent::new(argv, self.cwd, env)
+    }
+
+    /// The whole command line: the binary, the settled posture, the
+    /// model when one is named, and the prompt last.
+    fn argv(&self) -> Vec<String> {
         let mut argv = vec![
             self.binary.clone(),
             "-p".to_owned(),
@@ -187,13 +207,10 @@ impl Agent for ClaudeCode {
             ]
             .map(str::to_owned),
         );
-        // The prompt is stdin, never an argument: file-like, any
-        // length, any number of lines.
-        let task = Task::new(argv, self.cwd.clone()).stdin(self.prompt.clone());
-        match &self.api_key {
-            Some(key) => task.env("ANTHROPIC_API_KEY", key.clone()),
-            None => task,
-        }
+        // The prompt is positional, and last: any length, any number
+        // of lines, and never mistaken for a flag.
+        argv.push(self.prompt.clone());
+        argv
     }
 }
 
@@ -299,7 +316,7 @@ mod tests {
     }
 
     #[cfg(feature = "native")]
-    mod task {
+    mod command_line {
         use super::super::*;
         use crate::chat::ANTHROPIC_MODEL;
 
@@ -314,11 +331,12 @@ mod tests {
         }
 
         /// The isolation and skip-permissions flags are load-bearing;
-        /// the whole argv is pinned, and the prompt is not in it.
+        /// the whole argv is pinned, the prompt last and the key
+        /// nowhere in it.
         #[test]
         fn the_argv_is_exactly_the_settled_posture() {
             assert_eq!(
-                agent().task().argv,
+                agent().argv(),
                 [
                     "/opt/homebrew/bin/claude",
                     "-p",
@@ -331,13 +349,14 @@ mod tests {
                     "{}",
                     "--strict-mcp-config",
                     "--dangerously-skip-permissions",
+                    "create a file\nnamed hello.txt",
                 ]
             );
 
             let mut without_model = agent();
             without_model.model = None;
             assert_eq!(
-                without_model.task().argv,
+                without_model.argv(),
                 [
                     "/opt/homebrew/bin/claude",
                     "-p",
@@ -348,43 +367,28 @@ mod tests {
                     "{}",
                     "--strict-mcp-config",
                     "--dangerously-skip-permissions",
+                    "create a file\nnamed hello.txt",
                 ]
-            );
-        }
-
-        #[test]
-        fn the_prompt_rides_stdin_and_the_cwd_is_the_given_one() {
-            let task = agent().task();
-            assert_eq!(
-                task.stdin.as_deref(),
-                Some("create a file\nnamed hello.txt")
-            );
-            assert_eq!(task.cwd, "/work/repo");
-        }
-
-        #[test]
-        fn the_key_is_in_the_env_exactly_when_supplied() {
-            let task = agent().task();
-            assert_eq!(task.env.len(), 1);
-            assert_eq!(
-                task.env.get("ANTHROPIC_API_KEY"),
-                Some(&Secret::from("sk-ant-hush-hush"))
-            );
-
-            let mut logged_in = agent();
-            logged_in.api_key = None;
-            assert!(
-                logged_in.task().env.is_empty(),
-                "no key means the CLI's own auth"
             );
         }
 
         #[test]
         fn no_debug_output_carries_the_keys_bytes() {
             let agent = agent();
-            for debugged in [format!("{agent:?}"), format!("{:?}", agent.task())] {
-                assert!(!debugged.contains("sk-ant-hush-hush"), "{debugged}");
-            }
+            let debugged = format!("{agent:?}");
+            assert!(!debugged.contains("sk-ant-hush-hush"), "{debugged}");
+            assert!(debugged.contains("api_key"), "the field is there, redacted");
+        }
+
+        /// The binary is bogus, so the spawn fails — after the recipe
+        /// was read in full, which is what the refusal's words show.
+        #[test]
+        fn a_missing_binary_refuses_in_words() {
+            let error = agent().start().err().expect("no such binary");
+            assert!(
+                format!("{error:#}").contains("could not start /opt/homebrew/bin/claude"),
+                "{error:#}"
+            );
         }
     }
 }

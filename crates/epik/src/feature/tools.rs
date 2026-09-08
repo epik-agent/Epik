@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
@@ -291,15 +291,14 @@ fn confirmed(answer: &Answer) -> Option<Check> {
 
 /// The `start_feature` tool over the host's seams: `plan` reads a
 /// feature's shape out of the tracker, `forge` names where the feature
-/// branch's pushes go, `runner` locates the agent runner binary,
-/// `agents` yields the per-issue Agent factory one build uses, and
+/// branch's pushes go, `agents` yields the per-issue Agent factory one
+/// build uses, and
 /// `asker` is the whole question modality — it takes the check card and
 /// comes back with the answer, however long that takes. Each is fallible
 /// where the host's world is: every refusal is words the model reads.
-pub fn start_feature<F, A, M>(
+pub fn start_feature<F, M>(
     builds: Arc<Builds>,
     budget: Arc<Budget>,
-    runner: impl Fn() -> Result<PathBuf, String> + 'static,
     plan: impl Fn(&str, &Feature) -> Result<Plan, String> + 'static,
     forge: impl Fn(&str) -> Result<F, String> + 'static,
     agents: impl Fn() -> Result<M, String> + 'static,
@@ -307,8 +306,7 @@ pub fn start_feature<F, A, M>(
 ) -> Tool
 where
     F: Forge + Send + Sync + 'static,
-    A: Agent + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> A + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
 {
     Tool::new(
         "start_feature",
@@ -376,7 +374,6 @@ where
             let problems = plan.problems();
             let issues = plan.work(&BTreeSet::new()).len();
             let forge = forge(repo)?;
-            let runner = runner()?;
             let agents = agents()?;
             // The check is a precondition: raised here, before anything
             // is dispatched, with detection's proposal prefilled.
@@ -401,7 +398,7 @@ where
                 let established = Arc::clone(&established);
                 move || established.tip()
             };
-            let record = build(plan, established, &runner, agents, Arc::clone(&budget));
+            let record = build(plan, established, agents, Arc::clone(&budget));
             let run = reservation.fill(Flight {
                 feature: feature.clone(),
                 repository: repository.clone(),
@@ -541,23 +538,16 @@ mod tests {
     use super::super::State;
     use super::super::fixtures::{id, node, plan, seven_holding_eight};
     use super::*;
-    use crate::agent::Task;
     use crate::testing::{Local, Scratch, seeded};
     use crate::tools::Registry;
 
-    /// An Agent that is never reached in these tests: the runner path is
-    /// bogus, so every dispatch fails at launch — which is exactly what
-    /// lets the tool tests run with no runner binary. The end-to-end
-    /// build rides in crates/epik-agent's integration tests.
-    struct Unreachable;
-
-    impl Agent for Unreachable {
-        fn task(&self) -> Task {
-            Task::new(
-                vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
-                "/",
-            )
-        }
+    /// An Agent that never starts: its program does not exist, so every
+    /// dispatch fails at the start — which is exactly what lets the tool
+    /// tests run without an engine. The end-to-end build rides in the
+    /// feature build's own tests.
+    fn unreachable(_: &Issue, _: &Workspace, _: &str) -> Result<Agent, String> {
+        Agent::new(vec!["/nonexistent/agent".to_owned()], "/", [])
+            .map_err(|error| format!("{error:#}"))
     }
 
     fn git(args: &[&str]) -> String {
@@ -609,8 +599,8 @@ mod tests {
     }
 
     /// The registry a turn would carry, over injected seams: a fixture
-    /// plan, a bare-directory forge, a bogus runner, and an asker the
-    /// test scripts.
+    /// plan, a bare-directory forge, an Agent that never starts, and an
+    /// asker the test scripts.
     fn registry(
         builds: &Arc<Builds>,
         the_plan: Plan,
@@ -621,15 +611,9 @@ mod tests {
         registry.register(start_feature(
             Arc::clone(builds),
             Budget::new(),
-            || Ok(PathBuf::from("/nonexistent/epik-agent")),
             move |_, _| Ok(the_plan.clone()),
             move |_| Ok(Local(remote.clone())),
-            || {
-                Ok(|_: &Issue, workspace: &Workspace, _: &str| {
-                    let _ = workspace;
-                    Unreachable
-                })
-            },
+            || Ok(unreachable),
             asker,
         ));
         registry.register(feature_status(Arc::clone(builds)));
@@ -815,7 +799,7 @@ mod tests {
         assert_eq!(
             status["tip"],
             json!(main_tip),
-            "nothing landed: a bogus runner"
+            "nothing landed: an Agent that never starts"
         );
         tidy(&work);
     }

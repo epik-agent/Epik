@@ -17,26 +17,24 @@
 //! sibling for a branch that already stands: the feature workspace a
 //! feature build keeps for itself, distinct from the jobs' own.
 //!
-//! [`launch`] runs any [`Agent`] in the workspace through the runner —
-//! `ClaudeCode` in production, an inline shell script in tests, the same
-//! asymmetry as CLI-in-prod/git2-in-tests — and one drainer thread folds
-//! its events into the shared [`Record`]: stdout lines interpreted
-//! through [`claude_code::interpret`] into narration, and at the end the
-//! commit *observation* — did the branch advance past the base, is the
-//! worktree clean. Epik observes; the Agent commits. A clean
+//! [`launch`] takes a started [`Agent`] in the workspace — `ClaudeCode`
+//! in production, an inline shell script in tests, the same asymmetry as
+//! CLI-in-prod/git2-in-tests — and one drainer thread folds its events
+//! into the shared [`Record`]: stdout lines interpreted through
+//! [`claude_code::interpret`] into narration, then the exit, and at the
+//! end the commit *observation* — did the branch advance past the base,
+//! is the worktree clean. Epik observes; the Agent commits. A clean
 //! worktree is removed; a dirty one is left where it is and its path
 //! noted. Remediation is deliberately unbuilt.
 //!
 //! Nothing here reports anywhere. The record is the sink; whoever
 //! ordered the job reads it.
 
-use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::agent::claude_code::{self, Update};
-use crate::agent::{Agent, Event, Exit, Handle};
+use crate::agent::{Agent, Event, Exit};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
 use crate::temp;
 
@@ -288,6 +286,9 @@ pub enum Phase {
     Running,
     /// The Agent is gone; this is how it ended.
     Finished(Exit),
+    /// The Agent is gone, but how it ended could not be read; the words
+    /// say why.
+    Lost(String),
 }
 
 /// What the branch and the worktree looked like when the Agent was
@@ -356,7 +357,7 @@ impl Record {
             .find(|update| matches!(update, Update::Result { .. }))
     }
 
-    /// Folds one event in: narration, stderr, or the end.
+    /// Folds one event in: narration or stderr.
     fn absorb(&mut self, event: Event) {
         match event {
             Event::Stdout { line } => {
@@ -372,8 +373,6 @@ impl Record {
                     self.stderr.remove(0);
                 }
             }
-            Event::Exited(exit) => self.phase = Phase::Finished(exit),
-            Event::Started { .. } | Event::Unknown => {}
         }
     }
 }
@@ -420,10 +419,10 @@ pub(crate) fn remove_worktree(workspace: &Workspace) {
     ]);
 }
 
-/// Removes a provisioned worktree that never got its Agent, so a failed
-/// launch — or a factory that never produced one — leaves nothing
+/// Removes a provisioned worktree whose Agent never started, so a
+/// failed start — or a factory that never produced one — leaves nothing
 /// behind. Best effort.
-pub(crate) fn abandon(workspace: &Workspace) {
+pub fn abandon(workspace: &Workspace) {
     remove_worktree(workspace);
     let _ = plumbing(&[
         "-C",
@@ -434,67 +433,49 @@ pub(crate) fn abandon(workspace: &Workspace) {
     ]);
 }
 
-/// Launches `agent` under the runner at `runner` for the run `record`
-/// describes, and returns at once. One drainer thread folds the events
-/// into the record; when the Agent exits it takes the commit observation
-/// and removes the worktree if clean. The [`Handle`] is the run's life:
-/// dropping it kills the Agent, so the caller keeps it. Beside it rides
-/// the drainer's own [`JoinHandle`](std::thread::JoinHandle): joining it
-/// is how a caller waits for the commit observation — the last thing the
-/// drainer writes — bounded by the work itself rather than by polling;
-/// dropping it detaches the drainer, which finishes on its own.
+/// Attaches the started `agent` to the run `record` describes, and
+/// returns at once. One drainer thread owns the Agent for the run's
+/// life: it folds the events into the record, records the exit, and
+/// then takes the commit observation and removes the worktree if clean.
+/// The drainer's own [`JoinHandle`](std::thread::JoinHandle) comes back:
+/// joining it is how a caller waits for the commit observation — the
+/// last thing the drainer writes — bounded by the work itself rather
+/// than by polling; dropping it detaches the drainer, which finishes on
+/// its own.
 ///
-/// `on_exit` runs on the drainer thread at the moment the run's end is
-/// folded — the [`Phase::Finished`] transition, before the commit
+/// `on_exit` runs on the drainer thread the moment the run's end is
+/// recorded — the [`Phase::Finished`] transition, before the commit
 /// observation — so a host can return an Agent slot the instant the
-/// Agent is gone, even when the drain itself outlives the run.
-///
-/// # Errors
-///
-/// The spawn itself failing — the runner binary missing, chiefly. The
-/// provisioned worktree is removed on the way out.
+/// Agent is gone, even when the observation outlives the run.
 pub fn launch(
-    agent: &impl Agent,
-    runner: &Path,
+    mut agent: Agent,
     record: Run,
     on_exit: impl FnOnce() + Send + 'static,
-) -> io::Result<(Handle, std::thread::JoinHandle<()>)> {
-    let (events_in, events) = channel();
-    let handle = match crate::agent::run(agent, runner, events_in) {
-        Ok(handle) => handle,
-        Err(error) => {
-            let workspace = record
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for event in agent.events() {
+            record
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .workspace
-                .clone();
-            abandon(&workspace);
-            return Err(error);
+                .absorb(event);
         }
-    };
-    let drainer = std::thread::spawn(move || {
-        let mut on_exit = Some(on_exit);
-        for event in events {
-            let exited = matches!(event, Event::Exited(_));
-            let workspace = {
-                let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
-                record.absorb(event);
-                exited.then(|| record.workspace.clone())
-            };
-            if exited && let Some(on_exit) = on_exit.take() {
-                on_exit();
-            }
-            // Observed outside the lock: git takes its time.
-            if let Some(workspace) = workspace {
-                let commits = observe(&workspace);
-                record
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .commits = Some(commits);
-            }
-        }
-    });
-    Ok((handle, drainer))
+        let phase = match agent.wait() {
+            Ok(exit) => Phase::Finished(exit),
+            Err(error) => Phase::Lost(format!("{error:#}")),
+        };
+        let workspace = {
+            let mut record = record.lock().unwrap_or_else(PoisonError::into_inner);
+            record.phase = phase;
+            record.workspace.clone()
+        };
+        on_exit();
+        // Observed outside the lock: git takes its time.
+        let commits = observe(&workspace);
+        record
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commits = Some(commits);
+    })
 }
 
 #[cfg(test)]
@@ -502,9 +483,8 @@ mod tests {
     use super::*;
 
     // Provisioning against a git_init-made bare repository, verified with
-    // git2 — the independent implementation. Launching needs the runner
-    // binary, which only the epik-agent package's tests can locate; those
-    // live in crates/epik-agent/tests/build.rs.
+    // git2 — the independent implementation; launching against a
+    // scripted Agent in the provisioned worktree.
 
     use crate::testing::Scratch;
 
@@ -671,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_folds_narration_and_the_end_and_caps_what_it_keeps() {
+    fn a_record_folds_narration_and_stderr_and_caps_what_it_keeps() {
         let run = Record::new(
             order("/r", "b"),
             Workspace {
@@ -682,7 +662,6 @@ mod tests {
             },
         );
         let mut record = run.lock().unwrap();
-        record.absorb(Event::Started { pid: 1 });
         record.absorb(Event::Stdout {
             line: r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
                 .to_owned(),
@@ -719,11 +698,89 @@ mod tests {
             line: r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#
                 .to_owned(),
         });
-        record.absorb(Event::Exited(Exit::Code(0)));
         assert!(matches!(
             record.result(),
             Some(Update::Result { ok: true, .. })
         ));
+        assert_eq!(
+            record.phase,
+            Phase::Running,
+            "the exit is the drainer's to record, after the stream"
+        );
+    }
+
+    /// `script` under `sh -c` in the workspace's directory.
+    fn agent_in(workspace: &Workspace, script: &str) -> Agent {
+        Agent::new(
+            vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            workspace.directory.to_string_lossy().into_owned(),
+            [],
+        )
+        .expect("sh starts")
+    }
+
+    #[test]
+    fn a_launched_agent_is_recorded_observed_and_its_clean_worktree_removed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scratch = Scratch::new("launch");
+        let repository = bare(&scratch);
+        let order = order(&repository, "launch/clean");
+        let workspace = provision(&order).unwrap();
+        let directory = workspace.directory.clone();
+        let agent = agent_in(
+            &workspace,
+            concat!(
+                r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}'; "#,
+                "echo grumble >&2; ",
+                "echo hello > hello.txt && git add hello.txt && ",
+                "git -c commit.gpgsign=false commit -qm hello"
+            ),
+        );
+        let run = Record::new(order, workspace);
+        let exited = Arc::new(AtomicBool::new(false));
+        let observer = launch(agent, Arc::clone(&run), {
+            let exited = Arc::clone(&exited);
+            move || exited.store(true, Ordering::SeqCst)
+        });
+        observer.join().unwrap();
+
+        let record = run.lock().unwrap();
         assert_eq!(record.phase, Phase::Finished(Exit::Code(0)));
+        assert!(exited.load(Ordering::SeqCst), "on_exit ran");
+        assert_eq!(
+            record.narration,
+            [Update::Text {
+                text: "hi".to_owned()
+            }]
+        );
+        assert_eq!(record.stderr, ["grumble"]);
+        let commits = record.commits.as_ref().expect("the observation is taken");
+        assert!(commits.advanced, "{commits:?}");
+        assert!(commits.clean, "{commits:?}");
+        assert_eq!(commits.kept, None);
+        assert!(!directory.exists(), "a clean worktree is removed");
+    }
+
+    #[test]
+    fn a_launched_agent_that_commits_nothing_and_leaves_a_mess_keeps_its_worktree() {
+        let scratch = Scratch::new("launch-dirty");
+        let repository = bare(&scratch);
+        let order = order(&repository, "launch/dirty");
+        let workspace = provision(&order).unwrap();
+        let directory = workspace.directory.clone();
+        let agent = agent_in(&workspace, "echo half-done > mess.txt; exit 7");
+        let run = Record::new(order, workspace.clone());
+        launch(agent, Arc::clone(&run), || {}).join().unwrap();
+
+        let record = run.lock().unwrap();
+        assert_eq!(record.phase, Phase::Finished(Exit::Code(7)));
+        let commits = record.commits.as_ref().expect("the observation is taken");
+        assert!(!commits.advanced, "{commits:?}");
+        assert!(!commits.clean, "{commits:?}");
+        assert_eq!(commits.kept.as_deref(), Some(directory.as_path()));
+        assert!(directory.exists(), "a dirty worktree is left where it is");
+        drop(record);
+        tidy(&workspace);
     }
 }
