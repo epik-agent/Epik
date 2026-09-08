@@ -8,7 +8,7 @@
 //! isolation posture: the agent runs with Epik's configuration
 //! (`--settings '{}'`, `--strict-mcp-config`), never the machine-wide
 //! Claude Code setup, and with `--dangerously-skip-permissions` —
-//! deliberate autonomy, because events only flow *out* of an agent;
+//! deliberate autonomy, because output only flows *out* of an agent;
 //! there is no channel to answer a permission prompt, so the agent must
 //! never ask one. Its containment is the working directory and the
 //! environment it is handed. The prompt is the last argument: the CLI
@@ -16,8 +16,8 @@
 //!
 //! [`start`]: ClaudeCode::start
 //!
-//! The CLI's stream-json arrives as the generic `Stdout { line }`
-//! events; the generic channel stays generic, and [`interpret`] layers
+//! The CLI's stream-json arrives as the Agent's generic stdout
+//! [`Line`](super::Line)s; the stream stays generic, and [`interpret`] layers
 //! the engine's meaning on top as a pure function over lines — modelling
 //! only the fields Epik reads, absorbing everything else. A line that is
 //! not JSON, or JSON of an unmodelled shape, interprets to nothing;
@@ -60,15 +60,15 @@ pub enum Update {
 /// an empty Vec, never an error.
 #[must_use]
 pub fn interpret(line: &str) -> Vec<Update> {
-    let Ok(line) = serde_json::from_str::<Line>(line) else {
+    let Ok(event) = serde_json::from_str::<Event>(line) else {
         return Vec::new();
     };
-    match line.kind.as_str() {
-        "system" if line.subtype == "init" => match (line.session_id, line.model) {
+    match event.kind.as_str() {
+        "system" if event.subtype == "init" => match (event.session_id, event.model) {
             (Some(id), Some(model)) => vec![Update::Session { id, model }],
             _ => Vec::new(),
         },
-        "assistant" => line
+        "assistant" => event
             .message
             .map(|message| message.content)
             .unwrap_or_default()
@@ -76,13 +76,13 @@ pub fn interpret(line: &str) -> Vec<Update> {
             .filter_map(block_update)
             .collect(),
         "result" => {
-            let usage = line.usage.unwrap_or_default();
+            let usage = event.usage.unwrap_or_default();
             vec![Update::Result {
-                ok: !line.is_error.unwrap_or(false),
+                ok: !event.is_error.unwrap_or(false),
                 // A success reports under `result`; an error's words
                 // arrive as an `errors` list instead.
-                text: line.result.unwrap_or_else(|| line.errors.join("; ")),
-                cost_usd: line.total_cost_usd,
+                text: event.result.unwrap_or_else(|| event.errors.join("; ")),
+                cost_usd: event.total_cost_usd,
                 input_tokens: usage.input_tokens,
                 output_tokens: usage.output_tokens,
             }]
@@ -99,10 +99,11 @@ fn block_update(block: Block) -> Option<Update> {
     }
 }
 
-// The wire view: only the fields Epik reads, everything else absorbed.
+// The wire view: one stream-json event, as the CLI writes one per line —
+// only the fields Epik reads, everything else absorbed.
 
 #[derive(Default, Deserialize)]
-struct Line {
+struct Event {
     #[serde(default, rename = "type")]
     kind: String,
     #[serde(default)]

@@ -19,7 +19,7 @@
 //!
 //! [`launch`] takes a started [`Agent`] in the workspace — `ClaudeCode`
 //! in production, an inline shell script in tests, the same asymmetry as
-//! CLI-in-prod/git2-in-tests — and one drainer thread folds its events
+//! CLI-in-prod/git2-in-tests — and one drainer thread folds its lines
 //! into the shared [`Record`]: stdout lines interpreted through
 //! [`claude_code::interpret`] into narration, then the exit, and at the
 //! end the commit *observation* — did the branch advance past the base,
@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::agent::claude_code::{self, Update};
-use crate::agent::{Agent, Event, Exit};
+use crate::agent::{Agent, Exit, Line};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
 use crate::temp;
 
@@ -358,16 +358,16 @@ impl Record {
     }
 
     /// Folds one event in: narration or stderr.
-    fn absorb(&mut self, event: Event) {
-        match event {
-            Event::Stdout { line } => {
+    fn absorb(&mut self, line: Line) {
+        match line {
+            Line::Stdout(line) => {
                 self.narration.extend(claude_code::interpret(&line));
                 if self.narration.len() > NARRATION_CAP {
                     let excess = self.narration.len() - NARRATION_CAP;
                     self.narration.drain(..excess);
                 }
             }
-            Event::Stderr { line } => {
+            Line::Stderr(line) => {
                 self.stderr.push(line);
                 if self.stderr.len() > STDERR_CAP {
                     self.stderr.remove(0);
@@ -435,7 +435,7 @@ pub fn abandon(workspace: &Workspace) {
 
 /// Attaches the started `agent` to the run `record` describes, and
 /// returns at once. One drainer thread owns the Agent for the run's
-/// life: it folds the events into the record, records the exit, and
+/// life: it folds the lines into the record, records the exit, and
 /// then takes the commit observation and removes the worktree if clean.
 /// The drainer's own [`JoinHandle`](std::thread::JoinHandle) comes back:
 /// joining it is how a caller waits for the commit observation — the
@@ -453,11 +453,11 @@ pub fn launch(
     on_exit: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for event in agent.events() {
+        for line in agent.lines() {
             record
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .absorb(event);
+                .absorb(line);
         }
         let phase = match agent.wait() {
             Ok(exit) => Phase::Finished(exit),
@@ -662,16 +662,12 @@ mod tests {
             },
         );
         let mut record = run.lock().unwrap();
-        record.absorb(Event::Stdout {
-            line: r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
+        record.absorb(Line::Stdout(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
                 .to_owned(),
-        });
-        record.absorb(Event::Stdout {
-            line: "not json".to_owned(),
-        });
-        record.absorb(Event::Stderr {
-            line: "grumble".to_owned(),
-        });
+        ));
+        record.absorb(Line::Stdout("not json".to_owned()));
+        record.absorb(Line::Stderr("grumble".to_owned()));
         assert_eq!(
             record.narration,
             [Update::Text {
@@ -683,10 +679,8 @@ mod tests {
         assert!(record.result().is_none());
 
         for _ in 0..(NARRATION_CAP + 5) {
-            record.absorb(Event::Stdout {
-                line: r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}"#
-                    .to_owned(),
-            });
+            record.absorb(Line::Stdout(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}"#
+                    .to_owned()));
         }
         assert_eq!(record.narration.len(), NARRATION_CAP);
         assert!(
@@ -694,10 +688,9 @@ mod tests {
             "the oldest went first"
         );
 
-        record.absorb(Event::Stdout {
-            line: r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#
-                .to_owned(),
-        });
+        record.absorb(Line::Stdout(
+            r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#.to_owned(),
+        ));
         assert!(matches!(
             record.result(),
             Some(Update::Result { ok: true, .. })

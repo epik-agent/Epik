@@ -4,8 +4,8 @@
 //! an *Agent*, whatever it does — a test fixture counting to three is an
 //! Agent the same as a coding engine implementing an issue. An [`Agent`]
 //! is that process, running from the moment [`Agent::new`] returns: it
-//! says what it says as [`Event`]s, one per line, and ends in the
-//! [`Exit`] that [`Agent::wait`] reports. Events flow out only. There is
+//! says what it says as [`Line`]s, one per line, and ends in the
+//! [`Exit`] that [`Agent::wait`] reports. Output flows out only. There is
 //! no channel into an Agent, and it gets no stdin; what it needs to know
 //! goes in its arguments, its environment, and its working directory.
 //! An Agent may be given a deadline, past which `wait` kills it and says
@@ -28,7 +28,7 @@
 //! The piece the standard library does not provide is a pair of reader
 //! threads, called pumps here, that drain both pipes continuously and hand
 //! the lines to the caller as they arrive. [`Agent`] owns the process and its
-//! pumps, delivers output as a stream of [`Event`]s, and kills the process if
+//! pumps, delivers output as a stream of [`Line`]s, and kills the process if
 //! it is dropped before being waited on, so nothing is left running or
 //! blocked by mistake.
 //!
@@ -44,7 +44,7 @@
 //! # Example
 //!
 //! Call the methods in this order: [`Agent::new`] starts the process and the
-//! pumps, [`Agent::events`] is drained until the process closes its output,
+//! pumps, [`Agent::lines`] is drained until the process closes its output,
 //! and then [`Agent::wait`] collects the exit.
 //!
 //! ```no_run
@@ -56,8 +56,8 @@
 //!     [],
 //!     None,
 //! )?;
-//! for event in agent.events() {
-//!     println!("{event:?}");
+//! for line in agent.lines() {
+//!     println!("{line:?}");
 //! }
 //! let exit = agent.wait()?;
 //! # Ok::<(), anyhow::Error>(())
@@ -65,7 +65,7 @@
 //!
 //! The pumps keep the process from hanging whatever the caller does, so
 //! calling `wait` first does not deadlock. It does mean the whole output is
-//! buffered in memory until `events` is read, and that nothing is seen until
+//! buffered in memory until `lines` is read, and that nothing is seen until
 //! the process exits, which defeats the purpose of streaming.
 //!
 //! The types are plain and wasm-clean; the process itself rides behind
@@ -104,11 +104,11 @@ impl Exit {
 /// UTF-8 come through as replacement characters rather than failing the
 /// stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Event {
+pub enum Line {
     /// One line of the Agent's stdout.
-    Stdout { line: String },
+    Stdout(String),
     /// One line of the Agent's stderr.
-    Stderr { line: String },
+    Stderr(String),
 }
 
 #[cfg(feature = "native")]
@@ -122,12 +122,12 @@ mod process {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{Event, Exit, platform};
+    use super::{Exit, Line, platform};
     use crate::keystore::Secret;
 
-    /// A process whose stdout and stderr are streamed as [`Event`]s.
+    /// A process whose stdout and stderr are streamed as [`Line`]s.
     ///
-    /// Drain [`Agent::events`] before calling [`Agent::wait`]. The reader
+    /// Drain [`Agent::lines`] before calling [`Agent::wait`]. The reader
     /// threads stop when the process closes its output, so the event
     /// iterator ends on its own once the process exits.
     pub struct Agent {
@@ -136,7 +136,7 @@ mod process {
         /// When the process is killed if still running, and how long it
         /// was given; `None` lets it run for as long as it likes.
         deadline: Option<(Instant, Duration)>,
-        event_receiver: Receiver<Event>,
+        line_receiver: Receiver<Line>,
         process: Child,
         pumps: Vec<JoinHandle<Result<()>>>,
     }
@@ -159,7 +159,7 @@ mod process {
         /// # Errors
         ///
         /// No program named, or the spawn itself failing — the program
-        /// missing, chiefly. Everything after that arrives as events or
+        /// missing, chiefly. Everything after that arrives as lines or
         /// through [`Agent::wait`].
         pub fn new(
             argv: Vec<String>,
@@ -175,42 +175,42 @@ mod process {
             for (name, value) in env {
                 command.env(name, value.reveal());
             }
-            let (event_sender, event_receiver) = channel();
+            let (line_sender, line_receiver) = channel();
             let (process, stdout, stderr) = spawn_piped(command)?;
             let deadline = deadline.map(|allowed| (Instant::now() + allowed, allowed));
             // Each pump owns one sender. When both reader threads finish
-            // and drop theirs, the channel disconnects and `events` ends.
+            // and drop theirs, the channel disconnects and `lines` ends.
             // Nothing else may hold a sender or the iterator would never
             // terminate.
             let pumps = vec![
-                pump(stdout, event_sender.clone(), |line| Event::Stdout { line }),
-                pump(stderr, event_sender, |line| Event::Stderr { line }),
+                pump(stdout, line_sender.clone(), Line::Stdout),
+                pump(stderr, line_sender, Line::Stderr),
             ];
             Ok(Self {
                 program: program.clone(),
                 deadline,
-                event_receiver,
+                line_receiver,
                 process,
                 pumps,
             })
         }
 
-        /// Events in the order they were received. Blocks between events
+        /// Lines in the order they were received. Blocks between lines
         /// and ends when the process has closed both stdout and stderr.
-        pub fn events(&self) -> impl Iterator<Item = Event> + '_ {
-            self.event_receiver.iter()
+        pub fn lines(&self) -> impl Iterator<Item = Line> + '_ {
+            self.line_receiver.iter()
         }
 
         /// Wait for the reader threads to finish and the process to exit.
         ///
-        /// Normally called after draining [`Agent::events`]. Calling it
+        /// Normally called after draining [`Agent::lines`]. Calling it
         /// earlier is safe, since the channel is unbounded and the pumps
         /// keep draining the pipes, but all output is then held in memory
         /// until read. Calling this more than once returns the cached exit.
         ///
         /// The deadline is enforced here: a process still running when it
         /// passes is killed, with its group, and the kill is the error. A
-        /// caller with a deadline waits first and reads the events after,
+        /// caller with a deadline waits first and reads the lines after,
         /// since draining them blocks for as long as the process holds its
         /// pipes open.
         ///
@@ -260,10 +260,10 @@ mod process {
         pub fn finish(mut self) -> Result<Finished> {
             let exit = self.wait()?;
             let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-            for event in self.events() {
-                match event {
-                    Event::Stdout { line } => stdout.push(line),
-                    Event::Stderr { line } => stderr.push(line),
+            for line in self.lines() {
+                match line {
+                    Line::Stdout(line) => stdout.push(line),
+                    Line::Stderr(line) => stderr.push(line),
                 }
             }
             let mut output = stdout.join("\n");
@@ -354,12 +354,12 @@ mod process {
     }
 
     /// Read `process_stream` on a new thread, sending each line to
-    /// `event_sender` as soon as it is complete. The thread exits when the
+    /// `line_sender` as soon as it is complete. The thread exits when the
     /// stream reaches end of file or the receiver has been dropped.
     fn pump<R: Read + Send + 'static>(
         process_stream: R,
-        event_sender: Sender<Event>,
-        create_event: fn(String) -> Event,
+        line_sender: Sender<Line>,
+        create_line: fn(String) -> Line,
     ) -> JoinHandle<Result<()>> {
         spawn(move || {
             let mut reader = BufReader::new(process_stream);
@@ -371,7 +371,7 @@ mod process {
                     Ok(_) => {}
                     Err(e) => return Err(e.into()),
                 }
-                if event_sender.send(create_event(line(&buffer))).is_err() {
+                if line_sender.send(create_line(decode(&buffer))).is_err() {
                     // The receiver is gone, so nobody wants the rest.
                     break;
                 }
@@ -383,7 +383,7 @@ mod process {
     /// One line's bytes as text: the newline, and a carriage return before
     /// it, dropped as [`BufRead::lines`] does; anything that is not UTF-8
     /// replaced.
-    fn line(bytes: &[u8]) -> String {
+    fn decode(bytes: &[u8]) -> String {
         let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
         let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
         String::from_utf8_lossy(bytes).into_owned()
@@ -446,10 +446,10 @@ mod process {
         fn run(script: &str) -> Collected {
             let mut agent = sh(script);
             let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-            for event in agent.events() {
-                match event {
-                    Event::Stdout { line } => stdout.push(line),
-                    Event::Stderr { line } => stderr.push(line),
+            for line in agent.lines() {
+                match line {
+                    Line::Stdout(line) => stdout.push(line),
+                    Line::Stderr(line) => stderr.push(line),
                 }
             }
             let exit = agent.wait().expect("wait failed");
@@ -514,16 +514,16 @@ mod process {
             let mut agent = sh("head -c 1000000 /dev/zero");
             assert_eq!(agent.wait().unwrap(), Exit::Code(0));
             let total: usize = agent
-                .events()
-                .map(|event| match event {
-                    Event::Stdout { line } | Event::Stderr { line } => line.len(),
+                .lines()
+                .map(|line| match line {
+                    Line::Stdout(line) | Line::Stderr(line) => line.len(),
                 })
                 .sum();
             assert_eq!(total, 1_000_000);
         }
 
         #[test]
-        fn no_output_yields_no_events() {
+        fn no_output_yields_no_lines() {
             let out = run("true");
             assert!(out.stdout.is_empty() && out.stderr.is_empty());
             assert_eq!(out.exit, Exit::Code(0));
@@ -542,7 +542,7 @@ mod process {
         #[test]
         fn wait_can_be_called_again() {
             let mut agent = sh("exit 5");
-            for _ in agent.events() {}
+            for _ in agent.lines() {}
             assert_eq!(agent.wait().unwrap(), Exit::Code(5));
             assert_eq!(agent.wait().unwrap(), Exit::Code(5));
         }
@@ -561,9 +561,9 @@ mod process {
             )
             .unwrap();
             let lines: Vec<String> = agent
-                .events()
-                .map(|event| match event {
-                    Event::Stdout { line } | Event::Stderr { line } => line,
+                .lines()
+                .map(|line| match line {
+                    Line::Stdout(line) | Line::Stderr(line) => line,
                 })
                 .collect();
             assert_eq!(agent.wait().unwrap(), Exit::Code(0));
@@ -612,7 +612,7 @@ mod process {
             // The shell starts sleep in the background, reports its pid, and
             // then waits for it, so both are alive when the agent is dropped.
             let agent = sh("sleep 30 & echo $!; wait");
-            let Some(Event::Stdout { line }) = agent.events().next() else {
+            let Some(Line::Stdout(line)) = agent.lines().next() else {
                 panic!("expected the grandchild pid on stdout");
             };
             let grandchild: u32 = line.trim().parse().unwrap();
@@ -659,10 +659,8 @@ mod process {
             assert!(!process_exists(pid), "killed and reaped");
             // What it said before the kill is still there to read.
             assert_eq!(
-                agent.events().collect::<Vec<_>>(),
-                [Event::Stdout {
-                    line: "started".to_owned()
-                }]
+                agent.lines().collect::<Vec<_>>(),
+                [Line::Stdout("started".to_owned())]
             );
         }
 
@@ -671,10 +669,8 @@ mod process {
             let mut agent = sh_within("echo quick; exit 4", Duration::from_secs(30));
             assert_eq!(agent.wait().unwrap(), Exit::Code(4));
             assert_eq!(
-                agent.events().collect::<Vec<_>>(),
-                [Event::Stdout {
-                    line: "quick".to_owned()
-                }]
+                agent.lines().collect::<Vec<_>>(),
+                [Line::Stdout("quick".to_owned())]
             );
         }
 
@@ -695,7 +691,7 @@ mod process {
         #[test]
         fn drop_after_wait_is_harmless() {
             let mut agent = sh("true");
-            for _ in agent.events() {}
+            for _ in agent.lines() {}
             assert_eq!(agent.wait().unwrap(), Exit::Code(0));
             drop(agent);
         }

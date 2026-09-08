@@ -4,7 +4,7 @@
 //! The scripted engine is the deterministic stand-in for the claude
 //! binary: `sh -c` printf of captured fixture lines — inline only, never
 //! a written script file (the ETXTBSY lesson) — and it exercises the
-//! whole path: Agent → Event stream → interpret → typed Updates. Only
+//! whole path: Agent → Line stream → interpret → typed Updates. Only
 //! the live tier, behind EPIK_CLAUDE_LIVE=1, touches a real model.
 
 #![cfg(all(feature = "testing", unix))]
@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use epik::agent::claude_code::{ClaudeCode, Update, interpret};
-use epik::agent::{Agent, Event, Exit};
+use epik::agent::{Agent, Exit, Line};
 use epik::testing::Scratch;
 use epik::testing::agent::shell;
 
@@ -34,10 +34,10 @@ fn canned(lines: &[&str], coda: &str) -> Agent {
 /// final exit.
 fn updates_of(mut agent: Agent) -> (Vec<Update>, Result<Exit, String>) {
     let updates = agent
-        .events()
-        .filter_map(|event| match event {
-            Event::Stdout { line } => Some(interpret(&line)),
-            Event::Stderr { .. } => None,
+        .lines()
+        .filter_map(|line| match line {
+            Line::Stdout(line) => Some(interpret(&line)),
+            Line::Stderr(_) => None,
         })
         .flatten()
         .collect();
@@ -104,14 +104,14 @@ fn dropping_an_engine_mid_stream_takes_it_with_it() {
 
     // The stream is flowing — the session start has been interpreted —
     // and the engine now hangs.
-    let mut events = engine.events();
-    assert!(events.any(|event| matches!(
-        event,
-        Event::Stdout { line } if interpret(&line)
+    let mut lines = engine.lines();
+    assert!(lines.any(|line| matches!(
+        line,
+        Line::Stdout(line) if interpret(&line)
             .iter()
             .any(|update| matches!(update, Update::Session { .. }))
     )));
-    drop(events);
+    drop(lines);
 
     drop(engine);
     if let Err(survivors) = gone("sleep 6379") {
