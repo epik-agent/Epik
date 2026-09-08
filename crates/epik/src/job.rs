@@ -715,6 +715,7 @@ mod tests {
             vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             workspace.directory.to_string_lossy().into_owned(),
             [],
+            None,
         )
         .expect("sh starts")
     }

@@ -1,11 +1,9 @@
 pub mod agent;
 pub mod chat;
-#[cfg(all(feature = "native", unix))]
-pub mod job;
-#[cfg(feature = "native")]
-pub use agent::child::spawn;
 #[cfg(feature = "serde")]
 pub mod config;
+#[cfg(all(feature = "native", unix))]
+pub mod job;
 // Compiled without `native` so the vocabulary stays wasm-clean, though
 // nothing but native code calls into it yet — likewise `github` and
 // `tools`.

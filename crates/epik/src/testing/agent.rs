@@ -54,6 +54,7 @@ fn sh(script: &str, env: Option<(String, Secret)>) -> Agent {
         vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
         "/",
         env,
+        None,
     )
     .expect("sh starts")
 }

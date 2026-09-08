@@ -202,25 +202,27 @@ mod tests {
     fn the_askpass_script_answers_username_and_password_from_the_environment() {
         let askpass = Askpass::new().unwrap();
         let ask = |prompt: &str| {
-            let output = crate::spawn(
-                std::process::Command::new(askpass.path().unwrap())
-                    .arg(prompt)
-                    .env("EPIK_GIT_USERNAME", "x-access-token")
-                    .env("EPIK_GIT_PASSWORD", "ghp_sesame")
-                    .stdout(std::process::Stdio::piped()),
+            crate::agent::Agent::new(
+                vec![askpass.path().unwrap().to_owned(), prompt.to_owned()],
+                "/",
+                [
+                    (
+                        "EPIK_GIT_USERNAME".to_owned(),
+                        Secret::from("x-access-token"),
+                    ),
+                    ("EPIK_GIT_PASSWORD".to_owned(), Secret::from("ghp_sesame")),
+                ],
+                None,
             )
             .unwrap()
-            .wait_with_output()
-            .unwrap();
-            String::from_utf8(output.stdout).unwrap()
+            .finish()
+            .unwrap()
+            .output
         };
-        assert_eq!(
-            ask("Username for 'https://github.com': "),
-            "x-access-token\n"
-        );
+        assert_eq!(ask("Username for 'https://github.com': "), "x-access-token");
         assert_eq!(
             ask("Password for 'https://x-access-token@github.com': "),
-            "ghp_sesame\n"
+            "ghp_sesame"
         );
         assert!(
             !ASKPASS.contains("sesame"),

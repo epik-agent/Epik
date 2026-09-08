@@ -176,7 +176,7 @@ impl ClaudeCode {
         let env = self
             .api_key
             .map(|key| ("ANTHROPIC_API_KEY".to_owned(), key));
-        Agent::new(argv, self.cwd, env)
+        Agent::new(argv, self.cwd, env, None)
     }
 
     /// The whole command line: the binary, the settled posture, the

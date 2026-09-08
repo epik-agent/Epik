@@ -8,8 +8,12 @@
 //! [`Exit`] that [`Agent::wait`] reports. Events flow out only. There is
 //! no channel into an Agent, and it gets no stdin; what it needs to know
 //! goes in its arguments, its environment, and its working directory.
-//! [`ClaudeCode`](claude_code::ClaudeCode) is the first real engine, and
-//! the scripted Agent under `testing` the deterministic stand-in.
+//! An Agent may be given a deadline, past which `wait` kills it and says
+//! so; `None` lets it run for as long as it likes. This is the one way
+//! Epik starts a process: [`ClaudeCode`](claude_code::ClaudeCode) is the
+//! first real engine, the scripted Agent under `testing` the
+//! deterministic stand-in, and every git command and every check is an
+//! Agent [`finish`](Agent::finish)ed for its words.
 //!
 //! # Why this exists
 //!
@@ -50,6 +54,7 @@
 //!     vec!["sh".to_string(), "-c".to_string(), "echo Hello".to_string()],
 //!     "/",
 //!     [],
+//!     None,
 //! )?;
 //! for event in agent.events() {
 //!     println!("{event:?}");
@@ -68,14 +73,12 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "native")]
-pub(crate) mod child;
 pub mod claude_code;
 #[cfg(feature = "native")]
 mod platform;
 
 #[cfg(feature = "native")]
-pub use process::Agent;
+pub use process::{Agent, Finished};
 
 /// How an Agent ended: an exit code, or the signal that took it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -85,6 +88,14 @@ pub enum Exit {
     Code(i32),
     /// A signal took the Agent.
     Signal(i32),
+}
+
+impl Exit {
+    /// Exit code zero: the one end a process calls success.
+    #[must_use]
+    pub fn success(self) -> bool {
+        self == Self::Code(0)
+    }
 }
 
 /// One line an Agent said, in the order said, without its newline — nor
@@ -105,11 +116,13 @@ mod process {
     use std::io::{BufRead, BufReader, Read};
     use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
     use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::sync::{Mutex, PoisonError};
     use std::thread::{JoinHandle, spawn};
+    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{Event, Exit, child, platform};
+    use super::{Event, Exit, platform};
     use crate::keystore::Secret;
 
     /// A process whose stdout and stderr are streamed as [`Event`]s.
@@ -118,15 +131,30 @@ mod process {
     /// threads stop when the process closes its output, so the event
     /// iterator ends on its own once the process exits.
     pub struct Agent {
+        /// The program, for the words a failure comes back as.
+        program: String,
+        /// When the process is killed if still running, and how long it
+        /// was given; `None` lets it run for as long as it likes.
+        deadline: Option<(Instant, Duration)>,
         event_receiver: Receiver<Event>,
         process: Child,
         pumps: Vec<JoinHandle<Result<()>>>,
     }
 
+    /// A process run to its end: how it ended, and everything it said —
+    /// stdout first, then stderr, each in order, lines joined by newlines.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Finished {
+        pub exit: Exit,
+        pub output: String,
+    }
+
     impl Agent {
         /// Start `argv` — the program, then its arguments — in `cwd`, with
         /// `env` added to the environment Epik has, and begin streaming its
-        /// output. The process gets no stdin.
+        /// output. The process gets no stdin. With a `deadline`, a process
+        /// still running that long after its start is killed by
+        /// [`Agent::wait`], which says so; `None` is no limit.
         ///
         /// # Errors
         ///
@@ -137,6 +165,7 @@ mod process {
             argv: Vec<String>,
             cwd: impl Into<String>,
             env: impl IntoIterator<Item = (String, Secret)>,
+            deadline: Option<Duration>,
         ) -> Result<Self> {
             let Some((program, arguments)) = argv.split_first() else {
                 return Err(anyhow!("no program to run"));
@@ -148,6 +177,7 @@ mod process {
             }
             let (event_sender, event_receiver) = channel();
             let (process, stdout, stderr) = spawn_piped(command)?;
+            let deadline = deadline.map(|allowed| (Instant::now() + allowed, allowed));
             // Each pump owns one sender. When both reader threads finish
             // and drop theirs, the channel disconnects and `events` ends.
             // Nothing else may hold a sender or the iterator would never
@@ -157,6 +187,8 @@ mod process {
                 pump(stderr, event_sender, |line| Event::Stderr { line }),
             ];
             Ok(Self {
+                program: program.clone(),
+                deadline,
                 event_receiver,
                 process,
                 pumps,
@@ -176,17 +208,70 @@ mod process {
         /// keep draining the pipes, but all output is then held in memory
         /// until read. Calling this more than once returns the cached exit.
         ///
+        /// The deadline is enforced here: a process still running when it
+        /// passes is killed, with its group, and the kill is the error. A
+        /// caller with a deadline waits first and reads the events after,
+        /// since draining them blocks for as long as the process holds its
+        /// pipes open.
+        ///
         /// # Errors
         ///
-        /// A pipe could not be read to its end, or the process could not
-        /// be reaped.
+        /// The deadline passed, a pipe could not be read to its end, or
+        /// the process could not be reaped.
         pub fn wait(&mut self) -> Result<Exit> {
+            if let Some((deadline, allowed)) = self.deadline {
+                while self
+                    .process
+                    .try_wait()
+                    .with_context(|| format!("could not wait for {}", self.program))?
+                    .is_none()
+                {
+                    if Instant::now() >= deadline {
+                        platform::kill_tree(&mut self.process);
+                        let _ = self.process.wait();
+                        platform::kill_tree(&mut self.process);
+                        return Err(anyhow!(
+                            "{} was killed after {allowed:?} without finishing",
+                            self.program
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
             for pump in self.pumps.drain(..) {
                 pump.join()
                     .map_err(|_| anyhow!("reader thread panicked"))??;
             }
-            let status = self.process.wait().context("could not wait for process")?;
+            let status = self
+                .process
+                .wait()
+                .with_context(|| format!("could not wait for {}", self.program))?;
             exit(status)
+        }
+
+        /// Run to the end and collect everything: the exit, and the output
+        /// as one transcript — stdout first, then stderr — the shape a
+        /// caller that wants a process's words rather than its stream
+        /// reads. The deadline is in force.
+        ///
+        /// # Errors
+        ///
+        /// [`Agent::wait`]'s.
+        pub fn finish(mut self) -> Result<Finished> {
+            let exit = self.wait()?;
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            for event in self.events() {
+                match event {
+                    Event::Stdout { line } => stdout.push(line),
+                    Event::Stderr { line } => stderr.push(line),
+                }
+            }
+            let mut output = stdout.join("\n");
+            if !output.is_empty() && !stderr.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&stderr.join("\n"));
+            Ok(Finished { exit, output })
         }
     }
 
@@ -226,16 +311,13 @@ mod process {
     /// Start `command` with stdout and stderr piped, no stdin, and on Unix
     /// as the leader of a new process group.
     ///
-    /// The spawn goes through the crate's one spawn lock: macOS makes a
-    /// pipe in two steps, and a spawn on another thread between them would
-    /// inherit an end of these pipes and hold it open for as long as that
-    /// child lives. Returns the pipes alongside the process handle so the
-    /// caller can hand them to their readers without leaving `Option`s
-    /// behind in `Child`.
+    /// Returns the pipes alongside the process handle so the caller can
+    /// hand them to their readers without leaving `Option`s behind in
+    /// `Child`.
     fn spawn_piped(mut command: Command) -> Result<(Child, ChildStdout, ChildStderr)> {
         let program = command.get_program().to_string_lossy().into_owned();
         platform::prepare(&mut command);
-        let mut process = child::spawn(
+        let mut process = spawn_one_at_a_time(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -251,6 +333,24 @@ mod process {
             .take()
             .with_context(|| format!("{program} stderr not piped"))?;
         Ok((process, stdout, stderr))
+    }
+
+    /// Spawns `command`, with no other spawn of this process in flight.
+    ///
+    /// macOS makes a pipe in two steps — `pipe`, then `FD_CLOEXEC` on each
+    /// end — and `posix_spawn` hands a child every descriptor not yet so
+    /// marked. A spawn on another thread between those two steps gives
+    /// its child the pipe ends this one is wiring, and that child — and
+    /// everything it runs — holds them for as long as it lives: this one's
+    /// stdout never closes. Measured: 4 of 3000 spawns under concurrent
+    /// spawn pressure saw a sibling's EOF delayed by that child's whole
+    /// lifetime, none with the lock. Spawning takes microseconds; nothing
+    /// waits behind the lock for longer than that. Every process Epik
+    /// starts comes through here, since every one is an Agent.
+    fn spawn_one_at_a_time(command: &mut Command) -> std::io::Result<Child> {
+        static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+        let _held = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        command.spawn()
     }
 
     /// Read `process_stream` on a new thread, sending each line to
@@ -295,8 +395,12 @@ mod process {
 
         #[test]
         fn missing_program_is_an_error() {
-            let Err(error) = Agent::new(vec!["definitely-not-a-real-program".to_owned()], "/", [])
-            else {
+            let Err(error) = Agent::new(
+                vec!["definitely-not-a-real-program".to_owned()],
+                "/",
+                [],
+                None,
+            ) else {
                 panic!("expected spawn to fail");
             };
             assert!(
@@ -307,7 +411,7 @@ mod process {
 
         #[test]
         fn no_program_is_an_error() {
-            let Err(error) = Agent::new(vec![], "/", []) else {
+            let Err(error) = Agent::new(vec![], "/", [], None) else {
                 panic!("expected nothing to run");
             };
             assert_eq!(error.to_string(), "no program to run");
@@ -333,6 +437,7 @@ mod process {
                 vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
                 "/",
                 [],
+                None,
             )
             .expect("could not start sh")
         }
@@ -452,6 +557,7 @@ mod process {
                 ],
                 "/tmp",
                 [("HUSH".to_owned(), Secret::from("hush-hush-bytes"))],
+                None,
             )
             .unwrap();
             let lines: Vec<String> = agent
@@ -491,12 +597,12 @@ mod process {
 
         /// Poll until `pid` no longer exists, giving up after a few seconds.
         fn wait_for_exit(pid: u32) -> bool {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
                 if !process_exists(pid) {
                     return true;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(20));
             }
             false
         }
@@ -514,10 +620,10 @@ mod process {
             // Without the group kill, drop would block in `wait` until the sleep
             // ran out and the shell exited, and the grandchild would be gone by
             // the time it was checked. Timing the drop tells the two apart.
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             drop(agent);
             assert!(
-                started.elapsed() < std::time::Duration::from_secs(5),
+                started.elapsed() < Duration::from_secs(5),
                 "drop should not wait for the background sleep to finish"
             );
             // The grandchild is reparented to init, which reaps it soon after
@@ -526,6 +632,64 @@ mod process {
                 wait_for_exit(grandchild),
                 "background sleep should be killed with the process group"
             );
+        }
+
+        /// `script` under `sh -c`, from `/`, with `allowed` to finish.
+        fn sh_within(script: &str, allowed: Duration) -> Agent {
+            Agent::new(
+                vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+                "/",
+                [],
+                Some(allowed),
+            )
+            .expect("could not start sh")
+        }
+
+        #[test]
+        fn a_deadline_kills_a_process_that_will_not_finish_and_says_so() {
+            let mut agent = sh_within("echo started; exec sleep 30", Duration::from_millis(200));
+            let pid = agent.process.id();
+            let started = Instant::now();
+            let error = agent.wait().expect_err("the deadline should kill it");
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert_eq!(
+                error.to_string(),
+                "sh was killed after 200ms without finishing"
+            );
+            assert!(!process_exists(pid), "killed and reaped");
+            // What it said before the kill is still there to read.
+            assert_eq!(
+                agent.events().collect::<Vec<_>>(),
+                [Event::Stdout {
+                    line: "started".to_owned()
+                }]
+            );
+        }
+
+        #[test]
+        fn a_deadline_that_is_not_reached_changes_nothing() {
+            let mut agent = sh_within("echo quick; exit 4", Duration::from_secs(30));
+            assert_eq!(agent.wait().unwrap(), Exit::Code(4));
+            assert_eq!(
+                agent.events().collect::<Vec<_>>(),
+                [Event::Stdout {
+                    line: "quick".to_owned()
+                }]
+            );
+        }
+
+        #[test]
+        fn finish_collects_the_exit_and_the_words_stdout_before_stderr() {
+            let finished = sh("echo out; echo err >&2; echo out again; exit 3")
+                .finish()
+                .unwrap();
+            assert_eq!(finished.exit, Exit::Code(3));
+            assert!(!finished.exit.success());
+            assert_eq!(finished.output, "out\nout again\nerr");
+
+            let quiet = sh("true").finish().unwrap();
+            assert!(quiet.exit.success());
+            assert_eq!(quiet.output, "");
         }
 
         #[test]

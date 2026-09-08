@@ -410,17 +410,19 @@ mod tests {
     }
 
     fn tidy(workspace: &Workspace) {
-        let directory = workspace.directory.to_string_lossy().into_owned();
-        let _ = epik::spawn(std::process::Command::new("git").args([
+        let argv = [
+            "git",
             "-C",
             &workspace.repository,
             "worktree",
             "remove",
             "--force",
             "--",
-            &directory,
-        ]))
-        .and_then(|mut git| git.wait());
+            &workspace.directory.to_string_lossy(),
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let _ = Agent::new(argv, "/", [], None).and_then(Agent::finish);
     }
 
     /// The tools over `state`, with git beside them, as a turn would

@@ -1,6 +1,6 @@
 //! Epik's own git: the user's `git` binary, run as argv.
 //!
-//! Every invocation is argv straight into [`Command`] — never a shell,
+//! Every invocation is argv straight into an [`Agent`] — never a shell,
 //! never a string spliced into a command line — under a deadline, with
 //! no terminal to prompt on. [`execute`] settles the outcome into the
 //! `{ ok, output }` shape the model's git tools answer with, and
@@ -8,10 +8,12 @@
 //! git's answer as a value and its refusal as words. The persona
 //! identity every commit Epik itself makes is stated here, once.
 
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+use crate::agent::Agent;
+use crate::keystore::Secret;
 
 /// How long one git invocation may take before it is killed and reported.
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,16 +41,22 @@ fn execute_within(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<Value, String> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .envs(envs.iter().copied())
-        // No terminal is attached, so a network verb that wants
-        // credentials must fail in words rather than wait for a prompt
-        // nobody can see. The user's helpers and SSH config still apply.
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let finished = crate::agent::child::run("git", &mut command, timeout)?;
-    Ok(json!({ "ok": finished.success, "output": finished.output }))
+    let argv = std::iter::once("git")
+        .chain(args.iter().copied())
+        .map(str::to_owned)
+        .collect();
+    // No terminal is attached, so a network verb that wants credentials
+    // must fail in words rather than wait for a prompt nobody can see.
+    // The user's helpers and SSH config still apply.
+    let env = envs
+        .iter()
+        .chain(&[("GIT_TERMINAL_PROMPT", "0")])
+        .map(|(name, value)| ((*name).to_owned(), Secret::from(*value)));
+    // From wherever Epik is: every call names its repository with `-C`.
+    let finished = Agent::new(argv, ".", env, Some(timeout))
+        .and_then(Agent::finish)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(json!({ "ok": finished.exit.success(), "output": finished.output }))
 }
 
 /// [`execute`] for callers inside the crate that want git's answer, not
@@ -97,7 +105,7 @@ mod tests {
 
     /// The deadline, exercised on a short fuse rather than the real 60
     /// seconds: a fetch against a loopback listener that accepts and then
-    /// says nothing blocks git forever, so the runner has to kill it and
+    /// says nothing blocks git forever, so the Agent has to kill it and
     /// say so.
     #[test]
     fn the_deadline_kills_a_git_that_will_not_finish() {

@@ -15,8 +15,9 @@
 //! and says so.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
+
+use crate::agent::Agent;
 
 /// A repository's own idea of green: a command, judged by its exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,16 +52,16 @@ pub(super) fn run(check: &Check, workspace: &Path) -> Verdict {
 /// [`run`] against a stated deadline — which is how the tests exercise
 /// the kill without sitting through the real one.
 fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(&check.command).current_dir(workspace);
-    match crate::agent::child::run("the check", &mut command, deadline) {
+    let argv = vec!["sh".to_owned(), "-c".to_owned(), check.command.clone()];
+    match Agent::new(argv, workspace.to_string_lossy(), [], Some(deadline)).and_then(Agent::finish)
+    {
         Ok(finished) => Verdict {
-            green: finished.success,
+            green: finished.exit.success(),
             output: finished.output,
         },
-        Err(words) => Verdict {
+        Err(error) => Verdict {
             green: false,
-            output: words,
+            output: format!("the check {error:#}"),
         },
     }
 }
@@ -138,7 +139,7 @@ mod tests {
             &scratch.0,
         );
         assert!(verdict.green);
-        assert_eq!(verdict.output, "checked\n");
+        assert_eq!(verdict.output, "checked");
     }
 
     #[test]
