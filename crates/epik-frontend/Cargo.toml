@@ -29,14 +29,16 @@ wasm-bindgen-futures = "0.4"
 # `window` that tells the app's window from a browser.
 js-sys = "0.3"
 # Only for features leptos doesn't already enable (matchMedia, the
-# delegated link-click handler's Element walk, and the browser's event
-# stream).
+# delegated link-click handler's Element walk, the browser's event
+# stream, and the reload a relaunched backend calls for).
 web-sys = { version = "0.3", features = [
     "Element",
     "EventSource",
     "EventTarget",
+    "Location",
     "MediaQueryList",
     "MessageEvent",
+    "Window",
 ] }
 
 # Deliberately its own workspace: this crate targets wasm while the root

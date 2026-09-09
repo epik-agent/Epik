@@ -4,11 +4,14 @@
 //!
 //! One renderer, two transports. The page is the wasm bundle Trunk
 //! emits, embedded here so a headless backend is one file; the entries
-//! reach it as Server-Sent Events, `id: <seq>`, and a reconnecting
-//! browser's `Last-Event-ID` is the cursor to resume from. A connection
-//! with none replays from 0: attaching is replay, and there is no
-//! snapshot to serve. The surface is read-only — it serves the page and
-//! the changes, and can start nothing, stop nothing and answer nothing.
+//! reach it as Server-Sent Events, `id: <boot>.<seq>`, and a
+//! reconnecting browser's `Last-Event-ID` is the cursor to resume from
+//! — when its boot is this process's. A connection with none, or with
+//! another process's id, replays from 0: attaching is replay, there is
+//! no snapshot to serve, and a relaunched backend is a new log whose
+//! `seq` restarts at 0, which an old cursor must not be read against.
+//! The surface is read-only — it serves the page and the changes, and
+//! can start nothing, stop nothing and answer nothing.
 //!
 //! `tiny_http`: blocking, a thread per connection, and off Tauri's async
 //! runtime — the `epik` library is synchronous throughout and the server
@@ -27,9 +30,9 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use epik::monitor::{Entry, Log};
 use include_dir::{Dir, File, include_dir};
@@ -42,6 +45,19 @@ static BUNDLE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../epik-frontend/dist");
 
 /// The event stream's path.
 pub const CHANGES: &str = "/monitor/changes";
+
+/// This process's mark on every event id, `<boot>.<seq>`: unix
+/// milliseconds at first use. A relaunched backend is a new log whose
+/// `seq` restarts at 0, and a browser reconnecting with the old
+/// process's `Last-Event-ID` must not resume from it — a cursor into a
+/// log that no longer exists — so the id says which log it indexes.
+static BOOT: LazyLock<u64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+});
 
 /// How long a connection waits for an entry before saying it is still
 /// there — a comment line, so a client that has gone is noticed by the
@@ -193,22 +209,32 @@ fn handle(request: Request, log: &Log, bound: IpAddr) {
     let _ = request.respond(response);
 }
 
-/// The cursor a request resumes from: one past its `Last-Event-ID`, or
-/// 0 for a connection with none — the replay.
+/// The cursor a request resumes from: one past the `seq` of its
+/// `Last-Event-ID` when that id is this process's — and 0, the replay,
+/// for a connection with none, with another boot's, or with one that
+/// does not read as `<boot>.<seq>`.
 fn cursor(request: &Request) -> u64 {
-    request
+    let last = request
         .headers()
         .iter()
         .find(|header| header.field.equiv("Last-Event-ID"))
-        .and_then(|header| header.value.as_str().parse::<u64>().ok())
-        .map_or(0, |last| last.saturating_add(1))
+        .map(|header| header.value.as_str());
+    resume(last, *BOOT)
 }
 
-/// One entry as an event: its `seq` as the id the browser sends back,
-/// its JSON as the data.
-fn event(entry: &Entry) -> String {
+/// [`cursor`] over the header's value and the boot to match.
+fn resume(last: Option<&str>, boot: u64) -> u64 {
+    last.and_then(|id| id.split_once('.'))
+        .filter(|(seen, _)| seen.parse() == Ok(boot))
+        .and_then(|(_, seq)| seq.parse::<u64>().ok())
+        .map_or(0, |seq| seq.saturating_add(1))
+}
+
+/// One entry as an event: `<boot>.<seq>` as the id the browser sends
+/// back, its JSON as the data.
+fn event(entry: &Entry, boot: u64) -> String {
     let data = serde_json::to_string(entry).expect("an entry is JSON");
-    format!("id: {}\ndata: {data}\n\n", entry.seq)
+    format!("id: {boot}.{}\ndata: {data}\n\n", entry.seq)
 }
 
 /// The event stream: every entry from the cursor on, for as long as the
@@ -237,7 +263,7 @@ fn stream(request: Request, log: &Log) {
             None => ": keep-alive\n\n".to_owned(),
             Some(last) => {
                 cursor = last.seq + 1;
-                entries.iter().map(event).collect()
+                entries.iter().map(|entry| event(entry, *BOOT)).collect()
             }
         };
         if send(&text).is_err() {
@@ -318,9 +344,9 @@ mod tests {
         (status, headers, reader)
     }
 
-    /// The next event on the stream — its id and its entry — comment
-    /// lines passed over.
-    fn next_event(reader: &mut BufReader<TcpStream>) -> (u64, Entry) {
+    /// The next event on the stream — its id as `(boot, seq)` and its
+    /// entry — comment lines passed over.
+    fn next_event(reader: &mut BufReader<TcpStream>) -> ((u64, u64), Entry) {
         let (mut id, mut data) = (None, None);
         loop {
             let mut line = String::new();
@@ -333,7 +359,10 @@ mod tests {
                 }
                 comment if comment.starts_with(':') => {}
                 field => match field.split_once(": ").unwrap() {
-                    ("id", value) => id = Some(value.parse().unwrap()),
+                    ("id", value) => {
+                        let (boot, seq) = value.split_once('.').unwrap();
+                        id = Some((boot.parse().unwrap(), seq.parse().unwrap()));
+                    }
                     ("data", value) => data = Some(serde_json::from_str(value).unwrap()),
                     (name, _) => panic!("an unexpected field {name}"),
                 },
@@ -354,32 +383,66 @@ mod tests {
         assert!(headers.contains(&"cache-control: no-cache".to_owned()));
         for (seq, expected) in log.since(0).iter().enumerate() {
             let (id, entry) = next_event(&mut reader);
-            assert_eq!(id, seq as u64);
+            assert_eq!(id, (*BOOT, seq as u64));
             assert_eq!(entry, *expected);
         }
 
         log.record(Change::Finished { run: RunId(1) });
         let (id, entry) = next_event(&mut reader);
-        assert_eq!(id, 3, "recorded after the connection opened, and heard");
+        assert_eq!(
+            id,
+            (*BOOT, 3),
+            "recorded after the connection opened, and heard"
+        );
         assert_eq!(entry.change, Change::Finished { run: RunId(1) });
     }
 
     #[test]
-    fn a_reconnecting_client_resumes_after_its_last_event_id() {
+    fn a_reconnecting_client_resumes_after_its_last_event_id_of_this_boot() {
         let (log, addr) = served();
         log.record(reserved(1));
         log.record(reserved(2));
         log.record(reserved(3));
 
-        let (status, _, mut reader) =
-            request(addr, &format!("GET {CHANGES}"), &["Last-Event-ID: 1"]);
+        let (status, _, mut reader) = request(
+            addr,
+            &format!("GET {CHANGES}"),
+            &[&format!("Last-Event-ID: {}.1", *BOOT)],
+        );
         assert_eq!(status, 200);
         let (id, entry) = next_event(&mut reader);
-        assert_eq!(id, 2, "only what follows");
+        assert_eq!(id, (*BOOT, 2), "only what follows");
         assert_eq!(entry, log.since(2)[0]);
 
         log.record(reserved(4));
-        assert_eq!(next_event(&mut reader).0, 3);
+        assert_eq!(next_event(&mut reader).0, (*BOOT, 3));
+    }
+
+    /// The id a page kept from a backend that has since been relaunched
+    /// indexes a log that no longer exists: it replays from 0.
+    #[test]
+    fn a_last_event_id_from_another_boot_replays_from_the_start() {
+        let (log, addr) = served();
+        log.record(reserved(1));
+        log.record(reserved(2));
+
+        let (status, _, mut reader) = request(
+            addr,
+            &format!("GET {CHANGES}"),
+            &["Last-Event-ID: 12345.40"],
+        );
+        assert_eq!(status, 200);
+        assert_eq!(next_event(&mut reader).0, (*BOOT, 0));
+        assert_eq!(next_event(&mut reader).0, (*BOOT, 1));
+    }
+
+    #[test]
+    fn the_cursor_is_one_past_this_boots_seq_and_zero_otherwise() {
+        assert_eq!(resume(Some("7.41"), 7), 42);
+        assert_eq!(resume(Some("8.41"), 7), 0, "another boot");
+        assert_eq!(resume(Some("41"), 7), 0, "no boot at all");
+        assert_eq!(resume(Some("7.forty"), 7), 0);
+        assert_eq!(resume(None, 7), 0);
     }
 
     #[test]
@@ -504,14 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn an_event_carries_the_seq_as_its_id() {
+    fn an_event_carries_the_boot_and_the_seq_as_its_id() {
         let entry = Entry {
             seq: 7,
             at: 1,
             change: Change::Finished { run: RunId(1) },
         };
-        let text = event(&entry);
-        assert!(text.starts_with("id: 7\ndata: {"), "{text}");
+        let text = event(&entry, 5);
+        assert!(text.starts_with("id: 5.7\ndata: {"), "{text}");
         assert!(text.ends_with("}\n\n"), "{text}");
     }
 }
