@@ -29,6 +29,11 @@ impl<T> Tree<T> {
         }
     }
 
+    /// Whether this node holds nothing: where the tree is a plan, work.
+    pub(super) const fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
+
     /// Every value in the tree, this node first, depth-first.
     pub(super) fn nodes(&self) -> impl Iterator<Item = &T> {
         let mut stack = vec![self];
