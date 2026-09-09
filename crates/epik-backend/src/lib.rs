@@ -1,5 +1,9 @@
+use std::sync::{Arc, Mutex};
+
+use epik::config::Config;
+use epik::monitor::Log;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
+use tauri::{AppHandle, Builder, Manager, Theme, WebviewUrl, WebviewWindowBuilder, Wry};
 
 mod build;
 mod chat;
@@ -73,8 +77,8 @@ async fn settings_close(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
     let theme = match theme.as_str() {
-        "dark" => tauri::Theme::Dark,
-        _ => tauri::Theme::Light,
+        "dark" => Theme::Dark,
+        _ => Theme::Light,
     };
     app.set_theme(Some(theme));
     Ok(())
@@ -82,7 +86,7 @@ async fn set_theme(app: AppHandle, theme: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -91,19 +95,19 @@ pub fn run() {
             // stderr and the built-in defaults apply.
             let config = config::converge(app.handle()).unwrap_or_else(|error| {
                 eprintln!("{error:#}; starting with the built-in defaults");
-                epik::config::Config::default()
+                Config::default()
             });
             let listen = config
                 .monitor
                 .as_ref()
                 .and_then(|monitor| monitor.listen.clone());
             // Managed behind a lock: the settings window replaces it.
-            app.manage(std::sync::Mutex::new(config));
+            app.manage(Mutex::new(config));
             // The feature-build log, relayed to the window before any
             // build can speak: every entry goes out as an event, in
             // order, and `monitor_log` replays the rest.
-            let log = std::sync::Arc::new(epik::monitor::Log::new());
-            build::relay(app.handle().clone(), std::sync::Arc::clone(&log));
+            let log = Arc::new(Log::new());
+            build::relay(app.handle().clone(), Arc::clone(&log));
             // The same log as a page a browser can open, when the file
             // asks for one.
             monitor::start(listen.as_deref(), &log);
