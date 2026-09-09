@@ -37,12 +37,12 @@ pub mod tools;
 mod tree;
 
 #[cfg(all(feature = "native", unix))]
-pub use build::{Budget, Build, CONCURRENCY, Slot, State, build};
+pub use build::{Budget, Build, CONCURRENCY, Slot, build};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
 use tree::Tree;
 
@@ -88,6 +88,34 @@ impl fmt::Display for Feature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Where one issue stands: waiting on a slot or a blocker, running
+/// under an Agent, merging behind the lock, and three ends — landed,
+/// failed in its own right, or skipped because nothing this build can
+/// do would ever make it ready. Serialized — `feature_status`'s answer
+/// on its way to a model — tagged by its state word.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum State {
+    /// Not yet dispatched: blocked, or ready and out of slots.
+    Waiting,
+    /// An Agent holds a slot and is working the issue's branch.
+    Running,
+    /// The Agent is done and the slot released; the merge is queued
+    /// behind the lock or under way.
+    Merging,
+    /// Merged onto the feature branch and pushed. `checked` is false
+    /// when the build was handed no check — the branch is unchecked,
+    /// and the record says so.
+    Merged { commit: String, checked: bool },
+    /// Failed, with the words to fail it by: the Agent's end, the
+    /// observation, a conflict's paths, or a red check's output.
+    Failed { report: String },
+    /// Never dispatched, and never will be: the blocker it is stuck on,
+    /// which this build can never settle — a failure upstream, or a
+    /// plan that was never buildable here.
+    Skipped { reason: String },
 }
 
 /// An issue as a plan carries one: enough to schedule and render — title

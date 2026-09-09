@@ -35,10 +35,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
-use serde::Serialize;
-
 use super::merge::{Branch, Outcome};
-use super::{Issue, IssueId, Plan, Problem};
+use super::{Issue, IssueId, Plan, Problem, State};
 use crate::agent::{Agent, Exit};
 use crate::forge::Forge;
 use crate::git::plumbing;
@@ -119,34 +117,6 @@ impl Drop for Slot {
     fn drop(&mut self) {
         self.0.release();
     }
-}
-
-/// Where one issue stands: waiting on a slot or a blocker, running
-/// under an Agent, merging behind the lock, and three ends — landed,
-/// failed in its own right, or skipped because nothing this build can
-/// do would ever make it ready. Serialized — `feature_status`'s answer
-/// on its way to a model — tagged by its state word.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum State {
-    /// Not yet dispatched: blocked, or ready and out of slots.
-    Waiting,
-    /// An Agent holds a slot and is working the issue's branch.
-    Running,
-    /// The Agent is done and the slot released; the merge is queued
-    /// behind the lock or under way.
-    Merging,
-    /// Merged onto the feature branch and pushed. `checked` is false
-    /// when the build was handed no check — the branch is unchecked,
-    /// and the record says so.
-    Merged { commit: String, checked: bool },
-    /// Failed, with the words to fail it by: the Agent's end, the
-    /// observation, a conflict's paths, or a red check's output.
-    Failed { report: String },
-    /// Never dispatched, and never will be: the blocker it is stuck on,
-    /// which this build can never settle — a failure upstream, or a
-    /// plan that was never buildable here.
-    Skipped { reason: String },
 }
 
 /// The record of a feature build: the plan and what is wrong with its
