@@ -66,13 +66,16 @@ impl<F: Forge> Branch<F> {
     /// Establishes the feature branch `name` in `repository`: created
     /// at `base` and pushed to `forge` when new; a branch already
     /// standing is used as it stands, and not moved. Keeps one
-    /// workspace of the branch for merging.
+    /// workspace of the branch for merging — which is also the guard
+    /// against two builds of one feature: a branch another build's
+    /// workspace already holds is refused here, by git, in its words.
     ///
     /// # Errors
     ///
     /// Words for the model: the repository is not one, the base does
-    /// not name a commit, the branch could not be pushed, or git failed
-    /// along the way.
+    /// not name a commit, the branch is checked out in another build's
+    /// workspace, the branch could not be pushed, or git failed along
+    /// the way.
     pub(super) fn establish(
         repository: &str,
         name: &str,

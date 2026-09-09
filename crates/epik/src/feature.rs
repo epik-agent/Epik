@@ -644,6 +644,42 @@ pub(crate) mod fixtures {
     pub(crate) fn seven_holding_eight() -> Plan {
         plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
     }
+
+    /// The Agent factory of an end-to-end feature build: each Agent
+    /// commits one file named for its issue and exits 0 — everything a
+    /// real Agent's landing looks like, none of the model. Given `gate`,
+    /// an Agent first waits for that path to exist, so a test can hold
+    /// every build at Running until it says otherwise.
+    #[cfg(all(feature = "native", unix))]
+    pub(crate) fn committing(
+        gate: Option<std::path::PathBuf>,
+    ) -> impl Fn(&Issue, &crate::job::Workspace, &str) -> Result<crate::agent::Agent, String>
+    + Clone
+    + Send
+    + Sync
+    + 'static {
+        move |issue, workspace, _| {
+            let wait = gate.as_ref().map_or(String::new(), |gate| {
+                format!(
+                    "i=0; until [ -e '{}' ]; do i=$((i+1)); \
+                     if [ \"$i\" -gt 600 ]; then exit 1; fi; sleep 0.05; done; ",
+                    gate.display()
+                )
+            });
+            let script = format!(
+                "{wait}echo {id} > {id}.txt && git add {id}.txt && \
+                 git -c commit.gpgsign=false commit -qm 'issue {id}'",
+                id = issue.id
+            );
+            crate::agent::Agent::new(
+                vec!["sh".to_owned(), "-c".to_owned(), script],
+                workspace.directory.to_string_lossy().into_owned(),
+                [],
+                None,
+            )
+            .map_err(|error| format!("{error:#}"))
+        }
+    }
 }
 
 #[cfg(test)]

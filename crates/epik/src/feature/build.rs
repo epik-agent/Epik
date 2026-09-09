@@ -528,7 +528,7 @@ fn words(panic: &(dyn std::any::Any + Send)) -> &str {
 mod tests {
     use super::*;
     use crate::feature::fixtures::{
-        a_chain_beside_a_loner, id, issue, nine_waiting_on_container_seven, node, plan,
+        a_chain_beside_a_loner, committing, id, issue, nine_waiting_on_container_seven, node, plan,
         two_and_three_in_a_cycle, two_then_three,
     };
     use crate::monitor::{Entry, Stage, folded};
@@ -788,16 +788,16 @@ mod tests {
         }
     }
 
-    /// Waits for the run's Finished to land in the log — the last thing
-    /// the scheduler records — bounded, never by a fixed sleep.
-    fn eventually_finished(log: &Log) -> Vec<Entry> {
+    /// Waits for `run`'s Finished to land in the log — the last thing
+    /// its scheduler records — bounded, never by a fixed sleep.
+    fn eventually_finished(log: &Log, run: RunId) -> Vec<Entry> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut cursor = 0;
         loop {
             let heard = log.wait_after(cursor, std::time::Duration::from_secs(1));
             if heard
                 .iter()
-                .any(|entry| matches!(entry.change, Change::Finished { .. }))
+                .any(|entry| entry.change == Change::Finished { run })
             {
                 return log.since(0);
             }
@@ -810,6 +810,94 @@ mod tests {
         }
     }
 
+    /// Launches `plan` as run `run` for feature `feature`, the way the
+    /// tools would: Reserved spoken, the feature branch `branch`
+    /// established in `work` over `remote`, and the machinery started
+    /// against the committing Agent on `budget` and `log` — both shared
+    /// by whoever else is launched beside it.
+    fn launched(
+        run: u64,
+        feature: u64,
+        plan: Plan,
+        (work, remote): (&str, &str),
+        branch: &str,
+        budget: &Arc<Budget>,
+        log: &Arc<Log>,
+    ) -> Arc<Mutex<Build>> {
+        let established = Arc::new(
+            Branch::establish(work, branch, "main", Local(remote.to_owned()), None).unwrap(),
+        );
+        // The reservation is the tools' to speak; here the test speaks
+        // it, so the fold has a run to hang Started on.
+        log.record(Change::Reserved {
+            run: RunId(run),
+            feature: id(feature),
+            repository: work.to_owned(),
+            branch: branch.to_owned(),
+            base: Some("main".to_owned()),
+        });
+        build(
+            RunId(run),
+            Arc::clone(log),
+            plan,
+            established,
+            committing(None),
+            Arc::clone(budget),
+        )
+    }
+
+    /// The build is over with every leaf in `leaves` Merged, and each
+    /// leaf's file is in the tree at `branch`'s tip.
+    fn landed(work: &str, branch: &str, record: &Arc<Mutex<Build>>, leaves: &[u64]) {
+        let build = record.lock().unwrap().clone();
+        assert!(build.finished());
+        let tree = git2::Repository::open(work).unwrap();
+        let tip = tree
+            .find_branch(branch, git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_tree()
+            .unwrap();
+        for leaf in leaves {
+            let id = id(*leaf);
+            assert!(
+                matches!(build.states[&id], State::Merged { .. }),
+                "{branch} {id}: {:?}",
+                build.states
+            );
+            assert!(
+                tip.get_name(&format!("{id}.txt")).is_some(),
+                "{branch} {id}"
+            );
+        }
+    }
+
+    /// The runs the log says Finished, in order — each once, if the
+    /// scheduler keeps its word.
+    fn finished(entries: &[Entry]) -> Vec<RunId> {
+        entries
+            .iter()
+            .filter_map(|entry| match entry.change {
+                Change::Finished { run } => Some(run),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Feature 4 holds 5 and 6, 6 waiting on 5: `two_then_three`'s
+    /// shape on ids that collide with none of its own, so the two can
+    /// build in one repository — issue branches are named for the id.
+    fn five_then_six() -> Plan {
+        plan(
+            4,
+            vec![
+                node(4, false, &[5, 6], &[]),
+                node(5, false, &[], &[]),
+                node(6, false, &[], &[(5, false)]),
+            ],
+        )
+    }
+
     /// The whole machinery against a scripted Agent that commits one
     /// file and exits: 2 lands, which readies 3, which lands — every
     /// leaf Merged. The log tells the same story: one Moved per
@@ -819,61 +907,20 @@ mod tests {
     fn a_scripted_agent_merges_every_leaf_and_the_log_is_the_record() {
         let scratch = Scratch::new("feature-build");
         let (work, remote) = seeded(&scratch);
-        let branch = Arc::new(
-            Branch::establish(&work, "feature-1", "main", Local(remote.clone()), None).unwrap(),
-        );
         let log = Arc::new(Log::new());
-        // The reservation is the tools' to speak; here the test speaks
-        // it, so the fold has a run to hang Started on.
-        log.record(Change::Reserved {
-            run: RunId(1),
-            feature: id(1),
-            repository: work.clone(),
-            branch: "feature-1".to_owned(),
-            base: Some("main".to_owned()),
-        });
-        let agents = |issue: &Issue, workspace: &Workspace, _: &str| {
-            let script = format!(
-                "echo {id} > {id}.txt && git add {id}.txt && \
-                 git -c commit.gpgsign=false commit -qm 'issue {id}'",
-                id = issue.id
-            );
-            Agent::new(
-                vec!["sh".to_owned(), "-c".to_owned(), script],
-                workspace.directory.to_string_lossy().into_owned(),
-                [],
-                None,
-            )
-            .map_err(|error| format!("{error:#}"))
-        };
-        let record = build(
-            RunId(1),
-            Arc::clone(&log),
+        let record = launched(
+            1,
+            1,
             two_then_three(),
-            Arc::clone(&branch),
-            agents,
-            Budget::new(),
+            (&work, &remote),
+            "feature-1",
+            &Budget::new(),
+            &log,
         );
 
-        let entries = eventually_finished(&log);
+        let entries = eventually_finished(&log, RunId(1));
+        landed(&work, "feature-1", &record, &[2, 3]);
         let build = record.lock().unwrap().clone();
-        assert!(build.finished());
-        for id in [id(2), id(3)] {
-            assert!(
-                matches!(build.states[&id], State::Merged { .. }),
-                "{id}: {:?}",
-                build.states
-            );
-        }
-        let tree = git2::Repository::open(&work).unwrap();
-        let tip = tree
-            .find_branch("feature-1", git2::BranchType::Local)
-            .unwrap()
-            .get()
-            .peel_to_tree()
-            .unwrap();
-        assert!(tip.get_name("2.txt").is_some());
-        assert!(tip.get_name("3.txt").is_some());
 
         // Reserved, then Started before any move; Finished closes, once.
         assert!(matches!(entries[0].change, Change::Reserved { .. }));
@@ -882,13 +929,7 @@ mod tests {
             entries.last().unwrap().change,
             Change::Finished { .. }
         ));
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| matches!(entry.change, Change::Finished { .. }))
-                .count(),
-            1
-        );
+        assert_eq!(finished(&entries), [RunId(1)]);
         // One Moved per terminal state, each the record's own.
         let moved = moves(&entries);
         let terminal: Vec<_> = moved
@@ -918,5 +959,86 @@ mod tests {
         assert_eq!(watch.counts().merged, 2);
 
         tidy(&work);
+    }
+
+    /// Two feature builds in one repository, off the same base, at the
+    /// same time — one budget, one log, the clone carrying both builds'
+    /// worktree adds and removes and ref updates — and both complete
+    /// with every leaf Merged, the log saying Finished once for each.
+    #[test]
+    fn two_features_in_one_repository_build_at_once() {
+        let scratch = Scratch::new("two-features");
+        let (work, remote) = seeded(&scratch);
+        let budget = Budget::new();
+        let log = Arc::new(Log::new());
+        let first = launched(
+            1,
+            1,
+            two_then_three(),
+            (&work, &remote),
+            "feature-1",
+            &budget,
+            &log,
+        );
+        let second = launched(
+            2,
+            4,
+            five_then_six(),
+            (&work, &remote),
+            "feature-2",
+            &budget,
+            &log,
+        );
+
+        eventually_finished(&log, RunId(1));
+        let entries = eventually_finished(&log, RunId(2));
+        landed(&work, "feature-1", &first, &[2, 3]);
+        landed(&work, "feature-2", &second, &[5, 6]);
+        let mut runs = finished(&entries);
+        runs.sort_unstable();
+        assert_eq!(runs, [RunId(1), RunId(2)]);
+
+        tidy(&work);
+    }
+
+    /// Two feature builds in two repositories at the same time, sharing
+    /// nothing but the host's budget and log, and both complete.
+    #[test]
+    fn two_features_in_two_repositories_build_at_once() {
+        let one = Scratch::new("repository-one");
+        let two = Scratch::new("repository-two");
+        let (work_one, remote_one) = seeded(&one);
+        let (work_two, remote_two) = seeded(&two);
+        let budget = Budget::new();
+        let log = Arc::new(Log::new());
+        let first = launched(
+            1,
+            1,
+            two_then_three(),
+            (&work_one, &remote_one),
+            "feature-1",
+            &budget,
+            &log,
+        );
+        let second = launched(
+            2,
+            1,
+            two_then_three(),
+            (&work_two, &remote_two),
+            "feature-1",
+            &budget,
+            &log,
+        );
+
+        eventually_finished(&log, RunId(1));
+        let entries = eventually_finished(&log, RunId(2));
+        landed(&work_one, "feature-1", &first, &[2, 3]);
+        landed(&work_two, "feature-1", &second, &[2, 3]);
+        let mut runs = finished(&entries);
+        runs.sort_unstable();
+        assert_eq!(runs, [RunId(1), RunId(2)]);
+
+        tidy(&work_one);
+        tidy(&work_two);
     }
 }
