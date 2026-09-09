@@ -297,9 +297,11 @@ where
          up to four coding agents work the ready issues at once, each finished issue merges \
          onto one feature branch, and the branch is pushed as work lands. Asks the user, in \
          the window, for the check command every merge must pass — never ask that yourself. \
-         Returns as soon as the build is running; it then proceeds on its own for a long \
-         time, so tell the user the branch and run id and end your turn — the user will ask \
-         how it is going, and feature_status answers.",
+         Returns as soon as the build is running, with the run id that names this build; \
+         several feature builds may run at once, each with its own run id, and one feature \
+         builds once at a time. The build then proceeds on its own for a long time, so tell \
+         the user the branch and run id and end your turn — the user will ask how it is \
+         going, and feature_status answers for the run.",
         json!({
             "type": "object",
             "properties": {
@@ -437,18 +439,20 @@ where
 pub fn feature_status(builds: Arc<Builds>) -> Tool {
     Tool::new(
         "feature_status",
-        "How the feature build started by start_feature is going — or went: each issue's \
+        "How a feature build started by start_feature is going — or went: each issue's \
          title and state (waiting, running, merging, merged, failed with its report, skipped \
          with its reason), the feature branch's tip, the check in force (null means the \
-         branch is unchecked), and any problems with the plan's shape. Call it once when the \
-         user asks and report what it says; never poll it in a loop — the build runs on its \
-         own. Pass run to read an earlier build; the latest answers when it is omitted.",
+         branch is unchecked), and any problems with the plan's shape. Several feature \
+         builds may run at once: pass run — the run id start_feature answered with — to \
+         read a particular build; with run omitted, the most recently started build answers, \
+         whichever feature it is. Call it once when the user asks and report what it says; \
+         never poll it in a loop — the build runs on its own.",
         json!({
             "type": "object",
             "properties": {
                 "run": {
                     "type": "integer",
-                    "description": "The run id start_feature answered with; the latest when omitted.",
+                    "description": "The run id start_feature answered with, selecting that build; the most recently started build when omitted.",
                 },
             },
         }),
