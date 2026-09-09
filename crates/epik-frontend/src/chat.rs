@@ -406,7 +406,7 @@ pub fn Chat() -> impl IntoView {
     };
 
     view! {
-        <main class="flex h-screen flex-col bg-neutral-50 dark:bg-neutral-900">
+        <main class="flex h-full flex-col bg-neutral-50 dark:bg-neutral-900">
             <header class="flex shrink-0 items-center justify-end border-b border-neutral-200 px-3 py-1 dark:border-neutral-800">
                 <button
                     type="button"

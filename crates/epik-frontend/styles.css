@@ -44,3 +44,62 @@
     color: #8b949e;
   }
 }
+
+/* The graph palette: brand.json's graph group — closed, open, link —
+   with semantic.error and border.strong beside them, one set per theme.
+   A node paints itself currentColor, so the colour is stated here and
+   nowhere in the markup. graph.active goes unused: against closed it
+   is a distinction nobody can see. */
+.graph-closed {
+  color: #34d399;
+}
+.graph-open {
+  color: #d4940a;
+}
+.graph-error {
+  color: #dc2626;
+}
+.graph-strong {
+  color: #c7c7c7;
+}
+.graph-link {
+  color: rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  .graph-open {
+    color: #f5a623;
+  }
+  .graph-error {
+    color: #ef4444;
+  }
+  .graph-strong {
+    color: #333333;
+  }
+  .graph-link {
+    color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* The one motion: a thing pulses when an Agent is working on it right
+   now. Where motion is turned off, a Running node keeps a halo ring
+   instead, so the state still reads. */
+@keyframes epik-pulse {
+  50% {
+    opacity: 0.28;
+  }
+}
+.epik-pulse {
+  animation: epik-pulse 1.15s ease-in-out infinite;
+}
+.graph-halo {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .epik-pulse {
+    animation: none;
+  }
+  .graph-halo {
+    display: initial;
+  }
+}

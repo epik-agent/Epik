@@ -17,11 +17,13 @@
 //!
 //! Reading a plan out of a tracker is [`Plan::descend`], a pure function
 //! over an injected fetch closure; the [`Tracker`](crate::tracker::Tracker)
-//! seam is where a real tracker plugs in. Everything here compiles with no
-//! features enabled: the vocabulary is the library's, not any provider's,
-//! and it is wire vocabulary both ways — a plan serializes on its way to
-//! a model or a window and deserializes on the far side, where the
-//! [`monitor`](crate::monitor) folds it back into a picture; the
+//! seam is where a real tracker plugs in. Drawing one is the [`layout`]
+//! module, a pure function of the plan and its states. Everything here
+//! compiles with no features enabled: the vocabulary is the library's,
+//! not any provider's, and it is wire vocabulary both ways — a plan
+//! serializes on its way to a model or a window and deserializes on the
+//! far side, where the [`monitor`](crate::monitor) folds it back into a
+//! picture; the
 //! machinery is gated — the `check` module holding the repository's
 //! own idea of green, the `merge` module by which work lands on a
 //! feature branch, the build that folds a whole plan into work —
@@ -33,6 +35,7 @@
 mod build;
 #[cfg(all(feature = "native", unix))]
 mod check;
+pub mod layout;
 #[cfg(all(feature = "native", unix))]
 mod merge;
 #[cfg(all(feature = "native", unix))]
@@ -234,6 +237,12 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The feature's own title, as the tracker gave it.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.tree.value.title
+    }
+
     /// The descent from a feature issue to a plan. `fetch` answers for one
     /// issue at a time — a pure function over that closure, so fixtures
     /// exercise it with no network. A visited set keeps any graph finite

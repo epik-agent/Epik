@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::feature::layout::{self, Layout};
 use crate::feature::{IssueId, Plan, RunId, State};
 
 /// The event channel entries arrive on, backend to window.
@@ -198,6 +199,22 @@ impl Watch {
     #[must_use]
     pub const fn plan(&self) -> Option<&Plan> {
         self.plan.as_ref()
+    }
+
+    /// The feature's title, once Started has handed over the plan that
+    /// carries it.
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.plan.as_ref().map(Plan::title)
+    }
+
+    /// The plan as a picture, every issue drawn where it stands — or
+    /// nothing, before there is a plan.
+    #[must_use]
+    pub fn layout(&self) -> Option<Layout> {
+        self.plan
+            .as_ref()
+            .map(|plan| layout::layout(plan, &self.states))
     }
 
     /// What is wrong with the plan's shape, in words.
@@ -573,6 +590,7 @@ mod tests {
         let watch = progress.watch(RunId(1)).unwrap();
         assert_eq!(*watch.stage(), Stage::Starting);
         assert_eq!(watch.feature(), &id(1));
+        assert_eq!((watch.title(), watch.layout()), (None, None), "no plan yet");
         assert_eq!(watch.branch(), "feature-1");
         assert_eq!(watch.base(), Some("main"));
         assert!(watch.plan().is_none());
@@ -582,6 +600,12 @@ mod tests {
         let watch = progress.watch(RunId(1)).unwrap();
         assert_eq!(*watch.stage(), Stage::Building);
         assert!(watch.plan().is_some());
+        assert_eq!(watch.title(), Some("issue 1"));
+        assert_eq!(
+            watch.layout().unwrap().nodes.len(),
+            watch.states().len(),
+            "the picture draws every issue the build holds a state for"
+        );
         assert!(!watch.live(), "nothing is running yet");
 
         assert!(progress.absorb(&entry(2, moved(1, 2, State::Running))));

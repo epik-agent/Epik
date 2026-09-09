@@ -5,6 +5,8 @@ mod highlight;
 mod ipc;
 mod json;
 mod markdown;
+mod monitor;
+mod pane;
 mod settings;
 
 use leptos::prelude::*;
