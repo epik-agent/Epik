@@ -4,6 +4,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 mod build;
 mod chat;
 mod config;
+mod monitor;
 mod secrets;
 #[cfg(test)]
 mod testing;
@@ -92,8 +93,21 @@ pub fn run() {
                 eprintln!("{error:#}; starting with the built-in defaults");
                 epik::config::Config::default()
             });
+            let listen = config
+                .monitor
+                .as_ref()
+                .and_then(|monitor| monitor.listen.clone());
             // Managed behind a lock: the settings window replaces it.
             app.manage(std::sync::Mutex::new(config));
+            // The feature-build log, relayed to the window before any
+            // build can speak: every entry goes out as an event, in
+            // order, and `monitor_log` replays the rest.
+            let log = std::sync::Arc::new(epik::monitor::Log::new());
+            build::relay(app.handle().clone(), std::sync::Arc::clone(&log));
+            // The same log as a page a browser can open, when the file
+            // asks for one.
+            monitor::start(listen.as_deref(), &log);
+            app.manage(build::FeatureState::new(log));
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.
             app.handle().set_theme(None);
@@ -101,7 +115,6 @@ pub fn run() {
         })
         .manage(chat::ChatState::default())
         .manage(build::BuildState::default())
-        .manage(build::FeatureState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             // The default About, wherever this platform put it, gives way
@@ -142,6 +155,7 @@ pub fn run() {
             chat::send_message,
             chat::get_transcript,
             chat::answer_question,
+            build::monitor_log,
             secrets::secret_reveal,
             secrets::secret_save,
             config::config_read,

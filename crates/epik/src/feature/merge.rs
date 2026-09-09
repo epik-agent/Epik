@@ -22,6 +22,13 @@
 //! mid-judgement, whose commit may yet be reset away, can never be the
 //! answer.
 //!
+//! The workspace is held for exactly as long as the build runs: git
+//! gives a branch one worktree, so holding it is what keeps a feature
+//! to one build at a time, and [`Branch::retire`] gives it up when the
+//! build is over, so the same feature can be built again. The tip is
+//! read from the repository's ref, not the workspace, so status still
+//! answers for a build whose workspace is gone.
+//!
 //! A build handed no check merges on observation alone, and the
 //! [`Outcome`] says so.
 
@@ -66,12 +73,26 @@ impl<F: Forge> Branch<F> {
     /// Establishes the feature branch `name` in `repository`: created
     /// at `base` and pushed to `forge` when new; a branch already
     /// standing is used as it stands, and not moved. Keeps one
-    /// workspace of the branch for merging.
+    /// workspace of the branch for merging, held while the build runs
+    /// and given up by [`retire`](Self::retire) when it finishes —
+    /// which is also the guard against two builds of one feature: a
+    /// branch a running build's workspace holds is refused here, by
+    /// git, in its words.
+    ///
+    /// Establishing is serialized host-wide, one push wide: read,
+    /// create, push and adopt happen under one lock, so two
+    /// establishes of one new branch cannot interleave — the loser
+    /// finds the branch standing and held, and is refused by adopt,
+    /// rather than unwinding a branch the winner has already checked
+    /// out and leaving the winner on a branch that was never pushed.
+    /// The lock is held across the push, which is the cost of the
+    /// guarantee; establishing is one command per build.
     ///
     /// # Errors
     ///
     /// Words for the model: the repository is not one, the base does
-    /// not name a commit, the branch could not be pushed, or git failed
+    /// not name a commit, the branch is checked out in a running
+    /// build's workspace, the branch could not be pushed, or git failed
     /// along the way.
     pub(super) fn establish(
         repository: &str,
@@ -80,6 +101,8 @@ impl<F: Forge> Branch<F> {
         forge: F,
         check: Option<Check>,
     ) -> Result<Self, String> {
+        static ESTABLISHING: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = ESTABLISHING.lock().unwrap_or_else(PoisonError::into_inner);
         let name = positional("branch", name)?;
         // Absence and failure are different answers: `for-each-ref`
         // exits zero either way and simply lists nothing for a branch
@@ -125,30 +148,45 @@ impl<F: Forge> Branch<F> {
         &self.workspace
     }
 
+    /// The check that judges every merge; `None` is an unchecked branch.
+    #[must_use]
+    pub(super) const fn check(&self) -> Option<&Check> {
+        self.check.as_ref()
+    }
+
     /// The feature branch's tip as it stands settled — read under the
     /// merge lock, so a merge mid-judgement, whose commit a red check
     /// or a failed push may yet reset away, can never be the answer.
     /// Every commit this returns is permanent: it is where an issue
-    /// branch is cut from at dispatch.
+    /// branch is cut from at dispatch. The ref is read in the
+    /// repository, which outlives the workspace: status asks after a
+    /// build that has retired.
     ///
     /// # Errors
     ///
     /// Git failing to read the ref, in its own words.
     pub(super) fn tip(&self) -> Result<String, String> {
         let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        let directory = self
-            .workspace
-            .directory
-            .to_str()
-            .ok_or("the workspace path is not valid unicode")?;
         Ok(plumbing(&[
             "-C",
-            directory,
+            &self.workspace.repository,
             "rev-parse",
             &format!("refs/heads/{}", self.workspace.branch),
         ])?
         .trim()
         .to_owned())
+    }
+
+    /// Gives the workspace up: the build is over, and the feature branch
+    /// is nobody's to hold — the next build of the same feature
+    /// establishes it afresh. Under the merge lock, so no merge is
+    /// mid-flight in the directory as it goes; idempotent, since
+    /// removing what is already gone is nothing. Best effort, as
+    /// cleanup is: a worktree that will not go is what `worktree
+    /// prune` is for.
+    pub(super) fn retire(&self) {
+        let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        job::remove_worktree(&self.workspace);
     }
 
     /// Merges `branch` into the feature branch: `--no-ff`, one at a
@@ -636,6 +674,74 @@ mod tests {
 
         tidy(&issue);
         tidy(branch.workspace());
+    }
+
+    /// Two establishes of one new branch at once: exactly one wins, the
+    /// other is refused — by adopt, once the winner's workspace holds
+    /// the branch — and the branch the winner stands on is pushed. Not
+    /// serialized, the loser's unwind of "its" branch would be refused
+    /// by git while the winner sat on a branch the remote never saw.
+    #[test]
+    fn two_establishes_of_one_new_branch_yield_one_winner_and_a_pushed_branch() {
+        let scratch = Scratch::new("establish-twice");
+        let (work, remote) = seeded(&scratch);
+        let (first, second) = std::thread::scope(|scope| {
+            let establish =
+                || Branch::establish(&work, "feature/wumpus", "main", Local(remote.clone()), None);
+            let first = scope.spawn(establish);
+            let second = scope.spawn(establish);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let (winner, refusal) = match (first, second) {
+            (Ok(winner), Err(refusal)) | (Err(refusal), Ok(winner)) => (winner, refusal),
+            (Ok(_), Ok(_)) => panic!("both established"),
+            (Err(one), Err(two)) => panic!("neither established: {one}; {two}"),
+        };
+        assert!(refusal.contains("feature/wumpus"), "{refusal}");
+
+        let base = tip(&work, "main");
+        assert_eq!(winner.workspace().base_commit, base);
+        assert_eq!(tip(&remote, "feature/wumpus"), base, "pushed");
+        assert_eq!(
+            job::held_by(&work, "feature/wumpus")
+                .unwrap()
+                .map(|path| canonical(&path)),
+            Some(canonical(&winner.workspace().directory))
+        );
+        tidy(winner.workspace());
+    }
+
+    /// A path as the filesystem finally names it, through any symlink
+    /// the temp dir hides behind.
+    fn canonical(path: &Path) -> std::path::PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Retiring gives the workspace up and nothing else: the worktree is
+    /// gone from the repository's listing, the tip still answers from
+    /// the repository's ref, a second retirement is nothing, and the
+    /// branch can be established again — the rebuild.
+    #[test]
+    fn a_retired_branch_frees_its_workspace_and_still_answers_its_tip() {
+        let scratch = Scratch::new("retire");
+        let (work, remote, branch) = established(&scratch, None);
+        let issue = agent(&work, "issue-1", "one.txt", "one\n");
+        let Outcome::Merged { commit, .. } = branch.merge("issue-1").unwrap() else {
+            panic!("the merge lands");
+        };
+        let directory = branch.workspace().directory.clone();
+
+        branch.retire();
+        assert!(!directory.exists(), "the workspace is gone");
+        assert_eq!(job::held_by(&work, "feature/wumpus").unwrap(), None);
+        assert_eq!(branch.tip().unwrap(), commit, "read from the repository");
+        branch.retire();
+
+        let again =
+            Branch::establish(&work, "feature/wumpus", "main", Local(remote), None).unwrap();
+        assert_eq!(again.workspace().base_commit, commit, "as it stands");
+        tidy(&issue);
+        tidy(again.workspace());
     }
 
     /// The lock, exercised: two threads merging through one Branch both

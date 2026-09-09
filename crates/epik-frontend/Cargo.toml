@@ -25,12 +25,20 @@ serde_json = "1"
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-# Only for features leptos doesn't already enable (matchMedia, and the
-# delegated link-click handler's Element walk).
+# Already in the tree through leptos; named for the one look at
+# `window` that tells the app's window from a browser.
+js-sys = "0.3"
+# Only for features leptos doesn't already enable (matchMedia, the
+# delegated link-click handler's Element walk, the browser's event
+# stream, and the reload a relaunched backend calls for).
 web-sys = { version = "0.3", features = [
     "Element",
+    "EventSource",
     "EventTarget",
+    "Location",
     "MediaQueryList",
+    "MessageEvent",
+    "Window",
 ] }
 
 # Deliberately its own workspace: this crate targets wasm while the root

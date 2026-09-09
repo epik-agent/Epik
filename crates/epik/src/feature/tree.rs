@@ -8,11 +8,12 @@
 //! subtree it roots, its descendants, and its ancestors, so nothing
 //! outside this module ever walks `children` by hand.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-/// A value and the subtrees beneath it. Output vocabulary: it serializes
-/// on its way to a model or a window and is never read back in.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// A value and the subtrees beneath it. Wire vocabulary: it serializes
+/// on its way to a model or a window, and a window reads it back in as
+/// the shape of the build it watches.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Tree<T> {
     pub(super) value: T,
     pub(super) children: Vec<Self>,
@@ -26,6 +27,11 @@ impl<T> Tree<T> {
             value,
             children: Vec::new(),
         }
+    }
+
+    /// Whether this node holds nothing: where the tree is a plan, work.
+    pub(super) const fn is_leaf(&self) -> bool {
+        self.children.is_empty()
     }
 
     /// Every value in the tree, this node first, depth-first.

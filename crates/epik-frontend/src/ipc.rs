@@ -2,16 +2,20 @@
 //! bindings, the command names, and typed calls over them.
 //!
 //! The types on the wire are the library's own — [`Resolved`],
-//! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`] — so nothing
-//! here re-declares what `epik` already says.
+//! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
+//! — so nothing here re-declares what `epik` already says.
 
 use epik::chat::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::config::Config;
 use epik::keystore::{Resolved, Secret};
+use epik::monitor::{EVENT, Entry};
+use leptos::prelude::window;
 use leptos::task::spawn_local;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+
+use crate::monitor::Feed;
 
 #[wasm_bindgen]
 extern "C" {
@@ -77,6 +81,13 @@ struct SaveDialogOptions<'a> {
 #[derive(Deserialize)]
 struct TranscriptEnvelope {
     payload: TranscriptItem,
+}
+
+/// The same envelope on the monitor's channel; the entry rides in
+/// `payload`.
+#[derive(Deserialize)]
+struct MonitorEnvelope {
+    payload: Entry,
 }
 
 /// A rejected invoke as text for the page, with a fallback that can never
@@ -203,6 +214,45 @@ pub fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
         let _ = listen(TRANSCRIPT_EVENT, handler.as_ref()).await;
         handler.forget();
     });
+}
+
+/// The window's feed of feature-build entries: each one as an event on
+/// [`EVENT`], the replay from the `monitor_log` command.
+pub struct Monitor;
+
+impl Feed for Monitor {
+    /// The handler lives for the window, which is why it is forgotten
+    /// rather than dropped; `standing` hears whether the binding took,
+    /// once — the window's channel is neither lost nor regained.
+    fn listen(
+        &self,
+        hear: impl Fn(Entry) + 'static,
+        standing: impl Fn(Result<(), String>) + 'static,
+    ) {
+        spawn_local(async move {
+            let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+                if let Ok(envelope) = serde_wasm_bindgen::from_value::<MonitorEnvelope>(event) {
+                    hear(envelope.payload);
+                }
+            });
+            let outcome = listen(EVENT, handler.as_ref())
+                .await
+                .map(|_| ())
+                .map_err(|error| error_text(&error));
+            handler.forget();
+            standing(outcome);
+        });
+    }
+
+    fn replay(&self, deliver: impl FnOnce(Result<Vec<Entry>, String>) + 'static) {
+        spawn_local(async move { deliver(ask("monitor_log").await) });
+    }
+}
+
+/// Whether the page runs in the app's window: Tauri's bridge is on
+/// `window` there, and nowhere else.
+pub fn in_window() -> bool {
+    js_sys::Reflect::has(&window(), &JsValue::from_str("__TAURI__")).unwrap_or(false)
 }
 
 /// Opens `url` in the system browser through the opener plugin — the app's
