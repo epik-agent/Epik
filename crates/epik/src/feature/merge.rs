@@ -125,6 +125,12 @@ impl<F: Forge> Branch<F> {
         &self.workspace
     }
 
+    /// The check that judges every merge; `None` is an unchecked branch.
+    #[must_use]
+    pub(super) const fn check(&self) -> Option<&Check> {
+        self.check.as_ref()
+    }
+
     /// The feature branch's tip as it stands settled — read under the
     /// merge lock, so a merge mid-judgement, whose commit a red check
     /// or a failed push may yet reset away, can never be the answer.

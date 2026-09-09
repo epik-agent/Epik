@@ -23,37 +23,31 @@
 //! The tool answers when the build is running, not when it finishes:
 //! the turn that called it ends while the build proceeds. No Agent
 //! event enters any chat transcript — the [`Build`] record is the sink,
-//! and `feature_status` is the door.
+//! and `feature_status` is the door for a model. A window has another:
+//! the record speaks every change to the host's [`Log`], from the
+//! reservation on — [`Reserved`](Change::Reserved) before the card is
+//! raised, so a build is visible from the moment it is asked for, and
+//! [`Abandoned`](Change::Abandoned) with the reason when a launch fails
+//! before the build runs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::check::{self, Check};
 use super::merge::Branch;
-use super::{Budget, Build, Feature, Issue, IssueId, Plan, build};
+use super::{Budget, Build, Feature, Issue, IssueId, Plan, RunId, build};
 use crate::agent::Agent;
 use crate::chat::{Answer, Ask};
 use crate::forge::Forge;
 use crate::git::plumbing;
 use crate::job::Workspace;
+use crate::monitor::{Change, Log};
 use crate::tools::Tool;
 use crate::tools::arg;
-
-/// The key of the feature-build record: one per launched build,
-/// counting up from 1.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-struct RunId(u64);
-
-impl fmt::Display for RunId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 /// One launched feature build, as the record keeps it: the build in
 /// flight, and afterwards the build that flew.
@@ -134,24 +128,27 @@ impl Entry {
 
 /// The record of feature builds, keyed by run id. Finished builds stay
 /// readable — status outlives completion — and only a launch under way
-/// or a build still in flight blocks a reservation.
+/// or a build still in flight blocks a reservation. Every change to
+/// the record is spoken to `log`, the host's one.
 pub struct Builds {
     entries: Mutex<BTreeMap<RunId, Entry>>,
     /// The next run id. A counter rather than the map's maximum, so a
     /// released reservation never recycles its id onto a later build.
     next: std::sync::atomic::AtomicU64,
-}
-
-impl Default for Builds {
-    fn default() -> Self {
-        Self {
-            entries: Mutex::new(BTreeMap::new()),
-            next: std::sync::atomic::AtomicU64::new(1),
-        }
-    }
+    log: Arc<Log>,
 }
 
 impl Builds {
+    /// An empty record whose builds speak to `log`.
+    #[must_use]
+    pub fn new(log: Arc<Log>) -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+            next: std::sync::atomic::AtomicU64::new(1),
+            log,
+        }
+    }
+
     /// The refusal a second `start_feature` answers with, when a launch
     /// or a build is in flight.
     #[cfg(test)]
@@ -163,8 +160,10 @@ impl Builds {
     /// one is in flight — check and insert under one map lock, held for
     /// nothing else. The reservation is what a second start runs into
     /// from this moment on: before any card is raised, before any
-    /// branch is established. Fill it when the build is running; drop
-    /// it unfilled and the entry goes, though its id is never reused.
+    /// branch is established — and Reserved is recorded here, so it is
+    /// what a watcher sees from this moment on too. Fill it when the
+    /// build is running; abandon it, or drop it unfilled, and the entry
+    /// goes, though its id is never reused.
     ///
     /// # Errors
     ///
@@ -174,43 +173,67 @@ impl Builds {
         feature: Feature,
         repository: String,
         branch: String,
+        base: Option<String>,
     ) -> Result<Reservation, Refused> {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(refused) = refusal(&entries) {
-            return Err(refused);
-        }
-        let run = RunId(self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-        entries.insert(
+        let run = {
+            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(refused) = refusal(&entries) {
+                return Err(refused);
+            }
+            let run = RunId(self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            entries.insert(
+                run,
+                Entry::Starting {
+                    feature: feature.clone(),
+                    repository: repository.clone(),
+                    branch: branch.clone(),
+                },
+            );
+            run
+        };
+        self.log.record(Change::Reserved {
             run,
-            Entry::Starting {
-                feature,
-                repository,
-                branch,
-            },
-        );
+            feature: feature.0,
+            repository,
+            branch,
+            base,
+        });
         Ok(Reservation {
             builds: Arc::clone(self),
             run,
-            filled: false,
+            standing: Standing::Held,
         })
     }
 }
 
+/// How a reservation ended, if it has.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Standing {
+    /// The launch is under way.
+    Held,
+    /// The build is running: the flight took the reservation's place.
+    Filled,
+    /// The launch failed, and the log has been told why.
+    Abandoned,
+}
+
 /// A run id held while a launch is under way: taken before the check
 /// card is raised, filled with the [`Flight`] once the build is
-/// running. Dropped unfilled — the launch failed — it releases its
-/// entry, and a new start may reserve again.
+/// running. Abandoned — the launch failed — it releases its entry with
+/// the reason recorded, and a new start may reserve again; dropped
+/// unfilled without a word, it records the abandonment with words of
+/// its own, so no reservation ever vanishes from the log unexplained.
 struct Reservation {
     builds: Arc<Builds>,
     run: RunId,
-    filled: bool,
+    standing: Standing,
 }
 
 impl fmt::Debug for Reservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Reservation")
             .field("run", &self.run)
-            .field("filled", &self.filled)
+            .field("standing", &self.standing)
             .finish_non_exhaustive()
     }
 }
@@ -230,20 +253,52 @@ impl Reservation {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(self.run, Entry::Flight(flight));
-        self.filled = true;
+        self.standing = Standing::Filled;
         self.run
+    }
+
+    /// Fills the reservation with the flight `launch` yields — or, when
+    /// the launch fails, abandons it with the launch's own words, so no
+    /// path between reserving and running can fail silently. Whatever
+    /// else `launch` yields comes back beside the run id.
+    fn fill_with<T>(
+        self,
+        launch: impl FnOnce(RunId) -> Result<(Flight, T), String>,
+    ) -> Result<(RunId, T), String> {
+        match launch(self.run) {
+            Ok((flight, extra)) => Ok((self.fill(flight), extra)),
+            Err(words) => {
+                self.abandon(words.clone());
+                Err(words)
+            }
+        }
+    }
+
+    /// The launch failed: `reason` is recorded, and the entry released.
+    fn abandon(mut self, reason: String) {
+        self.builds.log.record(Change::Abandoned {
+            run: self.run,
+            reason,
+        });
+        self.standing = Standing::Abandoned;
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if !self.filled {
-            self.builds
-                .entries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&self.run);
+        match self.standing {
+            Standing::Filled => return,
+            Standing::Abandoned => {}
+            Standing::Held => self.builds.log.record(Change::Abandoned {
+                run: self.run,
+                reason: "the launch ended without saying why".to_owned(),
+            }),
         }
+        self.builds
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.run);
     }
 }
 
@@ -365,48 +420,65 @@ where
                     .to_owned(),
             };
             // The reservation: from here a second start refuses — before
-            // any card is raised — and any failure below releases it on
-            // the way out.
+            // any card is raised — and any failure below abandons it,
+            // with its words, on the way out.
             let reservation = builds
-                .reserve(feature.clone(), repository.clone(), branch.clone())
+                .reserve(
+                    feature.clone(),
+                    repository.clone(),
+                    branch.clone(),
+                    Some(base.clone()),
+                )
                 .map_err(|refused| refused.to_string())?;
-            let plan = plan(repo, &feature)?;
-            let problems = plan.problems();
-            let issues = plan.work(&BTreeSet::new()).len();
-            let forge = forge(repo)?;
-            let agents = agents()?;
-            // The check is a precondition: raised here, before anything
-            // is dispatched, with detection's proposal prefilled.
-            let proposal = check::detect(Path::new(&repository)).map(|check| check.command);
-            let answer = asker(Ask::Check {
-                prompt: asked(&feature, &branch),
-                proposal,
-            });
-            let check = confirmed(&answer);
-            let command = check.as_ref().map(|check| check.command.clone());
-            // Establishing pushes over the network and the build starts
-            // machinery: both happen outside every map lock — the
-            // reservation is what keeps the door shut meanwhile.
-            let established = Arc::new(Branch::establish(
-                &repository,
-                &branch,
-                &base,
-                forge,
-                check,
-            )?);
-            let tip = {
-                let established = Arc::clone(&established);
-                move || established.tip()
-            };
-            let record = build(plan, established, agents, Arc::clone(&budget));
-            let run = reservation.fill(Flight {
-                feature: feature.clone(),
-                repository: repository.clone(),
-                branch: branch.clone(),
-                check: command.clone(),
-                tip: Arc::new(tip),
-                record,
-            });
+            let (run, (problems, issues, command)) = reservation.fill_with(|run| {
+                let plan = plan(repo, &feature)?;
+                let problems = plan.problems();
+                let issues = plan.work(&BTreeSet::new()).len();
+                let forge = forge(repo)?;
+                let agents = agents()?;
+                // The check is a precondition: raised here, before
+                // anything is dispatched, with detection's proposal
+                // prefilled.
+                let proposal = check::detect(Path::new(&repository)).map(|check| check.command);
+                let answer = asker(Ask::Check {
+                    prompt: asked(&feature, &branch),
+                    proposal,
+                });
+                let check = confirmed(&answer);
+                let command = check.as_ref().map(|check| check.command.clone());
+                // Establishing pushes over the network and the build
+                // starts machinery: both happen outside every map lock
+                // — the reservation is what keeps the door shut
+                // meanwhile.
+                let established = Arc::new(Branch::establish(
+                    &repository,
+                    &branch,
+                    &base,
+                    forge,
+                    check,
+                )?);
+                let tip = {
+                    let established = Arc::clone(&established);
+                    move || established.tip()
+                };
+                let record = build(
+                    run,
+                    Arc::clone(&builds.log),
+                    plan,
+                    established,
+                    agents,
+                    Arc::clone(&budget),
+                );
+                let flight = Flight {
+                    feature: feature.clone(),
+                    repository: repository.clone(),
+                    branch: branch.clone(),
+                    check: command.clone(),
+                    tip: Arc::new(tip),
+                    record,
+                };
+                Ok((flight, (problems, issues, command)))
+            })?;
             Ok(json!({
                 "started": true,
                 "run": run,
@@ -538,8 +610,14 @@ mod tests {
     use super::super::State;
     use super::super::fixtures::{id, node, plan, seven_holding_eight};
     use super::*;
+    use crate::monitor::{Stage, folded};
     use crate::testing::{Local, Scratch, seeded};
     use crate::tools::Registry;
+
+    /// An empty record on a fresh log.
+    fn builds() -> Arc<Builds> {
+        Arc::new(Builds::new(Arc::new(Log::new())))
+    }
 
     /// An Agent that never starts: its program does not exist, so every
     /// dispatch fails at the start — which is exactly what lets the tool
@@ -580,13 +658,15 @@ mod tests {
             ],
         );
         let mut build = Build {
+            run: RunId(0),
+            log: Arc::new(Log::new()),
             problems: plan.problems(),
             plan,
             states: BTreeMap::new(),
             runs: BTreeMap::new(),
         };
         for (number, state) in states {
-            build.states.insert(id(*number), state.clone());
+            build.set(&id(*number), state.clone());
         }
         Flight {
             feature: Feature(id(feature)),
@@ -641,6 +721,7 @@ mod tests {
             Feature(id(feature)),
             "/r".to_owned(),
             format!("feature-{feature}"),
+            None,
         )
     }
 
@@ -695,6 +776,7 @@ mod tests {
                 the_flight.feature.clone(),
                 the_flight.repository.clone(),
                 the_flight.branch.clone(),
+                None,
             )
             .unwrap()
             .fill(the_flight)
@@ -702,7 +784,7 @@ mod tests {
 
     #[test]
     fn a_reservation_or_a_running_build_refuses_the_next_start_typed() {
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let first = admitted(
             &builds,
             flight(7, "feature-7", "/r", &[(8, State::Running)]),
@@ -720,8 +802,8 @@ mod tests {
             let Entry::Flight(flight) = &entries[&RunId(1)] else {
                 panic!("the filled entry is a flight");
             };
-            flight.record.lock().unwrap().states.insert(
-                id(8),
+            flight.record.lock().unwrap().set(
+                &id(8),
                 State::Failed {
                     report: "boom".to_owned(),
                 },
@@ -737,7 +819,7 @@ mod tests {
     /// filled it yet — so two starts can never both ask.
     #[test]
     fn an_unfilled_reservation_already_refuses_the_next_start() {
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let reservation = reserve(&builds, 7).unwrap();
         assert_eq!(reservation.run(), RunId(1));
 
@@ -750,6 +832,94 @@ mod tests {
         assert!(builds.entries.lock().unwrap().is_empty());
         let next = reserve(&builds, 9).unwrap();
         assert_eq!(next.run(), RunId(2));
+    }
+
+    /// A reservation is spoken from the moment it is taken, and its end
+    /// is spoken too: abandoned with the launch's words, or — dropped
+    /// without any — with words of the reservation's own. Either way
+    /// the fold's stage is Abandoned with the reason.
+    #[test]
+    fn a_reservation_is_recorded_and_its_abandonment_says_why() {
+        let builds = builds();
+        let reservation = reserve(&builds, 7).unwrap();
+        let entries = builds.log.since(0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].change,
+            Change::Reserved {
+                run: RunId(1),
+                feature: id(7),
+                repository: "/r".to_owned(),
+                branch: "feature-7".to_owned(),
+                base: None,
+            }
+        );
+        reservation.abandon("the tracker is down".to_owned());
+        assert!(builds.entries.lock().unwrap().is_empty(), "released");
+        let progress = folded(&builds.log);
+        assert_eq!(
+            *progress.watch(RunId(1)).unwrap().stage(),
+            Stage::Abandoned {
+                reason: "the tracker is down".to_owned()
+            }
+        );
+
+        drop(reserve(&builds, 7).unwrap());
+        let progress = folded(&builds.log);
+        let Stage::Abandoned { reason } = progress.watch(RunId(2)).unwrap().stage() else {
+            panic!("a dropped reservation is abandoned too");
+        };
+        assert!(reason.contains("without saying why"), "{reason}");
+    }
+
+    /// The launch that fails after reserving — here the plan cannot be
+    /// read — leaves Reserved then Abandoned with the failure's words,
+    /// and nothing else: no Started, no card raised.
+    #[test]
+    fn a_launch_that_fails_after_reserving_is_abandoned_with_its_words() {
+        let scratch = Scratch::new("abandoned");
+        let (work, remote) = seeded(&scratch);
+        let builds = builds();
+        let mut registry = Registry::default();
+        registry.register(start_feature(
+            Arc::clone(&builds),
+            Budget::new(),
+            |_, _| Err("the tracker is down".to_owned()),
+            move |_| Ok(Local(remote.clone())),
+            || Ok(unreachable),
+            |_| panic!("no card is raised when the plan cannot be read"),
+        ));
+
+        let error = start(&registry, &work, 7).unwrap_err();
+        assert_eq!(error, "the tracker is down");
+        assert!(builds.entries.lock().unwrap().is_empty(), "released");
+
+        let changes: Vec<&str> = builds
+            .log
+            .since(0)
+            .iter()
+            .map(|entry| match &entry.change {
+                Change::Reserved { base, .. } => {
+                    assert_eq!(base.as_deref(), Some("main"));
+                    "reserved"
+                }
+                Change::Abandoned { reason, .. } => {
+                    assert_eq!(reason, "the tracker is down");
+                    "abandoned"
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(changes, ["reserved", "abandoned"]);
+        assert_eq!(
+            *folded(&builds.log).watch(RunId(1)).unwrap().stage(),
+            Stage::Abandoned {
+                reason: "the tracker is down".to_owned()
+            }
+        );
+
+        // The door is open again: the next reservation takes the next id.
+        assert_eq!(reserve(&builds, 9).unwrap().run(), RunId(2));
     }
 
     #[test]
@@ -779,7 +949,7 @@ mod tests {
         let main_tip = git(&["-C", &work, "rev-parse", "refs/heads/main"])
             .trim()
             .to_owned();
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
         let started = start(&registry, &work, 7).unwrap();
@@ -801,7 +971,76 @@ mod tests {
             json!(main_tip),
             "nothing landed: an Agent that never starts"
         );
+
+        // The log told the whole story: Reserved before the card,
+        // Started, one Moved per state 8 passed through — Running, then
+        // its Failed end — and Finished once. The fold is the record.
+        let record = {
+            let entries = builds.entries.lock().unwrap();
+            let Entry::Flight(flight) = &entries[&RunId(1)] else {
+                panic!("the filled entry is a flight");
+            };
+            flight.record.lock().unwrap().clone()
+        };
+        let entries = wait_for_finished(&builds.log);
+        let words: Vec<&str> = entries
+            .iter()
+            .map(|entry| match &entry.change {
+                Change::Reserved { .. } => "reserved",
+                Change::Started { states, check, .. } => {
+                    assert_eq!(states[&id(8)], State::Waiting);
+                    assert_eq!(*check, None);
+                    "started"
+                }
+                Change::Moved { issue, state, .. } => {
+                    assert_eq!(*issue, id(8));
+                    match state {
+                        State::Running => "running",
+                        State::Failed { .. } => {
+                            assert_eq!(&record.states[&id(8)], state);
+                            "failed"
+                        }
+                        other => panic!("{other:?}"),
+                    }
+                }
+                Change::Finished { .. } => "finished",
+                Change::Abandoned { .. } => "abandoned",
+            })
+            .collect();
+        assert_eq!(
+            words,
+            ["reserved", "started", "running", "failed", "finished"]
+        );
+        let progress = folded(&builds.log);
+        let watch = progress.watch(RunId(1)).unwrap();
+        assert_eq!(*watch.states(), record.states);
+        assert_eq!(*watch.stage(), Stage::Finished);
+        assert_eq!(watch.branch(), "feature-7");
+        assert_eq!(watch.base(), Some("main"));
         tidy(&work);
+    }
+
+    /// The log once the run's Finished has landed — which follows the
+    /// record's own `finished` by the width of the scheduler's wakeup,
+    /// so status saying finished is not yet the log saying so.
+    fn wait_for_finished(log: &Log) -> Vec<crate::monitor::Entry> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut cursor = 0;
+        loop {
+            let heard = log.wait_after(cursor, std::time::Duration::from_secs(1));
+            if heard
+                .iter()
+                .any(|entry| matches!(entry.change, Change::Finished { .. }))
+            {
+                return log.since(0);
+            }
+            cursor += heard.len() as u64;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the log never said finished: {:?}",
+                log.since(0)
+            );
+        }
     }
 
     #[test]
@@ -810,7 +1049,7 @@ mod tests {
         let (work, remote) = seeded(&scratch);
         cargo_crate(&work);
         let asked = Arc::new(Mutex::new(None::<Ask>));
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let registry = registry(&builds, seven_holding_eight(), remote, {
             let asked = Arc::clone(&asked);
             move |question| {
@@ -862,7 +1101,7 @@ mod tests {
         let scratch = Scratch::new("decline");
         let (work, remote) = seeded(&scratch);
         cargo_crate(&work);
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let registry = registry(&builds, seven_holding_eight(), remote, |_| Answer::Declined);
 
         let started = start(&registry, &work, 7).unwrap();
@@ -877,7 +1116,7 @@ mod tests {
     fn a_second_start_while_one_is_in_flight_is_refused_naming_it() {
         let scratch = Scratch::new("inflight");
         let (work, remote) = seeded(&scratch);
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         admitted(
             &builds,
             flight(7, "feature-7", &work, &[(8, State::Running)]),
@@ -897,7 +1136,7 @@ mod tests {
 
     #[test]
     fn what_is_not_a_repository_is_refused_before_anyone_is_asked() {
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let registry = registry(
             &builds,
             plan(7, vec![node(7, false, &[], &[])]),
@@ -934,7 +1173,7 @@ mod tests {
         let tip = git(&["-C", &work, "rev-parse", "refs/heads/feature-100"])
             .trim()
             .to_owned();
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let mut settled = flight(
             100,
             "feature-100",
@@ -978,7 +1217,7 @@ mod tests {
 
     #[test]
     fn status_with_no_builds_says_so_in_an_ok_answer() {
-        let registry = status_registry(&Arc::new(Builds::default()));
+        let registry = status_registry(&builds());
         let status = registry.dispatch("feature_status", "{}").unwrap();
         assert_eq!(status["run"], Value::Null);
         assert_eq!(status["note"], json!("no feature build has been started"));
@@ -989,7 +1228,7 @@ mod tests {
     /// anything the launch holds.
     #[test]
     fn status_of_a_reserved_launch_says_it_has_not_started() {
-        let builds = Arc::new(Builds::default());
+        let builds = builds();
         let reservation = reserve(&builds, 7).unwrap();
         let registry = status_registry(&builds);
 
