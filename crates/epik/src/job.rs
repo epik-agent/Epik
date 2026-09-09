@@ -132,6 +132,11 @@ pub fn provision(order: &Order) -> Result<Workspace, String> {
 /// per-issue workspaces — under the same persona identity.
 /// `base_commit` is the tip the branch stood on when adopted.
 ///
+/// The refusal of a branch already checked out is load-bearing: it is
+/// what keeps a feature branch to one build at a time, in git's words,
+/// with nothing of Epik's own arbitrating. `worktree add` here must
+/// never gain `--force`.
+///
 /// # Errors
 ///
 /// Words for the model: the repository is not one, the branch does not
@@ -571,6 +576,23 @@ mod tests {
         assert!(error.contains("already exists"), "{error}");
 
         tidy(&first);
+    }
+
+    /// The guard a feature build rests on: a branch adopted once cannot
+    /// be adopted again — git refuses a second worktree of it — so two
+    /// builds can never own one feature branch. Dropping the feature
+    /// workspace, or adding `--force`, fails here rather than in a
+    /// merge.
+    #[test]
+    fn a_branch_already_adopted_is_refused_in_gits_words() {
+        let scratch = Scratch::new("adopt-twice");
+        let repository = bare(&scratch);
+        let first = adopt(&repository, "main").unwrap();
+
+        let error = adopt(&repository, "main").unwrap_err();
+        assert!(error.contains("'main' is already"), "{error}");
+
+        remove_worktree(&first);
     }
 
     #[test]
