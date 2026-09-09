@@ -43,6 +43,33 @@ use tiny_http::{Header, Method, Request, Response, Server};
 /// Trunk embeds an empty bundle and serves 404s for the page.
 static BUNDLE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../epik-frontend/dist");
 
+/// The mark `trunk serve` leaves in a bundle it meant to serve itself:
+/// the address its autoreload client dials, a placeholder the dev
+/// server fills in on the way out and nothing else does.
+const DEV_MARKER: &str = "__trunk_address__";
+
+/// Whether the embedded bundle is `trunk serve`'s. Decided once; the
+/// bundle does not change while the process runs.
+static DEV_BUNDLE: LazyLock<bool> = LazyLock::new(|| {
+    BUNDLE
+        .get_file("index.html")
+        .is_some_and(|index| dev_bundle(index.contents()))
+});
+
+/// Whether `index` is a dev-server bundle's page: one whose autoreload
+/// client would dial the placeholder from any other server, forever.
+/// Such a bundle is not served; the page is a sentence saying what to
+/// run instead.
+fn dev_bundle(index: &[u8]) -> bool {
+    index
+        .windows(DEV_MARKER.len())
+        .any(|window| window == DEV_MARKER.as_bytes())
+}
+
+/// What the page says in place of a dev-server bundle.
+const DEV_REFUSAL: &str = "the embedded monitor page is a trunk serve bundle; run trunk build \
+in crates/epik-frontend and build the backend again\n";
+
 /// The event stream's path.
 pub const CHANGES: &str = "/monitor/changes";
 
@@ -147,6 +174,8 @@ enum Route {
     Changes,
     /// One file of the bundle.
     Asset(&'static File<'static>),
+    /// A file of a bundle `trunk serve` wrote, which is not served.
+    DevBundle,
     /// A path the bundle does not hold.
     NotFound,
     /// Anything but GET: the surface is read-only.
@@ -165,7 +194,11 @@ fn route(method: &Method, url: &str) -> Route {
         "/" => "index.html",
         _ => path.trim_start_matches('/'),
     };
-    BUNDLE.get_file(file).map_or(Route::NotFound, Route::Asset)
+    match BUNDLE.get_file(file) {
+        Some(_) if *DEV_BUNDLE => Route::DevBundle,
+        Some(file) => Route::Asset(file),
+        None => Route::NotFound,
+    }
 }
 
 /// The content type an asset is served as, by its extension.
@@ -202,6 +235,9 @@ fn handle(request: Request, log: &Log, bound: IpAddr) {
         Route::Changes => return stream(request, log),
         Route::Asset(file) => Response::from_data(file.contents())
             .with_header(header("Content-Type", content_type(file.path())))
+            .boxed(),
+        Route::DevBundle => Response::from_string(DEV_REFUSAL)
+            .with_status_code(503)
             .boxed(),
         Route::NotFound => Response::empty(404).boxed(),
         Route::NotAllowed => Response::empty(405).boxed(),
@@ -452,14 +488,16 @@ mod tests {
         assert_eq!(request(addr, "GET /nothing-here", &[]).0, 404);
     }
 
-    /// The page is served when the build embedded a bundle, and a 404
-    /// says so when it did not — both are this crate compiling.
+    /// The page is served when the build embedded a bundle, a 404 says
+    /// so when it did not, and a 503 when what it embedded was `trunk
+    /// serve`'s — all three are this crate compiling.
     #[test]
     fn the_page_is_the_bundles_index() {
         let (_log, addr) = served();
         let (status, headers, mut reader) = request(addr, "GET /", &[]);
         match BUNDLE.get_file("index.html") {
             None => assert_eq!(status, 404, "no bundle was embedded"),
+            Some(_) if *DEV_BUNDLE => assert_eq!(status, 503, "a dev bundle was embedded"),
             Some(index) => {
                 assert_eq!(status, 200);
                 assert!(headers.contains(&"content-type: text/html; charset=utf-8".to_owned()));
@@ -556,6 +594,17 @@ mod tests {
         assert!(route(&Method::Get, "/nothing-here") == Route::NotFound);
         assert!(route(&Method::Get, "/../Cargo.toml") == Route::NotFound);
         assert!(route(&Method::Get, "/") == route(&Method::Get, "/index.html"));
+    }
+
+    #[test]
+    fn a_dev_server_bundle_is_told_by_its_placeholder() {
+        assert!(dev_bundle(
+            b"<script>window.__TRUNK_ADDRESS__ = '__trunk_address__'</script>"
+        ));
+        assert!(!dev_bundle(
+            b"<html><body><script>fetch('/monitor/changes')</script>"
+        ));
+        assert!(!dev_bundle(b""));
     }
 
     #[test]
