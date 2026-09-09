@@ -1,27 +1,46 @@
 [package]
 name = "epik"
-version.workspace = true
-edition.workspace = true
-
-[lints]
-workspace = true
+version = "0.1.0"
+edition = "2024"
 
 [features]
-default = ["native"]
-# Everything that cannot exist on wasm32, where this crate is a source of
-# types rather than a maker of requests: the HTTP client and the OS keyring.
-# The frontend depends on this crate with `default-features = false`.
-native = ["dep:keyring", "dep:ureq"]
+# The machinery of an actual desktop: the OS keyring, blocking HTTP,
+# process supervision. Off by default so the crate stays wasm-clean for
+# the frontend. Wire protocols come with it, so native implies serde.
+native = [
+    "dep:chrono",
+    "dep:include-crypt",
+    "dep:libc",
+    "dep:ureq",
+    "serde",
+]
+# Wire form for the types both sides of the IPC barrier share — including
+# Secret, whose serialization is the one door its bytes leave through. A
+# marker: the serde crates themselves are unconditional, because the agent
+# vocabulary is wire protocol under every feature set.
+serde = []
+# Test infrastructure, for this crate's tests and its dependents' — all
+# of it under `testing`: the scripted fakes, a loopback model and a
+# deterministic agent with just enough behavior to test against, and the
+# shared fixtures. No shipping build enables it, and no test here ever
+# depends on a real LLM.
+testing = ["native"]
 
 [dependencies]
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-toml = "1"
-
-keyring = { version = "4", optional = true }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+], optional = true }
+include-crypt = { version = "0.1", optional = true }
+libc = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]
-git2 = "0.20"
-tempfile = "3"
+# The independent git implementation the git.rs tests verify against:
+# CLI in prod, libgit2 in tests. Local-only, so no TLS or SSH features.
+git2 = { version = "0.20", default-features = false }
+
+[lints]
+workspace = true

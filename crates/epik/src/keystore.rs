@@ -1,201 +1,161 @@
-//! Where chat keys live: not here.
+//! Where secrets live: not here.
 //!
-//! Secrets are pushed to their official holders and Epik keeps references,
-//! never values. A chat key belongs in the OS keyring — Keychain, Credential
-//! Manager, secret service — under service `Epik`, with the provider's
-//! configured name as the account. Anthropic auth stays inside the `claude`
-//! CLI's login, GitHub auth inside `gh`, and CI keys, when they come, in
-//! GitHub Actions secrets.
+//! Secrets belong to the OS keyring, as a set of (name, secret) pairs;
+//! which keyring, and under what service, is the host's to say. Names are
+//! the callers' to choose; this module attaches no meaning to any of
+//! them. Values exist to be *used*, at runtime, and for nothing else:
+//! never printed, never logged, never written to a file. [`Secret`] is the
+//! type that keeps that promise, and keeps every exception to it greppable.
 //!
-//! [`KeyStore`] is the seam that keeps each of those placements an
-//! independent decision — and that keeps a test suite out of anybody's
-//! keychain.
+//! [`KeyStore`] is the seam that keeps each placement an independent
+//! decision — and that keeps a test suite out of anybody's keychain.
 
 use std::collections::BTreeMap;
-use std::env;
+use std::fmt;
 
 use anyhow::Result;
 
-/// The keyring service every Epik secret is filed under.
-pub const SERVICE: &str = "Epik";
+/// A secret in hand: usable anywhere, visible nowhere.
+///
+/// The bytes come out through [`reveal`](Self::reveal) and no other door, so
+/// every use of the raw value is greppable. `Debug` prints a redaction and
+/// there is no `Display` at all: a secret cannot wander into an error
+/// message, a panic, or a log line just by being formatted along the way.
+///
+/// Serialization is the one other door: the bare bytes, which is what
+/// lets a secret cross a process boundary — the IPC barrier — as itself
+/// instead of decaying into a `String` on each side. That crossing is the accepted exposure — every place it
+/// can happen types itself `Secret` and is findable by that name.
+#[derive(Clone, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Secret(String);
 
-/// An environment variable that outranks the keyring, for a shell session
-/// that wants to use a different key without storing it anywhere.
-pub const OVERRIDE_ENV: &str = "EPIK_API_KEY";
+impl Secret {
+    /// The bytes themselves, for the moment of use — an HTTP header, a
+    /// keyring write. Holding the `&str` any longer than that defeats the
+    /// wrapper.
+    #[must_use]
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+}
 
-/// Somewhere a provider's key can be kept and found again.
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl From<String> for Secret {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+/// Somewhere a secret can be kept and found again.
 pub trait KeyStore {
-    /// The key filed against `provider`, or `None` when there is none.
+    /// The secret filed against `name`, or `None` when there is none.
     ///
     /// # Errors
     ///
     /// Returns an error when the store itself could not be consulted — which
-    /// is a different thing from there being no key.
-    fn get(&self, provider: &str) -> Result<Option<String>>;
+    /// is a different thing from there being no secret.
+    fn get(&self, name: &str) -> Result<Option<Secret>>;
 
-    /// Files `key` against `provider`, replacing whatever was there.
+    /// Files `secret` against `name`, replacing whatever was there.
     ///
     /// # Errors
     ///
     /// Returns an error when the store would not take it.
-    fn set(&mut self, provider: &str, key: &str) -> Result<()>;
+    fn set(&mut self, name: &str, secret: Secret) -> Result<()>;
+
+    /// Where the secret for `name` stands, with a store that will not answer
+    /// reported rather than raised.
+    ///
+    /// [`get`](Self::get) makes an unreachable store an error, which is the
+    /// right shape for a caller about to need a secret. This is the right
+    /// shape for one that only needs to know where it stands — chiefly an
+    /// app starting up, which must not fail for want of a keyring. A machine
+    /// with no secret service still has plenty to offer; whoever really
+    /// needs the secret will say so in their own words soon enough.
+    fn resolve(&self, name: &str) -> Resolved {
+        match self.get(name) {
+            Ok(Some(secret)) => Resolved::Found(secret),
+            Ok(None) => Resolved::Absent,
+            Err(error) => Resolved::Unreachable(format!("{error:#}")),
+        }
+    }
 }
 
 /// Where resolution got to.
 ///
-/// Three states rather than an `Option`, because "there is no key" and "there
-/// is no way to find out" are different situations and a caller usually wants
-/// to treat them differently.
+/// Three states rather than an `Option`, because "there is no secret" and
+/// "there is no way to find out" are different situations and a caller
+/// usually wants to treat them differently.
+///
+/// With the `serde` feature this is also the wire shape of a resolution:
+/// both sides of the IPC barrier speak this type, defined once, here.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolved {
-    /// A key, from the environment or the store.
-    Found(String),
-    /// None, and nothing wrong. The ordinary state of a fresh install, and the
-    /// permanent state of a local server that wants none.
+    /// A secret, from the store.
+    Found(Secret),
+    /// None, and nothing wrong. The ordinary state of a fresh install.
     Absent,
-    /// The store would not answer, so whether a key exists is unknown. The
-    /// reason, for whoever has somewhere to say it.
+    /// The store would not answer, so whether a secret exists is unknown.
+    /// The reason, for whoever has somewhere to say it.
     Unreachable(String),
 }
 
 impl Resolved {
-    /// The key, if there is one. What a model's constructor takes.
-    #[must_use]
-    pub fn key(self) -> Option<String> {
+    /// The secret, if there is one. What a caller about to use it takes.
+    #[cfg(test)]
+    fn key(self) -> Option<Secret> {
         match self {
-            Self::Found(key) => Some(key),
+            Self::Found(secret) => Some(secret),
             Self::Absent | Self::Unreachable(_) => None,
         }
     }
 }
 
-/// A store that lives and dies with the process. Tests use this one, which is
-/// the entire reason the trait exists.
+/// A store that lives and dies with the process. Dependents' tests hand this
+/// to code that wants a [`KeyStore`] — the entire reason the trait exists —
+/// which is why it is a public export rather than a `cfg(test)` double like
+/// `Unplugged`.
 #[derive(Debug, Default)]
-pub struct InMemory(BTreeMap<String, String>);
+pub struct InMemory(BTreeMap<String, Secret>);
 
 impl KeyStore for InMemory {
-    fn get(&self, provider: &str) -> Result<Option<String>> {
-        Ok(self.0.get(provider).cloned())
+    fn get(&self, name: &str) -> Result<Option<Secret>> {
+        Ok(self.0.get(name).cloned())
     }
 
-    fn set(&mut self, provider: &str, key: &str) -> Result<()> {
-        self.0.insert(provider.to_owned(), key.to_owned());
+    fn set(&mut self, name: &str, secret: Secret) -> Result<()> {
+        self.0.insert(name.to_owned(), secret);
         Ok(())
     }
 }
 
-/// The operating system's own secret holder.
-#[cfg(feature = "native")]
-#[derive(Debug, Default)]
-pub struct OsKeyring;
-
-#[cfg(feature = "native")]
-impl OsKeyring {
-    fn entry(provider: &str) -> Result<keyring::Entry> {
-        keyring::Entry::new(SERVICE, provider).map_err(|error| {
-            anyhow::anyhow!("opening the {SERVICE}/{provider} keyring entry: {error}")
-        })
-    }
-}
-
-#[cfg(feature = "native")]
-impl KeyStore for OsKeyring {
-    fn get(&self, provider: &str) -> Result<Option<String>> {
-        match Self::entry(provider)?.get_password() {
-            Ok(key) => Ok(Some(key)),
-            // No entry is the ordinary state of a fresh install, not a fault.
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(anyhow::anyhow!(
-                "reading the {SERVICE}/{provider} key from the keyring: {error}"
-            )),
-        }
-    }
-
-    fn set(&mut self, provider: &str, key: &str) -> Result<()> {
-        Self::entry(provider)?.set_password(key).map_err(|error| {
-            anyhow::anyhow!("storing the {SERVICE}/{provider} key in the keyring: {error}")
-        })
-    }
-}
-
-/// Key resolution, in one place: the environment override, then the store,
-/// then absent — and absent is a state the app renders rather than an error.
-///
-/// The override is read once, when this is built, because a process-wide
-/// override is what an environment variable means. It is read-only:
-/// [`set`](Self::set) always writes to the store, and an override in force
-/// keeps winning until the process ends.
+/// A store that has broken down rather than one that is merely empty: the
+/// machine with no secret service — a container, a headless Linux box, a CI
+/// runner. The unit tests unplug it to show the library coping.
+#[cfg(test)]
 #[derive(Debug)]
-pub struct Keys<S> {
-    store: S,
-    override_key: Option<String>,
-}
+struct Unplugged;
 
-impl<S: KeyStore> Keys<S> {
-    /// Wraps `store`, honouring `EPIK_API_KEY` if it is set to anything.
-    #[must_use]
-    pub fn new(store: S) -> Self {
-        Self::with_override(
-            store,
-            env::var(OVERRIDE_ENV).ok().filter(|key| !key.is_empty()),
-        )
+#[cfg(test)]
+impl KeyStore for Unplugged {
+    fn get(&self, _: &str) -> Result<Option<Secret>> {
+        Err(anyhow::anyhow!("no default store has been set"))
     }
 
-    /// Wraps `store` with a stated override — which is how the resolution
-    /// order gets tested without a process mutating its own environment.
-    #[must_use]
-    pub const fn with_override(store: S, override_key: Option<String>) -> Self {
-        Self {
-            store,
-            override_key,
-        }
-    }
-
-    /// The key to use for `provider`, or `None` when there is none to use.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the store could not be consulted.
-    pub fn get(&self, provider: &str) -> Result<Option<String>> {
-        if let Some(key) = &self.override_key {
-            return Ok(Some(key.clone()));
-        }
-        self.store.get(provider)
-    }
-
-    /// Where the key for `provider` stands, with a store that will not answer
-    /// reported rather than raised.
-    ///
-    /// [`get`](Self::get) makes an unreachable store an error, which is the
-    /// right shape for a caller about to need a key. This is the right shape
-    /// for one that only needs to know where it stands — chiefly opening a
-    /// session, which must not fail for want of a keyring. A client that cannot
-    /// chat to a local model because a headless Linux box has no secret service
-    /// has mistaken its own plumbing for the user's problem; the provider that
-    /// does want a key will say so in its own words soon enough.
-    ///
-    /// The environment override is honoured first, so it works on a machine
-    /// with no store at all.
-    pub fn resolve(&self, provider: &str) -> Resolved {
-        if let Some(key) = &self.override_key {
-            return Resolved::Found(key.clone());
-        }
-        match self.store.get(provider) {
-            Ok(Some(key)) => Resolved::Found(key),
-            Ok(None) => Resolved::Absent,
-            Err(error) => Resolved::Unreachable(format!("{error:#}")),
-        }
-    }
-
-    /// Stores a key for `provider`. This is what the paste-your-key card
-    /// calls, and after it the chat proceeds without a restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the store would not take it.
-    pub fn set(&mut self, provider: &str, key: &str) -> Result<()> {
-        self.store.set(provider, key)
+    fn set(&mut self, _: &str, _: Secret) -> Result<()> {
+        Err(anyhow::anyhow!("no default store has been set"))
     }
 }
 
@@ -204,126 +164,92 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unknown_provider_has_no_key_rather_than_an_error() {
-        let keys = Keys::with_override(InMemory::default(), None);
-        assert_eq!(keys.get("anthropic").unwrap(), None);
+    fn an_unknown_name_has_no_secret_rather_than_an_error() {
+        let store = InMemory::default();
+        assert_eq!(store.get("anthropic").unwrap(), None);
     }
 
     #[test]
-    fn a_stored_key_comes_back() {
-        let mut keys = Keys::with_override(InMemory::default(), None);
-        keys.set("anthropic", "sk-stored").unwrap();
-        assert_eq!(keys.get("anthropic").unwrap().as_deref(), Some("sk-stored"));
-    }
-
-    #[test]
-    fn keys_are_filed_per_provider() {
-        let mut keys = Keys::with_override(InMemory::default(), None);
-        keys.set("anthropic", "sk-anthropic").unwrap();
-        keys.set("groq", "gsk-groq").unwrap();
-        assert_eq!(
-            keys.get("anthropic").unwrap().as_deref(),
-            Some("sk-anthropic")
-        );
-        assert_eq!(keys.get("groq").unwrap().as_deref(), Some("gsk-groq"));
-    }
-
-    #[test]
-    fn the_environment_outranks_the_store() {
+    fn a_stored_secret_comes_back() {
         let mut store = InMemory::default();
-        store.set("anthropic", "sk-stored").unwrap();
-        let keys = Keys::with_override(store, Some("sk-from-the-environment".to_owned()));
-
-        assert_eq!(
-            keys.get("anthropic").unwrap().as_deref(),
-            Some("sk-from-the-environment")
-        );
+        store.set("anthropic", "sk-stored".into()).unwrap();
+        assert_eq!(store.get("anthropic").unwrap(), Some("sk-stored".into()));
     }
 
     #[test]
-    fn the_environment_answers_for_every_provider() {
-        let keys = Keys::with_override(InMemory::default(), Some("sk-override".to_owned()));
-        assert_eq!(
-            keys.get("never-configured").unwrap().as_deref(),
-            Some("sk-override")
-        );
-    }
-
-    /// A store that has broken down rather than one that is merely empty.
-    #[derive(Debug)]
-    struct Unplugged;
-
-    impl KeyStore for Unplugged {
-        fn get(&self, _: &str) -> Result<Option<String>> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
-
-        fn set(&mut self, _: &str, _: &str) -> Result<()> {
-            Err(anyhow::anyhow!("no default store has been set"))
-        }
+    fn secrets_are_filed_per_name() {
+        let mut store = InMemory::default();
+        store.set("anthropic", "sk-anthropic".into()).unwrap();
+        store.set("groq", "gsk-groq".into()).unwrap();
+        assert_eq!(store.get("anthropic").unwrap(), Some("sk-anthropic".into()));
+        assert_eq!(store.get("groq").unwrap(), Some("gsk-groq".into()));
     }
 
     #[test]
     fn resolution_reports_the_three_states_it_can_be_in() {
         let mut store = InMemory::default();
-        store.set("kept", "sk-kept").unwrap();
-        let keys = Keys::with_override(store, None);
+        store.set("kept", "sk-kept".into()).unwrap();
 
-        assert_eq!(keys.resolve("kept"), Resolved::Found("sk-kept".to_owned()));
-        assert_eq!(keys.resolve("never-stored"), Resolved::Absent);
+        assert_eq!(store.resolve("kept"), Resolved::Found("sk-kept".into()));
+        assert_eq!(store.resolve("never-stored"), Resolved::Absent);
     }
 
     #[test]
     fn a_store_that_will_not_answer_is_a_state_rather_than_a_failure() {
-        let keys = Keys::with_override(Unplugged, None);
+        let store = Unplugged;
 
-        let Resolved::Unreachable(reason) = keys.resolve("anthropic") else {
+        let Resolved::Unreachable(reason) = store.resolve("anthropic") else {
             panic!("a broken store should resolve to Unreachable");
         };
         assert!(reason.contains("no default store"), "{reason}");
 
         assert!(
-            keys.get("anthropic").is_err(),
+            store.get("anthropic").is_err(),
             "the strict reading is still available to a caller that wants it"
         );
     }
 
     #[test]
-    fn the_override_answers_even_with_no_store_to_speak_of() {
-        let keys = Keys::with_override(Unplugged, Some("sk-override".to_owned()));
-
-        assert_eq!(
-            keys.resolve("anthropic"),
-            Resolved::Found("sk-override".to_owned()),
-            "a machine with no keyring can still be told a key"
-        );
-    }
-
-    #[test]
-    fn resolution_yields_the_key_a_model_constructor_takes() {
-        assert_eq!(
-            Resolved::Found("sk-x".to_owned()).key().as_deref(),
-            Some("sk-x")
-        );
+    fn resolution_yields_the_secret_a_caller_takes() {
+        assert_eq!(Resolved::Found("sk-x".into()).key(), Some("sk-x".into()));
         assert_eq!(Resolved::Absent.key(), None);
         assert_eq!(Resolved::Unreachable("broken".to_owned()).key(), None);
     }
 
     #[test]
-    fn storing_a_key_under_an_override_stores_it_anyway() {
-        let mut keys = Keys::with_override(InMemory::default(), Some("sk-override".to_owned()));
+    fn debug_formatting_a_secret_yields_a_redaction_rather_than_the_bytes() {
+        let secret = Secret::from("sk-super-secret");
+        let debugged = format!("{secret:?}");
 
-        keys.set("anthropic", "sk-pasted").unwrap();
+        assert!(!debugged.contains("sk-super-secret"), "{debugged}");
+        assert_eq!(debugged, "[redacted]");
+    }
 
-        assert_eq!(
-            keys.get("anthropic").unwrap().as_deref(),
-            Some("sk-override"),
-            "the override keeps winning for this process"
+    #[test]
+    fn debug_formatting_a_store_never_yields_the_secrets_it_holds() {
+        let mut store = InMemory::default();
+        store.set("anthropic", "sk-super-secret".into()).unwrap();
+        let debugged = format!("{store:?}");
+
+        assert!(!debugged.contains("sk-super-secret"), "{debugged}");
+        assert!(
+            debugged.contains("anthropic"),
+            "the name is not the secret: {debugged}"
         );
-        assert_eq!(
-            keys.store.get("anthropic").unwrap().as_deref(),
-            Some("sk-pasted"),
-            "but the pasted key was kept, so the next process finds it"
-        );
+    }
+
+    /// Serialization is the one deliberate door out: a resolution crosses
+    /// the wire with its bytes intact and comes back the same resolution —
+    /// while Debug keeps redacting on both sides of the trip.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_resolution_crosses_the_wire_and_comes_back_itself() {
+        let sent = Resolved::Found("sk-super-secret".into());
+        let wire = serde_json::to_string(&sent).unwrap();
+        let received: Resolved = serde_json::from_str(&wire).unwrap();
+
+        assert!(wire.contains("sk-super-secret"), "the wire carries bytes");
+        assert_eq!(received, sent);
+        assert!(!format!("{received:?}").contains("sk-super-secret"));
     }
 }

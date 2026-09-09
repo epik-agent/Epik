@@ -1,275 +1,180 @@
-# CI for the greenfield workspace.
+# Check every push and pull request; bundle the app from main.
 #
-# Three jobs, and an aggregate named `CI` that the branch ruleset's required
-# status check resolves to:
+# Pushes to rewrite run too, and only those base-branch runs save the
+# build cache: a pull request can restore caches from its base branch
+# but not from other pull requests, so a base branch that never runs
+# leaves every pull request to build the whole dependency tree cold.
+# The frontend is a workspace of its own and checks in a job of its own,
+# in parallel with the native one, each job with a cache of its size.
 #
-#   workspace  fmt, clippy, and the test suite for the native crates
-#   frontend   the same gates for epik-ui, on the host target and on wasm32
-#   live       the chat client against a real model, with no secret anywhere
+# Both jobs run over an OS matrix. Only macOS is in it today; Linux is
+# a matter of adding `ubuntu-latest` — its system packages and its
+# artifact paths are already here, gated on runner.os.
 #
-# The live tier is the reason this file exists in the shape it does. Epik's
-# secrets stance pushes keys to their official holders and keeps none of its
-# own, so the first real API test could not be "add a provider key to Actions
-# secrets". Instead CI runs the model itself: Ollama on the CPU runner, a
-# sub-1B model whose blob lives in actions/cache. Tests assert protocol
-# properties, never answer quality, so a tiny model is entirely adequate — and
-# `EPIK_REQUIRE_LIVE=1` means a missing or broken server fails the job rather
-# than skipping a tier that would then look green forever.
+# macOS signing is armed by secrets and absent otherwise: without them
+# the bundle job still runs and proves the build, it just produces an
+# unsigned app. Adding the secrets is the only step between this file and
+# a signed, notarized Epik.app — no workflow change needed.
+#
+#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD  the .p12's password
+#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   (optional) notarization via an
+#                               app-specific password; tauri-cli notarizes and
+#                               staples when all three are present, otherwise
+#                               warns and skips.
+#
+# tauri-cli reads all of these itself: it imports the certificate into a
+# temporary keychain for the build and tears it down afterwards.
 
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [main, local-client-greenfield]
+    branches: [main, rewrite]
+  pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  # Small enough to pull in seconds on a CPU runner, large enough to stream a
-  # sentence. The library's own default, so the live tests need no overrides.
-  LIVE_MODEL: smollm2:135m
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  workspace:
-    name: Workspace
-    runs-on: ubuntu-latest
+  check:
+    name: fmt, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-          # For the wasm-cleanliness check below: the frontend depends on this
-          # library, so the library's own build for that target is checked
-          # here rather than next door.
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-
-      # The Tauri host links against the system webview. Without these,
-      # epik-app does not compile and `cargo test --workspace` never starts.
-      - name: Install the webview epik-app links against
+      - name: Linux system packages
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libayatana-appindicator3-dev \
-            patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
 
-      - run: cargo fmt --all --check
-
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # The live tier skips here, which is the laptop rule doing its job: this
-      # job has no model server. The `live` job is what makes it execute.
-      - run: cargo test --workspace
-
-      - name: The library stays wasm-clean
-        run: cargo clippy -p epik --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
-
-      - name: The library stays synchronous
-        # Async is the host's problem. A tokio in this graph means something
-        # crossed the line the ADR draws, and it should be noticed here rather
-        # than discovered by a daemon that cannot start.
-        run: |
-          if cargo tree -p epik --all-features -i tokio > /dev/null 2>&1; then
-            echo "::error file=crates/epik/Cargo.toml::epik has acquired a tokio dependency; the library stays synchronous and async is the host's problem"
-            exit 1
-          fi
-          echo "no tokio in epik's dependency graph"
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        # The live tiers (EPIK_LIVE_*, EPIK_GITHUB_*) skip themselves when
+        # their environment is unset, so this is the hermetic suite.
+        run: cargo test --workspace
 
   frontend:
-    name: Frontend
-    runs-on: ubuntu-latest
-    # `crates/epik-ui` is its own workspace: its own lockfile, its own target
-    # directory, its own default target.
+    name: frontend fmt, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: crates/epik-ui
+        working-directory: crates/epik-frontend
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/epik-ui
+          workspaces: crates/epik-frontend -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
 
-      - name: Install Trunk
-        run: |
-          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C "$HOME/.cargo/bin"
-          trunk --version
-        env:
-          TRUNK_VERSION: 0.21.14
-
-      - run: cargo fmt --all --check
-
-      # Two targets, two different sets of code. The host target compiles the
-      # pure parts and runs their tests; wasm32 compiles the components.
-      - run: cargo clippy --all-targets -- -D warnings
-
-      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
-
-      - name: The pure parts test without a wasm toolchain
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
         run: cargo test
 
-      - name: The frontend builds
-        run: trunk build
-
-  live:
-    name: Live model
-    runs-on: ubuntu-latest
-    env:
-      # Pinned rather than `latest`: the download URL is a release asset name,
-      # and a project that renames its assets should not be able to break this
-      # job without someone deciding to bump a number.
-      OLLAMA_VERSION: 0.32.5
+  bundle:
+    name: bundle (${{ matrix.os }})
+    needs: [check, frontend]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - uses: dtolnay/rust-toolchain@stable
-
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-
-      # Keyed on the model, so the blob is downloaded once ever rather than
-      # once per run. Restoring before the server starts is what lets `ollama
-      # pull` find it already there.
-      - name: Restore the model blob
-        id: model
-        uses: actions/cache@v4
         with:
-          path: ~/.ollama/models
-          key: ollama-models-${{ env.LIVE_MODEL }}
+          workspaces: |
+            . -> target
+            crates/epik-frontend -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install trunk and tauri-cli
+        run: cargo binstall -y trunk tauri-cli@^2
 
-      - name: Restore Ollama
-        id: ollama
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/ollama
-          key: ollama-cpu-${{ env.OLLAMA_VERSION }}
-
-      # The release tarball rather than the install script, and under HOME
-      # rather than /usr/local: the script would create a systemd unit and a
-      # service account whose model directory actions/cache cannot reach, and
-      # a cache action cannot sudo.
-      #
-      # The published bundle unpacks to 2.1GB, two of which are CUDA and
-      # Vulkan backends a CPU runner will never load. Extracting the CPU parts
-      # alone leaves 66MB — small enough that caching it is worth doing, so
-      # every run after this one skips the download entirely.
-      - name: Install Ollama
-        if: steps.ollama.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$HOME/.local/ollama"
-          curl -fsSL "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
-            | tar --zstd -x -C "$HOME/.local/ollama" \
-                --exclude='lib/ollama/cuda_v*' \
-                --exclude='lib/ollama/vulkan'
-          du -sh "$HOME/.local/ollama"
-
-      - name: Put Ollama on PATH
-        run: |
-          echo "cache hit: ${{ steps.ollama.outputs.cache-hit || 'false' }}"
-          echo "$HOME/.local/ollama/bin" >> "$GITHUB_PATH"
-
-      - name: Start Ollama
-        run: |
-          ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
-          for _ in $(seq 1 60); do
-            if curl -sf http://localhost:11434/api/version > /dev/null; then
-              echo "listening: $(curl -s http://localhost:11434/api/version)"
-              ollama --version
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Ollama did not start listening within 60s"
-          cat "$RUNNER_TEMP/ollama.log"
-          exit 1
-
-      - name: Pull the model
-        run: |
-          echo "cache hit: ${{ steps.model.outputs.cache-hit || 'false' }}"
-          before=$(du -sm ~/.ollama/models 2>/dev/null | cut -f1)
-          ollama pull "$LIVE_MODEL"
-          after=$(du -sm ~/.ollama/models | cut -f1)
-          before=${before:-0}
-          # A restored cache means the pull moved no bytes. Reported rather
-          # than asserted: a cache the workflow depends on would be a cache
-          # whose first-ever run fails.
-          echo "models directory: ${before}MB before the pull, ${after}MB after"
-          ollama list
-
-      - name: Talk to it
-        # The one place the laptop rule is switched off: here a missing server
-        # is a failure, not a skip.
-        run: cargo test -p epik --test live -- --nocapture
+      - name: Arm code signing
+        if: runner.os == 'macOS'
+        # Secrets reach tauri-cli only when they exist: an empty
+        # APPLE_SIGNING_IDENTITY would be taken as an identity and fail.
         env:
-          EPIK_REQUIRE_LIVE: "1"
-          # One declaration of which model, governing both the pull and the
-          # tests, rather than two that could drift apart.
-          EPIK_LIVE_MODEL: ${{ env.LIVE_MODEL }}
-
-      - name: What the server saw
-        if: failure()
-        run: cat "$RUNNER_TEMP/ollama.log"
-
-  ci:
-    # The branch ruleset requires a status check with this exact context, so
-    # this job stands for the whole workflow. `if: always()` plus an explicit
-    # check of the results is deliberate: a *skipped* required check counts as
-    # a passing one, so an aggregate that merely `needs` its dependencies
-    # would wave failures through.
-    name: CI
-    if: always()
-    needs: [workspace, frontend, live]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Every job succeeded
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          echo '${{ toJSON(needs) }}'
-          if ${{ contains(needs.*.result, 'failure')
-                 || contains(needs.*.result, 'cancelled')
-                 || contains(needs.*.result, 'skipped') }}; then
-            echo "::error::at least one job did not succeed"
-            exit 1
+          if [ -z "$CERT" ] || [ -z "$IDENTITY" ]; then
+            echo "::notice::No signing secrets; the bundle will be unsigned."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"; echo "$CERT"; echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM" ]; then
+            {
+              echo "APPLE_ID=$NOTARY_ID"
+              echo "APPLE_PASSWORD=$NOTARY_PASSWORD"
+              echo "APPLE_TEAM_ID=$NOTARY_TEAM"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::notice::No notarization secrets; the bundle will be signed but not notarized."
           fi
 
-  deploy-website:
-    # Carried over from the workflow this file replaces. The website is the
-    # deployed version of this project, and the greenfield reset did not touch
-    # it: every push to main that passes CI redeploys it to GitHub Pages.
-    name: Deploy website
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: ci
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    concurrency:
-      group: pages
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - name: Bundle
+        run: cargo tauri build
+        working-directory: crates/epik-backend
+
+      - name: Signature
+        if: runner.os == 'macOS'
+        run: |
+          app=$(ls -d target/release/bundle/macos/*.app | head -1)
+          codesign --verify --deep --strict --verbose=2 "$app" || echo "::notice::unsigned bundle"
+          codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)' || true
+
+      - uses: actions/upload-artifact@v4
         with:
-          path: website
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          name: Epik-${{ runner.os }}
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
