@@ -6,11 +6,13 @@
 //! nobody else writes to, and the one place they could collide —
 //! merging into the default branch — is the human's, never Epik's.
 //! Nothing here arbitrates. The guard that remains is git's: a build
-//! keeps a workspace of its feature branch, and a branch has one
-//! worktree, so a second build of a feature already building is
-//! refused — asked of git's worktree listing before the check card is
-//! raised, and answered in Epik's words naming the build that holds
-//! the branch; `worktree add` beneath refuses whatever slips between.
+//! holds a workspace of its feature branch for as long as it runs, and
+//! a branch has one worktree, so a second build of a feature still
+//! building is refused — asked of git's worktree listing before the
+//! check card is raised, and answered in Epik's words naming the build
+//! that holds the branch; `worktree add` beneath refuses whatever slips
+//! between. A finished build has retired its workspace, and the same
+//! feature builds again.
 //! Launching is two-phase all the same: the run id is reserved before
 //! the check card is raised, so the build has a name from the moment
 //! it is asked for, and the flight fills the reservation once the

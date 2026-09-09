@@ -22,6 +22,13 @@
 //! mid-judgement, whose commit may yet be reset away, can never be the
 //! answer.
 //!
+//! The workspace is held for exactly as long as the build runs: git
+//! gives a branch one worktree, so holding it is what keeps a feature
+//! to one build at a time, and [`Branch::retire`] gives it up when the
+//! build is over, so the same feature can be built again. The tip is
+//! read from the repository's ref, not the workspace, so status still
+//! answers for a build whose workspace is gone.
+//!
 //! A build handed no check merges on observation alone, and the
 //! [`Outcome`] says so.
 
@@ -66,16 +73,18 @@ impl<F: Forge> Branch<F> {
     /// Establishes the feature branch `name` in `repository`: created
     /// at `base` and pushed to `forge` when new; a branch already
     /// standing is used as it stands, and not moved. Keeps one
-    /// workspace of the branch for merging — which is also the guard
-    /// against two builds of one feature: a branch another build's
-    /// workspace already holds is refused here, by git, in its words.
+    /// workspace of the branch for merging, held while the build runs
+    /// and given up by [`retire`](Self::retire) when it finishes —
+    /// which is also the guard against two builds of one feature: a
+    /// branch a running build's workspace holds is refused here, by
+    /// git, in its words.
     ///
     /// # Errors
     ///
     /// Words for the model: the repository is not one, the base does
-    /// not name a commit, the branch is checked out in another build's
-    /// workspace, the branch could not be pushed, or git failed along
-    /// the way.
+    /// not name a commit, the branch is checked out in a running
+    /// build's workspace, the branch could not be pushed, or git failed
+    /// along the way.
     pub(super) fn establish(
         repository: &str,
         name: &str,
@@ -138,26 +147,35 @@ impl<F: Forge> Branch<F> {
     /// merge lock, so a merge mid-judgement, whose commit a red check
     /// or a failed push may yet reset away, can never be the answer.
     /// Every commit this returns is permanent: it is where an issue
-    /// branch is cut from at dispatch.
+    /// branch is cut from at dispatch. The ref is read in the
+    /// repository, which outlives the workspace: status asks after a
+    /// build that has retired.
     ///
     /// # Errors
     ///
     /// Git failing to read the ref, in its own words.
     pub(super) fn tip(&self) -> Result<String, String> {
         let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
-        let directory = self
-            .workspace
-            .directory
-            .to_str()
-            .ok_or("the workspace path is not valid unicode")?;
         Ok(plumbing(&[
             "-C",
-            directory,
+            &self.workspace.repository,
             "rev-parse",
             &format!("refs/heads/{}", self.workspace.branch),
         ])?
         .trim()
         .to_owned())
+    }
+
+    /// Gives the workspace up: the build is over, and the feature branch
+    /// is nobody's to hold — the next build of the same feature
+    /// establishes it afresh. Under the merge lock, so no merge is
+    /// mid-flight in the directory as it goes; idempotent, since
+    /// removing what is already gone is nothing. Best effort, as
+    /// cleanup is: a worktree that will not go is what `worktree
+    /// prune` is for.
+    pub(super) fn retire(&self) {
+        let _serialized = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        job::remove_worktree(&self.workspace);
     }
 
     /// Merges `branch` into the feature branch: `--no-ff`, one at a
@@ -645,6 +663,33 @@ mod tests {
 
         tidy(&issue);
         tidy(branch.workspace());
+    }
+
+    /// Retiring gives the workspace up and nothing else: the worktree is
+    /// gone from the repository's listing, the tip still answers from
+    /// the repository's ref, a second retirement is nothing, and the
+    /// branch can be established again — the rebuild.
+    #[test]
+    fn a_retired_branch_frees_its_workspace_and_still_answers_its_tip() {
+        let scratch = Scratch::new("retire");
+        let (work, remote, branch) = established(&scratch, None);
+        let issue = agent(&work, "issue-1", "one.txt", "one\n");
+        let Outcome::Merged { commit, .. } = branch.merge("issue-1").unwrap() else {
+            panic!("the merge lands");
+        };
+        let directory = branch.workspace().directory.clone();
+
+        branch.retire();
+        assert!(!directory.exists(), "the workspace is gone");
+        assert_eq!(job::held_by(&work, "feature/wumpus").unwrap(), None);
+        assert_eq!(branch.tip().unwrap(), commit, "read from the repository");
+        branch.retire();
+
+        let again =
+            Branch::establish(&work, "feature/wumpus", "main", Local(remote), None).unwrap();
+        assert_eq!(again.workspace().base_commit, commit, "as it stands");
+        tidy(&issue);
+        tidy(again.workspace());
     }
 
     /// The lock, exercised: two threads merging through one Branch both

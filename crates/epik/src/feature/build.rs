@@ -38,8 +38,10 @@
 //! [`Started`](Change::Started) — the plan, its problems, and the
 //! initial states, so those never ride as a stream of moves — before
 //! the scheduler exists, and [`Finished`](Change::Finished) exactly
-//! once, where the scheduler observes [`Build::finished`]. The log is
-//! how a window watches a build without asking after it.
+//! once, where the scheduler observes [`Build::finished`] — and then
+//! retires the feature workspace, so the branch a build held while it
+//! ran is free for a rebuild. The log is how a window watches a build
+//! without asking after it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -363,7 +365,10 @@ where
     /// the slot was waited for, and a slot with no issue left to take it
     /// goes straight back. The end is observed here and nowhere else,
     /// so Finished is recorded exactly once — under the same lock as
-    /// the last move, and at once for a plan with nothing to do.
+    /// the last move, and at once for a plan with nothing to do — and
+    /// the feature workspace is retired after it, with no lock held:
+    /// the branch is free for a rebuild one git command after the log
+    /// says the build is over.
     fn schedule(self) {
         loop {
             {
@@ -371,6 +376,8 @@ where
                 loop {
                     if build.finished() {
                         build.log.record(Change::Finished { run: build.run });
+                        drop(build);
+                        self.branch.retire();
                         return;
                     }
                     if !build.dispatchable().is_empty() {
@@ -958,6 +965,53 @@ mod tests {
         assert_eq!(*watch.stage(), Stage::Finished);
         assert_eq!(watch.counts().merged, 2);
 
+        tidy(&work);
+    }
+
+    /// When the build is over its workspace is retired: the feature
+    /// branch has no worktree, the tip still answers from the
+    /// repository, and the same feature establishes again — the rebuild
+    /// git would otherwise refuse.
+    #[test]
+    fn a_finished_build_retires_its_workspace_and_the_feature_can_be_rebuilt() {
+        let scratch = Scratch::new("retire");
+        let (work, remote) = seeded(&scratch);
+        let log = Arc::new(Log::new());
+        let branch = Arc::new(
+            Branch::establish(&work, "feature-1", "main", Local(remote.clone()), None).unwrap(),
+        );
+        let workspace = branch.workspace().directory.clone();
+        let record = build(
+            RunId(1),
+            Arc::clone(&log),
+            two_then_three(),
+            Arc::clone(&branch),
+            committing(None),
+            Budget::new(),
+        );
+        eventually_finished(&log, RunId(1));
+        landed(&work, "feature-1", &record, &[2, 3]);
+
+        // Retirement follows Finished by the width of one git command.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while crate::job::held_by(&work, "feature-1").unwrap().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the workspace was never retired"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!workspace.exists());
+        let tip = branch.tip().unwrap();
+        assert_eq!(
+            tip,
+            plumbing(&["-C", &work, "rev-parse", "refs/heads/feature-1"])
+                .unwrap()
+                .trim()
+        );
+
+        let again = Branch::establish(&work, "feature-1", "main", Local(remote), None).unwrap();
+        assert_eq!(again.workspace().base_commit, tip, "as the build left it");
         tidy(&work);
     }
 
