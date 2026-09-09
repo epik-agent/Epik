@@ -48,6 +48,7 @@
 //! and then [`Agent::wait`] collects the exit.
 //!
 //! ```no_run
+//! # #[cfg(feature = "native")] {
 //! use epik::agent::Agent;
 //!
 //! let mut agent = Agent::new(
@@ -60,6 +61,7 @@
 //!     println!("{line:?}");
 //! }
 //! let exit = agent.wait()?;
+//! # }
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
