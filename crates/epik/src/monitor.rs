@@ -377,32 +377,27 @@ pub use log::Log;
 #[cfg(feature = "native")]
 mod log {
     use std::fmt;
-    use std::sync::{Arc, Condvar, Mutex, PoisonError};
+    use std::sync::{Condvar, Mutex, PoisonError};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{Change, Entry};
 
-    /// A subscriber, called with every entry as it is recorded.
-    type Subscriber = Arc<dyn Fn(&Entry) + Send + Sync>;
-
     /// The host's one log of feature-build changes: where a `seq` and an
     /// `at` are assigned, and the only place either is. Readers replay
-    /// with [`since`](Self::since), wait with
-    /// [`wait_after`](Self::wait_after), or [`subscribe`](Self::subscribe)
-    /// to hear each entry as it lands. A cursor is a count: how many
+    /// with [`since`](Self::since) and follow with
+    /// [`wait_after`](Self::wait_after). A cursor is a count: how many
     /// entries the caller has applied, which — `seq` being dense from 0
     /// — is also the next `seq` it wants.
     ///
-    /// The lock is held for the entries and nothing else: a subscriber
-    /// is called with no lock of the log held, so it may read the log,
-    /// or subscribe another, from inside the call. Delivery is in
-    /// recording order wherever recording is: every change of one run
-    /// is recorded under that run's own lock, so a run's story is never
-    /// told out of order.
+    /// The log never calls anyone: delivery is a reader's, and a reader
+    /// that advances its own cursor hears every entry in `seq` order by
+    /// construction, however many threads are recording. A log that
+    /// called back on record could not promise that — the callback for
+    /// `seq` N+1 can run before the one for N — and a fold keyed on
+    /// `seq` would drop N for good.
     pub struct Log {
         entries: Mutex<Vec<Entry>>,
         appended: Condvar,
-        subscribers: Mutex<Vec<Subscriber>>,
         /// Unix milliseconds now. Injected, so a test asserts the stamps
         /// it chose without sleeping.
         clock: Box<dyn Fn() -> u64 + Send + Sync>,
@@ -442,34 +437,23 @@ mod log {
             Self {
                 entries: Mutex::new(Vec::new()),
                 appended: Condvar::new(),
-                subscribers: Mutex::new(Vec::new()),
                 clock: Box::new(clock),
             }
         }
 
-        /// Records `change`: the next `seq`, the clock's stamp, the
-        /// condvar woken, then every subscriber called — outside the
-        /// lock — with the entry.
+        /// Records `change`: the next `seq`, the clock's stamp, and
+        /// every waiting reader woken.
         pub fn record(&self, change: Change) {
-            let entry = {
+            {
                 let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
                 let entry = Entry {
                     seq: entries.len() as u64,
                     at: (self.clock)(),
                     change,
                 };
-                entries.push(entry.clone());
-                entry
-            };
-            self.appended.notify_all();
-            let subscribers = self
-                .subscribers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            for subscriber in subscribers {
-                subscriber(&entry);
+                entries.push(entry);
             }
+            self.appended.notify_all();
         }
 
         /// Every entry from `cursor` on: `since(0)` is the whole log, the
@@ -498,15 +482,6 @@ mod log {
                 .get(start..)
                 .map(<[Entry]>::to_vec)
                 .unwrap_or_default()
-        }
-
-        /// Hears every entry recorded from now on. Nothing already
-        /// recorded is replayed: pair it with [`since`](Self::since).
-        pub fn subscribe(&self, subscriber: impl Fn(&Entry) + Send + Sync + 'static) {
-            self.subscribers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(Arc::new(subscriber));
         }
     }
 }
@@ -783,25 +758,44 @@ mod tests {
             assert!(log.wait_after(1, Duration::from_millis(20)).is_empty());
         }
 
-        /// The subscriber reads the log from inside its own call — which
-        /// would deadlock if the log's lock were held across the call — and
-        /// sees the entry it was called with already recorded.
+        /// Two runs recording at once, and one reader following by
+        /// cursor: every entry reaches it, in `seq` order, none twice —
+        /// the ordering a callback on record could not promise.
         #[test]
-        fn a_subscriber_is_called_outside_the_lock_with_the_recorded_entry() {
+        fn a_reader_following_by_cursor_hears_concurrent_records_in_seq_order() {
+            const EACH: u64 = 200;
             let log = Arc::new(Log::new());
-            let heard = Arc::new(Mutex::new(Vec::new()));
-            log.subscribe({
+            let reader = std::thread::spawn({
                 let log = Arc::clone(&log);
-                let heard = Arc::clone(&heard);
-                move |entry| {
-                    let visible = log.since(entry.seq);
-                    assert_eq!(visible.first(), Some(entry), "recorded before the call");
-                    heard.lock().unwrap().push(entry.clone());
+                move || {
+                    let mut heard = Vec::new();
+                    while heard.len() < (2 * EACH) as usize {
+                        let entries = log.wait_after(heard.len() as u64, Duration::from_secs(30));
+                        assert!(!entries.is_empty(), "the recorders went quiet");
+                        heard.extend(entries);
+                    }
+                    heard
                 }
             });
-            log.record(reserved(1));
-            log.record(Change::Finished { run: RunId(1) });
-            assert_eq!(*heard.lock().unwrap(), log.since(0));
+            let recorders: Vec<_> = [1, 2]
+                .into_iter()
+                .map(|run| {
+                    let log = Arc::clone(&log);
+                    std::thread::spawn(move || {
+                        for _ in 0..EACH {
+                            log.record(reserved(run));
+                        }
+                    })
+                })
+                .collect();
+            for recorder in recorders {
+                recorder.join().unwrap();
+            }
+
+            let heard = reader.join().unwrap();
+            let seqs: Vec<u64> = heard.iter().map(|entry| entry.seq).collect();
+            assert_eq!(seqs, (0..2 * EACH).collect::<Vec<_>>());
+            assert_eq!(heard, log.since(0));
         }
     }
 }

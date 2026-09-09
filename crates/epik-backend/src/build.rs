@@ -27,6 +27,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use epik::agent::Agent;
 use epik::agent::claude_code::{ClaudeCode, Update};
@@ -36,12 +37,12 @@ use epik::feature::{Budget, Feature, Issue, Plan};
 use epik::github::{GitHub, Repo};
 use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
-use epik::monitor::{Entry, Log};
+use epik::monitor::{EVENT, Entry, Log};
 use epik::tools::{Tool, arg};
 use epik::tracker::Tracker;
 use epik::tracker::github::GitHubTracker;
 use serde_json::{Value, json};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The run slot: at most one build in flight, and the last one's record
 /// afterwards.
@@ -324,6 +325,24 @@ impl FeatureState {
             budget: Budget::new(),
         }
     }
+}
+
+/// Follows `log` from a thread of its own and emits every entry on
+/// [`monitor::EVENT`](epik::monitor::EVENT). One reader with one
+/// cursor, so the window hears entries in `seq` order however many
+/// builds are recording at once — the fold on the far side drops by
+/// `seq`, and would drop N for good if N+1 came first. What is emitted
+/// before the window listens is in [`monitor_log`]'s replay.
+pub fn relay(app: AppHandle, log: Arc<Log>) {
+    std::thread::spawn(move || {
+        let mut cursor = 0;
+        loop {
+            for entry in log.wait_after(cursor, Duration::from_secs(60)) {
+                cursor = entry.seq + 1;
+                let _ = app.emit(EVENT, &entry);
+            }
+        }
+    });
 }
 
 /// The whole log so far, for a window that has just opened its eyes:

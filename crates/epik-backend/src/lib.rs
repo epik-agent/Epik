@@ -1,5 +1,5 @@
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 
 mod build;
 mod chat;
@@ -99,16 +99,11 @@ pub fn run() {
                 .and_then(|monitor| monitor.listen.clone());
             // Managed behind a lock: the settings window replaces it.
             app.manage(std::sync::Mutex::new(config));
-            // The feature-build log, with the window subscribed before
-            // any build can speak: every entry goes out as an event, and
-            // `monitor_log` replays the rest.
+            // The feature-build log, relayed to the window before any
+            // build can speak: every entry goes out as an event, in
+            // order, and `monitor_log` replays the rest.
             let log = std::sync::Arc::new(epik::monitor::Log::new());
-            log.subscribe({
-                let app = app.handle().clone();
-                move |entry| {
-                    let _ = app.emit(epik::monitor::EVENT, entry);
-                }
-            });
+            build::relay(app.handle().clone(), std::sync::Arc::clone(&log));
             // The same log as a page a browser can open, when the file
             // asks for one.
             monitor::start(listen.as_deref(), &log);
