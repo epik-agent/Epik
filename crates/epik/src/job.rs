@@ -167,6 +167,36 @@ pub(crate) fn adopt(repository: &str, branch: &str) -> Result<Workspace, String>
     })
 }
 
+/// The worktree of `repository` that has `branch` checked out, if one
+/// does — the main worktree counts. Git's own answer, read from
+/// `worktree list --porcelain`, where a `worktree <path>` line opens
+/// each entry and a `branch refs/heads/<name>` line follows when the
+/// entry has a branch checked out. This is the question `adopt`'s
+/// refusal answers, asked ahead of it, so a caller can refuse in its
+/// own words before doing anything it would have to undo.
+///
+/// # Errors
+///
+/// The repository is not one, or git could not list its worktrees.
+pub(crate) fn held_by(repository: &str, branch: &str) -> Result<Option<PathBuf>, String> {
+    let listed = plumbing(&["-C", repository, "worktree", "list", "--porcelain"])?;
+    Ok(holder(&listed, branch))
+}
+
+/// [`held_by`] over the listing itself.
+fn holder(listed: &str, branch: &str) -> Option<PathBuf> {
+    let wanted = format!("refs/heads/{branch}");
+    let mut path = None;
+    for line in listed.lines() {
+        if let Some(worktree) = line.strip_prefix("worktree ") {
+            path = Some(worktree);
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str()) {
+            return path.map(PathBuf::from);
+        }
+    }
+    None
+}
+
 /// What both provisioners insist on before touching anything: an
 /// absolute path that is a git repository. Reads only; the answer is
 /// the repository's git dir, which the config work needs later. Shared
@@ -582,17 +612,75 @@ mod tests {
     /// be adopted again — git refuses a second worktree of it — so two
     /// builds can never own one feature branch. Dropping the feature
     /// workspace, or adding `--force`, fails here rather than in a
-    /// merge.
+    /// merge. The invariant is pinned, not git's prose: the first
+    /// adoption stands, and it is the one `held_by` names.
     #[test]
-    fn a_branch_already_adopted_is_refused_in_gits_words() {
+    fn a_branch_already_adopted_cannot_be_adopted_again() {
         let scratch = Scratch::new("adopt-twice");
         let repository = bare(&scratch);
         let first = adopt(&repository, "main").unwrap();
 
-        let error = adopt(&repository, "main").unwrap_err();
-        assert!(error.contains("'main' is already"), "{error}");
+        assert!(adopt(&repository, "main").is_err());
+        assert_eq!(
+            held_by(&repository, "main").unwrap().map(canonical),
+            Some(canonical(first.directory.clone())),
+            "the first adoption holds the branch"
+        );
+        assert!(first.directory.is_dir(), "and stands untouched");
 
         remove_worktree(&first);
+        assert_eq!(held_by(&repository, "main").unwrap(), None);
+    }
+
+    /// A path as the filesystem finally names it, so a worktree path git
+    /// prints and the one this process made compare equal through any
+    /// symlink the temp dir hides behind.
+    fn canonical(path: PathBuf) -> PathBuf {
+        std::fs::canonicalize(&path).unwrap_or(path)
+    }
+
+    #[test]
+    fn held_by_names_the_worktree_of_a_branch_and_none_for_an_absent_one() {
+        let scratch = Scratch::new("held");
+        let repository = bare(&scratch);
+        assert_eq!(
+            held_by(&repository, "main").unwrap(),
+            None,
+            "bare: nothing checked out"
+        );
+        assert_eq!(held_by(&repository, "nonesuch").unwrap(), None);
+
+        let workspace = provision(&order(&repository, "feature/wumpus")).unwrap();
+        assert_eq!(
+            held_by(&repository, "feature/wumpus")
+                .unwrap()
+                .map(canonical),
+            Some(canonical(workspace.directory.clone()))
+        );
+        assert_eq!(
+            held_by(&repository, "feature").unwrap(),
+            None,
+            "a prefix is no match"
+        );
+
+        tidy(&workspace);
+    }
+
+    /// The listing read as git writes it: the main worktree counts, a
+    /// detached one has no branch, and the branch line belongs to the
+    /// entry above it.
+    #[test]
+    fn the_holder_is_read_from_the_porcelain_listing() {
+        let listed = "worktree /r\nHEAD 1111\nbranch refs/heads/main\n\n\
+                      worktree /tmp/epik-build-feature-7\nHEAD 2222\nbranch refs/heads/feature-7\n\n\
+                      worktree /tmp/elsewhere\nHEAD 3333\ndetached\n";
+        assert_eq!(holder(listed, "main"), Some(PathBuf::from("/r")));
+        assert_eq!(
+            holder(listed, "feature-7"),
+            Some(PathBuf::from("/tmp/epik-build-feature-7"))
+        );
+        assert_eq!(holder(listed, "feature-8"), None);
+        assert_eq!(holder("", "main"), None);
     }
 
     #[test]

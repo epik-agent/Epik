@@ -6,14 +6,16 @@
 //! nobody else writes to, and the one place they could collide —
 //! merging into the default branch — is the human's, never Epik's.
 //! Nothing here arbitrates. The guard that remains is git's: a build
-//! keeps a workspace of its feature branch, and `worktree add` refuses
-//! a branch already checked out, so a second build of a feature already
-//! building fails at provisioning in git's own words. Launching is
-//! two-phase all the same: the run id is reserved before the check card
-//! is raised, so the build has a name from the moment it is asked for,
-//! and the flight fills the reservation once the build is running; the
-//! map lock is only ever held for the map itself, never across a card,
-//! a network push, or a git command.
+//! keeps a workspace of its feature branch, and a branch has one
+//! worktree, so a second build of a feature already building is
+//! refused — asked of git's worktree listing before the check card is
+//! raised, and answered in Epik's words naming the build that holds
+//! the branch; `worktree add` beneath refuses whatever slips between.
+//! Launching is two-phase all the same: the run id is reserved before
+//! the check card is raised, so the build has a name from the moment
+//! it is asked for, and the flight fills the reservation once the
+//! build is running; the map lock is only ever held for the map
+//! itself, never across a card, a network push, or a git command.
 //!
 //! The check is a precondition, not an instruction: before anything is
 //! dispatched, `start_feature` raises the question itself —
@@ -353,6 +355,18 @@ where
                 Some(base.clone()),
             );
             let (run, (problems, issues, command)) = reservation.fill_with(|run| {
+                // Git is the guard — a feature branch has one worktree,
+                // and establishing beneath would be refused — but asked
+                // here first, so a second build of a held branch is
+                // refused in Epik's words, naming the holder, before
+                // anyone is asked anything.
+                if let Some(holder) = crate::job::held_by(&repository, &branch)? {
+                    return Err(format!(
+                        "feature branch {branch:?} is already checked out by a build at {}; \
+                         one build owns a feature branch at a time",
+                        holder.display()
+                    ));
+                }
                 let plan = plan(repo, &feature)?;
                 let problems = plan.problems();
                 let issues = plan.work(&BTreeSet::new()).len();
@@ -370,9 +384,8 @@ where
                 let command = check.as_ref().map(|check| check.command.clone());
                 // Establishing pushes over the network and the build
                 // starts machinery: both happen outside every map lock.
-                // Establishing is also where a feature already building
-                // is refused: its branch is checked out in that build's
-                // workspace, and git says so.
+                // A branch taken between the question above and here is
+                // refused by git inside establishing, in its words.
                 let established = Arc::new(Branch::establish(
                     &repository,
                     &branch,
@@ -1114,31 +1127,47 @@ mod tests {
         tidy(&work);
     }
 
-    /// A second start of a feature already building is refused by git
-    /// at provisioning: the feature branch is checked out in the first
-    /// build's workspace, and `worktree add` gives it no second owner.
-    /// Git's words reach the persona; the log says Reserved then
-    /// Abandoned with them for the second run; the first run is
-    /// untouched. (The check card is raised before git is reached —
-    /// the branch is established after the answer — so the asker
-    /// answers twice.)
+    /// A second start of a feature whose branch a build still holds is
+    /// refused before anyone is asked: git's worktree listing is the
+    /// guard, and the refusal is Epik's sentence, naming the branch
+    /// and the workspace that holds it. The log says Reserved then
+    /// Abandoned with that sentence for the second run; the first run
+    /// is untouched and finishes.
     #[test]
-    fn a_second_start_of_a_feature_already_building_is_refused_by_git() {
+    fn a_second_start_of_a_held_feature_branch_is_refused_before_anyone_is_asked() {
         let scratch = Scratch::new("twice");
         let (work, remote) = seeded(&scratch);
         let gate = Path::new(scratch.path()).join("release");
         let builds = builds();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let registry = registry(
             &builds,
             [(7, seven_holding_eight())],
             committing(Some(gate.clone())),
             remote,
-            |_| Answer::Declined,
+            {
+                let asked = Arc::clone(&asked);
+                move |_| {
+                    assert_eq!(
+                        asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                        0,
+                        "the second start asks nobody"
+                    );
+                    Answer::Declined
+                }
+            },
         );
 
         assert_eq!(start(&registry, &work, 7).unwrap()["run"], json!(1));
+        let holder = crate::job::held_by(&work, "feature-7").unwrap().unwrap();
         let refused = start(&registry, &work, 7).unwrap_err();
-        assert!(refused.contains("'feature-7' is already"), "{refused}");
+        assert!(
+            refused
+                .starts_with("feature branch \"feature-7\" is already checked out by a build at "),
+            "{refused}"
+        );
+        assert!(refused.contains(&holder.display().to_string()), "{refused}");
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         assert_eq!(runs(&builds), [RunId(1)], "run 2 released its entry");
         assert_eq!(story(&builds.log, RunId(2)), ["reserved", "abandoned"]);
