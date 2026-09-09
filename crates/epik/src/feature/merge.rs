@@ -79,6 +79,15 @@ impl<F: Forge> Branch<F> {
     /// branch a running build's workspace holds is refused here, by
     /// git, in its words.
     ///
+    /// Establishing is serialized host-wide, one push wide: read,
+    /// create, push and adopt happen under one lock, so two
+    /// establishes of one new branch cannot interleave — the loser
+    /// finds the branch standing and held, and is refused by adopt,
+    /// rather than unwinding a branch the winner has already checked
+    /// out and leaving the winner on a branch that was never pushed.
+    /// The lock is held across the push, which is the cost of the
+    /// guarantee; establishing is one command per build.
+    ///
     /// # Errors
     ///
     /// Words for the model: the repository is not one, the base does
@@ -92,6 +101,8 @@ impl<F: Forge> Branch<F> {
         forge: F,
         check: Option<Check>,
     ) -> Result<Self, String> {
+        static ESTABLISHING: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = ESTABLISHING.lock().unwrap_or_else(PoisonError::into_inner);
         let name = positional("branch", name)?;
         // Absence and failure are different answers: `for-each-ref`
         // exits zero either way and simply lists nothing for a branch
@@ -663,6 +674,47 @@ mod tests {
 
         tidy(&issue);
         tidy(branch.workspace());
+    }
+
+    /// Two establishes of one new branch at once: exactly one wins, the
+    /// other is refused — by adopt, once the winner's workspace holds
+    /// the branch — and the branch the winner stands on is pushed. Not
+    /// serialized, the loser's unwind of "its" branch would be refused
+    /// by git while the winner sat on a branch the remote never saw.
+    #[test]
+    fn two_establishes_of_one_new_branch_yield_one_winner_and_a_pushed_branch() {
+        let scratch = Scratch::new("establish-twice");
+        let (work, remote) = seeded(&scratch);
+        let (first, second) = std::thread::scope(|scope| {
+            let establish =
+                || Branch::establish(&work, "feature/wumpus", "main", Local(remote.clone()), None);
+            let first = scope.spawn(establish);
+            let second = scope.spawn(establish);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let (winner, refusal) = match (first, second) {
+            (Ok(winner), Err(refusal)) | (Err(refusal), Ok(winner)) => (winner, refusal),
+            (Ok(_), Ok(_)) => panic!("both established"),
+            (Err(one), Err(two)) => panic!("neither established: {one}; {two}"),
+        };
+        assert!(refusal.contains("feature/wumpus"), "{refusal}");
+
+        let base = tip(&work, "main");
+        assert_eq!(winner.workspace().base_commit, base);
+        assert_eq!(tip(&remote, "feature/wumpus"), base, "pushed");
+        assert_eq!(
+            job::held_by(&work, "feature/wumpus")
+                .unwrap()
+                .map(|path| canonical(&path)),
+            Some(canonical(&winner.workspace().directory))
+        );
+        tidy(winner.workspace());
+    }
+
+    /// A path as the filesystem finally names it, through any symlink
+    /// the temp dir hides behind.
+    fn canonical(path: &Path) -> std::path::PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     /// Retiring gives the workspace up and nothing else: the worktree is
