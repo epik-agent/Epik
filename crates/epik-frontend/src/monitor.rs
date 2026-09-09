@@ -16,8 +16,16 @@
 //! applied exactly once. (`Chat` does history-then-listen without that
 //! protection; this fold does not copy it.) A blink is a claim about the
 //! present, so the feed's health is view state: while it is not
-//! speaking, nothing pulses.
+//! speaking, nothing pulses — and a transport that makes a loss good on
+//! its own, as a browser's event stream does, says so and the pulse
+//! returns.
+//!
+//! The page is the same on both [`Surface`]s; the chat tab is the one
+//! difference. In a browser there is no backend to send to, so the
+//! strip does not offer it, and the oldest build is the tab that is
+//! open instead.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -30,12 +38,14 @@ use epik::monitor::{Counts, Entry, Progress, Stage, Watch};
 /// channel and the `monitor_log` command; a browser's is an event
 /// stream over HTTP.
 pub trait Feed {
-    /// Hears every entry from now on, for the life of the page, then
-    /// says whether the listener is up — the Err is why it is not.
+    /// Hears every entry from now on, for the life of the page, and
+    /// says where the listener stands each time that changes: Ok when
+    /// it is up — once, or again after a loss the transport made good
+    /// on its own — and the Err is why it is not.
     fn listen(
         &self,
         hear: impl Fn(Entry) + 'static,
-        attached: impl FnOnce(Result<(), String>) + 'static,
+        standing: impl Fn(Result<(), String>) + 'static,
     );
 
     /// Every entry recorded so far.
@@ -51,27 +61,36 @@ pub enum Step {
     Replayed(Result<Vec<Entry>, String>),
     /// The feed stopped, and why.
     Lost(String),
+    /// The feed is speaking again, after a loss.
+    Regained,
 }
 
 /// Listen, then replay. `apply` takes each [`Step`] to the view; the
-/// replay is requested only once the listener is up, so nothing
-/// recorded between the two can be missed.
+/// replay is requested once, when the listener first says where it
+/// stands — up or not — so nothing recorded between the two can be
+/// missed. Every later word from the listener is a loss or a regain.
 pub fn attach<F: Feed + 'static>(feed: F, apply: impl Fn(Step) + Clone + 'static) {
     let feed = Rc::new(feed);
     let hear = {
         let apply = apply.clone();
         move |entry| apply(Step::Heard(entry))
     };
-    let attached = {
+    let replayed = Cell::new(false);
+    let standing = {
         let feed = Rc::clone(&feed);
         move |outcome: Result<(), String>| {
-            if let Err(reason) = outcome {
-                apply(Step::Lost(reason));
+            match outcome {
+                Err(reason) => apply(Step::Lost(reason)),
+                Ok(()) if replayed.get() => apply(Step::Regained),
+                Ok(()) => {}
             }
-            feed.replay(move |replay| apply(Step::Replayed(replay)));
+            if !replayed.replace(true) {
+                let apply = apply.clone();
+                feed.replay(move |replay| apply(Step::Replayed(replay)));
+            }
         }
     };
-    feed.listen(hear, attached);
+    feed.listen(hear, standing);
 }
 
 /// The feed's standing: attaching — holding what the listener hears
@@ -83,7 +102,16 @@ enum Link {
     Lost(String),
 }
 
-/// Which tab is open.
+/// Where the page is shown: the window, whose first tab is the chat, or
+/// a browser, where the page is the monitor alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Surface {
+    Window,
+    Browser,
+}
+
+/// Which tab is open. `Chat` in a browser is no tab at all: the strip,
+/// with nothing under it, until a build appears.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tab {
     Chat,
@@ -154,6 +182,7 @@ pub struct Pane {
 /// The whole view: the library's fold plus the page's own state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct View {
+    surface: Surface,
     progress: Progress,
     link: Link,
     tab: Tab,
@@ -162,8 +191,17 @@ pub struct View {
 }
 
 impl Default for View {
+    /// The window's view.
     fn default() -> Self {
+        Self::new(Surface::Window)
+    }
+}
+
+impl View {
+    #[must_use]
+    pub fn new(surface: Surface) -> Self {
         Self {
+            surface,
             progress: Progress::default(),
             link: Link::Attaching(Vec::new()),
             tab: Tab::Chat,
@@ -171,14 +209,28 @@ impl Default for View {
             closed: BTreeSet::new(),
         }
     }
-}
 
-impl View {
+    /// Whether the strip holds the chat tab: only in the window, where
+    /// there is a backend to send to.
+    #[must_use]
+    pub const fn has_chat(&self) -> bool {
+        matches!(self.surface, Surface::Window)
+    }
+
     /// Folds one step of the feed in, and says how many entries counted.
     /// An entry heard while the replay is still on its way is held, not
     /// folded; the replay is folded first and the held entries after
-    /// it, each counting once or not at all by `seq`.
+    /// it, each counting once or not at all by `seq`. A browser with no
+    /// tab open settles on the oldest build as soon as there is one.
     pub fn step(&mut self, step: Step) -> usize {
+        let counted = self.fold(step);
+        if self.tab == Tab::Chat {
+            self.tab = self.home();
+        }
+        counted
+    }
+
+    fn fold(&mut self, step: Step) -> usize {
         match step {
             Step::Heard(entry) => match &mut self.link {
                 Link::Attaching(held) => {
@@ -206,7 +258,32 @@ impl View {
                 self.link = Link::Lost(reason);
                 0
             }
+            Step::Regained => {
+                if matches!(self.link, Link::Lost(_)) {
+                    self.link = Link::Attached;
+                }
+                0
+            }
         }
+    }
+
+    /// The tab that is open when none has been chosen: the chat, or in a
+    /// browser the oldest build still shown — or `Chat` for none.
+    fn home(&self) -> Tab {
+        match self.surface {
+            Surface::Window => Tab::Chat,
+            Surface::Browser => self
+                .shown()
+                .next()
+                .map_or(Tab::Chat, |watch| Tab::Feature(watch.run())),
+        }
+    }
+
+    /// Every build's watch, oldest first, the closed ones gone.
+    fn shown(&self) -> impl Iterator<Item = &Watch> {
+        self.progress
+            .watches()
+            .filter(|watch| !self.closed.contains(&watch.run()))
     }
 
     /// Whether the feed is speaking: the only state in which anything
@@ -236,7 +313,8 @@ impl View {
     }
 
     /// Closes a finished build's tab; a build still going stays. Closing
-    /// the open tab returns to the chat.
+    /// the open tab returns home: the chat, or in a browser the oldest
+    /// build left.
     pub fn close(&mut self, run: RunId) {
         let closable = self
             .progress
@@ -247,7 +325,7 @@ impl View {
         }
         self.closed.insert(run);
         if self.tab == Tab::Feature(run) {
-            self.tab = Tab::Chat;
+            self.tab = self.home();
         }
     }
 
@@ -259,9 +337,7 @@ impl View {
     /// Every build's tab, oldest first, the closed ones gone.
     #[must_use]
     pub fn tabs(&self) -> Vec<TabSpec> {
-        self.progress
-            .watches()
-            .filter(|watch| !self.closed.contains(&watch.run()))
+        self.shown()
             .map(|watch| {
                 let counts = watch.counts();
                 TabSpec {
@@ -499,18 +575,28 @@ mod tests {
     #[derive(Default)]
     struct Scripted {
         hear: Held<dyn Fn(Entry)>,
-        attached: Held<dyn FnOnce(Result<(), String>)>,
+        standing: Held<dyn Fn(Result<(), String>)>,
         deliver: Held<dyn FnOnce(Result<Vec<Entry>, String>)>,
+    }
+
+    impl Scripted {
+        fn hear(&self, entry: Entry) {
+            self.hear.borrow().as_ref().unwrap()(entry);
+        }
+
+        fn standing(&self, outcome: Result<(), String>) {
+            self.standing.borrow().as_ref().unwrap()(outcome);
+        }
     }
 
     impl Feed for Rc<Scripted> {
         fn listen(
             &self,
             hear: impl Fn(Entry) + 'static,
-            attached: impl FnOnce(Result<(), String>) + 'static,
+            standing: impl Fn(Result<(), String>) + 'static,
         ) {
             *self.hear.borrow_mut() = Some(Box::new(hear));
-            *self.attached.borrow_mut() = Some(Box::new(attached));
+            *self.standing.borrow_mut() = Some(Box::new(standing));
         }
 
         fn replay(&self, deliver: impl FnOnce(Result<Vec<Entry>, String>) + 'static) {
@@ -538,14 +624,14 @@ mod tests {
             feed.deliver.borrow().is_none(),
             "the replay waits for the listener"
         );
-        feed.attached.borrow_mut().take().unwrap()(Ok(()));
+        feed.standing(Ok(()));
         assert!(
             feed.deliver.borrow().is_some(),
             "and is asked for once it is up"
         );
 
         let live = entry(2, moved(1, 2, State::Running));
-        feed.hear.borrow().as_ref().unwrap()(live);
+        feed.hear(live);
         assert_eq!(*counted.borrow(), [0], "held, not folded");
         assert!(!view.borrow().connected());
 
@@ -558,13 +644,13 @@ mod tests {
         assert!(view.borrow().connected());
         assert_eq!(*view.borrow(), attached(&opening()));
 
-        feed.hear.borrow().as_ref().unwrap()(entry(3, moved(1, 2, State::Merging)));
+        feed.hear(entry(3, moved(1, 2, State::Merging)));
         assert_eq!(
             *counted.borrow(),
             [0, 3, 1],
             "live entries fold straight in now"
         );
-        feed.hear.borrow().as_ref().unwrap()(entry(3, moved(1, 2, State::Merging)));
+        feed.hear(entry(3, moved(1, 2, State::Merging)));
         assert_eq!(
             *counted.borrow(),
             [0, 3, 1, 0],
@@ -582,7 +668,7 @@ mod tests {
                 view.borrow_mut().step(step);
             }
         });
-        feed.attached.borrow_mut().take().unwrap()(Err("no channel".to_owned()));
+        feed.standing(Err("no channel".to_owned()));
         feed.deliver.borrow_mut().take().unwrap()(Ok(opening()));
         let view = view.borrow();
         assert!(!view.connected());
@@ -592,6 +678,96 @@ mod tests {
         );
         assert_eq!(view.tabs().len(), 1, "the picture is still shown");
         assert!(!view.tabs()[0].pulse, "but nothing pulses");
+    }
+
+    /// A browser's stream drops and comes back on its own, sending the
+    /// last id it saw: the loss stills the picture, what was missed
+    /// arrives as heard, and the regain — not a second replay — brings
+    /// the pulse back.
+    #[test]
+    fn a_feed_lost_and_regained_pulses_again_without_a_second_replay() {
+        let feed = Rc::new(Scripted::default());
+        let view = Rc::new(RefCell::new(View::default()));
+        attach(Rc::clone(&feed), {
+            let view = Rc::clone(&view);
+            move |step| {
+                view.borrow_mut().step(step);
+            }
+        });
+        feed.standing(Ok(()));
+        feed.deliver.borrow_mut().take().unwrap()(Ok(opening()));
+        assert!(view.borrow().tabs()[0].pulse);
+
+        feed.standing(Err("the stream dropped".to_owned()));
+        assert!(!view.borrow().connected());
+        assert!(!view.borrow().tabs()[0].pulse);
+
+        feed.hear(entry(3, moved(1, 2, merged())));
+        assert_eq!(
+            view.borrow().tabs()[0].count.as_deref(),
+            Some("1/2"),
+            "heard while lost still folds"
+        );
+        feed.hear(entry(4, moved(1, 3, State::Running)));
+
+        feed.standing(Ok(()));
+        assert!(feed.deliver.borrow().is_none(), "no second replay");
+        let view = view.borrow();
+        assert!(view.connected());
+        assert!(view.tabs()[0].pulse);
+        assert_eq!(view.disconnected(), None);
+    }
+
+    #[test]
+    fn a_regain_while_still_attaching_changes_nothing() {
+        let mut view = View::default();
+        view.step(Step::Regained);
+        assert!(!view.connected());
+        assert_eq!(
+            view.disconnected().as_deref(),
+            Some("connecting to the build feed")
+        );
+    }
+
+    #[test]
+    fn a_browser_has_no_chat_tab_and_opens_the_oldest_build() {
+        let mut view = View::new(Surface::Browser);
+        assert!(!view.has_chat());
+        assert_eq!(view.tab(), Tab::Chat, "nothing to show yet");
+        assert!(view.pane().is_none());
+
+        view.step(Step::Replayed(Ok(vec![
+            entry(0, reserved(1)),
+            entry(1, reserved(2)),
+        ])));
+        assert_eq!(view.tab(), Tab::Feature(RunId(1)), "the oldest, unasked");
+        assert!(view.pane().is_some());
+
+        view.open(Tab::Feature(RunId(2)));
+        view.step(Step::Heard(entry(2, reserved(3))));
+        assert_eq!(view.tab(), Tab::Feature(RunId(2)), "a choice is kept");
+
+        view.step(Step::Heard(entry(
+            3,
+            Change::Abandoned {
+                run: RunId(2),
+                reason: "declined".to_owned(),
+            },
+        )));
+        view.close(RunId(2));
+        assert_eq!(
+            view.tab(),
+            Tab::Feature(RunId(1)),
+            "closing the open tab goes to the oldest left"
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_its_chat_tab_open_as_builds_appear() {
+        let mut view = View::default();
+        assert!(view.has_chat());
+        view.step(Step::Replayed(Ok(opening())));
+        assert_eq!(view.tab(), Tab::Chat);
     }
 
     #[test]

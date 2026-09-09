@@ -9,6 +9,7 @@ use epik::chat::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::config::Config;
 use epik::keystore::{Resolved, Secret};
 use epik::monitor::{EVENT, Entry};
+use leptos::prelude::window;
 use leptos::task::spawn_local;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -221,11 +222,12 @@ pub struct Monitor;
 
 impl Feed for Monitor {
     /// The handler lives for the window, which is why it is forgotten
-    /// rather than dropped; `attached` hears whether the binding took.
+    /// rather than dropped; `standing` hears whether the binding took,
+    /// once — the window's channel is neither lost nor regained.
     fn listen(
         &self,
         hear: impl Fn(Entry) + 'static,
-        attached: impl FnOnce(Result<(), String>) + 'static,
+        standing: impl Fn(Result<(), String>) + 'static,
     ) {
         spawn_local(async move {
             let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
@@ -238,13 +240,19 @@ impl Feed for Monitor {
                 .map(|_| ())
                 .map_err(|error| error_text(&error));
             handler.forget();
-            attached(outcome);
+            standing(outcome);
         });
     }
 
     fn replay(&self, deliver: impl FnOnce(Result<Vec<Entry>, String>) + 'static) {
         spawn_local(async move { deliver(ask("monitor_log").await) });
     }
+}
+
+/// Whether the page runs in the app's window: Tauri's bridge is on
+/// `window` there, and nowhere else.
+pub fn in_window() -> bool {
+    js_sys::Reflect::has(&window(), &JsValue::from_str("__TAURI__")).unwrap_or(false)
 }
 
 /// Opens `url` in the system browser through the opener plugin — the app's

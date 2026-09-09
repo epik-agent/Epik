@@ -64,6 +64,7 @@ fn starting() -> Config {
             agent: None,
         },
         github: epik::config::GitHub::default(),
+        monitor: None,
     }
 }
 
@@ -186,7 +187,7 @@ pub async fn github_login() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    use epik::config::GitHub;
+    use epik::config::{GitHub, Monitor};
     use epik::keystore::InMemory;
 
     use crate::testing::Broken;
@@ -201,6 +202,7 @@ mod tests {
             github: GitHub {
                 owner: Some("o".to_owned()),
             },
+            monitor: None,
         }
     }
 
@@ -308,9 +310,33 @@ mod tests {
                 github: GitHub {
                     owner: Some("o".to_owned()),
                 },
+                monitor: None,
             }
         );
         assert_eq!(file(&root), text);
+    }
+
+    /// The key came later than the file format: a file without it is
+    /// read as it always was, and one stating it reads back as written.
+    #[test]
+    fn a_monitor_section_parses_and_round_trips() {
+        let (_dir, root) = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let text = "[monitor]\nlisten = \"127.0.0.1:7878\"\n";
+        std::fs::write(root.join(FILE), text).unwrap();
+        let config = converge_at(&root).unwrap();
+        assert_eq!(
+            config,
+            Config {
+                monitor: Some(Monitor {
+                    listen: Some("127.0.0.1:7878".to_owned()),
+                }),
+                ..Config::default()
+            }
+        );
+        save(&root, &config).unwrap();
+        assert_eq!(file(&root), text);
+        assert_eq!(converge_at(&root).unwrap(), config);
     }
 
     #[test]
@@ -323,6 +349,9 @@ mod tests {
             github: GitHub {
                 owner: Some("o".to_owned()),
             },
+            monitor: Some(Monitor {
+                listen: Some("127.0.0.1:7878".to_owned()),
+            }),
         };
         let chat_only = starting();
         let owner_only = Config {

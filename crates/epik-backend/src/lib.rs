@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 mod build;
 mod chat;
 mod config;
+mod monitor;
 mod secrets;
 #[cfg(test)]
 mod testing;
@@ -92,6 +93,10 @@ pub fn run() {
                 eprintln!("{error:#}; starting with the built-in defaults");
                 epik::config::Config::default()
             });
+            let listen = config
+                .monitor
+                .as_ref()
+                .and_then(|monitor| monitor.listen.clone());
             // Managed behind a lock: the settings window replaces it.
             app.manage(std::sync::Mutex::new(config));
             // The feature-build log, with the window subscribed before
@@ -104,6 +109,9 @@ pub fn run() {
                     let _ = app.emit(epik::monitor::EVENT, entry);
                 }
             });
+            // The same log as a page a browser can open, when the file
+            // asks for one.
+            monitor::start(listen.as_deref(), &log);
             app.manage(build::FeatureState::new(log));
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.

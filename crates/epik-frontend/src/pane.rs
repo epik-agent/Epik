@@ -183,10 +183,11 @@ const fn form_class(form: Form, pulse: bool) -> &'static str {
     }
 }
 
-/// The strip: the chat first, then a tab per build the fold knows.
+/// The strip: the chat first, where there is one, then a tab per build
+/// the fold knows.
 #[component]
 pub fn TabStrip(view: RwSignal<View>) -> impl IntoView {
-    let chat = move || {
+    let chat = view.with_untracked(View::has_chat).then_some(move || {
         let active = view.with(|view| view.tab() == Tab::Chat);
         view! {
             <div
@@ -197,7 +198,7 @@ pub fn TabStrip(view: RwSignal<View>) -> impl IntoView {
                 "Epik"
             </div>
         }
-    };
+    });
     let features = move || {
         view.with(View::tabs)
             .into_iter()
