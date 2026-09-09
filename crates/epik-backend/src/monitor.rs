@@ -1,0 +1,397 @@
+//! The monitor as a page a browser can open: the bundle the window runs,
+//! served over loopback HTTP, with the change log as an event stream
+//! beside it.
+//!
+//! One renderer, two transports. The page is the wasm bundle Trunk
+//! emits, embedded here so a headless backend is one file; the entries
+//! reach it as Server-Sent Events, `id: <seq>`, and a reconnecting
+//! browser's `Last-Event-ID` is the cursor to resume from. A connection
+//! with none replays from 0: attaching is replay, and there is no
+//! snapshot to serve. The surface is read-only — it serves the page and
+//! the changes, and can start nothing, stop nothing and answer nothing.
+//!
+//! `tiny_http`: blocking, a thread per connection, and off Tauri's async
+//! runtime — the `epik` library is synchronous throughout and the server
+//! keeps that discipline. A connection blocks in [`Log::wait_after`], so
+//! an idle monitor costs a sleeping thread and nothing else.
+//!
+//! It binds loopback and refuses any other address, in words that say
+//! why: remote access is an ssh tunnel until there is an authentication
+//! story.
+
+use std::ffi::OsStr;
+use std::io::Write;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
+use epik::monitor::{Entry, Log};
+use include_dir::{Dir, File, include_dir};
+use tiny_http::{Header, Method, Request, Response, Server};
+
+/// The bundle Trunk emitted, as of this build. `build.rs` makes the
+/// directory exist before this is compiled, so a build that never ran
+/// Trunk embeds an empty bundle and serves 404s for the page.
+static BUNDLE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../epik-frontend/dist");
+
+/// The event stream's path.
+pub const CHANGES: &str = "/monitor/changes";
+
+/// How long a connection waits for an entry before saying it is still
+/// there — a comment line, so a client that has gone is noticed by the
+/// write that fails.
+const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+/// What `setup` calls: decides, serves, and reports to stderr whatever
+/// stops it. The app carries on without a server either way.
+pub fn start(listen: Option<&str>, log: &Arc<Log>) {
+    let Some(listen) = listen else { return };
+    match decide(listen).and_then(|addr| serve(addr, Arc::clone(log))) {
+        Ok(addr) => eprintln!("the monitor is at http://{addr}/"),
+        Err(reason) => eprintln!("{reason}"),
+    }
+}
+
+/// Whether `listen` names an address the monitor will bind: a socket
+/// address on a loopback interface, and nothing else. The Err is the
+/// sentence for stderr.
+pub fn decide(listen: &str) -> Result<SocketAddr, String> {
+    let addr: SocketAddr = listen.parse().map_err(|_| {
+        format!("the monitor's listen address {listen:?} is not an address:port; no monitor server")
+    })?;
+    if addr.ip().is_loopback() {
+        Ok(addr)
+    } else {
+        Err(format!(
+            "the monitor refuses to listen on {addr}: it binds loopback only, and reaching it \
+             from another machine is an ssh tunnel until there is an authentication story; \
+             no monitor server"
+        ))
+    }
+}
+
+/// Serves `log` and the bundle on `addr` from a thread of its own, and
+/// answers the address bound — which is how port 0 says which port.
+pub fn serve(addr: SocketAddr, log: Arc<Log>) -> Result<SocketAddr, String> {
+    let server = Server::http(addr)
+        .map_err(|error| format!("the monitor could not listen on {addr}: {error}"))?;
+    let bound = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| format!("the monitor bound {addr} to no IP address"))?;
+    thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let log = Arc::clone(&log);
+            thread::spawn(move || handle(request, &log));
+        }
+    });
+    Ok(bound)
+}
+
+/// Where a request goes, decided from the method and the path alone.
+#[derive(PartialEq)]
+enum Route {
+    /// The event stream.
+    Changes,
+    /// One file of the bundle.
+    Asset(&'static File<'static>),
+    /// A path the bundle does not hold.
+    NotFound,
+    /// Anything but GET: the surface is read-only.
+    NotAllowed,
+}
+
+/// `/` is the page; anything else is looked up in the bundle as it is,
+/// so `..` and its like find nothing.
+fn route(method: &Method, url: &str) -> Route {
+    if *method != Method::Get {
+        return Route::NotAllowed;
+    }
+    let path = url.split('?').next().unwrap_or(url);
+    let file = match path {
+        CHANGES => return Route::Changes,
+        "/" => "index.html",
+        _ => path.trim_start_matches('/'),
+    };
+    BUNDLE.get_file(file).map_or(Route::NotFound, Route::Asset)
+}
+
+/// The content type an asset is served as, by its extension.
+fn content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(OsStr::to_str) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript",
+        Some("wasm") => "application/wasm",
+        Some("css") => "text/css",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+fn header(field: &str, value: &str) -> Header {
+    Header::from_bytes(field, value).expect("ascii header text")
+}
+
+fn handle(request: Request, log: &Log) {
+    let response = match route(request.method(), request.url()) {
+        Route::Changes => return stream(request, log),
+        Route::Asset(file) => Response::from_data(file.contents())
+            .with_header(header("Content-Type", content_type(file.path())))
+            .boxed(),
+        Route::NotFound => Response::empty(404).boxed(),
+        Route::NotAllowed => Response::empty(405).boxed(),
+    };
+    let _ = request.respond(response);
+}
+
+/// The cursor a request resumes from: one past its `Last-Event-ID`, or
+/// 0 for a connection with none — the replay.
+fn cursor(request: &Request) -> u64 {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Last-Event-ID"))
+        .and_then(|header| header.value.as_str().parse::<u64>().ok())
+        .map_or(0, |last| last.saturating_add(1))
+}
+
+/// One entry as an event: its `seq` as the id the browser sends back,
+/// its JSON as the data.
+fn event(entry: &Entry) -> String {
+    let data = serde_json::to_string(entry).expect("an entry is JSON");
+    format!("id: {}\ndata: {data}\n\n", entry.seq)
+}
+
+/// The event stream: every entry from the cursor on, for as long as the
+/// client stays, and a comment while nothing happens. The body has no
+/// length and no framing — it ends when the connection does — which is
+/// why it is written raw: tiny_http's `Response` would buffer an event
+/// until the next one filled the buffer.
+fn stream(request: Request, log: &Log) {
+    let mut cursor = cursor(&request);
+    let mut writer = request.into_writer();
+    let mut send = |text: &str| {
+        writer
+            .write_all(text.as_bytes())
+            .and_then(|()| writer.flush())
+    };
+    let head = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\n\
+                Connection: close\r\n\r\n";
+    if send(head).is_err() {
+        return;
+    }
+    loop {
+        let entries = log.wait_after(cursor, KEEP_ALIVE);
+        let text = match entries.last() {
+            None => ": keep-alive\n\n".to_owned(),
+            Some(last) => {
+                cursor = last.seq + 1;
+                entries.iter().map(event).collect()
+            }
+        };
+        if send(&text).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Read};
+    use std::net::TcpStream;
+
+    use epik::feature::{IssueId, RunId};
+    use epik::monitor::Change;
+
+    use super::*;
+
+    fn reserved(run: u64) -> Change {
+        Change::Reserved {
+            run: RunId(run),
+            feature: IssueId::from(1),
+            repository: "/r".to_owned(),
+            branch: "feature-1".to_owned(),
+            base: None,
+        }
+    }
+
+    /// A server over a fresh log, and where it is.
+    fn served() -> (Arc<Log>, SocketAddr) {
+        let log = Arc::new(Log::new());
+        let addr = serve("127.0.0.1:0".parse().unwrap(), Arc::clone(&log)).unwrap();
+        (log, addr)
+    }
+
+    /// A raw request, answered: the status, the headers lowercased, and
+    /// the connection positioned at the body.
+    fn request(
+        addr: SocketAddr,
+        line: &str,
+        headers: &[&str],
+    ) -> (u16, Vec<String>, BufReader<TcpStream>) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(stream, "{line} HTTP/1.1\r\nHost: {addr}\r\n").unwrap();
+        for header in headers {
+            write!(stream, "{header}\r\n").unwrap();
+        }
+        write!(stream, "\r\n").unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status = String::new();
+        reader.read_line(&mut status).unwrap();
+        let status = status.split(' ').nth(1).unwrap().parse().unwrap();
+        let mut headers = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push(line.trim_end().to_lowercase());
+        }
+        (status, headers, reader)
+    }
+
+    /// The next event on the stream — its id and its entry — comment
+    /// lines passed over.
+    fn next_event(reader: &mut BufReader<TcpStream>) -> (u64, Entry) {
+        let (mut id, mut data) = (None, None);
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "the stream ended");
+            match line.trim_end_matches('\n') {
+                "" => {
+                    if let (Some(id), Some(data)) = (id, data.take()) {
+                        return (id, data);
+                    }
+                }
+                comment if comment.starts_with(':') => {}
+                field => match field.split_once(": ").unwrap() {
+                    ("id", value) => id = Some(value.parse().unwrap()),
+                    ("data", value) => data = Some(serde_json::from_str(value).unwrap()),
+                    (name, _) => panic!("an unexpected field {name}"),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn the_stream_replays_in_seq_order_with_seq_as_the_id_then_carries_on_live() {
+        let (log, addr) = served();
+        log.record(reserved(1));
+        log.record(reserved(2));
+        log.record(reserved(3));
+
+        let (status, headers, mut reader) = request(addr, &format!("GET {CHANGES}"), &[]);
+        assert_eq!(status, 200);
+        assert!(headers.contains(&"content-type: text/event-stream".to_owned()));
+        assert!(headers.contains(&"cache-control: no-cache".to_owned()));
+        for (seq, expected) in log.since(0).iter().enumerate() {
+            let (id, entry) = next_event(&mut reader);
+            assert_eq!(id, seq as u64);
+            assert_eq!(entry, *expected);
+        }
+
+        log.record(Change::Finished { run: RunId(1) });
+        let (id, entry) = next_event(&mut reader);
+        assert_eq!(id, 3, "recorded after the connection opened, and heard");
+        assert_eq!(entry.change, Change::Finished { run: RunId(1) });
+    }
+
+    #[test]
+    fn a_reconnecting_client_resumes_after_its_last_event_id() {
+        let (log, addr) = served();
+        log.record(reserved(1));
+        log.record(reserved(2));
+        log.record(reserved(3));
+
+        let (status, _, mut reader) =
+            request(addr, &format!("GET {CHANGES}"), &["Last-Event-ID: 1"]);
+        assert_eq!(status, 200);
+        let (id, entry) = next_event(&mut reader);
+        assert_eq!(id, 2, "only what follows");
+        assert_eq!(entry, log.since(2)[0]);
+
+        log.record(reserved(4));
+        assert_eq!(next_event(&mut reader).0, 3);
+    }
+
+    #[test]
+    fn anything_but_a_get_is_refused_and_an_unknown_path_is_not_found() {
+        let (_log, addr) = served();
+        assert_eq!(request(addr, &format!("POST {CHANGES}"), &[]).0, 405);
+        assert_eq!(request(addr, "GET /nothing-here", &[]).0, 404);
+    }
+
+    /// The page is served when the build embedded a bundle, and a 404
+    /// says so when it did not — both are this crate compiling.
+    #[test]
+    fn the_page_is_the_bundles_index() {
+        let (_log, addr) = served();
+        let (status, headers, mut reader) = request(addr, "GET /", &[]);
+        match BUNDLE.get_file("index.html") {
+            None => assert_eq!(status, 404, "no bundle was embedded"),
+            Some(index) => {
+                assert_eq!(status, 200);
+                assert!(headers.contains(&"content-type: text/html; charset=utf-8".to_owned()));
+                let mut body = vec![0; index.contents().len()];
+                reader.read_exact(&mut body).unwrap();
+                assert_eq!(body, index.contents());
+            }
+        }
+    }
+
+    #[test]
+    fn a_loopback_address_is_accepted_and_anything_else_refused() {
+        assert_eq!(
+            decide("127.0.0.1:7878").unwrap(),
+            "127.0.0.1:7878".parse::<SocketAddr>().unwrap()
+        );
+        assert!(decide("[::1]:7878").is_ok());
+        let refused = decide("0.0.0.0:7878").unwrap_err();
+        assert!(refused.contains("ssh tunnel"), "{refused}");
+        assert!(refused.contains("0.0.0.0:7878"), "{refused}");
+        let refused = decide("10.0.0.5:7878").unwrap_err();
+        assert!(refused.contains("loopback"), "{refused}");
+        let garbage = decide("localhost").unwrap_err();
+        assert!(garbage.contains("not an address:port"), "{garbage}");
+    }
+
+    #[test]
+    fn the_routes() {
+        assert!(route(&Method::Get, CHANGES) == Route::Changes);
+        assert!(route(&Method::Get, &format!("{CHANGES}?x=1")) == Route::Changes);
+        assert!(route(&Method::Post, CHANGES) == Route::NotAllowed);
+        assert!(route(&Method::Get, "/nothing-here") == Route::NotFound);
+        assert!(route(&Method::Get, "/../Cargo.toml") == Route::NotFound);
+        assert!(route(&Method::Get, "/") == route(&Method::Get, "/index.html"));
+    }
+
+    #[test]
+    fn content_types_follow_the_extension() {
+        assert_eq!(content_type(Path::new("a.wasm")), "application/wasm");
+        assert_eq!(content_type(Path::new("a.js")), "text/javascript");
+        assert_eq!(content_type(Path::new("a.css")), "text/css");
+        assert_eq!(content_type(Path::new("a")), "application/octet-stream");
+    }
+
+    #[test]
+    fn an_event_carries_the_seq_as_its_id() {
+        let entry = Entry {
+            seq: 7,
+            at: 1,
+            change: Change::Finished { run: RunId(1) },
+        };
+        let text = event(&entry);
+        assert!(text.starts_with("id: 7\ndata: {"), "{text}");
+        assert!(text.ends_with("}\n\n"), "{text}");
+    }
+}

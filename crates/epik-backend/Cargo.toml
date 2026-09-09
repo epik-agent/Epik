@@ -30,6 +30,11 @@ toml = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# The monitor's HTTP server: blocking, a thread per connection, pure
+# Rust, and off the async runtime like the rest of the library.
+tiny_http = "0.12"
+# The frontend bundle, embedded: a headless backend is one file.
+include_dir = "0.7"
 
 [dev-dependencies]
 # The scripted model rides in for tests only; no shipping build sees it.

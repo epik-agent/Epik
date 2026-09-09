@@ -24,6 +24,20 @@ pub struct Config {
     pub model: Model,
     #[serde(default, skip_serializing_if = "GitHub::is_default")]
     pub github: GitHub,
+    /// `[monitor]`: absent means no server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<Monitor>,
+}
+
+/// `[monitor]`: the monitor as a page a browser can open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Monitor {
+    /// The address the page is served on, as `host:port`. Loopback
+    /// only: reaching it from another machine is an ssh tunnel until
+    /// there is an authentication story.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
 }
 
 /// `[model]`: which models the chat window and the build Agents speak to.

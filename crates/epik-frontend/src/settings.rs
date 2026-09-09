@@ -128,6 +128,8 @@ pub struct Fields {
     pub key: Secret,
     pub chat: String,
     pub agent: String,
+    /// What the window does not show, carried so a write keeps it.
+    pub monitor: Option<config::Monitor>,
 }
 
 impl Fields {
@@ -144,6 +146,7 @@ impl Fields {
                 .clone()
                 .unwrap_or_else(|| ANTHROPIC_MODEL.to_owned()),
             agent: config.model.agent.clone().unwrap_or_default(),
+            monitor: config.monitor.clone(),
             ..Self::default()
         }
     }
@@ -159,6 +162,7 @@ impl Fields {
             github: config::GitHub {
                 owner: entry(&self.owner),
             },
+            monitor: self.monitor.clone(),
         }
     }
 
@@ -581,6 +585,7 @@ mod tests {
             key: Secret::from("sk-kept"),
             chat: "claude-chat".to_owned(),
             agent: String::new(),
+            monitor: None,
         }
     }
 
@@ -684,6 +689,7 @@ mod tests {
             github: config::GitHub {
                 owner: Some("other".to_owned()),
             },
+            monitor: None,
         };
         assert_eq!(
             writes(Tab::GitHub, &loaded(), &current),
@@ -692,6 +698,21 @@ mod tests {
                 config: Some(expected),
             }
         );
+    }
+
+    #[test]
+    fn what_the_window_does_not_show_survives_a_write() {
+        let monitor = Some(config::Monitor {
+            listen: Some("127.0.0.1:7878".to_owned()),
+        });
+        let loaded = Fields::from_config(&Config {
+            monitor: monitor.clone(),
+            ..Config::default()
+        });
+        let mut current = loaded.clone();
+        current.owner = "other".to_owned();
+        let written = writes(Tab::GitHub, &loaded, &current).config.unwrap();
+        assert_eq!(written.monitor, monitor);
     }
 
     #[test]

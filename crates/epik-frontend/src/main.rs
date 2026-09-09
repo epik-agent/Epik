@@ -2,6 +2,7 @@ mod app;
 mod card;
 mod chat;
 mod highlight;
+mod http;
 mod ipc;
 mod json;
 mod markdown;
