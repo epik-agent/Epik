@@ -21,7 +21,7 @@
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -54,22 +54,32 @@ pub fn start(listen: Option<&str>, log: &Arc<Log>) {
     }
 }
 
-/// Whether `listen` names an address the monitor will bind: a socket
-/// address on a loopback interface, and nothing else. The Err is the
-/// sentence for stderr.
+/// Whether `listen` names an address the monitor will bind: `ip:port`
+/// or `host:port`, resolved, with every address it resolves to on a
+/// loopback interface — `localhost` names two, and a name that reaches
+/// anywhere else is refused whole rather than bound on its loopback
+/// half. The first address is the one bound. The Err is the sentence
+/// for stderr.
 pub fn decide(listen: &str) -> Result<SocketAddr, String> {
-    let addr: SocketAddr = listen.parse().map_err(|_| {
-        format!("the monitor's listen address {listen:?} is not an address:port; no monitor server")
-    })?;
-    if addr.ip().is_loopback() {
-        Ok(addr)
-    } else {
-        Err(format!(
-            "the monitor refuses to listen on {addr}: it binds loopback only, and reaching it \
-             from another machine is an ssh tunnel until there is an authentication story; \
-             no monitor server"
-        ))
+    let addrs: Vec<SocketAddr> = listen
+        .to_socket_addrs()
+        .map_err(|error| {
+            format!(
+                "the monitor's listen address {listen:?} is not a host:port it can resolve \
+                 ({error}); no monitor server"
+            )
+        })?
+        .collect();
+    if let Some(routable) = addrs.iter().find(|addr| !addr.ip().is_loopback()) {
+        return Err(format!(
+            "the monitor refuses to listen on {listen} ({routable}): it binds loopback only, \
+             and reaching it from another machine is an ssh tunnel until there is an \
+             authentication story; no monitor server"
+        ));
     }
+    addrs.first().copied().ok_or_else(|| {
+        format!("the monitor's listen address {listen:?} resolves to nothing; no monitor server")
+    })
 }
 
 /// Serves `log` and the bundle on `addr` from a thread of its own, and
@@ -349,20 +359,25 @@ mod tests {
         }
     }
 
+    /// `localhost` is the one name tried: it resolves from the hosts
+    /// file, so no test here touches DNS.
     #[test]
-    fn a_loopback_address_is_accepted_and_anything_else_refused() {
+    fn a_loopback_address_or_name_is_accepted_and_anything_else_refused() {
         assert_eq!(
             decide("127.0.0.1:7878").unwrap(),
             "127.0.0.1:7878".parse::<SocketAddr>().unwrap()
         );
         assert!(decide("[::1]:7878").is_ok());
+        let local = decide("localhost:0").unwrap();
+        assert!(local.ip().is_loopback(), "{local}");
+        assert_eq!(local.port(), 0);
         let refused = decide("0.0.0.0:7878").unwrap_err();
         assert!(refused.contains("ssh tunnel"), "{refused}");
         assert!(refused.contains("0.0.0.0:7878"), "{refused}");
         let refused = decide("10.0.0.5:7878").unwrap_err();
         assert!(refused.contains("loopback"), "{refused}");
         let garbage = decide("localhost").unwrap_err();
-        assert!(garbage.contains("not an address:port"), "{garbage}");
+        assert!(garbage.contains("host:port"), "{garbage}");
     }
 
     #[test]
