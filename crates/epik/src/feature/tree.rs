@@ -59,6 +59,14 @@ impl<T> Tree<T> {
         })
     }
 
+    /// The subtree rooted at the first node — in [`nodes`](Self::nodes)
+    /// order — whose value satisfies `found`: the last element of
+    /// [`find_path`](Self::find_path), for a caller with no use for the
+    /// ancestors.
+    pub(super) fn find(&self, found: impl Fn(&T) -> bool) -> Option<&Self> {
+        self.find_path(found).and_then(|path| path.last().copied())
+    }
+
     /// The chain of subtrees from this root down to the first node — in
     /// [`nodes`](Self::nodes) order — whose value satisfies `found`, or
     /// `None` when nothing does. The last element is the match's own

@@ -32,9 +32,9 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use epik::monitor::{Entry, Log};
+use epik::monitor::{Entry, Log, now};
 use include_dir::{Dir, File, include_dir};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -78,13 +78,7 @@ pub const CHANGES: &str = "/monitor/changes";
 /// `seq` restarts at 0, and a browser reconnecting with the old
 /// process's `Last-Event-ID` must not resume from it — a cursor into a
 /// log that no longer exists — so the id says which log it indexes.
-static BOOT: LazyLock<u64> = LazyLock::new(|| {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
-});
+static BOOT: LazyLock<u64> = LazyLock::new(now);
 
 /// How long a connection waits for an entry before saying it is still
 /// there — a comment line, so a client that has gone is noticed by the

@@ -39,7 +39,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
 
@@ -109,6 +109,13 @@ impl Builds {
         }
     }
 
+    /// The map, locked — for the map itself and nothing else; a
+    /// poisoned lock is taken anyway, since every write is one insert
+    /// or remove.
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<RunId, Entry>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Reserves the next run id for a launch — the insert under the map
     /// lock, held for nothing else. The reservation exists so the build
     /// has a name before any card is raised or any branch established:
@@ -124,7 +131,7 @@ impl Builds {
         base: Option<String>,
     ) -> Reservation {
         let run = {
-            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut entries = self.lock();
             let run = RunId(self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
             entries.insert(
                 run,
@@ -152,22 +159,22 @@ impl Builds {
 }
 
 /// How a reservation ended, if it has.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Standing {
     /// The launch is under way.
     Held,
     /// The build is running: the flight took the reservation's place.
     Filled,
-    /// The launch failed, and the log has been told why.
-    Abandoned,
+    /// The launch failed, and these are its words for the log.
+    Abandoned(String),
 }
 
 /// A run id held while a launch is under way: taken before the check
 /// card is raised, filled with the [`Flight`] once the build is
-/// running. Abandoned — the launch failed — it releases its entry with
-/// the reason recorded; dropped unfilled without a word, it records the
-/// abandonment with words of its own, so no reservation ever vanishes
-/// from the log unexplained.
+/// running. Anything else is an abandonment, spoken and released on the
+/// way out — with the launch's words when it failed, with words of the
+/// reservation's own when it was dropped unfilled without any — so no
+/// reservation ever vanishes from the log unexplained.
 struct Reservation {
     builds: Arc<Builds>,
     run: RunId,
@@ -193,11 +200,7 @@ impl Reservation {
     /// The build is running: the flight takes the reservation's place
     /// in the record.
     fn fill(mut self, flight: Flight) -> RunId {
-        self.builds
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(self.run, Entry::Flight(flight));
+        self.builds.lock().insert(self.run, Entry::Flight(flight));
         self.standing = Standing::Filled;
         self.run
     }
@@ -219,31 +222,25 @@ impl Reservation {
         }
     }
 
-    /// The launch failed: `reason` is recorded, and the entry released.
+    /// The launch failed: `reason` is what the log hears on the way
+    /// out.
     fn abandon(mut self, reason: String) {
-        self.builds.log.record(Change::Abandoned {
-            run: self.run,
-            reason,
-        });
-        self.standing = Standing::Abandoned;
+        self.standing = Standing::Abandoned(reason);
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        match self.standing {
+        let reason = match &self.standing {
             Standing::Filled => return,
-            Standing::Abandoned => {}
-            Standing::Held => self.builds.log.record(Change::Abandoned {
-                run: self.run,
-                reason: "the launch ended without saying why".to_owned(),
-            }),
-        }
-        self.builds
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.run);
+            Standing::Abandoned(reason) => reason.clone(),
+            Standing::Held => "the launch ended without saying why".to_owned(),
+        };
+        self.builds.log.record(Change::Abandoned {
+            run: self.run,
+            reason,
+        });
+        self.builds.lock().remove(&self.run);
     }
 }
 
@@ -460,10 +457,7 @@ pub fn feature_status(builds: Arc<Builds>) -> Tool {
             // Cloned out under the map lock; the tip read — which waits
             // on the merge lock — runs after it is gone.
             let (run, feature, repository, branch, check, tip, build) = {
-                let entries = builds
-                    .entries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let entries = builds.lock();
                 let (run, entry) = match arguments["run"].as_u64() {
                     Some(asked) => entries
                         .get_key_value(&RunId(asked))
@@ -552,8 +546,8 @@ mod tests {
     use super::super::State;
     use super::super::fixtures::{committing, id, node, plan, seven_holding_eight};
     use super::*;
-    use crate::monitor::{Stage, folded};
-    use crate::testing::{Local, Scratch, seeded};
+    use crate::monitor::{Stage, eventually_finished, folded};
+    use crate::testing::{Local, Scratch, seeded, tidy};
     use crate::tools::Registry;
 
     /// An empty record on a fresh log.
@@ -574,21 +568,6 @@ mod tests {
         plumbing(args).unwrap()
     }
 
-    /// Removes every linked worktree a build left behind, so a scratch
-    /// drop is enough.
-    fn tidy(repository: &str) {
-        let listed = git(&["-C", repository, "worktree", "list", "--porcelain"]);
-        for line in listed.lines() {
-            if let Some(path) = line.strip_prefix("worktree ")
-                && path != repository
-            {
-                let _ = plumbing(&[
-                    "-C", repository, "worktree", "remove", "--force", "--", path,
-                ]);
-            }
-        }
-    }
-
     /// A flight over a hand-built record, for exercising the map without
     /// any machinery.
     fn flight(feature: u64, branch: &str, repository: &str, states: &[(u64, State)]) -> Flight {
@@ -599,14 +578,7 @@ mod tests {
                 node(feature + 1, false, &[], &[]),
             ],
         );
-        let mut build = Build {
-            run: RunId(0),
-            log: Arc::new(Log::new()),
-            problems: plan.problems(),
-            plan,
-            states: BTreeMap::new(),
-            runs: BTreeMap::new(),
-        };
+        let mut build = Build::new(RunId(0), Arc::new(Log::new()), plan);
         for (number, state) in states {
             build.set(&id(*number), state.clone());
         }
@@ -655,8 +627,20 @@ mod tests {
         registry
     }
 
-    /// Polls `feature_status` for run `run` until it says finished.
-    fn eventually_finished(registry: &Registry, run: u64) -> Value {
+    /// The registry most tool tests want: feature 7 holding 8, an Agent
+    /// that never starts, and a user who declines the check.
+    fn declining(builds: &Arc<Builds>, remote: String) -> Registry {
+        registry(
+            builds,
+            [(7, seven_holding_eight())],
+            unreachable,
+            remote,
+            |_| Answer::Declined,
+        )
+    }
+
+    /// `feature_status` for run `run`, polled until it says finished.
+    fn finished_status(registry: &Registry, run: u64) -> Value {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let arguments = json!({ "run": run }).to_string();
         loop {
@@ -684,7 +668,20 @@ mod tests {
 
     /// The run ids the record holds, in order.
     fn runs(builds: &Builds) -> Vec<RunId> {
-        builds.entries.lock().unwrap().keys().copied().collect()
+        builds.lock().keys().copied().collect()
+    }
+
+    /// The log's story of run `run`, one word per change: the tag each
+    /// change carries on the wire.
+    fn story(log: &Log, run: RunId) -> Vec<String> {
+        log.since(0)
+            .iter()
+            .filter(|entry| entry.change.run() == run)
+            .map(|entry| {
+                let wire = serde_json::to_value(&entry.change).unwrap();
+                wire["change"].as_str().unwrap().to_owned()
+            })
+            .collect()
     }
 
     /// `start_feature` with only its required arguments.
@@ -787,7 +784,7 @@ mod tests {
             }
         );
         reservation.abandon("the tracker is down".to_owned());
-        assert!(builds.entries.lock().unwrap().is_empty(), "released");
+        assert!(builds.lock().is_empty(), "released");
         let progress = folded(&builds.log);
         assert_eq!(
             *progress.watch(RunId(1)).unwrap().stage(),
@@ -824,27 +821,14 @@ mod tests {
 
         let error = start(&registry, &work, 7).unwrap_err();
         assert_eq!(error, "the tracker is down");
-        assert!(builds.entries.lock().unwrap().is_empty(), "released");
+        assert!(builds.lock().is_empty(), "released");
 
-        let changes: Vec<&str> = builds
-            .log
-            .since(0)
-            .iter()
-            .map(|entry| match &entry.change {
-                Change::Reserved { base, .. } => {
-                    assert_eq!(base.as_deref(), Some("main"));
-                    "reserved"
-                }
-                Change::Abandoned { reason, .. } => {
-                    assert_eq!(reason, "the tracker is down");
-                    "abandoned"
-                }
-                other => panic!("{other:?}"),
-            })
-            .collect();
-        assert_eq!(changes, ["reserved", "abandoned"]);
+        assert_eq!(story(&builds.log, RunId(1)), ["reserved", "abandoned"]);
+        let progress = folded(&builds.log);
+        let watch = progress.watch(RunId(1)).unwrap();
+        assert_eq!(watch.base(), Some("main"), "the default branch, resolved");
         assert_eq!(
-            *folded(&builds.log).watch(RunId(1)).unwrap().stage(),
+            *watch.stage(),
             Stage::Abandoned {
                 reason: "the tracker is down".to_owned()
             }
@@ -883,13 +867,7 @@ mod tests {
             .trim()
             .to_owned();
         let builds = builds();
-        let registry = registry(
-            &builds,
-            [(7, seven_holding_eight())],
-            unreachable,
-            remote,
-            |_| Answer::Declined,
-        );
+        let registry = declining(&builds, remote);
 
         let started = start(&registry, &work, 7).unwrap();
         assert_eq!(started["started"], json!(true));
@@ -903,7 +881,7 @@ mod tests {
             "the feature branch was cut at the base"
         );
 
-        let status = eventually_finished(&registry, 1);
+        let status = finished_status(&registry, 1);
         assert_eq!(status["branch"], "feature-7");
         assert_eq!(
             status["tip"],
@@ -915,13 +893,13 @@ mod tests {
         // Started, one Moved per state 8 passed through — Running, then
         // its Failed end — and Finished once. The fold is the record.
         let record = {
-            let entries = builds.entries.lock().unwrap();
+            let entries = builds.lock();
             let Entry::Flight(flight) = &entries[&RunId(1)] else {
                 panic!("the filled entry is a flight");
             };
             flight.record.lock().unwrap().clone()
         };
-        let entries = wait_for_finished(&builds.log);
+        let entries = eventually_finished(&builds.log, RunId(1));
         let words: Vec<&str> = entries
             .iter()
             .map(|entry| match &entry.change {
@@ -957,29 +935,6 @@ mod tests {
         assert_eq!(watch.branch(), "feature-7");
         assert_eq!(watch.base(), Some("main"));
         tidy(&work);
-    }
-
-    /// The log once the run's Finished has landed — which follows the
-    /// record's own `finished` by the width of the scheduler's wakeup,
-    /// so status saying finished is not yet the log saying so.
-    fn wait_for_finished(log: &Log) -> Vec<crate::monitor::Entry> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut cursor = 0;
-        loop {
-            let heard = log.wait_after(cursor, std::time::Duration::from_secs(1));
-            if heard
-                .iter()
-                .any(|entry| matches!(entry.change, Change::Finished { .. }))
-            {
-                return log.since(0);
-            }
-            cursor += heard.len() as u64;
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the log never said finished: {:?}",
-                log.since(0)
-            );
-        }
     }
 
     #[test]
@@ -1036,7 +991,7 @@ mod tests {
         assert!(prompt.contains("Feature 7"), "{prompt}");
         assert!(prompt.contains("wumpus"), "{prompt}");
 
-        let status = eventually_finished(&registry, 1);
+        let status = finished_status(&registry, 1);
         assert_eq!(status["check"], json!("cargo test --workspace"));
         tidy(&work);
     }
@@ -1047,18 +1002,12 @@ mod tests {
         let (work, remote) = seeded(&scratch);
         cargo_crate(&work);
         let builds = builds();
-        let registry = registry(
-            &builds,
-            [(7, seven_holding_eight())],
-            unreachable,
-            remote,
-            |_| Answer::Declined,
-        );
+        let registry = declining(&builds, remote);
 
         let started = start(&registry, &work, 7).unwrap();
         assert_eq!(started["check"], Value::Null, "unchecked, and said so");
 
-        let status = eventually_finished(&registry, 1);
+        let status = finished_status(&registry, 1);
         assert_eq!(status["check"], Value::Null);
         tidy(&work);
     }
@@ -1070,21 +1019,6 @@ mod tests {
             9,
             vec![node(9, false, &[10], &[]), node(10, false, &[], &[])],
         )
-    }
-
-    /// The log's story of run `run`, one word per change.
-    fn story(log: &Log, run: RunId) -> Vec<&'static str> {
-        log.since(0)
-            .iter()
-            .filter(|entry| entry.change.run() == run)
-            .map(|entry| match entry.change {
-                Change::Reserved { .. } => "reserved",
-                Change::Started { .. } => "started",
-                Change::Moved { .. } => "moved",
-                Change::Finished { .. } => "finished",
-                Change::Abandoned { .. } => "abandoned",
-            })
-            .collect()
     }
 
     /// Two starts on one record, in one clone, while the first is still
@@ -1124,7 +1058,7 @@ mod tests {
 
         std::fs::write(&gate, "").unwrap();
         for (run, leaf) in [(1, "8"), (2, "10")] {
-            let status = eventually_finished(&registry, run);
+            let status = finished_status(&registry, run);
             let issues = status["issues"].as_array().unwrap();
             assert_eq!(issues.len(), 1, "{status}");
             assert_eq!(issues[0]["id"], json!(leaf));
@@ -1187,7 +1121,7 @@ mod tests {
         assert_eq!(status["finished"], json!(false), "{status}");
 
         std::fs::write(&gate, "").unwrap();
-        let status = eventually_finished(&registry, 1);
+        let status = finished_status(&registry, 1);
         assert_eq!(status["issues"][0]["state"], json!("merged"), "{status}");
         tidy(&work);
     }
@@ -1204,7 +1138,7 @@ mod tests {
         );
         let error = start(&registry, "/nonexistent/clone", 7).unwrap_err();
         assert!(error.contains("not a git repository"), "{error}");
-        assert!(builds.entries.lock().unwrap().is_empty());
+        assert!(builds.lock().is_empty());
 
         // A relative path gets provisioning's own refusal, not a
         // cwd-dependent build.
@@ -1221,7 +1155,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("branch"), "{error}");
         assert!(error.contains("non-empty"), "{error}");
-        assert!(builds.entries.lock().unwrap().is_empty());
+        assert!(builds.lock().is_empty());
     }
 
     #[test]

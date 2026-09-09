@@ -328,7 +328,7 @@ impl FeatureState {
 }
 
 /// Follows `log` from a thread of its own and emits every entry on
-/// [`monitor::EVENT`](epik::monitor::EVENT). One reader with one
+/// [`monitor::EVENT`](EVENT). One reader with one
 /// cursor, so the window hears entries in `seq` order however many
 /// builds are recording at once — the fold on the far side drops by
 /// `seq`, and would drop N for good if N+1 came first. What is emitted

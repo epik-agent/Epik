@@ -604,6 +604,20 @@ mod tests {
         }
     }
 
+    /// A view attached to a scripted feed, every step folded straight
+    /// in: the two ends of the wire a test drives.
+    fn wired() -> (Rc<Scripted>, Rc<RefCell<View>>) {
+        let feed = Rc::new(Scripted::default());
+        let view = Rc::new(RefCell::new(View::default()));
+        attach(Rc::clone(&feed), {
+            let view = Rc::clone(&view);
+            move |step| {
+                view.borrow_mut().step(step);
+            }
+        });
+        (feed, view)
+    }
+
     /// The listener is up; entry 2 is recorded and delivered live before
     /// the replay — carrying 0, 1 and 2 — arrives. Every entry is applied
     /// exactly once, and the view is the one a straight fold gives.
@@ -660,14 +674,7 @@ mod tests {
 
     #[test]
     fn a_listener_that_fails_to_attach_still_gets_the_replay_but_is_not_connected() {
-        let feed = Rc::new(Scripted::default());
-        let view = Rc::new(RefCell::new(View::default()));
-        attach(Rc::clone(&feed), {
-            let view = Rc::clone(&view);
-            move |step| {
-                view.borrow_mut().step(step);
-            }
-        });
+        let (feed, view) = wired();
         feed.standing(Err("no channel".to_owned()));
         feed.deliver.borrow_mut().take().unwrap()(Ok(opening()));
         let view = view.borrow();
@@ -686,14 +693,7 @@ mod tests {
     /// the pulse back.
     #[test]
     fn a_feed_lost_and_regained_pulses_again_without_a_second_replay() {
-        let feed = Rc::new(Scripted::default());
-        let view = Rc::new(RefCell::new(View::default()));
-        attach(Rc::clone(&feed), {
-            let view = Rc::clone(&view);
-            move |step| {
-                view.borrow_mut().step(step);
-            }
-        });
+        let (feed, view) = wired();
         feed.standing(Ok(()));
         feed.deliver.borrow_mut().take().unwrap()(Ok(opening()));
         assert!(view.borrow().tabs()[0].pulse);
