@@ -17,11 +17,15 @@
 //!
 //! It binds loopback and refuses any other address, in words that say
 //! why: remote access is an ssh tunnel until there is an authentication
-//! story.
+//! story. Loopback is not the whole of the story, though: a page from
+//! any origin whose name is re-pointed at 127.0.0.1 — DNS rebinding —
+//! reaches a loopback server with requests the browser does not
+//! restrict, so every request's `Host` must name this server, and one
+//! that does not is refused with 421.
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -94,10 +98,30 @@ pub fn serve(addr: SocketAddr, log: Arc<Log>) -> Result<SocketAddr, String> {
     thread::spawn(move || {
         for request in server.incoming_requests() {
             let log = Arc::clone(&log);
-            thread::spawn(move || handle(request, &log));
+            thread::spawn(move || handle(request, &log, bound.ip()));
         }
     });
     Ok(bound)
+}
+
+/// Whether `host` — a request's `Host` header, or none — names this
+/// server: `localhost`, a loopback literal, or the address bound, with
+/// or without a port. Anything else is a page from some other origin
+/// whose name has been pointed at loopback, and the browser's own
+/// same-origin rules do not restrict it, so this check has to.
+fn admitted(host: Option<&str>, bound: IpAddr) -> bool {
+    let Some(host) = host else { return false };
+    let name = match host.strip_prefix('[') {
+        // `[::1]:7878`, or `[::1]`.
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        // A bare `::1` has more than one colon; `localhost:7878` has one.
+        None if host.matches(':').count() > 1 => host,
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip == bound)
 }
 
 /// Where a request goes, decided from the method and the path alone.
@@ -146,7 +170,18 @@ fn header(field: &str, value: &str) -> Header {
     Header::from_bytes(field, value).expect("ascii header text")
 }
 
-fn handle(request: Request, log: &Log) {
+fn handle(request: Request, log: &Log, bound: IpAddr) {
+    let host = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Host"))
+        .map(|header| header.value.as_str().to_owned());
+    if !admitted(host.as_deref(), bound) {
+        let refused =
+            Response::from_string("the monitor answers to localhost only\n").with_status_code(421);
+        let _ = request.respond(refused);
+        return;
+    }
     let response = match route(request.method(), request.url()) {
         Route::Changes => return stream(request, log),
         Route::Asset(file) => Response::from_data(file.contents())
@@ -245,11 +280,24 @@ mod tests {
         line: &str,
         headers: &[&str],
     ) -> (u16, Vec<String>, BufReader<TcpStream>) {
+        request_from(addr, Some(&addr.to_string()), line, headers)
+    }
+
+    /// [`request`], naming `host` — or no `Host` at all.
+    fn request_from(
+        addr: SocketAddr,
+        host: Option<&str>,
+        line: &str,
+        headers: &[&str],
+    ) -> (u16, Vec<String>, BufReader<TcpStream>) {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        write!(stream, "{line} HTTP/1.1\r\nHost: {addr}\r\n").unwrap();
+        write!(stream, "{line} HTTP/1.1\r\n").unwrap();
+        if let Some(host) = host {
+            write!(stream, "Host: {host}\r\n").unwrap();
+        }
         for header in headers {
             write!(stream, "{header}\r\n").unwrap();
         }
@@ -378,6 +426,63 @@ mod tests {
         assert!(refused.contains("loopback"), "{refused}");
         let garbage = decide("localhost").unwrap_err();
         assert!(garbage.contains("host:port"), "{garbage}");
+    }
+
+    /// Every name this server goes by is admitted, and any other — a
+    /// rebound domain, or no name at all — is not.
+    #[test]
+    fn only_a_host_naming_this_server_is_admitted() {
+        let bound: IpAddr = "127.0.0.1".parse().unwrap();
+        for host in [
+            "localhost",
+            "localhost:7878",
+            "LOCALHOST:7878",
+            "127.0.0.1",
+            "127.0.0.1:7878",
+            "[::1]",
+            "[::1]:7878",
+            "::1",
+        ] {
+            assert!(admitted(Some(host), bound), "{host}");
+        }
+        assert!(admitted(Some("[::1]:7878"), "::1".parse().unwrap()));
+        for host in [
+            "attacker.example",
+            "attacker.example:7878",
+            "10.0.0.5:7878",
+            "",
+        ] {
+            assert!(!admitted(Some(host), bound), "{host}");
+        }
+        assert!(!admitted(None, bound));
+    }
+
+    #[test]
+    fn a_request_from_another_host_is_refused_with_421() {
+        let (log, addr) = served();
+        log.record(reserved(1));
+        assert_eq!(
+            request_from(
+                addr,
+                Some("attacker.example"),
+                &format!("GET {CHANGES}"),
+                &[]
+            )
+            .0,
+            421
+        );
+        assert_eq!(request_from(addr, None, "GET /", &[]).0, 421);
+        assert_eq!(
+            request_from(
+                addr,
+                Some(&format!("localhost:{}", addr.port())),
+                "GET /nothing",
+                &[]
+            )
+            .0,
+            404,
+            "localhost is this server"
+        );
     }
 
     #[test]
