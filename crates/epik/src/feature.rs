@@ -18,8 +18,11 @@
 //! Reading a plan out of a tracker is [`Plan::descend`], a pure function
 //! over an injected fetch closure; the [`Tracker`](crate::tracker::Tracker)
 //! seam is where a real tracker plugs in. Everything here compiles with no
-//! features enabled: the vocabulary is the library's, not any provider's;
-//! the machinery is gated — the `check` module holding the repository's
+//! features enabled: the vocabulary is the library's, not any provider's,
+//! and it is wire vocabulary both ways — a plan serializes on its way to
+//! a model or a window and deserializes on the far side, where the
+//! [`monitor`](crate::monitor) folds it back into a picture; the
+//! machinery is gated — the `check` module holding the repository's
 //! own idea of green, the `merge` module by which work lands on a
 //! feature branch, the build that folds a whole plan into work —
 //! [`build()`], the verb, and [`Build`], its record — and the `tools`
@@ -48,7 +51,7 @@ use tree::Tree;
 
 /// A tracker's name for an issue. A string, because a Linear key is not a
 /// number; GitHub's numbers ride in as their decimal spelling.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct IssueId(pub String);
 
 impl fmt::Display for IssueId {
@@ -66,6 +69,18 @@ impl From<&str> for IssueId {
 impl From<u64> for IssueId {
     fn from(number: u64) -> Self {
         Self(number.to_string())
+    }
+}
+
+/// The key of the feature-build record: one per launched build,
+/// counting up from 1. Ungated, because every change the
+/// [`monitor`](crate::monitor) speaks of names the run it belongs to.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct RunId(pub u64);
+
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -120,7 +135,7 @@ pub enum State {
 
 /// An issue as a plan carries one: enough to schedule and render — title
 /// and state, no body.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Issue {
     pub(crate) id: IssueId,
     pub(crate) title: String,
@@ -131,7 +146,7 @@ pub struct Issue {
 /// the containment tree freely, and a blocker may be a container — "the
 /// docs wait on the whole API" is the natural thing to say — or an issue
 /// outside the tree altogether.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Blocking {
     pub issue: IssueId,
     blocker: IssueId,
@@ -202,10 +217,11 @@ impl Serialize for Problem {
 const CAP: usize = 500;
 
 /// A feature's plan: containment as a tree, ordering as a flat edge list
-/// over the same ids, and the blockers that point outside the tree.
-/// Output vocabulary, like everything here: serialized on its way to a
-/// model, never read back in.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+/// over the same ids, and the blockers that point outside the tree. Wire
+/// vocabulary both ways: serialized on its way to a model or a window,
+/// and read back in wherever the [`monitor`](crate::monitor) folds a
+/// build's log — the plan a watcher holds is the plan the build ran.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Plan {
     /// The feature issue at the root, its decomposition beneath it.
     /// Interior nodes are containers, not work; only leaves get an Agent.
@@ -514,18 +530,19 @@ fn gather(
     })
 }
 
-/// Plan builders shared by this module's tests and its submodules':
-/// numbered issues, the nodes a fetch would answer with, and a descent
-/// over them — no network, no tracker, just the graph a test states.
+/// Plan builders shared by this module's tests, its submodules', and
+/// the monitor's: numbered issues, the nodes a fetch would answer with,
+/// and a descent over them — no network, no tracker, just the graph a
+/// test states.
 #[cfg(test)]
-mod fixtures {
+pub(crate) mod fixtures {
     use super::{Feature, Issue, IssueId, Node, Plan};
 
-    pub(super) fn id(number: u64) -> IssueId {
+    pub(crate) fn id(number: u64) -> IssueId {
         IssueId::from(number)
     }
 
-    pub(super) fn issue(number: u64, closed: bool) -> Issue {
+    pub(crate) fn issue(number: u64, closed: bool) -> Issue {
         Issue {
             id: id(number),
             title: format!("issue {number}"),
@@ -535,7 +552,7 @@ mod fixtures {
 
     /// One fixture node: the issue, who it contains, and who blocks it —
     /// blockers as (id, closed) pairs, exactly what an edge carries.
-    pub(super) fn node(
+    pub(crate) fn node(
         number: u64,
         closed: bool,
         children: &[u64],
@@ -551,7 +568,7 @@ mod fixtures {
         }
     }
 
-    pub(super) fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
+    pub(crate) fn plan(feature: u64, nodes: Vec<Node>) -> Plan {
         Plan::descend(&Feature(id(feature)), |asked| {
             nodes
                 .iter()
@@ -565,7 +582,7 @@ mod fixtures {
     /// The smallest plan with an order in it: feature 1 holds 2 and 3,
     /// and 3 waits on 2. Two ready states, one edge — enough to watch
     /// one issue's end change another's standing.
-    pub(super) fn two_then_three() -> Plan {
+    pub(crate) fn two_then_three() -> Plan {
         plan(
             1,
             vec![
@@ -578,7 +595,7 @@ mod fixtures {
 
     /// The same two, each waiting on the other: nothing can ever be
     /// ready, and the cycle is the plan's problem to name.
-    pub(super) fn two_and_three_in_a_cycle() -> Plan {
+    pub(crate) fn two_and_three_in_a_cycle() -> Plan {
         plan(
             1,
             vec![
@@ -591,7 +608,7 @@ mod fixtures {
 
     /// A chain, 2 then 3 then 5, beside 4, which waits on nothing:
     /// what a loss at the head takes down, and what it spares.
-    pub(super) fn a_chain_beside_a_loner() -> Plan {
+    pub(crate) fn a_chain_beside_a_loner() -> Plan {
         plan(
             1,
             vec![
@@ -607,7 +624,7 @@ mod fixtures {
     /// Feature 1 holds a container, 7, with leaves 2 and 8 — and a leaf
     /// of its own, 9, that waits on the container: what a loss inside 7
     /// means for whoever waited on 7 as a whole.
-    pub(super) fn nine_waiting_on_container_seven() -> Plan {
+    pub(crate) fn nine_waiting_on_container_seven() -> Plan {
         plan(
             1,
             vec![
@@ -624,7 +641,7 @@ mod fixtures {
     /// Gated as the tools are, so a build without them has no unused
     /// fixture to warn about.
     #[cfg(all(feature = "native", unix))]
-    pub(super) fn seven_holding_eight() -> Plan {
+    pub(crate) fn seven_holding_eight() -> Plan {
         plan(7, vec![node(7, false, &[8], &[]), node(8, false, &[], &[])])
     }
 }
@@ -899,6 +916,36 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error, "no such issue: 1");
+    }
+
+    /// Everything a plan can hold, through the wire and back: a nested
+    /// container, an edge onto that container, a blocker outside the
+    /// tree, and an edge onto an issue nobody knows — the last kept as
+    /// a problem to name, not scheduled around, and not lost in transit.
+    #[test]
+    fn a_plan_survives_the_wire_unchanged() {
+        let mut plan = plan(
+            1,
+            vec![
+                node(1, false, &[7, 9], &[]),
+                node(7, false, &[2, 8], &[]),
+                node(2, false, &[], &[(55, false)]),
+                node(8, true, &[], &[]),
+                node(9, false, &[], &[(7, false)]),
+            ],
+        );
+        plan.blocking.push(Blocking {
+            issue: id(9),
+            blocker: id(42),
+        });
+        assert_eq!(plan.outside, [issue(55, false)]);
+        assert_eq!(plan.problems().len(), 1, "the dangling edge, named");
+
+        let wire = serde_json::to_string(&plan).unwrap();
+        let back: Plan = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back, plan);
+        assert_eq!(back.problems(), plan.problems());
+        assert_eq!(ready_ids(&back), ready_ids(&plan));
     }
 
     #[test]
