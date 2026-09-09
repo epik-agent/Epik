@@ -136,6 +136,17 @@ pub enum State {
     Skipped { reason: String },
 }
 
+/// The done set a build's states imply: what has landed, by id — the
+/// leaves the plan takes as settled when it judges what is ready.
+#[must_use]
+pub(crate) fn merged(states: &BTreeMap<IssueId, State>) -> BTreeSet<IssueId> {
+    states
+        .iter()
+        .filter(|(_, state)| matches!(state, State::Merged { .. }))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 /// An issue as a plan carries one: enough to schedule and render — title
 /// and state, no body.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -375,16 +386,12 @@ impl Plan {
     /// its edge.
     fn settles(&self, id: &IssueId, done: &BTreeSet<IssueId>, alive: &BTreeSet<&IssueId>) -> bool {
         done.contains(id)
-            || match self.tree.find_path(|issue| &issue.id == id) {
+            || match self.tree.find(|issue| &issue.id == id) {
                 None => self
                     .outside
                     .iter()
                     .any(|issue| &issue.id == id && issue.closed),
-                Some(path) => settled(
-                    path.last().expect("a found path reaches its match"),
-                    done,
-                    alive,
-                ),
+                Some(node) => settled(node, done, alive),
             }
     }
 
@@ -551,6 +558,11 @@ pub(crate) mod fixtures {
         IssueId::from(number)
     }
 
+    /// [`id`] read back: the number a numbered fixture's id spells.
+    pub(crate) fn number(id: &IssueId) -> u64 {
+        id.0.parse().unwrap()
+    }
+
     pub(crate) fn issue(number: u64, closed: bool) -> Issue {
         Issue {
             id: id(number),
@@ -630,6 +642,22 @@ pub(crate) mod fixtures {
         )
     }
 
+    /// A diamond: feature 1 holds 2, the arms 3 and 4 that wait on 2,
+    /// and the join 5 that waits on both — the top closed or open, and
+    /// the edges from it saying the same.
+    pub(crate) fn diamond(top_closed: bool) -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[2, 3, 4, 5], &[]),
+                node(2, top_closed, &[], &[]),
+                node(3, false, &[], &[(2, top_closed)]),
+                node(4, false, &[], &[(2, top_closed)]),
+                node(5, false, &[], &[(3, false), (4, false)]),
+            ],
+        )
+    }
+
     /// Feature 1 holds a container, 7, with leaves 2 and 8 — and a leaf
     /// of its own, 9, that waits on the container: what a loss inside 7
     /// means for whoever waited on 7 as a whole.
@@ -642,6 +670,21 @@ pub(crate) mod fixtures {
                 node(2, false, &[], &[]),
                 node(8, false, &[], &[]),
                 node(9, false, &[], &[(7, false)]),
+            ],
+        )
+    }
+
+    /// Feature 1 holds 3, which waits on 6, and a closed container 5
+    /// over the open 6: an abandoned subtree — 6 is not work and will
+    /// never close — and a leaf stuck on it, which the plan knows.
+    pub(crate) fn three_waiting_on_abandoned_six() -> Plan {
+        plan(
+            1,
+            vec![
+                node(1, false, &[3, 5], &[]),
+                node(3, false, &[], &[(6, false)]),
+                node(5, true, &[6], &[]),
+                node(6, false, &[], &[]),
             ],
         )
     }
@@ -694,8 +737,8 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::fixtures::{
-        a_chain_beside_a_loner, id, issue, nine_waiting_on_container_seven, node, plan,
-        two_and_three_in_a_cycle, two_then_three,
+        a_chain_beside_a_loner, diamond, id, issue, nine_waiting_on_container_seven, node, number,
+        plan, three_waiting_on_abandoned_six, two_and_three_in_a_cycle, two_then_three,
     };
     use super::*;
 
@@ -726,49 +769,37 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_chain_readies_only_its_head() {
-        let plan = plan(
+    /// A chain, 2 then 3 then 4, its head closed or open — and the
+    /// edge from it saying the same.
+    fn chain(head_closed: bool) -> Plan {
+        plan(
             1,
             vec![
                 node(1, false, &[2, 3, 4], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
+                node(2, head_closed, &[], &[]),
+                node(3, false, &[], &[(2, head_closed)]),
                 node(4, false, &[], &[(3, false)]),
             ],
-        );
+        )
+    }
+
+    #[test]
+    fn a_chain_readies_only_its_head() {
+        let plan = chain(false);
         assert_eq!(ready_ids(&plan), ["2"]);
         assert!(plan.problems().is_empty());
     }
 
     #[test]
     fn a_partly_closed_chain_readies_the_first_open_link() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3, 4], &[]),
-                node(2, true, &[], &[]),
-                node(3, false, &[], &[(2, true)]),
-                node(4, false, &[], &[(3, false)]),
-            ],
-        );
-        assert_eq!(ready_ids(&plan), ["3"], "closed 2 releases 3, not 4");
+        assert_eq!(ready_ids(&chain(true)), ["3"], "closed 2 releases 3, not 4");
     }
 
     #[test]
     fn a_diamond_readies_both_arms_once_the_top_lands() {
-        let nodes = |top_closed: bool| {
-            vec![
-                node(1, false, &[2, 3, 4, 5], &[]),
-                node(2, top_closed, &[], &[]),
-                node(3, false, &[], &[(2, top_closed)]),
-                node(4, false, &[], &[(2, top_closed)]),
-                node(5, false, &[], &[(3, false), (4, false)]),
-            ]
-        };
-        assert_eq!(ready_ids(&plan(1, nodes(false))), ["2"]);
+        assert_eq!(ready_ids(&diamond(false)), ["2"]);
         assert_eq!(
-            ready_ids(&plan(1, nodes(true))),
+            ready_ids(&diamond(true)),
             ["3", "4"],
             "both arms at once; the join still waits on both"
         );
@@ -1014,9 +1045,8 @@ mod tests {
     /// [`Plan::doomed`] over numbered fixtures, as (leaf, blocker) numbers.
     fn doomed_pairs(plan: &Plan, lost: &[u64]) -> Vec<(u64, u64)> {
         let lost: BTreeSet<IssueId> = lost.iter().copied().map(id).collect();
-        let number = |id: IssueId| id.0.parse().unwrap();
         plan.doomed(&BTreeSet::new(), &lost)
-            .into_iter()
+            .iter()
             .map(|(leaf, blocker)| (number(leaf), number(blocker)))
             .collect()
     }
@@ -1073,17 +1103,7 @@ mod tests {
 
     #[test]
     fn a_blocker_that_is_abandoned_work_dooms_its_dependents() {
-        // 6 is open but its container 5 is closed: 6 is not work, and it
-        // will never close, so 3 can never become ready.
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[3, 5], &[]),
-                node(3, false, &[], &[(6, false)]),
-                node(5, true, &[6], &[]),
-                node(6, false, &[], &[]),
-            ],
-        );
+        let plan = three_waiting_on_abandoned_six();
         assert_eq!(doomed_pairs(&plan, &[]), [(3, 6)]);
     }
 

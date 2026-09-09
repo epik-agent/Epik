@@ -355,24 +355,34 @@ mod tests {
             )
         }
 
-        #[test]
-        fn a_tool_call_turn_dispatches_and_reports_back_to_the_model() {
-            let model = Scripted::spawn(vec![
-                Turn::ToolCalls(vec![
-                    vec![Fragment::open(0, "call_1", "echo", "{\"text\":")],
-                    vec![Fragment::more(0, "\"hi\"}")],
-                ]),
-                Turn::text(&["done"]),
-            ]);
-            let registry = echoing();
+        /// One turn over the echo registry against a model scripted to
+        /// make the tool calls `calls` and then say "done": what `note`
+        /// makes of each call and its result, in dispatch order, and
+        /// the requests the model saw.
+        fn observed<T>(
+            calls: Vec<Vec<Fragment>>,
+            mut note: impl FnMut(&ToolCall, &Result<serde_json::Value, String>) -> T,
+        ) -> (Vec<T>, Vec<serde_json::Value>) {
+            let model = Scripted::spawn(vec![Turn::ToolCalls(calls), Turn::text(&["done"])]);
             let mut observed = Vec::new();
-
-            let text = run_against(&model, &registry, |call, result| {
-                observed.push((call.clone(), result.clone()));
+            let text = run_against(&model, &echoing(), |call, result| {
+                observed.push(note(call, result));
             })
             .unwrap();
-
             assert_eq!(text, "done");
+            (observed, model.requests())
+        }
+
+        #[test]
+        fn a_tool_call_turn_dispatches_and_reports_back_to_the_model() {
+            let (observed, requests) = observed(
+                vec![
+                    vec![Fragment::open(0, "call_1", "echo", "{\"text\":")],
+                    vec![Fragment::more(0, "\"hi\"}")],
+                ],
+                |call, result| (call.clone(), result.clone()),
+            );
+
             assert_eq!(
                 observed,
                 [(
@@ -385,7 +395,6 @@ mod tests {
                 )]
             );
 
-            let requests = model.requests();
             assert_eq!(requests.len(), 2);
             assert_eq!(
                 requests[0]["tools"][0]["function"]["name"], "echo",
@@ -415,29 +424,21 @@ mod tests {
 
         #[test]
         fn two_tools_in_one_turn_dispatch_in_index_order() {
-            let model = Scripted::spawn(vec![
-                Turn::ToolCalls(vec![vec![
+            let (observed, requests) = observed(
+                vec![vec![
                     Fragment::open(0, "call_a", "echo", "{\"text\":\"one\"}"),
                     Fragment::open(1, "call_b", "nonesuch", "{}"),
-                ]]),
-                Turn::text(&["done"]),
-            ]);
-            let registry = echoing();
-            let mut observed = Vec::new();
+                ]],
+                |call, result| (call.name.clone(), result.is_ok()),
+            );
 
-            let text = run_against(&model, &registry, |call, result| {
-                observed.push((call.name.clone(), result.is_ok()));
-            })
-            .unwrap();
-
-            assert_eq!(text, "done");
             assert_eq!(
                 observed,
                 [("echo".to_owned(), true), ("nonesuch".to_owned(), false)],
                 "the observer fires in dispatch order, failures included"
             );
 
-            let messages = model.requests()[1]["messages"].as_array().unwrap().clone();
+            let messages = requests[1]["messages"].as_array().unwrap().clone();
             let tool_answers: Vec<_> = messages
                 .iter()
                 .filter(|message| message["role"] == "tool")

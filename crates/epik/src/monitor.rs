@@ -22,11 +22,11 @@
 //! place either is; it alone needs the `native` feature, so the window
 //! folds this module's fold rather than a copy of it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::feature::layout::{self, Layout};
+use crate::feature::layout::{self, Form, Layout};
 use crate::feature::{IssueId, Plan, RunId, State};
 
 /// The event channel entries arrive on, backend to window.
@@ -250,35 +250,22 @@ impl Watch {
             .any(|state| matches!(state, State::Running))
     }
 
-    /// How many issues stand where, Waiting split into ready and blocked
+    /// How many issues stand where: the picture's nodes tallied by
+    /// [`Form`], which is where Waiting is split into ready and blocked
     /// by the plan's own judgement over what has merged.
     #[must_use]
     pub fn counts(&self) -> Counts {
-        let done: BTreeSet<IssueId> = self
-            .states
-            .iter()
-            .filter(|(_, state)| matches!(state, State::Merged { .. }))
-            .map(|(id, _)| id.clone())
-            .collect();
-        let ready: BTreeSet<&IssueId> = self
-            .plan
-            .iter()
-            .flat_map(|plan| plan.ready(&done))
-            .map(|issue| &issue.id)
-            .collect();
-        let mut counts = Counts {
-            total: self.states.len(),
-            ..Counts::default()
-        };
-        for (id, state) in &self.states {
-            match state {
-                State::Waiting if ready.contains(id) => counts.ready += 1,
-                State::Waiting => counts.blocked += 1,
-                State::Running => counts.running += 1,
-                State::Merging => counts.merging += 1,
-                State::Merged { .. } => counts.merged += 1,
-                State::Failed { .. } => counts.failed += 1,
-                State::Skipped { .. } => counts.skipped += 1,
+        let mut counts = Counts::default();
+        for node in self.layout().iter().flat_map(|layout| &layout.nodes) {
+            counts.total += 1;
+            match node.form {
+                Form::Ready => counts.ready += 1,
+                Form::Blocked => counts.blocked += 1,
+                Form::Running => counts.running += 1,
+                Form::Merging => counts.merging += 1,
+                Form::Merged => counts.merged += 1,
+                Form::Failed => counts.failed += 1,
+                Form::Skipped => counts.skipped += 1,
             }
         }
         counts
@@ -372,7 +359,7 @@ impl Progress {
 }
 
 #[cfg(feature = "native")]
-pub use log::Log;
+pub use log::{Log, now};
 
 #[cfg(feature = "native")]
 mod log {
@@ -418,17 +405,23 @@ mod log {
         }
     }
 
+    /// Unix milliseconds now, as the host's clock reads: what a log on
+    /// the system clock stamps [`Entry::at`] with, and the one reading
+    /// of the clock anything beside the log takes.
+    #[must_use]
+    pub fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            })
+    }
+
     impl Log {
         /// An empty log on the system clock.
         #[must_use]
         pub fn new() -> Self {
-            Self::with_clock(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |since| {
-                        u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-                    })
-            })
+            Self::with_clock(now)
         }
 
         /// An empty log stamping entries with whatever `clock` answers.
@@ -461,10 +454,7 @@ mod log {
         #[must_use]
         pub fn since(&self, cursor: u64) -> Vec<Entry> {
             let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries
-                .get(usize::try_from(cursor).unwrap_or(usize::MAX)..)
-                .map(<[Entry]>::to_vec)
-                .unwrap_or_default()
+            tail(&entries, cursor)
         }
 
         /// [`since`](Self::since), waited for: the entries from `cursor`
@@ -478,21 +468,28 @@ mod log {
                 .appended
                 .wait_timeout_while(entries, timeout, |entries| entries.len() <= start)
                 .unwrap_or_else(PoisonError::into_inner);
-            entries
-                .get(start..)
-                .map(<[Entry]>::to_vec)
-                .unwrap_or_default()
+            tail(&entries, cursor)
         }
+    }
+
+    /// The entries from `cursor` on; none when the cursor is past the end.
+    fn tail(entries: &[Entry], cursor: u64) -> Vec<Entry> {
+        entries
+            .get(usize::try_from(cursor).unwrap_or(usize::MAX)..)
+            .map(<[Entry]>::to_vec)
+            .unwrap_or_default()
     }
 }
 
 #[cfg(all(test, feature = "native"))]
-pub(crate) use tests::native::folded;
+pub(crate) use tests::native::{eventually_finished, folded};
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
-    use crate::feature::fixtures::{id, node, plan, two_then_three};
+    use crate::feature::fixtures::{id, two_then_three};
 
     fn reserved(run: u64) -> Change {
         Change::Reserved {
@@ -650,18 +647,17 @@ mod tests {
         assert!(progress.watch(RunId(9)).is_none());
     }
 
+    /// Run 1's counts as (merged, ready, blocked, total).
+    fn tally(progress: &Progress) -> (usize, usize, usize, usize) {
+        let counts = progress.watch(RunId(1)).unwrap().counts();
+        (counts.merged, counts.ready, counts.blocked, counts.total)
+    }
+
     /// 2 waits on nothing and 3 waits on 2: one ready, one blocked, and
     /// the split moves as 2 lands.
     #[test]
     fn counts_split_waiting_into_ready_and_blocked() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-            ],
-        );
+        let plan = two_then_three();
         let states = [(id(2), State::Waiting), (id(3), State::Waiting)].into();
         let mut progress = Progress::default();
         progress.absorb(&entry(0, reserved(1)));
@@ -675,29 +671,10 @@ mod tests {
                 check: None,
             },
         ));
-        let counts = progress.watch(RunId(1)).unwrap().counts();
-        assert_eq!(
-            counts,
-            Counts {
-                ready: 1,
-                blocked: 1,
-                total: 2,
-                ..Counts::default()
-            }
-        );
+        assert_eq!(tally(&progress), (0, 1, 1, 2));
 
         progress.absorb(&entry(2, moved(1, 2, merged())));
-        let counts = progress.watch(RunId(1)).unwrap().counts();
-        assert_eq!(
-            counts,
-            Counts {
-                merged: 1,
-                ready: 1,
-                total: 2,
-                ..Counts::default()
-            },
-            "2 landing released 3"
-        );
+        assert_eq!(tally(&progress), (1, 1, 0, 2), "2 landing released 3");
     }
 
     #[cfg(feature = "native")]
@@ -714,6 +691,31 @@ mod tests {
                 progress.absorb(&entry);
             }
             progress
+        }
+
+        /// The whole log once `run`'s Finished has landed in it — the
+        /// last thing a scheduler records, which follows the record's
+        /// own `finished` by the width of the scheduler's wakeup, so a
+        /// status saying finished is not yet the log saying so. Waited
+        /// for by cursor, bounded, never by a fixed sleep.
+        pub(crate) fn eventually_finished(log: &Log, run: RunId) -> Vec<Entry> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            let mut cursor = 0;
+            loop {
+                let heard = log.wait_after(cursor, Duration::from_secs(1));
+                if heard
+                    .iter()
+                    .any(|entry| entry.change == Change::Finished { run })
+                {
+                    return log.since(0);
+                }
+                cursor += heard.len() as u64;
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for run {run} to finish: {:?}",
+                    log.since(0)
+                );
+            }
         }
 
         #[test]

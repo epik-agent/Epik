@@ -66,6 +66,21 @@ pub fn seeded(scratch: &Scratch) -> (String, String) {
     (work, remote)
 }
 
+/// Removes every linked worktree a build left behind in `repository`,
+/// so a scratch drop is enough.
+pub fn tidy(repository: &str) {
+    let listed = plumbing(&["-C", repository, "worktree", "list", "--porcelain"]).unwrap();
+    for line in listed.lines() {
+        if let Some(path) = line.strip_prefix("worktree ")
+            && path != repository
+        {
+            let _ = plumbing(&[
+                "-C", repository, "worktree", "remove", "--force", "--", path,
+            ]);
+        }
+    }
+}
+
 /// A forge for tests: a bare directory, no credentials — pushing to it
 /// is pushing to a path.
 #[cfg(unix)]

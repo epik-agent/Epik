@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Issue, IssueId, Plan, State};
+use super::{Issue, IssueId, Plan, State, merged};
 
 /// How a node is drawn: its state, with Waiting split by the plan's
 /// own judgement into ready and blocked.
@@ -136,11 +136,9 @@ pub fn layout(plan: &Plan, states: &BTreeMap<IssueId, State>) -> Layout {
     // when a container, none when settled, outside, or unknown.
     let beneath = |id: &IssueId| -> Vec<usize> {
         plan.tree
-            .find_path(|issue| &issue.id == id)
-            .map(|path| {
-                path.last()
-                    .expect("a found path reaches its match")
-                    .leaves()
+            .find(|issue| &issue.id == id)
+            .map(|node| {
+                node.leaves()
                     .filter_map(|leaf| row_of.get(&leaf.id).copied())
                     .collect()
             })
@@ -169,11 +167,7 @@ pub fn layout(plan: &Plan, states: &BTreeMap<IssueId, State>) -> Layout {
         longest(row, &into, &mut column, &mut Vec::new());
     }
 
-    let done: BTreeSet<IssueId> = states
-        .iter()
-        .filter(|(_, state)| matches!(state, State::Merged { .. }))
-        .map(|(id, _)| id.clone())
-        .collect();
+    let done = merged(states);
     let ready: BTreeSet<&IssueId> = plan
         .ready(&done)
         .into_iter()
@@ -304,7 +298,10 @@ const fn form(state: &State, ready: bool) -> Form {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{id, nine_waiting_on_container_seven, node, plan, two_then_three};
+    use super::super::fixtures::{
+        diamond, id, nine_waiting_on_container_seven, node, number, plan,
+        three_waiting_on_abandoned_six, two_then_three,
+    };
     use super::*;
 
     /// The states a build starts with: every issue of work, Waiting.
@@ -320,7 +317,7 @@ mod tests {
         layout
             .nodes
             .iter()
-            .map(|node| (node.id.0.parse().unwrap(), node.column, node.row))
+            .map(|node| (number(&node.id), node.column, node.row))
             .collect()
     }
 
@@ -328,17 +325,12 @@ mod tests {
         layout
             .edges
             .iter()
-            .map(|edge| {
-                (
-                    edge.blocker.0.parse().unwrap(),
-                    edge.issue.0.parse().unwrap(),
-                )
-            })
+            .map(|edge| (number(&edge.blocker), number(&edge.issue)))
             .collect()
     }
 
     fn numbers(ids: &[IssueId]) -> Vec<u64> {
-        ids.iter().map(|id| id.0.parse().unwrap()).collect()
+        ids.iter().map(number).collect()
     }
 
     #[test]
@@ -382,7 +374,7 @@ mod tests {
             .iter()
             .map(|container| {
                 (
-                    container.id.0.parse().unwrap(),
+                    number(&container.id),
                     container.depth,
                     container.height,
                     numbers(&container.leaves),
@@ -412,16 +404,7 @@ mod tests {
 
     #[test]
     fn a_diamond_puts_its_arms_in_one_column_and_the_join_past_them() {
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[2, 3, 4, 5], &[]),
-                node(2, false, &[], &[]),
-                node(3, false, &[], &[(2, false)]),
-                node(4, false, &[], &[(2, false)]),
-                node(5, false, &[], &[(3, false), (4, false)]),
-            ],
-        );
+        let plan = diamond(false);
         let layout = layout(&plan, &waiting(&plan));
         assert_eq!(cells(&layout), [(2, 0, 0), (3, 1, 1), (4, 1, 2), (5, 2, 3)]);
         assert_eq!(arrows(&layout), [(2, 3), (2, 4), (3, 5), (4, 5)]);
@@ -485,17 +468,7 @@ mod tests {
 
     #[test]
     fn what_is_not_work_is_not_drawn() {
-        // 5 is a closed container over an open 6: an abandoned subtree.
-        // 3 waits on 6, which the plan knows and will never settle.
-        let plan = plan(
-            1,
-            vec![
-                node(1, false, &[3, 5], &[]),
-                node(3, false, &[], &[(6, false)]),
-                node(5, true, &[6], &[]),
-                node(6, false, &[], &[]),
-            ],
-        );
+        let plan = three_waiting_on_abandoned_six();
         let layout = layout(&plan, &waiting(&plan));
         assert_eq!(cells(&layout), [(3, 0, 0)]);
         assert!(layout.edges.is_empty(), "no node to draw the arrow from");

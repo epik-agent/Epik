@@ -44,10 +44,10 @@
 //! without asking after it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use super::merge::{Branch, Outcome};
-use super::{Issue, IssueId, Plan, Problem, RunId, State};
+use super::{Issue, IssueId, Plan, Problem, RunId, State, merged};
 use crate::agent::{Agent, Exit};
 use crate::forge::Forge;
 use crate::git::plumbing;
@@ -157,7 +157,7 @@ impl Build {
     /// blocker it is stuck on. What is already settled, or abandoned
     /// under a closed container, is not work and gets no state. Nothing
     /// is recorded here: the initial map rides in Started, whole.
-    fn new(run: RunId, log: Arc<Log>, plan: Plan) -> Self {
+    pub(super) fn new(run: RunId, log: Arc<Log>, plan: Plan) -> Self {
         let none = BTreeSet::new();
         let problems = plan.problems();
         let mut states: BTreeMap<IssueId, State> = plan
@@ -220,21 +220,12 @@ impl Build {
             && self.dispatchable().is_empty()
     }
 
-    /// The done set fed to [`Plan::ready`]: the leaves this build has
-    /// merged. Issues the tracker already closed are settled by the
-    /// plan itself.
-    fn merged(&self) -> BTreeSet<IssueId> {
-        self.states
-            .iter()
-            .filter(|(_, state)| matches!(state, State::Merged { .. }))
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
     /// The issues a free slot could take: ready by the plan's judgement
-    /// and still Waiting by this build's.
+    /// — fed the leaves this build has [`merged`]; issues the tracker
+    /// already closed are settled by the plan itself — and still Waiting
+    /// by this build's.
     fn dispatchable(&self) -> Vec<Issue> {
-        let done = self.merged();
+        let done = merged(&self.states);
         self.plan
             .ready(&done)
             .into_iter()
@@ -248,7 +239,7 @@ impl Build {
     /// [`Plan::doomed`] is the judgement; this only writes it down.
     fn fail(&mut self, issue: &IssueId, report: String) {
         self.set(issue, State::Failed { report });
-        let done = self.merged();
+        let done = merged(&self.states);
         let lost: BTreeSet<IssueId> = self
             .states
             .iter()
@@ -353,6 +344,12 @@ where
     F: Forge + Send + Sync + 'static,
     M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
 {
+    /// The record, locked; a poisoned lock is taken anyway, since the
+    /// record's every write is one insert.
+    fn lock(&self) -> MutexGuard<'_, Build> {
+        self.record.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The slot loop, three steps a turn. First, under the record lock:
     /// wait — on the condvar the workers notify — until something is
     /// dispatchable, or return when the build is over. Second, with no
@@ -372,7 +369,7 @@ where
     fn schedule(self) {
         loop {
             {
-                let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut build = self.lock();
                 loop {
                     if build.finished() {
                         build.log.record(Change::Finished { run: build.run });
@@ -391,7 +388,7 @@ where
             }
             let slot = self.budget.take();
             let dispatched = {
-                let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut build = self.lock();
                 let issue = build.dispatchable().into_iter().next();
                 if let Some(issue) = &issue {
                     build.set(&issue.id, State::Running);
@@ -420,7 +417,7 @@ where
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.attempt(issue, slot)))
                 .unwrap_or_else(|panic| Err(format!("the worker panicked: {}", words(&*panic))));
         {
-            let mut build = self.record.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut build = self.lock();
             match landed {
                 Ok((commit, checked)) => build.set(&issue.id, State::Merged { commit, checked }),
                 Err(report) => build.fail(&issue.id, report),
@@ -469,11 +466,7 @@ where
         // The exit hook stays empty here: a feature issue's slot is
         // released at the Merging transition below, not at the exit.
         let observer = launch(agent, Arc::clone(&run), || {});
-        self.record
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .runs
-            .insert(issue.id.clone(), Arc::clone(&run));
+        self.lock().runs.insert(issue.id.clone(), Arc::clone(&run));
         // The observation is the last thing the drainer writes; joining
         // it waits exactly as long as that takes, no polling.
         observer
@@ -506,10 +499,7 @@ where
                 None => "the Agent left uncommitted work".to_owned(),
             });
         }
-        self.record
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set(&issue.id, State::Merging);
+        self.lock().set(&issue.id, State::Merging);
         drop(slot);
         self.signal.notify_all();
         match self.branch.merge(&branch)? {
@@ -538,8 +528,8 @@ mod tests {
         a_chain_beside_a_loner, committing, id, issue, nine_waiting_on_container_seven, node, plan,
         two_and_three_in_a_cycle, two_then_three,
     };
-    use crate::monitor::{Entry, Stage, folded};
-    use crate::testing::{Local, Scratch, seeded};
+    use crate::monitor::{Entry, Stage, eventually_finished, folded};
+    use crate::testing::{Local, Scratch, seeded, tidy};
 
     /// A record for `plan` as run 1, on a log of its own.
     fn fresh(plan: Plan) -> Build {
@@ -780,43 +770,6 @@ mod tests {
         }
     }
 
-    /// Removes every linked worktree a build left behind, so a scratch
-    /// drop is enough.
-    fn tidy(repository: &str) {
-        let listed = plumbing(&["-C", repository, "worktree", "list", "--porcelain"]).unwrap();
-        for line in listed.lines() {
-            if let Some(path) = line.strip_prefix("worktree ")
-                && path != repository
-            {
-                let _ = plumbing(&[
-                    "-C", repository, "worktree", "remove", "--force", "--", path,
-                ]);
-            }
-        }
-    }
-
-    /// Waits for `run`'s Finished to land in the log — the last thing
-    /// its scheduler records — bounded, never by a fixed sleep.
-    fn eventually_finished(log: &Log, run: RunId) -> Vec<Entry> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let mut cursor = 0;
-        loop {
-            let heard = log.wait_after(cursor, std::time::Duration::from_secs(1));
-            if heard
-                .iter()
-                .any(|entry| entry.change == Change::Finished { run })
-            {
-                return log.since(0);
-            }
-            cursor += heard.len() as u64;
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for the build to finish: {:?}",
-                log.since(0)
-            );
-        }
-    }
-
     /// Launches `plan` as run `run` for feature `feature`, the way the
     /// tools would: Reserved spoken, the feature branch `branch`
     /// established in `work` over `remote`, and the machinery started
@@ -1015,6 +968,43 @@ mod tests {
         tidy(&work);
     }
 
+    /// One side of a side-by-side build: the feature, its plan, the
+    /// `(work, remote)` it builds in, its branch, and the leaves that
+    /// must land.
+    type Side<'a> = (u64, Plan, (&'a str, &'a str), &'a str, &'a [u64]);
+
+    /// `sides` launched at once as runs 1 and 2, on one budget and one
+    /// log, and both done: every named leaf Merged on its branch, and
+    /// the log saying Finished once for each run.
+    fn both_land(sides: [Side<'_>; 2]) {
+        let budget = Budget::new();
+        let log = Arc::new(Log::new());
+        let records: Vec<_> = sides
+            .iter()
+            .zip(1..)
+            .map(|((feature, plan, repository, branch, _), run)| {
+                launched(
+                    run,
+                    *feature,
+                    plan.clone(),
+                    *repository,
+                    branch,
+                    &budget,
+                    &log,
+                )
+            })
+            .collect();
+
+        eventually_finished(&log, RunId(1));
+        let entries = eventually_finished(&log, RunId(2));
+        for ((_, _, (work, _), branch, leaves), record) in sides.iter().zip(&records) {
+            landed(work, branch, record, leaves);
+        }
+        let mut runs = finished(&entries);
+        runs.sort_unstable();
+        assert_eq!(runs, [RunId(1), RunId(2)]);
+    }
+
     /// Two feature builds in one repository, off the same base, at the
     /// same time — one budget, one log, the clone carrying both builds'
     /// worktree adds and removes and ref updates — and both complete
@@ -1023,35 +1013,10 @@ mod tests {
     fn two_features_in_one_repository_build_at_once() {
         let scratch = Scratch::new("two-features");
         let (work, remote) = seeded(&scratch);
-        let budget = Budget::new();
-        let log = Arc::new(Log::new());
-        let first = launched(
-            1,
-            1,
-            two_then_three(),
-            (&work, &remote),
-            "feature-1",
-            &budget,
-            &log,
-        );
-        let second = launched(
-            2,
-            4,
-            five_then_six(),
-            (&work, &remote),
-            "feature-2",
-            &budget,
-            &log,
-        );
-
-        eventually_finished(&log, RunId(1));
-        let entries = eventually_finished(&log, RunId(2));
-        landed(&work, "feature-1", &first, &[2, 3]);
-        landed(&work, "feature-2", &second, &[5, 6]);
-        let mut runs = finished(&entries);
-        runs.sort_unstable();
-        assert_eq!(runs, [RunId(1), RunId(2)]);
-
+        both_land([
+            (1, two_then_three(), (&work, &remote), "feature-1", &[2, 3]),
+            (4, five_then_six(), (&work, &remote), "feature-2", &[5, 6]),
+        ]);
         tidy(&work);
     }
 
@@ -1063,35 +1028,22 @@ mod tests {
         let two = Scratch::new("repository-two");
         let (work_one, remote_one) = seeded(&one);
         let (work_two, remote_two) = seeded(&two);
-        let budget = Budget::new();
-        let log = Arc::new(Log::new());
-        let first = launched(
-            1,
-            1,
-            two_then_three(),
-            (&work_one, &remote_one),
-            "feature-1",
-            &budget,
-            &log,
-        );
-        let second = launched(
-            2,
-            1,
-            two_then_three(),
-            (&work_two, &remote_two),
-            "feature-1",
-            &budget,
-            &log,
-        );
-
-        eventually_finished(&log, RunId(1));
-        let entries = eventually_finished(&log, RunId(2));
-        landed(&work_one, "feature-1", &first, &[2, 3]);
-        landed(&work_two, "feature-1", &second, &[2, 3]);
-        let mut runs = finished(&entries);
-        runs.sort_unstable();
-        assert_eq!(runs, [RunId(1), RunId(2)]);
-
+        both_land([
+            (
+                1,
+                two_then_three(),
+                (&work_one, &remote_one),
+                "feature-1",
+                &[2, 3],
+            ),
+            (
+                1,
+                two_then_three(),
+                (&work_two, &remote_two),
+                "feature-1",
+                &[2, 3],
+            ),
+        ]);
         tidy(&work_one);
         tidy(&work_two);
     }
