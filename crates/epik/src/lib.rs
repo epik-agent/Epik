@@ -17,6 +17,9 @@ pub mod git;
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub mod github;
 pub mod keystore;
+// The vocabulary and the fold compile everywhere, like `feature`; only
+// the `Log` inside needs the host.
+pub mod monitor;
 #[cfg(feature = "native")]
 mod temp;
 #[cfg(all(feature = "native", any(test, feature = "testing")))]

@@ -11,10 +11,12 @@
 //! transcript channel. `build_status` and the git verbs are the
 //! persona's view of it.
 //!
-//! [`FeatureState`] is the feature side: the record of feature builds
-//! and the one [`Budget`] of four Agent slots that plain builds and
-//! feature builds draw on together — a plain build claims a slot for
-//! its Agent's life, or refuses in words when all four are out. The
+//! [`FeatureState`] is the feature side: the record of feature builds,
+//! the [`Log`] every change to it is spoken to — the window hears each
+//! entry as an event and replays the rest through `monitor_log` — and
+//! the one [`Budget`] of four Agent slots that plain builds and feature
+//! builds draw on together — a plain build claims a slot for its
+//! Agent's life, or refuses in words when all four are out. The
 //! feature tools themselves live in `epik::feature::tools`; this module
 //! only wires them to GitHub, Claude Code, and the window's question
 //! rail.
@@ -34,11 +36,12 @@ use epik::feature::{Budget, Feature, Issue, Plan};
 use epik::github::{GitHub, Repo};
 use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
+use epik::monitor::{Entry, Log};
 use epik::tools::{Tool, arg};
 use epik::tracker::Tracker;
 use epik::tracker::github::GitHubTracker;
 use serde_json::{Value, json};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 /// The run slot: at most one build in flight, and the last one's record
 /// afterwards.
@@ -303,19 +306,33 @@ fn build_status(record: impl Fn() -> Option<Record> + 'static) -> Tool {
 }
 
 /// The feature side of the managed state: the record of feature builds,
-/// and the one budget of Agent slots every build in the app draws on.
+/// the log every change to it is spoken to, and the one budget of Agent
+/// slots every build in the app draws on. Made in `setup`, after the
+/// log — there is no default, because the record cannot exist without
+/// somewhere to speak.
 pub struct FeatureState {
     pub builds: Arc<Builds>,
+    pub log: Arc<Log>,
     pub budget: Arc<Budget>,
 }
 
-impl Default for FeatureState {
-    fn default() -> Self {
+impl FeatureState {
+    pub fn new(log: Arc<Log>) -> Self {
         Self {
-            builds: Arc::new(Builds::default()),
+            builds: Arc::new(Builds::new(Arc::clone(&log))),
+            log,
             budget: Budget::new(),
         }
     }
+}
+
+/// The whole log so far, for a window that has just opened its eyes:
+/// the replay it folds before — or after — it listens on
+/// [`monitor::EVENT`](epik::monitor::EVENT). No command answers with a
+/// picture; the window folds this one.
+#[tauri::command]
+pub fn monitor_log(state: State<'_, FeatureState>) -> Vec<Entry> {
+    state.log.since(0)
 }
 
 /// The build tools as the app registers them each turn: the slot lives
