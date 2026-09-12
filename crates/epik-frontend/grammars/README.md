@@ -1,6 +1,6 @@
 # Vendored syntax grammars
 
-The pruned grammar set for code-block highlighting. `build.rs` compiles
+The pruned grammar set for code-block highlighting. `builde` compiles
 this folder into the SyntaxSet dump the highlighter embeds, so
 regeneration is just `cargo build`; adding a language is dropping a
 syntect-compatible `.sublime-syntax` file here and listing it in

@@ -217,7 +217,8 @@ mod tests {
             .unwrap()
             .finish()
             .unwrap()
-            .output
+            .stdout
+            .unwrap()
         };
         assert_eq!(ask("Username for 'https://github.com': "), "x-access-token");
         assert_eq!(

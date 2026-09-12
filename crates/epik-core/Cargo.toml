@@ -1,0 +1,29 @@
+[package]
+name = "epik-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# The machinery of an actual desktop: process supervision, and the
+# runtime a plan's tasks run on. Off by default so the crate stays
+# wasm-clean for the frontend.
+native = ["dep:libc", "dep:tokio"]
+# Test infrastructure, for this crate's tests and its dependents': the
+# scratch directory. No shipping build enables it.
+testing = ["native"]
+
+[dependencies]
+anyhow = "1.0.104"
+# Parsing only, so the vocabulary stays wasm-clean; nothing here reads
+# a clock.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+libc = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# A plan runs its tasks on the blocking pool, counts them with a
+# semaphore, and waits on the JoinSet; nothing else here is async.
+tokio = { version = "1", features = ["rt", "sync", "macros"], optional = true }
+url = "2"
+
+[lints]
+workspace = true

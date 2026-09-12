@@ -9,8 +9,8 @@ edition = "2024"
 # the frontend. Wire protocols come with it, so native implies serde.
 native = [
     "dep:chrono",
+    "epik-core/native",
     "dep:include-crypt",
-    "dep:libc",
     "dep:ureq",
     "serde",
 ]
@@ -24,15 +24,15 @@ serde = []
 # deterministic agent with just enough behavior to test against, and the
 # shared fixtures. No shipping build enables it, and no test here ever
 # depends on a real LLM.
-testing = ["native"]
+testing = ["native", "epik-core/testing"]
 
 [dependencies]
 anyhow = "1"
+epik-core = { path = "../epik-core" }
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
 ], optional = true }
 include-crypt = { version = "0.1", optional = true }
-libc = { version = "0.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", features = ["json"], optional = true }

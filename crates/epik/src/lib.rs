@@ -1,4 +1,6 @@
-pub mod agent;
+// Moved to epik-core; re-exported here until the rest follows.
+#[cfg(feature = "native")]
+pub use epik_core::agent;
 pub mod chat;
 #[cfg(feature = "serde")]
 pub mod config;
@@ -21,7 +23,7 @@ pub mod keystore;
 // the `Log` inside needs the host.
 pub mod monitor;
 #[cfg(feature = "native")]
-mod temp;
+use epik_core::temp;
 #[cfg(all(feature = "native", any(test, feature = "testing")))]
 pub mod testing;
 #[cfg(feature = "serde")]

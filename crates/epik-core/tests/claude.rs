@@ -12,22 +12,29 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use epik::agent::claude_code::{ClaudeCode, Update, interpret};
-use epik::agent::{Agent, Exit, Line};
-use epik::testing::Scratch;
-use epik::testing::agent::shell;
+use epik_core::agent::{Agent, Exit, Line};
+use epik_core::coding::agent::claude::{ClaudeCode, Update, interpret};
+use epik_core::temp::Scratch;
 
-const SESSION: &str = include_str!("../src/agent/claude_code/fixtures/session.jsonl");
-const RESULT_ERROR: &str = include_str!("../src/agent/claude_code/fixtures/result_error.json");
+const SESSION: &str = include_str!("../src/coding/agent/claude/fixtures/session.jsonl");
+const RESULT_ERROR: &str = include_str!("../src/coding/agent/claude/fixtures/result_error.json");
 
-/// The scripted engine: a child that says `lines` — one printf argument
-/// each, single-quoted for the shell — and then runs `coda`.
+/// The scripted engine: `sh -c`, from `/`, saying `lines` — one printf
+/// argument each, single-quoted for the shell — and then running
+/// `coda`. Inline, never a written script file: the ETXTBSY lesson.
 fn canned(lines: &[&str], coda: &str) -> Agent {
     let quoted: Vec<String> = lines
         .iter()
         .map(|line| format!("'{}'", line.replace('\'', r"'\''")))
         .collect();
-    shell(&format!("printf '%s\\n' {}; {coda}", quoted.join(" ")))
+    let script = format!("printf '%s\\n' {}; {coda}", quoted.join(" "));
+    Agent::new(
+        vec!["sh".to_owned(), "-c".to_owned(), script],
+        "/",
+        [],
+        None,
+    )
+    .expect("sh starts")
 }
 
 /// Reads the whole run: every interpreted Update in order, and the

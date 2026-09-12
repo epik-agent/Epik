@@ -21,7 +21,7 @@
 //! in production, an inline shell script in tests, the same asymmetry as
 //! CLI-in-prod/git2-in-tests — and one drainer thread folds its lines
 //! into the shared [`Record`]: stdout lines interpreted through
-//! [`claude_code::interpret`] into narration, then the exit, and at the
+//! [`claude::interpret`] into narration, then the exit, and at the
 //! end the commit *observation* — did the branch advance past the base,
 //! is the worktree clean. Epik observes; the Agent commits. A clean
 //! worktree is removed; a dirty one is left where it is and its path
@@ -33,10 +33,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::agent::claude_code::{self, Update};
 use crate::agent::{Agent, Exit, Line};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
 use crate::temp;
+use epik_core::coding::agent::claude::{self, Update};
+// Moved to epik-core; re-exported here until the rest of job follows.
+pub use epik_core::coding::agent;
 
 /// A job as ordered: the prompt, the repository — a git URL, of which
 /// a local path is one — the branch to build on, and the base to start
@@ -396,7 +398,7 @@ impl Record {
     fn absorb(&mut self, line: Line) {
         match line {
             Line::Stdout(line) => {
-                self.narration.extend(claude_code::interpret(&line));
+                self.narration.extend(claude::interpret(&line));
                 if self.narration.len() > NARRATION_CAP {
                     let excess = self.narration.len() - NARRATION_CAP;
                     self.narration.drain(..excess);

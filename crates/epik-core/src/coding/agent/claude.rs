@@ -17,7 +17,7 @@
 //! [`start`]: ClaudeCode::start
 //!
 //! The CLI's stream-json arrives as the Agent's generic stdout
-//! [`Line`](super::Line)s; the stream stays generic, and [`interpret`] layers
+//! [`Line`](crate::agent::Line)s; the stream stays generic, and [`interpret`] layers
 //! the engine's meaning on top as a pure function over lines — modelling
 //! only the fields Epik reads, absorbing everything else. A line that is
 //! not JSON, or JSON of an unmodelled shape, interprets to nothing;
@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
-use super::Agent;
+use crate::agent::Agent;
 #[cfg(feature = "native")]
 use crate::keystore::Secret;
 
@@ -221,8 +221,8 @@ mod tests {
 
     /// A complete captured session; see fixtures/README.md for
     /// provenance.
-    const SESSION: &str = include_str!("claude_code/fixtures/session.jsonl");
-    const RESULT_ERROR: &str = include_str!("claude_code/fixtures/result_error.json");
+    const SESSION: &str = include_str!("claude/fixtures/session.jsonl");
+    const RESULT_ERROR: &str = include_str!("claude/fixtures/result_error.json");
 
     fn updates(stream: &str) -> Vec<Update> {
         stream.lines().flat_map(interpret).collect()
@@ -319,11 +319,12 @@ mod tests {
     #[cfg(feature = "native")]
     mod command_line {
         use super::super::*;
-        use crate::chat::ANTHROPIC_MODEL;
+
+        const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
 
         fn agent() -> ClaudeCode {
             ClaudeCode {
-                binary: "/opt/homebrew/bin/claude".to_owned(),
+                binary: "/nonexistent/claude".to_owned(),
                 cwd: "/work/repo".to_owned(),
                 prompt: "create a file\nnamed hello.txt".to_owned(),
                 model: Some(ANTHROPIC_MODEL.to_owned()),
@@ -339,7 +340,7 @@ mod tests {
             assert_eq!(
                 agent().argv(),
                 [
-                    "/opt/homebrew/bin/claude",
+                    "/nonexistent/claude",
                     "-p",
                     "--output-format",
                     "stream-json",
@@ -359,7 +360,7 @@ mod tests {
             assert_eq!(
                 without_model.argv(),
                 [
-                    "/opt/homebrew/bin/claude",
+                    "/nonexistent/claude",
                     "-p",
                     "--output-format",
                     "stream-json",
@@ -381,13 +382,14 @@ mod tests {
             assert!(debugged.contains("api_key"), "the field is there, redacted");
         }
 
-        /// The binary is bogus, so the spawn fails — after the recipe
-        /// was read in full, which is what the refusal's words show.
+        /// The binary is at a path no machine has, so the spawn fails —
+        /// after the recipe was read in full, which is what the
+        /// refusal's words show.
         #[test]
         fn a_missing_binary_refuses_in_words() {
             let error = agent().start().err().expect("no such binary");
             assert!(
-                format!("{error:#}").contains("could not start /opt/homebrew/bin/claude"),
+                format!("{error:#}").contains("could not start /nonexistent/claude"),
                 "{error:#}"
             );
         }

@@ -30,11 +30,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use epik::agent::Agent;
-use epik::agent::claude_code::{ClaudeCode, Update};
 use epik::chat::{Answer, Ask};
 use epik::feature::tools::{Builds, feature_status, start_feature};
 use epik::feature::{Budget, Feature, Issue, Plan};
 use epik::github::{GitHub, Repo};
+use epik::job::agent::claude::{ClaudeCode, Update};
 use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
 use epik::monitor::{EVENT, Entry, Log};

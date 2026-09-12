@@ -56,7 +56,12 @@ fn execute_within(
     let finished = Agent::new(argv, ".", env, Some(timeout))
         .and_then(Agent::finish)
         .map_err(|error| format!("{error:#}"))?;
-    Ok(json!({ "ok": finished.exit.success(), "output": finished.output }))
+    // The tools' one shape: everything git said, stdout then stderr.
+    let output: Vec<String> = [finished.stdout, finished.stderr]
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(json!({ "ok": finished.exit.success(), "output": output.join("\n") }))
 }
 
 /// [`execute`] for callers inside the crate that want git's answer, not

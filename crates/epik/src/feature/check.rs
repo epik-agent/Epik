@@ -57,7 +57,12 @@ fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
     {
         Ok(finished) => Verdict {
             green: finished.exit.success(),
-            output: finished.output,
+            // The verdict's one transcript: stdout, then stderr.
+            output: [finished.stdout, finished.stderr]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n"),
         },
         Err(error) => Verdict {
             green: false,

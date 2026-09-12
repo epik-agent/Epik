@@ -34,4 +34,4 @@ The interpreter is deliberately unknown-tolerant, so a newer CLI's
 extra fields or event types must not break the tests; recapture when
 the *modelled* fields move.
 
-[`ClaudeCode`]: ../../claude_code.rs
+[`ClaudeCode`]: ../../claude.rs

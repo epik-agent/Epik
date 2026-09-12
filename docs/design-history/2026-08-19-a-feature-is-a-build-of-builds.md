@@ -54,7 +54,7 @@ up, and `feature::Build` holds many `build::Run`s.
 component, and under this rule that makes it a phantom with no referent — the
 kind of word that gets someone writing a `Harness` struct six weeks later
 because the prose implied one. Every sentence that used it has a real actor
-underneath: the build, or provisioning, or Epik. `build.rs`'s module doc
+underneath: the build, or provisioning, or Epik. `builde`'s module doc
 currently ships *the harness observes; the Agent commits*; it should read *Epik
 observes; the Agent commits*.
 
