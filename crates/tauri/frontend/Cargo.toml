@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 console_error_panic_hook = "0.1"
-epik = { path = "../epik", features = ["serde"] }
+epik = { path = "../../epik", features = ["serde"] }
 leptos = { version = "0.8", features = ["csr"] }
 # The Markdown grammar. Parser only — Epik renders the events into its
 # own typed structure; the HTML output half is never used.

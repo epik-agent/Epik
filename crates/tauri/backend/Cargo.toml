@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
-epik = { path = "../epik", features = ["native", "serde"] }
+epik = { path = "../../epik", features = ["native", "serde"] }
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",
@@ -38,7 +38,7 @@ include_dir = "0.7"
 
 [dev-dependencies]
 # The scripted model rides in for tests only; no shipping build sees it.
-epik = { path = "../epik", features = ["testing"] }
+epik = { path = "../../epik", features = ["testing"] }
 
 [lints]
 workspace = true
