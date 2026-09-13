@@ -8,13 +8,14 @@
 //! repository that exists. Whatever is refused — by the command, by
 //! git — comes back in words as an Err result the model reads.
 //!
-//! [`Command`]: crate::git::commands::Command
+//! [`Command`]: git::commands::Command
 
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
+use super::schema::{boolean, integer, object, string, strings};
 use super::{Tool, arg};
 use crate::git::commands::{
     AbortMerge, Add, AddWorktree, Branch, Clone, Commit, DeleteBranch, Diff, Fetch, Hash, Init,
@@ -31,7 +32,7 @@ pub fn all() -> Vec<Tool> {
         tool(
             "git_init",
             "Makes a new bare repository at path, on branch main with no commits yet, and answers with the repository.",
-            schema(
+            object(
                 &[(
                     "path",
                     string(
@@ -48,7 +49,7 @@ pub fn all() -> Vec<Tool> {
         tool(
             "git_clone",
             "Clones from a URL or local path into a directory that does not exist yet, checked out at branch when one is named, and answers with the repository.",
-            schema(
+            object(
                 &[
                     (
                         "from",
@@ -165,11 +166,7 @@ pub fn all() -> Vec<Tool> {
             within(
                 &[(
                     "paths",
-                    json!({
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "The paths to stage, relative to the repository; at least one.",
-                    }),
+                    strings("The paths to stage, relative to the repository; at least one."),
                 )],
                 &["paths"],
             ),
@@ -253,7 +250,7 @@ pub fn all() -> Vec<Tool> {
                     ),
                     (
                         "count",
-                        json!({ "type": "integer", "description": "The most commits to answer with; all of them when absent." }),
+                        integer("The most commits to answer with; all of them when absent."),
                     ),
                 ],
                 &[],
@@ -396,7 +393,9 @@ pub fn all() -> Vec<Tool> {
                     ),
                     (
                         "force",
-                        json!({ "type": "boolean", "description": "Whether to remove a worktree that holds uncommitted work; false when absent." }),
+                        boolean(
+                            "Whether to remove a worktree that holds uncommitted work; false when absent.",
+                        ),
                     ),
                 ],
                 &["path"],
@@ -434,29 +433,14 @@ fn tool(
     )
 }
 
-/// A string argument's schema.
-fn string(description: &str) -> Value {
-    json!({ "type": "string", "description": description })
-}
-
-/// The JSON Schema of an object with `properties`, of which `required`
-/// must be given.
-fn schema(properties: &[(&str, Value)], required: &[&str]) -> Value {
-    let properties: serde_json::Map<String, Value> = properties
-        .iter()
-        .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
-        .collect();
-    json!({ "type": "object", "properties": properties, "required": required })
-}
-
-/// [`schema`] for a command that runs in a repository: `repository`
+/// An [`object`] for a command that runs in a repository: `repository`
 /// first, and required.
 fn within(properties: &[(&str, Value)], required: &[&str]) -> Value {
     let mut all = vec![("repository", string(REPOSITORY))];
     all.extend(properties.iter().cloned());
     let mut all_required = vec!["repository"];
     all_required.extend_from_slice(required);
-    schema(&all, &all_required)
+    object(&all, &all_required)
 }
 
 /// A required, non-empty string.
