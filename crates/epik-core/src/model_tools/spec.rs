@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn the_tool_runs_the_handler_and_turns_its_error_into_words() {
-        let mut registry = crate::tools::Registry::default();
+        let mut registry = crate::model_tools::Registry::default();
         registry.register(GREET.tool());
         assert_eq!(
             registry.dispatch("greet", r#"{"name":"Ada"}"#),

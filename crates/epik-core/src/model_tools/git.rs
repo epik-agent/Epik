@@ -565,8 +565,8 @@ fn said(output: String) -> Value {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::model_tools::Registry;
     use crate::temp::Scratch;
-    use crate::tools::Registry;
 
     fn registry() -> Registry {
         let mut registry = Registry::default();

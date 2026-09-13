@@ -1,4 +1,4 @@
-//! Tools the model can call, in the OpenAI function-tool protocol.
+//! Tools the model can call using the OpenAI function-tool protocol.
 //!
 //! Deliberately dumb: a [`Tool`] is a name, a description, a parameters
 //! schema, and a handler; a [`Registry`] is a Vec of them. Everything a

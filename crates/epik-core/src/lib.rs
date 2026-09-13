@@ -4,7 +4,7 @@ pub mod coding;
 pub mod dag;
 pub mod git;
 pub mod keystore;
+pub mod model_tools;
 #[cfg(feature = "native")]
 pub mod temp;
-pub mod tools;
 pub mod tracker;
