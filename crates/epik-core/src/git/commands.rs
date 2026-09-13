@@ -416,52 +416,51 @@ impl Switch {
     }
 }
 
-/// `git worktree add`: `branch`, which exists, checked out at `path`,
-/// a directory that does not exist yet, sharing `repository`'s
-/// history.
+/// `git worktree add`: `branch`, which exists, checked out at `linked`,
+/// a directory that does not exist yet, sharing `main`'s history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddWorktree {
-    repository: Repository,
-    path: PathBuf,
+    main: Repository,
+    linked: PathBuf,
     branch: String,
 }
 
 impl AddWorktree {
-    /// A worktree of `repository` at `path`, on `branch`.
+    /// A linked worktree of `main` at `linked`, on `branch`.
     ///
     /// # Errors
     ///
-    /// A relative `path`, or a branch beginning with `-`.
-    pub fn new(repository: Repository, path: PathBuf, branch: String) -> Result<Self> {
-        absolute("the worktree", &path)?;
+    /// A relative `linked`, or a branch beginning with `-`.
+    pub fn new(main: Repository, linked: PathBuf, branch: String) -> Result<Self> {
+        absolute("the worktree", &linked)?;
         plain("branch", &branch)?;
         Ok(Self {
-            repository,
-            path,
+            main,
+            linked,
             branch,
         })
     }
 
-    /// Where the worktree lands.
+    /// Where the linked worktree lands.
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn linked(&self) -> &Path {
+        &self.linked
     }
 
     fn argv(&self) -> Vec<String> {
-        let mut argv = within(&self.repository, "worktree");
+        let mut argv = within(&self.main, "worktree");
         argv.extend([
             "add".to_owned(),
             "--".to_owned(),
-            self.path.to_string_lossy().into_owned(),
+            self.linked.to_string_lossy().into_owned(),
             self.branch.clone(),
         ]);
         argv
     }
 }
 
-/// `git worktree list`: every worktree of `repository`, the main one
-/// first.
+/// `git worktree list`: every worktree of `repository`, which may be
+/// any of them, the main one first.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListWorktrees {
     repository: Repository,
@@ -1135,37 +1134,35 @@ impl DeleteBranch {
     }
 }
 
-/// `git worktree remove`: the worktree of `repository` at `path` taken
+/// `git worktree remove`: `linked`, a linked worktree of `main`, taken
 /// away — with `force`, even when it holds uncommitted work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoveWorktree {
-    repository: Repository,
-    path: PathBuf,
+    main: Repository,
+    linked: Repository,
     force: bool,
 }
 
 impl RemoveWorktree {
-    /// The worktree at `path`, removed.
-    ///
-    /// # Errors
-    ///
-    /// A relative `path`.
-    pub fn new(repository: Repository, path: PathBuf, force: bool) -> Result<Self> {
-        absolute("the worktree", &path)?;
-        Ok(Self {
-            repository,
-            path,
+    #[must_use]
+    pub const fn new(main: Repository, linked: Repository, force: bool) -> Self {
+        Self {
+            main,
+            linked,
             force,
-        })
+        }
     }
 
     fn argv(&self) -> Vec<String> {
-        let mut argv = within(&self.repository, "worktree");
+        let mut argv = within(&self.main, "worktree");
         argv.push("remove".to_owned());
         if self.force {
             argv.push("--force".to_owned());
         }
-        argv.extend(["--".to_owned(), self.path.to_string_lossy().into_owned()]);
+        argv.extend([
+            "--".to_owned(),
+            self.linked.path().to_string_lossy().into_owned(),
+        ]);
         argv
     }
 }
@@ -1393,7 +1390,8 @@ mod tests {
             ["-C", "/work/repo", "worktree", "list", "--porcelain"]
         );
 
-        let remove = RemoveWorktree::new(repository(), "/work/topic".into(), false).unwrap();
+        let topic = Repository(PathBuf::from("/work/topic"));
+        let remove = RemoveWorktree::new(repository(), topic.clone(), false);
         assert_eq!(
             Command::RemoveWorktree(remove).argv(),
             [
@@ -1405,7 +1403,7 @@ mod tests {
                 "/work/topic"
             ]
         );
-        let remove = RemoveWorktree::new(repository(), "/work/topic".into(), true).unwrap();
+        let remove = RemoveWorktree::new(repository(), topic, true);
         assert_eq!(
             Command::RemoveWorktree(remove).argv(),
             [
@@ -1418,7 +1416,6 @@ mod tests {
                 "/work/topic"
             ]
         );
-        assert!(RemoveWorktree::new(repository(), "topic".into(), false).is_err());
     }
 
     #[test]
@@ -1986,14 +1983,11 @@ mod live {
         );
 
         std::fs::write(topic.path().join("loose.txt"), "loose\n").unwrap();
-        let error = remove_worktree(
-            RemoveWorktree::new(work.clone(), topic.path().to_owned(), false).unwrap(),
-        )
-        .unwrap_err()
-        .to_string();
+        let error = remove_worktree(RemoveWorktree::new(work.clone(), topic.clone(), false))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("untracked"), "{error}");
-        remove_worktree(RemoveWorktree::new(work.clone(), topic.path().to_owned(), true).unwrap())
-            .unwrap();
+        remove_worktree(RemoveWorktree::new(work.clone(), topic.clone(), true)).unwrap();
         assert!(!topic.path().exists());
         assert_eq!(list_worktrees(ListWorktrees::new(work)).unwrap().len(), 1);
     }

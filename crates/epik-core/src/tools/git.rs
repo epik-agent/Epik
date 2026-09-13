@@ -34,6 +34,13 @@ const REPOSITORY: Param = required(
     "The absolute path of the repository: the root of a working tree, or a bare repository.",
 );
 
+/// The `main` worktree the worktree commands run in.
+const MAIN: Param = required(
+    "main",
+    Kind::String,
+    "The absolute path of the main worktree, or of the bare repository, whose linked worktrees these are.",
+);
+
 /// The `remote` the network verbs speak to.
 const REMOTE: Param = required(
     "remote",
@@ -110,13 +117,13 @@ pub const TOOLS: &[Spec] = &[
     },
     Spec {
         name: "git_add_worktree",
-        description: "Checks out a branch that exists as a new worktree at path, sharing the repository's history, and answers with the worktree as a repository.",
+        description: "Checks out a branch that exists as a new linked worktree of main, and answers with the linked worktree as a repository.",
         parameters: &[
-            REPOSITORY,
+            MAIN,
             required(
-                "path",
+                "linked",
                 Kind::String,
-                "The absolute path of the worktree, which does not exist yet.",
+                "The absolute path of the linked worktree, which does not exist yet.",
             ),
             required("branch", Kind::String, "The branch to check out there."),
         ],
@@ -124,7 +131,7 @@ pub const TOOLS: &[Spec] = &[
     },
     Spec {
         name: "git_list_worktrees",
-        description: "Every worktree of the repository, the main one first, with the commit and branch each has checked out.",
+        description: "Every worktree of the repository, from any of them, the main one first, with the commit and branch each has checked out.",
         parameters: &[REPOSITORY],
         handler: list_worktrees,
     },
@@ -277,18 +284,18 @@ pub const TOOLS: &[Spec] = &[
     },
     Spec {
         name: "git_remove_worktree",
-        description: "Removes a worktree of the repository; with force true, even one holding uncommitted work.",
+        description: "Removes a linked worktree of main; with force true, even one holding uncommitted work.",
         parameters: &[
-            REPOSITORY,
+            MAIN,
             required(
-                "path",
+                "linked",
                 Kind::String,
-                "The absolute path of the worktree to remove.",
+                "The absolute path of the linked worktree to remove.",
             ),
             optional(
                 "force",
                 Kind::Boolean,
-                "Whether to remove a worktree that holds uncommitted work; false when absent.",
+                "Whether to remove a linked worktree that holds uncommitted work; false when absent.",
             ),
         ],
         handler: remove_worktree,
@@ -333,10 +340,10 @@ fn switch(arguments: &Value) -> Result<Value> {
 }
 
 fn add_worktree(arguments: &Value) -> Result<Value> {
-    let path = path(arguments, "path")?;
+    let destination = path(arguments, "linked")?;
     let branch = text(arguments, "branch")?.to_owned();
-    let worktree = git::add_worktree(AddWorktree::new(repository(arguments)?, path, branch)?)?;
-    Ok(made(&worktree))
+    let linked = git::add_worktree(AddWorktree::new(main(arguments)?, destination, branch)?)?;
+    Ok(made(&linked))
 }
 
 fn list_worktrees(arguments: &Value) -> Result<Value> {
@@ -464,9 +471,9 @@ fn delete_branch(arguments: &Value) -> Result<Value> {
 }
 
 fn remove_worktree(arguments: &Value) -> Result<Value> {
-    let path = path(arguments, "path")?;
     let force = arg::flag(arguments, "force").map_err(anyhow::Error::msg)?;
-    git::remove_worktree(RemoveWorktree::new(repository(arguments)?, path, force)?)?;
+    let linked = Repository::open(path(arguments, "linked")?)?;
+    git::remove_worktree(RemoveWorktree::new(main(arguments)?, linked, force))?;
     Ok(done())
 }
 
@@ -494,6 +501,11 @@ fn path(arguments: &Value, name: &str) -> Result<PathBuf> {
 /// The `repository` argument, opened.
 fn repository(arguments: &Value) -> Result<Repository> {
     Repository::open(path(arguments, "repository")?)
+}
+
+/// The `main` argument, opened.
+fn main(arguments: &Value) -> Result<Repository> {
+    Repository::open(path(arguments, "main")?)
 }
 
 /// The `remote` argument: a URL when it is spelled like one — a colon
@@ -700,11 +712,11 @@ mod tests {
                 function["description"].as_str().unwrap().ends_with('.'),
                 "{name} says what it does"
             );
-            if !["git_init", "git_clone"].contains(&name) {
-                assert_eq!(
-                    function["parameters"]["required"][0], "repository",
-                    "{name} runs in a repository"
-                );
+            let first = &function["parameters"]["required"][0];
+            if ["git_add_worktree", "git_remove_worktree"].contains(&name) {
+                assert_eq!(first, "main", "{name} runs in the main worktree");
+            } else if !["git_init", "git_clone"].contains(&name) {
+                assert_eq!(first, "repository", "{name} runs in a repository");
             }
         }
     }
@@ -824,7 +836,7 @@ mod tests {
         let added = ok(
             &registry,
             "git_add_worktree",
-            json!({ "repository": work, "path": linked, "branch": "side" }),
+            json!({ "main": work, "linked": linked, "branch": "side" }),
         );
         assert_eq!(added["repository"], linked);
         let listed = ok(
@@ -840,7 +852,7 @@ mod tests {
         ok(
             &registry,
             "git_remove_worktree",
-            json!({ "repository": work, "path": linked }),
+            json!({ "main": work, "linked": linked }),
         );
         assert_eq!(
             ok(
@@ -970,7 +982,7 @@ mod tests {
         let force = refused(
             &registry,
             "git_remove_worktree",
-            json!({ "repository": work, "path": scratch.join("linked"), "force": "yes" }),
+            json!({ "main": work, "linked": scratch.join("linked"), "force": "yes" }),
         );
         assert_eq!(force, "the force argument must be true or false");
     }

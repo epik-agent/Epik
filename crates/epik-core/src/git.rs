@@ -181,7 +181,7 @@ pub fn switch(switch: Switch) -> Result<()> {
     settled(Command::Switch(switch)).map(drop)
 }
 
-/// Adds a worktree, and hands back the repository it is.
+/// Adds a linked worktree, and hands back the repository it is.
 ///
 /// # Errors
 ///
@@ -189,9 +189,9 @@ pub fn switch(switch: Switch) -> Result<()> {
 /// checked out elsewhere among them.
 #[cfg(feature = "native")]
 pub fn add_worktree(worktree: AddWorktree) -> Result<Repository> {
-    let path = worktree.path().to_owned();
+    let linked = worktree.linked().to_owned();
     settled(Command::AddWorktree(worktree))?;
-    Ok(Repository(path))
+    Ok(Repository(linked))
 }
 
 /// Lists the worktrees, the main one first.
@@ -372,7 +372,7 @@ pub fn delete_branch(branch: DeleteBranch) -> Result<()> {
     settled(Command::DeleteBranch(branch)).map(drop)
 }
 
-/// Removes a worktree.
+/// Removes a linked worktree.
 ///
 /// # Errors
 ///
