@@ -28,7 +28,7 @@ use std::sync::{Mutex, PoisonError};
 
 use epik::chat::{
     Answer, Ask, ChatError, Client, Conversation, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
-    TranscriptItem,
+    TranscriptItem, run,
 };
 use epik::config::Config;
 use epik::github::GitHub;
@@ -215,7 +215,7 @@ fn replying_with<'a>(
     stop: &'a AtomicBool,
 ) -> impl Replier + 'a {
     move |on_delta, record| {
-        tools::run(
+        run(
             client,
             system,
             transcript,

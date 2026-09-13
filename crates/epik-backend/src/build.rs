@@ -610,7 +610,7 @@ mod tests {
     /// while the "build" is nominally running.
     #[test]
     fn a_scripted_turn_inits_a_repository_starts_a_build_and_answers() {
-        use epik::chat::{Client, Role, TranscriptItem};
+        use epik::chat::{Client, Role, TranscriptItem, run};
         use epik::testing::model::{Fragment, Scripted, Turn as Script};
 
         let scratch = Scratch::new("turn");
@@ -640,7 +640,7 @@ mod tests {
         let client = Client::new(model.base_url(), "scripted".to_owned(), None);
         let mut observed = Vec::new();
 
-        let text = epik::tools::run(
+        let text = run(
             &client,
             "system",
             &[TranscriptItem::Message {

@@ -1,4 +1,4 @@
-//! Tools the model can call, and the loop that runs a turn through them.
+//! Tools the model can call, in the OpenAI function-tool protocol.
 //!
 //! Deliberately dumb: a [`Tool`] is a name, a description, a parameters
 //! schema, and a handler; a [`Registry`] is a Vec of them. Everything a
@@ -6,18 +6,12 @@
 //! handler that fails — becomes an Err *result*, words fed back to the
 //! model as the tool's output. Never a crash, never a turn failure.
 //!
-//! [`run`] is the turn: call the model, dispatch whatever tools it asks
-//! for, tell it what happened, and repeat until it answers in text. The
-//! providers' verbs live beside this port — [`git`] and [`github`], one
-//! tool per verb — and [`current_time`], the wire's canary, is the one
-//! built-in.
-
-#[cfg(feature = "native")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use crate::chat::ToolSpec;
-#[cfg(feature = "native")]
-use crate::chat::{ChatError, ChatMessage, Client, Reply, ToolCall, TranscriptItem};
+//! The wire shapes are the protocol's own: a [`ToolSpec`] is a tool as
+//! a request advertises it, a [`ToolCall`] is a call as the model makes
+//! it. The loop that runs a turn through a registry lives with the
+//! client that speaks to the model. The providers' verbs live beside
+//! this port — [`git`] and [`github`], one tool per verb — and
+//! [`current_time`], the wire's canary, is the one built-in.
 
 #[cfg(feature = "native")]
 pub mod git;
@@ -84,6 +78,77 @@ pub mod arg {
     }
 }
 
+/// One tool as a request advertises it: the protocol's function tool,
+/// `{"type": "function", "function": {name, description, parameters}}`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ToolSpec {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: ToolFunction,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ToolFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+impl ToolSpec {
+    /// A function tool: `parameters` is its arguments' JSON Schema.
+    #[must_use]
+    pub fn function(name: String, description: String, parameters: serde_json::Value) -> Self {
+        Self {
+            kind: "function",
+            function: ToolFunction {
+                name,
+                description,
+                parameters,
+            },
+        }
+    }
+}
+
+/// One completed tool call, as the model asked for it: the id the result
+/// must answer to, the tool's name, and the arguments exactly as the
+/// model wrote them — a raw JSON string, parsed only at dispatch.
+///
+/// Serializes as the protocol's tool call, `{"id", "type": "function",
+/// "function": {name, arguments}}`, so an assistant message echoes it
+/// back to the model exactly as it was asked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub(crate) arguments: String,
+}
+
+impl serde::Serialize for ToolCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Function<'a> {
+            name: &'a str,
+            arguments: &'a str,
+        }
+        #[derive(serde::Serialize)]
+        struct Wire<'a> {
+            id: &'a str,
+            #[serde(rename = "type")]
+            kind: &'static str,
+            function: Function<'a>,
+        }
+        Wire {
+            id: &self.id,
+            kind: "function",
+            function: Function {
+                name: &self.name,
+                arguments: &self.arguments,
+            },
+        }
+        .serialize(serializer)
+    }
+}
+
 /// What a tool does with its parsed arguments: a JSON answer, or its
 /// failure in words — which the model reads, so say what went wrong.
 type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
@@ -141,7 +206,7 @@ impl Registry {
 
     /// The request's tools array.
     #[must_use]
-    fn to_wire(&self) -> Vec<ToolSpec> {
+    pub(crate) fn to_wire(&self) -> Vec<ToolSpec> {
         self.0
             .iter()
             .map(|tool| {
@@ -174,63 +239,6 @@ impl Registry {
     }
 }
 
-/// The most rounds of tool calls one turn may take before it is a turn
-/// failure. A model that hasn't answered in this many is not going to.
-const MAX_TOOL_ITERATIONS: usize = 16;
-
-/// One whole turn, run until the model answers in text.
-///
-/// Calls [`Client::reply`] with the registry's tools on offer; when the
-/// reply is tool calls, dispatches each in order, reports every call and
-/// its result to `observer`, appends what happened to the working
-/// messages, and asks again. Deltas stream to `on_delta` as ever. `stop`
-/// is checked between deltas (inside `reply`) and between iterations —
-/// once set, the turn stands down quietly with what text it has.
-///
-/// # Errors
-///
-/// Everything [`Client::reply`] can die of, plus [`ChatError::ToolLoop`]
-/// when [`MAX_TOOL_ITERATIONS`] rounds pass without an answer.
-#[cfg(feature = "native")]
-pub fn run(
-    client: &Client,
-    system: &str,
-    transcript: &[TranscriptItem],
-    registry: &Registry,
-    mut on_delta: impl FnMut(&str),
-    mut observer: impl FnMut(&ToolCall, &Result<serde_json::Value, String>),
-    stop: &AtomicBool,
-) -> Result<String, ChatError> {
-    let tools = registry.to_wire();
-    let mut messages = ChatMessage::from_transcript(transcript);
-    for _ in 0..MAX_TOOL_ITERATIONS {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(String::new());
-        }
-        match client.reply(system, &messages, &tools, &mut on_delta, stop)? {
-            Reply::Text(text) => return Ok(text),
-            Reply::ToolCalls(calls) => {
-                messages.push(ChatMessage::ToolCalls(calls.clone()));
-                for call in calls {
-                    let result = registry.dispatch(&call.name, &call.arguments);
-                    observer(&call, &result);
-                    let content = match &result {
-                        Ok(value) => value.to_string(),
-                        Err(reason) => reason.clone(),
-                    };
-                    messages.push(ChatMessage::ToolResult {
-                        id: call.id,
-                        content,
-                    });
-                }
-            }
-        }
-    }
-    Err(ChatError::ToolLoop {
-        limit: MAX_TOOL_ITERATIONS,
-    })
-}
-
 /// The built-in canary: no arguments, the local date-time and UTC offset
 /// as JSON. It proves the round trip, and afterwards it tells the time.
 #[cfg(feature = "native")]
@@ -250,29 +258,33 @@ fn current_time() -> Tool {
     )
 }
 
+/// The tool that says its `text` argument back: the fixture the loop
+/// tests drive.
+#[cfg(test)]
+pub(crate) fn echo() -> Tool {
+    Tool::new(
+        "echo",
+        "Says the argument back.",
+        serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"],
+        }),
+        Box::new(|arguments| Ok(serde_json::json!({ "echo": arguments["text"] }))),
+    )
+}
+
+/// A registry of exactly [`echo`].
+#[cfg(test)]
+pub(crate) fn echoing() -> Registry {
+    let mut registry = Registry::default();
+    registry.register(echo());
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn echo() -> Tool {
-        Tool::new(
-            "echo",
-            "Says the argument back.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "text": { "type": "string" } },
-                "required": ["text"],
-            }),
-            Box::new(|arguments| Ok(serde_json::json!({ "echo": arguments["text"] }))),
-        )
-    }
-
-    /// A registry of exactly [`echo`].
-    fn echoing() -> Registry {
-        let mut registry = Registry::default();
-        registry.register(echo());
-        registry
-    }
 
     #[test]
     fn dispatch_hands_parsed_arguments_to_the_handler() {
@@ -315,198 +327,29 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_serializes_as_the_protocol_writes_it() {
+        let call = ToolCall {
+            id: "call_1".to_owned(),
+            name: "echo".to_owned(),
+            arguments: "{\"text\":\"hi\"}".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&call).unwrap(),
+            serde_json::json!({
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "echo", "arguments": "{\"text\":\"hi\"}" },
+            })
+        );
+    }
+
+    #[test]
     fn the_registry_advertises_its_tools_in_the_wire_shape() {
         let registry = echoing();
         let wire = serde_json::to_value(registry.to_wire()).unwrap();
         assert_eq!(wire[0]["type"], "function");
         assert_eq!(wire[0]["function"]["name"], "echo");
         assert!(wire[0]["function"]["parameters"].is_object());
-    }
-
-    /// The loop end to end, against the scripted model: a real client, a
-    /// loopback socket, and a script the test controls exactly.
-    #[cfg(feature = "testing")]
-    mod looped {
-        use super::*;
-        use crate::chat::{Role, TranscriptItem};
-        use crate::testing::model::{Fragment, Scripted, Turn};
-
-        fn transcript() -> Vec<TranscriptItem> {
-            vec![TranscriptItem::Message {
-                role: Role::User,
-                text: "go".to_owned(),
-            }]
-        }
-
-        fn run_against(
-            model: &Scripted,
-            registry: &Registry,
-            observer: impl FnMut(&ToolCall, &Result<serde_json::Value, String>),
-        ) -> Result<String, ChatError> {
-            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
-            run(
-                &client,
-                "system",
-                &transcript(),
-                registry,
-                |_| {},
-                observer,
-                &AtomicBool::new(false),
-            )
-        }
-
-        /// One turn over the echo registry against a model scripted to
-        /// make the tool calls `calls` and then say "done": what `note`
-        /// makes of each call and its result, in dispatch order, and
-        /// the requests the model saw.
-        fn observed<T>(
-            calls: Vec<Vec<Fragment>>,
-            mut note: impl FnMut(&ToolCall, &Result<serde_json::Value, String>) -> T,
-        ) -> (Vec<T>, Vec<serde_json::Value>) {
-            let model = Scripted::spawn(vec![Turn::ToolCalls(calls), Turn::text(&["done"])]);
-            let mut observed = Vec::new();
-            let text = run_against(&model, &echoing(), |call, result| {
-                observed.push(note(call, result));
-            })
-            .unwrap();
-            assert_eq!(text, "done");
-            (observed, model.requests())
-        }
-
-        #[test]
-        fn a_tool_call_turn_dispatches_and_reports_back_to_the_model() {
-            let (observed, requests) = observed(
-                vec![
-                    vec![Fragment::open(0, "call_1", "echo", "{\"text\":")],
-                    vec![Fragment::more(0, "\"hi\"}")],
-                ],
-                |call, result| (call.clone(), result.clone()),
-            );
-
-            assert_eq!(
-                observed,
-                [(
-                    ToolCall {
-                        id: "call_1".to_owned(),
-                        name: "echo".to_owned(),
-                        arguments: "{\"text\":\"hi\"}".to_owned(),
-                    },
-                    Ok(serde_json::json!({ "echo": "hi" })),
-                )]
-            );
-
-            assert_eq!(requests.len(), 2);
-            assert_eq!(
-                requests[0]["tools"][0]["function"]["name"], "echo",
-                "the tools ride the first request"
-            );
-            let messages = requests[1]["messages"].as_array().unwrap();
-            assert_eq!(
-                &messages[messages.len() - 2..],
-                &[
-                    serde_json::json!({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": "call_1",
-                            "type": "function",
-                            "function": { "name": "echo", "arguments": "{\"text\":\"hi\"}" },
-                        }],
-                    }),
-                    serde_json::json!({
-                        "role": "tool",
-                        "content": "{\"echo\":\"hi\"}",
-                        "tool_call_id": "call_1",
-                    }),
-                ],
-                "the second request carries the call and its answer, in order"
-            );
-        }
-
-        #[test]
-        fn two_tools_in_one_turn_dispatch_in_index_order() {
-            let (observed, requests) = observed(
-                vec![vec![
-                    Fragment::open(0, "call_a", "echo", "{\"text\":\"one\"}"),
-                    Fragment::open(1, "call_b", "nonesuch", "{}"),
-                ]],
-                |call, result| (call.name.clone(), result.is_ok()),
-            );
-
-            assert_eq!(
-                observed,
-                [("echo".to_owned(), true), ("nonesuch".to_owned(), false)],
-                "the observer fires in dispatch order, failures included"
-            );
-
-            let messages = requests[1]["messages"].as_array().unwrap().clone();
-            let tool_answers: Vec<_> = messages
-                .iter()
-                .filter(|message| message["role"] == "tool")
-                .map(|message| message["tool_call_id"].as_str().unwrap().to_owned())
-                .collect();
-            assert_eq!(tool_answers, ["call_a", "call_b"]);
-        }
-
-        /// The unknown tool's Err went back to the model as content, not
-        /// up as a failure — the turn still ended in text.
-        #[test]
-        fn a_failed_dispatch_feeds_the_model_the_words() {
-            let model = Scripted::spawn(vec![
-                Turn::ToolCalls(vec![vec![Fragment::open(0, "call_1", "nonesuch", "{}")]]),
-                Turn::text(&["ok"]),
-            ]);
-
-            let text = run_against(&model, &Registry::default(), |_, _| {}).unwrap();
-
-            assert_eq!(text, "ok");
-            let messages = model.requests()[1]["messages"].as_array().unwrap().clone();
-            let answer = messages.last().unwrap();
-            assert_eq!(answer["role"], "tool");
-            assert!(
-                answer["content"].as_str().unwrap().contains("nonesuch"),
-                "{answer}"
-            );
-        }
-
-        #[test]
-        fn a_turn_that_never_stops_calling_tools_is_a_turn_failure() {
-            let script = std::iter::repeat_n(
-                Turn::ToolCalls(vec![vec![Fragment::open(
-                    0,
-                    "call_1",
-                    "echo",
-                    "{\"text\":\"x\"}",
-                )]]),
-                MAX_TOOL_ITERATIONS,
-            )
-            .collect();
-            let model = Scripted::spawn(script);
-            let registry = echoing();
-
-            let error = run_against(&model, &registry, |_, _| {}).unwrap_err();
-
-            assert_eq!(
-                error,
-                ChatError::ToolLoop {
-                    limit: MAX_TOOL_ITERATIONS
-                }
-            );
-            assert!(error.to_string().contains("16"), "{error}");
-            assert_eq!(model.requests().len(), MAX_TOOL_ITERATIONS);
-        }
-
-        #[test]
-        fn a_plain_text_turn_calls_no_tools_and_asks_once() {
-            let model = Scripted::spawn(vec![Turn::text(&["Hel", "lo"])]);
-
-            let text = run_against(&model, &Registry::standard(), |_, _| {
-                panic!("no tool was called");
-            })
-            .unwrap();
-
-            assert_eq!(text, "Hello");
-            assert_eq!(model.requests().len(), 1);
-        }
     }
 
     /// The whole registry as the backend assembles it each turn:

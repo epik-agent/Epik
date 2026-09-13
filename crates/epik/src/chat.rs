@@ -10,8 +10,11 @@
 //! chat-completions endpoint — transcript in, streamed deltas out. It is
 //! provider-agnostic data: a base URL, a model, a key. Provider
 //! specificity lives only in constructors, of which there is exactly one
-//! today, [`Client::anthropic`]. The library is synchronous; running a
-//! turn somewhere it won't block anything is the host's problem.
+//! today, [`Client::anthropic`]. [`run`] is a whole turn: it calls the
+//! model with a [`Registry`] of tools on offer, dispatches whatever the
+//! model asks for, tells it what happened, and repeats until it answers
+//! in text. The library is synchronous; running a turn somewhere it
+//! won't block anything is the host's problem.
 
 /// Drains one HTTP request off `socket` — headers, then content-length's
 /// worth of body — and answers with the body. What every loopback stand-in
@@ -38,9 +41,13 @@ pub(crate) fn read_request(socket: &mut std::net::TcpStream) -> Option<Vec<u8>> 
 }
 
 #[cfg(feature = "native")]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::keystore::Secret;
+#[cfg(feature = "native")]
+use crate::tools::Registry;
+#[cfg(feature = "serde")]
+use crate::tools::{ToolCall, ToolSpec};
 
 /// A speaker, by its wire-protocol name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,17 +181,6 @@ impl Conversation {
     }
 }
 
-/// One completed tool call, as the model asked for it: the id the result
-/// must answer to, the tool's name, and the arguments exactly as the
-/// model wrote them — a raw JSON string, parsed only at dispatch.
-#[cfg(feature = "serde")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub(crate) arguments: String,
-}
-
 /// What a reply turned out to be: the model either spoke or reached for
 /// tools, never both.
 #[cfg(feature = "serde")]
@@ -195,43 +191,6 @@ pub(crate) enum Reply {
     Text(String),
     /// The calls the model wants made, in index order.
     ToolCalls(Vec<ToolCall>),
-}
-
-/// One tool as the wire advertises it: the OpenAI function-tool shape.
-#[cfg(feature = "serde")]
-#[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct ToolSpec {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    function: ToolFunction,
-}
-
-#[cfg(feature = "serde")]
-#[derive(Clone, Debug, serde::Serialize)]
-struct ToolFunction {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-#[cfg(feature = "serde")]
-impl ToolSpec {
-    /// A function tool: `parameters` is its arguments' JSON Schema.
-    #[must_use]
-    pub(crate) fn function(
-        name: String,
-        description: String,
-        parameters: serde_json::Value,
-    ) -> Self {
-        Self {
-            kind: "function",
-            function: ToolFunction {
-                name,
-                description,
-                parameters,
-            },
-        }
-    }
 }
 
 /// One message as the request will carry it. The transcript's completed
@@ -565,7 +524,7 @@ mod wire {
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        tool_calls: Option<Vec<MessageToolCall<'a>>>,
+        tool_calls: Option<&'a [ToolCall]>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<&'a str>,
     }
@@ -579,22 +538,6 @@ mod wire {
                 tool_call_id: None,
             }
         }
-    }
-
-    /// A completed call inside an assistant message, echoed back to the
-    /// model exactly as it asked for it.
-    #[derive(serde::Serialize)]
-    struct MessageToolCall<'a> {
-        id: &'a str,
-        #[serde(rename = "type")]
-        kind: &'static str,
-        function: MessageFunction<'a>,
-    }
-
-    #[derive(serde::Serialize)]
-    struct MessageFunction<'a> {
-        name: &'a str,
-        arguments: &'a str,
     }
 
     const fn role_name(role: Role) -> &'static str {
@@ -615,34 +558,20 @@ mod wire {
         tool_choice: Option<&'a str>,
     ) -> Request<'a> {
         let mut wire = vec![Message::text("system", system)];
-        wire.extend(messages.iter().map(|message| {
-            match message {
-                ChatMessage::Text { role, text } => Message::text(role_name(*role), text),
-                ChatMessage::ToolCalls(calls) => Message {
-                    role: "assistant",
-                    content: None,
-                    tool_calls: Some(
-                        calls
-                            .iter()
-                            .map(|call| MessageToolCall {
-                                id: &call.id,
-                                kind: "function",
-                                function: MessageFunction {
-                                    name: &call.name,
-                                    arguments: &call.arguments,
-                                },
-                            })
-                            .collect(),
-                    ),
-                    tool_call_id: None,
-                },
-                ChatMessage::ToolResult { id, content } => Message {
-                    role: "tool",
-                    content: Some(content),
-                    tool_calls: None,
-                    tool_call_id: Some(id),
-                },
-            }
+        wire.extend(messages.iter().map(|message| match message {
+            ChatMessage::Text { role, text } => Message::text(role_name(*role), text),
+            ChatMessage::ToolCalls(calls) => Message {
+                role: "assistant",
+                content: None,
+                tool_calls: Some(calls),
+                tool_call_id: None,
+            },
+            ChatMessage::ToolResult { id, content } => Message {
+                role: "tool",
+                content: Some(content),
+                tool_calls: None,
+                tool_call_id: Some(id),
+            },
         }));
         Request {
             model,
@@ -800,7 +729,6 @@ impl Client {
         stop: &AtomicBool,
     ) -> Result<Reply, ChatError> {
         use std::io::{BufRead, BufReader};
-        use std::sync::atomic::Ordering;
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body =
@@ -872,6 +800,64 @@ impl Client {
             Ok(Reply::Text(reply))
         }
     }
+}
+
+/// The most rounds of tool calls one turn may take before it is a turn
+/// failure. A model that hasn't answered in this many is not going to.
+#[cfg(feature = "native")]
+const MAX_TOOL_ITERATIONS: usize = 16;
+
+/// One whole turn, run until the model answers in text.
+///
+/// Calls [`Client::reply`] with the registry's tools on offer; when the
+/// reply is tool calls, dispatches each in order, reports every call and
+/// its result to `observer`, appends what happened to the working
+/// messages, and asks again. Deltas stream to `on_delta` as ever. `stop`
+/// is checked between deltas (inside `reply`) and between iterations —
+/// once set, the turn stands down quietly with what text it has.
+///
+/// # Errors
+///
+/// Everything [`Client::reply`] can die of, plus [`ChatError::ToolLoop`]
+/// when [`MAX_TOOL_ITERATIONS`] rounds pass without an answer.
+#[cfg(feature = "native")]
+pub fn run(
+    client: &Client,
+    system: &str,
+    transcript: &[TranscriptItem],
+    registry: &Registry,
+    mut on_delta: impl FnMut(&str),
+    mut observer: impl FnMut(&ToolCall, &Result<serde_json::Value, String>),
+    stop: &AtomicBool,
+) -> Result<String, ChatError> {
+    let tools = registry.to_wire();
+    let mut messages = ChatMessage::from_transcript(transcript);
+    for _ in 0..MAX_TOOL_ITERATIONS {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(String::new());
+        }
+        match client.reply(system, &messages, &tools, &mut on_delta, stop)? {
+            Reply::Text(text) => return Ok(text),
+            Reply::ToolCalls(calls) => {
+                messages.push(ChatMessage::ToolCalls(calls.clone()));
+                for call in calls {
+                    let result = registry.dispatch(&call.name, &call.arguments);
+                    observer(&call, &result);
+                    let content = match &result {
+                        Ok(value) => value.to_string(),
+                        Err(reason) => reason.clone(),
+                    };
+                    messages.push(ChatMessage::ToolResult {
+                        id: call.id,
+                        content,
+                    });
+                }
+            }
+        }
+    }
+    Err(ChatError::ToolLoop {
+        limit: MAX_TOOL_ITERATIONS,
+    })
 }
 
 #[cfg(test)]
@@ -1690,6 +1676,192 @@ mod tests {
             };
             assert!(!reply.is_empty());
             assert_eq!(streamed, reply, "the deltas are the reply");
+        }
+    }
+
+    /// The loop end to end, against the scripted model: a real client, a
+    /// loopback socket, and a script the test controls exactly.
+    #[cfg(feature = "testing")]
+    mod looped {
+        use super::*;
+        use crate::testing::model::{Fragment, Scripted, Turn};
+        use crate::tools::echoing;
+
+        fn transcript() -> Vec<TranscriptItem> {
+            vec![TranscriptItem::Message {
+                role: Role::User,
+                text: "go".to_owned(),
+            }]
+        }
+
+        fn run_against(
+            model: &Scripted,
+            registry: &Registry,
+            observer: impl FnMut(&ToolCall, &Result<serde_json::Value, String>),
+        ) -> Result<String, ChatError> {
+            let client = Client::new(model.base_url(), "scripted".to_owned(), None);
+            run(
+                &client,
+                "system",
+                &transcript(),
+                registry,
+                |_| {},
+                observer,
+                &AtomicBool::new(false),
+            )
+        }
+
+        /// One turn over the echo registry against a model scripted to
+        /// make the tool calls `calls` and then say "done": what `note`
+        /// makes of each call and its result, in dispatch order, and
+        /// the requests the model saw.
+        fn observed<T>(
+            calls: Vec<Vec<Fragment>>,
+            mut note: impl FnMut(&ToolCall, &Result<serde_json::Value, String>) -> T,
+        ) -> (Vec<T>, Vec<serde_json::Value>) {
+            let model = Scripted::spawn(vec![Turn::ToolCalls(calls), Turn::text(&["done"])]);
+            let mut observed = Vec::new();
+            let text = run_against(&model, &echoing(), |call, result| {
+                observed.push(note(call, result));
+            })
+            .unwrap();
+            assert_eq!(text, "done");
+            (observed, model.requests())
+        }
+
+        #[test]
+        fn a_tool_call_turn_dispatches_and_reports_back_to_the_model() {
+            let (observed, requests) = observed(
+                vec![
+                    vec![Fragment::open(0, "call_1", "echo", "{\"text\":")],
+                    vec![Fragment::more(0, "\"hi\"}")],
+                ],
+                |call, result| (call.clone(), result.clone()),
+            );
+
+            assert_eq!(
+                observed,
+                [(
+                    ToolCall {
+                        id: "call_1".to_owned(),
+                        name: "echo".to_owned(),
+                        arguments: "{\"text\":\"hi\"}".to_owned(),
+                    },
+                    Ok(serde_json::json!({ "echo": "hi" })),
+                )]
+            );
+
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[0]["tools"][0]["function"]["name"], "echo",
+                "the tools ride the first request"
+            );
+            let messages = requests[1]["messages"].as_array().unwrap();
+            assert_eq!(
+                &messages[messages.len() - 2..],
+                &[
+                    serde_json::json!({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": { "name": "echo", "arguments": "{\"text\":\"hi\"}" },
+                        }],
+                    }),
+                    serde_json::json!({
+                        "role": "tool",
+                        "content": "{\"echo\":\"hi\"}",
+                        "tool_call_id": "call_1",
+                    }),
+                ],
+                "the second request carries the call and its answer, in order"
+            );
+        }
+
+        #[test]
+        fn two_tools_in_one_turn_dispatch_in_index_order() {
+            let (observed, requests) = observed(
+                vec![vec![
+                    Fragment::open(0, "call_a", "echo", "{\"text\":\"one\"}"),
+                    Fragment::open(1, "call_b", "nonesuch", "{}"),
+                ]],
+                |call, result| (call.name.clone(), result.is_ok()),
+            );
+
+            assert_eq!(
+                observed,
+                [("echo".to_owned(), true), ("nonesuch".to_owned(), false)],
+                "the observer fires in dispatch order, failures included"
+            );
+
+            let messages = requests[1]["messages"].as_array().unwrap().clone();
+            let tool_answers: Vec<_> = messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .map(|message| message["tool_call_id"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(tool_answers, ["call_a", "call_b"]);
+        }
+
+        /// The unknown tool's Err went back to the model as content, not
+        /// up as a failure — the turn still ended in text.
+        #[test]
+        fn a_failed_dispatch_feeds_the_model_the_words() {
+            let model = Scripted::spawn(vec![
+                Turn::ToolCalls(vec![vec![Fragment::open(0, "call_1", "nonesuch", "{}")]]),
+                Turn::text(&["ok"]),
+            ]);
+
+            let text = run_against(&model, &Registry::default(), |_, _| {}).unwrap();
+
+            assert_eq!(text, "ok");
+            let messages = model.requests()[1]["messages"].as_array().unwrap().clone();
+            let answer = messages.last().unwrap();
+            assert_eq!(answer["role"], "tool");
+            assert!(
+                answer["content"].as_str().unwrap().contains("nonesuch"),
+                "{answer}"
+            );
+        }
+
+        #[test]
+        fn a_turn_that_never_stops_calling_tools_is_a_turn_failure() {
+            let script = std::iter::repeat_n(
+                Turn::ToolCalls(vec![vec![Fragment::open(
+                    0,
+                    "call_1",
+                    "echo",
+                    "{\"text\":\"x\"}",
+                )]]),
+                MAX_TOOL_ITERATIONS,
+            )
+            .collect();
+            let model = Scripted::spawn(script);
+            let registry = echoing();
+
+            let error = run_against(&model, &registry, |_, _| {}).unwrap_err();
+
+            assert_eq!(
+                error,
+                ChatError::ToolLoop {
+                    limit: MAX_TOOL_ITERATIONS
+                }
+            );
+            assert!(error.to_string().contains("16"), "{error}");
+            assert_eq!(model.requests().len(), MAX_TOOL_ITERATIONS);
+        }
+
+        #[test]
+        fn a_plain_text_turn_calls_no_tools_and_asks_once() {
+            let model = Scripted::spawn(vec![Turn::text(&["Hel", "lo"])]);
+
+            let text = run_against(&model, &Registry::standard(), |_, _| {
+                panic!("no tool was called");
+            })
+            .unwrap();
+
+            assert_eq!(text, "Hello");
+            assert_eq!(model.requests().len(), 1);
         }
     }
 }
