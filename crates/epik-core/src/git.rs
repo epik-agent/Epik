@@ -14,6 +14,8 @@
 //! which either did what was asked or failed in git's words.
 
 pub mod commands;
+#[cfg(all(test, unix, feature = "native"))]
+pub mod testing;
 pub mod url;
 
 use std::path::{Path, PathBuf};
@@ -32,7 +34,7 @@ use crate::keystore::Secret;
 use commands::{
     AbortMerge, Add, AddWorktree, Branch, Change, Clone, Command, Commit, DeleteBranch, Diff,
     Entry, Fetch, Hash, Init, ListRemotes, ListWorktrees, Log, Merge, Pull, Push, RemoteEntry,
-    RemoveWorktree, Reset, RevParse, SetConfig, Show, ShowPrefix, Status, Switch, Worktree,
+    RemoveWorktree, Reset, RevParse, SetConfig, Show, ShowPrefix, Status, Switch, WorktreeInfo,
 };
 
 /// A repository on this machine: the directory an init, a clone, or a
@@ -201,7 +203,7 @@ pub fn add_worktree(worktree: AddWorktree) -> Result<Repository> {
 /// [`run`]'s, git's own words on a nonzero exit, or a listing of a
 /// shape git does not produce.
 #[cfg(feature = "native")]
-pub fn list_worktrees(worktrees: ListWorktrees) -> Result<Vec<Worktree>> {
+pub fn list_worktrees(worktrees: ListWorktrees) -> Result<Vec<WorktreeInfo>> {
     ListWorktrees::worktrees(said(&settled(Command::ListWorktrees(worktrees))?))
 }
 

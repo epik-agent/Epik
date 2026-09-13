@@ -468,7 +468,7 @@ pub struct ListWorktrees {
 
 /// One worktree as `git worktree list` reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Worktree {
+pub struct WorktreeInfo {
     pub path: PathBuf,
     /// The commit checked out; none in a bare repository.
     pub head: Option<Hash>,
@@ -490,12 +490,12 @@ impl ListWorktrees {
     ///
     /// A paragraph without a `worktree` line, or a `HEAD` that is not a
     /// hash — neither of which git produces.
-    pub fn worktrees(stdout: &str) -> Result<Vec<Worktree>> {
+    pub fn worktrees(stdout: &str) -> Result<Vec<WorktreeInfo>> {
         stdout
             .split("\n\n")
             .filter(|paragraph| !paragraph.trim().is_empty())
             .map(|paragraph| {
-                let mut worktree = Worktree {
+                let mut worktree = WorktreeInfo {
                     path: PathBuf::new(),
                     head: None,
                     branch: None,
@@ -1430,25 +1430,25 @@ mod tests {
         assert_eq!(
             worktrees,
             [
-                Worktree {
+                WorktreeInfo {
                     path: "/work/repo".into(),
                     head: Some(hash()),
                     branch: Some("main".to_owned()),
                     bare: false,
                 },
-                Worktree {
+                WorktreeInfo {
                     path: "/work/topic".into(),
                     head: Some(hash()),
                     branch: Some("topic".to_owned()),
                     bare: false,
                 },
-                Worktree {
+                WorktreeInfo {
                     path: "/srv/origin.git".into(),
                     head: None,
                     branch: None,
                     bare: true,
                 },
-                Worktree {
+                WorktreeInfo {
                     path: "/work/loose".into(),
                     head: Some(hash()),
                     branch: None,
@@ -1762,46 +1762,16 @@ mod tests {
 #[cfg(all(test, unix, feature = "native"))]
 mod live {
     use super::*;
+    use crate::git::testing::{cloned, committed, head, identified, origin, seeded};
     use crate::git::{
         abort_merge, add, add_worktree, branch, clone, commit, delete_branch, diff, fetch, init,
         list_remotes, list_worktrees, log, merge, pull, push, remove_worktree, reset, rev_parse,
-        set_config, show, status, switch,
+        show, status, switch,
     };
     use crate::temp::Scratch;
 
     fn url(text: &str) -> Url {
         text.parse().unwrap()
-    }
-
-    fn origin() -> Remote {
-        Remote::named("origin".to_owned()).unwrap()
-    }
-
-    /// The identity the tests' commits are made under, unsigned.
-    fn identified(repository: &Repository) {
-        for (key, value) in [
-            ("user.name", "Ada"),
-            ("user.email", "ada@example.com"),
-            ("commit.gpgsign", "false"),
-        ] {
-            set_config(
-                SetConfig::new(repository.clone(), key.to_owned(), value.to_owned()).unwrap(),
-            )
-            .unwrap();
-        }
-    }
-
-    /// `content` written to `name` in `repository`, staged, and
-    /// committed under `subject`: the commit's hash.
-    fn committed(repository: &Repository, name: &str, content: &str, subject: &str) -> Hash {
-        std::fs::write(repository.path().join(name), content).unwrap();
-        add(Add::new(repository.clone(), vec![name.into()]).unwrap()).unwrap();
-        commit(Commit::new(repository.clone(), subject.to_owned()).unwrap()).unwrap();
-        head(repository)
-    }
-
-    fn head(repository: &Repository) -> Hash {
-        rev_parse(RevParse::new(repository.clone(), "HEAD".to_owned()).unwrap()).unwrap()
     }
 
     fn subjects(repository: &Repository) -> Vec<String> {
@@ -1810,36 +1780,6 @@ mod live {
             .into_iter()
             .map(|entry| entry.subject)
             .collect()
-    }
-
-    /// A clone of `origin` at `into` under `scratch`, on `branch` when
-    /// one is named.
-    fn cloned(
-        scratch: &Scratch,
-        origin: &Repository,
-        into: &str,
-        branch: Option<&str>,
-    ) -> Repository {
-        clone(
-            Clone::new(
-                Url::Local(origin.path().to_owned()),
-                scratch.join(into).into(),
-                branch.map(str::to_owned),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    /// A bare origin under `scratch`, and a clone of it with one commit
-    /// of `hello.txt` on `main`, pushed.
-    fn seeded(scratch: &Scratch) -> (Repository, Repository) {
-        let origin = init(Init::new(scratch.join("origin.git").into()).unwrap()).unwrap();
-        let work = cloned(scratch, &origin, "work", None);
-        identified(&work);
-        committed(&work, "hello.txt", "hello\n", "the first commit");
-        push(Push::new(work.clone(), self::origin(), "main".to_owned()).unwrap()).unwrap();
-        (origin, work)
     }
 
     /// The whole vocabulary, end to end and through nothing else: a
