@@ -24,6 +24,7 @@ use super::url::Url;
 pub enum Command {
     Init(Init),
     Clone(Clone),
+    ShowPrefix(ShowPrefix),
     SetConfig(SetConfig),
     Branch(Branch),
     Switch(Switch),
@@ -58,6 +59,7 @@ impl Command {
         match self {
             Self::Init(init) => init.argv(),
             Self::Clone(clone) => clone.argv(),
+            Self::ShowPrefix(prefix) => prefix.argv(),
             Self::SetConfig(config) => config.argv(),
             Self::Branch(branch) => branch.argv(),
             Self::Switch(switch) => switch.argv(),
@@ -271,6 +273,51 @@ impl TryFrom<SerializedClone> for Clone {
 
     fn try_from(serialized: SerializedClone) -> Result<Self> {
         Self::new(serialized.from, serialized.into, serialized.branch)
+    }
+}
+
+/// `git rev-parse --show-prefix`: where `path` sits in its repository,
+/// as the path below the root — empty at the root of a working tree,
+/// bare or linked, so the reading is what makes a path a
+/// [`Repository`]. The one command that runs in a path rather than a
+/// repository, being how a path becomes one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShowPrefix {
+    path: PathBuf,
+}
+
+impl ShowPrefix {
+    /// The prefix of `path`.
+    ///
+    /// # Errors
+    ///
+    /// Epik has no working directory to resolve against, so `path`
+    /// must be absolute.
+    pub fn new(path: PathBuf) -> Result<Self> {
+        absolute("the repository", &path)?;
+        Ok(Self { path })
+    }
+
+    /// The path asked about.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The prefix in `stdout`, as [`ShowPrefix::argv`] asked for it:
+    /// one line, empty at the root.
+    #[must_use]
+    pub fn prefix(stdout: &str) -> &str {
+        stdout.trim()
+    }
+
+    fn argv(&self) -> Vec<String> {
+        vec![
+            "-C".to_owned(),
+            self.path.to_string_lossy().into_owned(),
+            "rev-parse".to_owned(),
+            "--show-prefix".to_owned(),
+        ]
     }
 }
 
@@ -1508,6 +1555,18 @@ mod tests {
     fn a_commit_without_a_message_is_refused_at_the_door() {
         let error = Commit::new(repository(), "  \n".to_owned()).unwrap_err();
         assert_eq!(error.to_string(), "a commit needs a message");
+    }
+
+    #[test]
+    fn the_show_prefix_argv_asks_where_a_path_sits() {
+        let prefix = ShowPrefix::new(PathBuf::from("/work/repo/src")).unwrap();
+        assert_eq!(
+            Command::ShowPrefix(prefix).argv(),
+            ["-C", "/work/repo/src", "rev-parse", "--show-prefix"]
+        );
+        assert!(ShowPrefix::new(PathBuf::from("src")).is_err());
+        assert_eq!(ShowPrefix::prefix("\n"), "");
+        assert_eq!(ShowPrefix::prefix("src/\n"), "src/");
     }
 
     #[test]

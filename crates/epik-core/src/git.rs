@@ -6,8 +6,9 @@
 //! Library code and a model's tool calls both arrive here, so the
 //! command's construction is the one check either gets. Above `run`,
 //! one verb per command, in the list's order, each returning what the
-//! command reads back: a [`Repository`] from [`init`], [`clone`], and
-//! [`add_worktree`]; a [`Hash`](struct@Hash) from [`rev_parse`]; the typed listing
+//! command reads back: a [`Repository`] from [`init`], [`clone`],
+//! [`add_worktree`], and [`Repository::open`], the door a path named
+//! from outside comes through; a [`Hash`](struct@Hash) from [`rev_parse`]; the typed listing
 //! from [`status`], [`log`], [`list_worktrees`], and [`list_remotes`];
 //! the text from [`diff`] and [`show`]; and nothing from the rest,
 //! which either did what was asked or failed in git's words.
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(feature = "native")]
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 #[cfg(feature = "native")]
 use crate::agent::{Agent, Finished};
@@ -31,7 +32,7 @@ use crate::keystore::Secret;
 use commands::{
     AbortMerge, Add, AddWorktree, Branch, Change, Clone, Command, Commit, DeleteBranch, Diff,
     Entry, Fetch, Hash, Init, ListRemotes, ListWorktrees, Log, Merge, Pull, Push, RemoteEntry,
-    RemoveWorktree, Reset, RevParse, SetConfig, Show, Status, Switch, Worktree,
+    RemoveWorktree, Reset, RevParse, SetConfig, Show, ShowPrefix, Status, Switch, Worktree,
 };
 
 /// A repository on this machine: the directory an init, a clone, or a
@@ -45,6 +46,30 @@ impl Repository {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.0
+    }
+}
+
+#[cfg(feature = "native")]
+impl Repository {
+    /// The repository at `path`: the root of a working tree, main or
+    /// linked, or a bare repository — as git judges it, by
+    /// [`ShowPrefix`].
+    ///
+    /// # Errors
+    ///
+    /// A relative `path`; git's own words when `path` is in no
+    /// repository at all; and a `path` inside a repository but below
+    /// its root, which says how far below.
+    pub fn open(path: PathBuf) -> Result<Self> {
+        let finished = settled(Command::ShowPrefix(ShowPrefix::new(path.clone())?))?;
+        let prefix = ShowPrefix::prefix(said(&finished));
+        if prefix.is_empty() {
+            return Ok(Self(path));
+        }
+        bail!(
+            "{} is {prefix} below the root of its repository",
+            path.display()
+        );
     }
 }
 
@@ -378,11 +403,49 @@ fn settle(finished: &Finished) -> Result<()> {
     }
 }
 
-/// This one reaches the runner's private deadline, so it lives here.
+/// These reach what only this module has: the runner's private
+/// deadline, and the one way a path becomes a [`Repository`].
 #[cfg(all(test, unix, feature = "native"))]
 mod tests {
+    use super::url::Url;
     use super::*;
     use crate::temp::Scratch;
+
+    #[test]
+    fn open_takes_a_root_and_refuses_everything_else() {
+        let scratch = Scratch::new("open");
+        let origin = init(Init::new(scratch.join("origin.git").into()).unwrap()).unwrap();
+        let work = clone(
+            Clone::new(
+                Url::Local(origin.path().to_owned()),
+                scratch.join("work").into(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir(work.path().join("src")).unwrap();
+
+        assert_eq!(Repository::open(origin.path().to_owned()).unwrap(), origin);
+        assert_eq!(Repository::open(work.path().to_owned()).unwrap(), work);
+        let below = Repository::open(work.path().join("src")).unwrap_err();
+        assert!(
+            below
+                .to_string()
+                .ends_with("is src/ below the root of its repository"),
+            "{below}"
+        );
+        let outside = Repository::open(scratch.path().into()).unwrap_err();
+        assert!(
+            outside.to_string().contains("not a git repository"),
+            "{outside}"
+        );
+        let relative = Repository::open("work".into()).unwrap_err();
+        assert_eq!(
+            relative.to_string(),
+            "the repository must be an absolute path: work"
+        );
+    }
 
     /// The deadline, exercised on a short fuse rather than the real 60
     /// seconds: a clone from a loopback listener that never answers

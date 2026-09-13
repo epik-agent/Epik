@@ -6,4 +6,5 @@ pub mod git;
 pub mod keystore;
 #[cfg(feature = "native")]
 pub mod temp;
+pub mod tools;
 pub mod tracker;
