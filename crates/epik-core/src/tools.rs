@@ -9,12 +9,17 @@
 //! The wire shapes are the protocol's own: a [`ToolSpec`] is a tool as
 //! a request advertises it, a [`ToolCall`] is a call as the model makes
 //! it. The loop that runs a turn through a registry lives with the
-//! client that speaks to the model. [`Registry::standard`] is every
-//! tool the model gets: [`git`], one tool per command, and
-//! [`current_time`], the one built-in.
+//! client that speaks to the model. Each tool is declared as a
+//! [`Spec`], a row of data with its handler named beside it, and
+//! [`Registry::standard`] is every tool the model gets: [`git`], one
+//! tool per command, and [`CURRENT_TIME`], the one built-in.
 
 #[cfg(feature = "native")]
 pub mod git;
+pub mod spec;
+
+#[cfg(feature = "native")]
+use spec::Spec;
 
 /// The typed reads of a tool's JSON arguments, shared by every tool
 /// module. Each refusal is words for the model: which argument, and
@@ -157,47 +162,6 @@ impl serde::Serialize for ToolCall {
     }
 }
 
-/// The JSON Schema of a tool's parameters, written once here for
-/// every tool module: an [`object`] of named properties, each a typed
-/// value with the sentence the model reads. The mirror of [`arg`].
-pub mod schema {
-    use serde_json::{Value, json};
-
-    /// An object with `properties`, of which `required` must be given.
-    #[must_use]
-    pub fn object(properties: &[(&str, Value)], required: &[&str]) -> Value {
-        let properties: serde_json::Map<String, Value> = properties
-            .iter()
-            .map(|(name, schema)| ((*name).to_owned(), schema.clone()))
-            .collect();
-        json!({ "type": "object", "properties": properties, "required": required })
-    }
-
-    /// A string.
-    #[must_use]
-    pub fn string(description: &str) -> Value {
-        json!({ "type": "string", "description": description })
-    }
-
-    /// A whole number.
-    #[must_use]
-    pub fn integer(description: &str) -> Value {
-        json!({ "type": "integer", "description": description })
-    }
-
-    /// True or false.
-    #[must_use]
-    pub fn boolean(description: &str) -> Value {
-        json!({ "type": "boolean", "description": description })
-    }
-
-    /// An array of strings.
-    #[must_use]
-    pub fn strings(description: &str) -> Value {
-        json!({ "type": "array", "items": { "type": "string" }, "description": description })
-    }
-}
-
 /// What a tool does with its parsed arguments: a JSON answer, or its
 /// failure in words — which the model reads, so say what went wrong.
 type Handler = Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String>>;
@@ -233,13 +197,13 @@ impl Tool {
 pub struct Registry(Vec<Tool>);
 
 impl Registry {
-    /// The registry every real host starts from: [`current_time`] and
+    /// The registry every real host starts from: [`CURRENT_TIME`] and
     /// the git tools.
     #[cfg(feature = "native")]
     #[must_use]
     pub fn standard() -> Self {
         let mut registry = Self::default();
-        registry.register(current_time());
+        registry.register(CURRENT_TIME.tool());
         registry.extend(git::all());
         registry
     }
@@ -289,22 +253,22 @@ impl Registry {
     }
 }
 
-/// The local date-time and UTC offset as JSON.
+/// The one built-in: the local date-time and UTC offset as JSON.
 #[cfg(feature = "native")]
-#[must_use]
-fn current_time() -> Tool {
-    Tool::new(
-        "current_time",
-        "The current local date and time, with the UTC offset.",
-        schema::object(&[], &[]),
-        Box::new(|_| {
-            let now = chrono::Local::now();
-            Ok(serde_json::json!({
-                "local": now.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                "utc_offset": now.offset().to_string(),
-            }))
-        }),
-    )
+pub const CURRENT_TIME: Spec = Spec {
+    name: "current_time",
+    description: "The current local date and time, with the UTC offset.",
+    parameters: &[],
+    handler: current_time,
+};
+
+#[cfg(feature = "native")]
+fn current_time(_: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let now = chrono::Local::now();
+    Ok(serde_json::json!({
+        "local": now.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "utc_offset": now.offset().to_string(),
+    }))
 }
 
 #[cfg(test)]
