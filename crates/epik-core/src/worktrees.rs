@@ -223,14 +223,13 @@ mod tests {
             .to_owned();
 
         let files = scripted::adder();
-        let mut engine = Scripted {
+        let engine = Scripted {
             cwd: repository.path().to_owned(),
             files: files.clone(),
         }
         .start()
         .unwrap();
-        for _ in engine.stdout() {}
-        assert_eq!(engine.wait().unwrap(), Exit::Code(0));
+        assert_eq!(engine.finish().unwrap().exit, Exit::Code(0));
 
         identified(&repository);
         add(Add::new(repository.clone(), files.keys().cloned().collect()).unwrap()).unwrap();

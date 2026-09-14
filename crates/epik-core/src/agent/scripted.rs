@@ -211,14 +211,13 @@ mod tests {
     fn content_with_quotes_and_percent_signs_is_written_whole() {
         let scratch = Scratch::new("scripted-quoting");
         let content = "it's 100% '$HOME' \"quoted\" \\ backslash\n\nno trailing newline";
-        let mut process = Scripted {
+        let process = Scripted {
             cwd: scratch.0.clone(),
             files: [("odd 'name'.txt".into(), content.to_owned())].into(),
         }
         .start()
         .unwrap();
-        for _ in process.stdout() {}
-        assert_eq!(process.wait().unwrap(), Exit::Code(0));
+        assert_eq!(process.finish().unwrap().exit, Exit::Code(0));
         assert_eq!(
             std::fs::read_to_string(scratch.0.join("odd 'name'.txt")).unwrap(),
             content
