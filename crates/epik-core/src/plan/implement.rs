@@ -17,7 +17,7 @@ pub struct Implement<A>(pub A);
 
 /// Everything the agents of a plan said, in the plan's order: a
 /// [`Sum`], so a plan of them returns one.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Narration(pub Vec<Update>);
 
 impl Sum for Narration {

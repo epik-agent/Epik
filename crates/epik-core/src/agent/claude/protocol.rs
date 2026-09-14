@@ -16,6 +16,7 @@
 //! serde ignores unknown fields. A line that is not JSON, or JSON with
 //! no `type`, is nothing at all.
 
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::agent::Update;
@@ -82,7 +83,7 @@ enum Event {
         result: Option<String>,
         #[serde(default)]
         errors: Vec<String>,
-        total_cost_usd: Option<f64>,
+        total_cost_usd: Option<Decimal>,
         usage: Option<Usage>,
     },
     /// Every other event: user turns, hooks, stream events, and
@@ -157,7 +158,7 @@ mod tests {
                     text: "Created `hello.txt` in the working directory containing exactly \
                            `hello`."
                         .to_owned(),
-                    cost_usd: Some(0.316_251),
+                    cost_usd: Some(Decimal::new(316_251, 6)),
                     input_tokens: Some(4),
                     output_tokens: Some(181),
                 },
@@ -230,7 +231,7 @@ mod tests {
         let update = Update::Result {
             ok: false,
             text: "ran aground".to_owned(),
-            cost_usd: Some(0.25),
+            cost_usd: Some(Decimal::new(25, 2)),
             input_tokens: None,
             output_tokens: Some(7),
         };

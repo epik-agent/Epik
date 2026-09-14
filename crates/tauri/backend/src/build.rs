@@ -581,7 +581,7 @@ mod tests {
             record.narration.push(Update::Result {
                 ok: true,
                 text: "done".to_owned(),
-                cost_usd: Some(0.25),
+                cost_usd: Some(rust_decimal::Decimal::new(25, 2)),
                 input_tokens: None,
                 output_tokens: Some(7),
             });
@@ -598,7 +598,10 @@ mod tests {
         assert_eq!(status["exit"]["code"], 0);
         assert_eq!(status["result"]["ok"], true);
         assert_eq!(status["result"]["text"], "done");
-        assert_eq!(status["result"]["cost_usd"], 0.25);
+        assert_eq!(
+            status["result"]["cost_usd"], "0.25",
+            "money crosses as a string"
+        );
         assert_eq!(status["commits"]["branch_advanced"], true);
         assert_eq!(status["commits"]["worktree_clean"], true);
         assert!(status["commits"]["worktree_kept_at"].is_null());

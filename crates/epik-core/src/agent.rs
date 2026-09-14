@@ -11,6 +11,7 @@
 //! [`start`]: Agent::start
 //! [`interpret`]: Agent::interpret
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
@@ -23,7 +24,7 @@ pub mod scripted;
 /// One thing Epik understands from an agent, in the order said. The
 /// typed view is deliberately small: enough to narrate progress and
 /// settle the outcome, no more.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Update {
     /// The session opened: its id, and the model actually speaking.
     Session { id: String, model: String },
@@ -33,11 +34,12 @@ pub enum Update {
     /// files" or "it's running tests", no more.
     ToolUse { name: String },
     /// The terminal line: how the run ended, in the engine's own words,
-    /// with the bill when one was presented.
+    /// with the bill when one was presented — in dollars, to the cent
+    /// and beyond, exactly as billed.
     Result {
         ok: bool,
         text: String,
-        cost_usd: Option<f64>,
+        cost_usd: Option<Decimal>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
     },
