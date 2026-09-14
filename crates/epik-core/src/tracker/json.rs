@@ -136,7 +136,7 @@ impl IssueTracker<String> for JsonTracker {
 mod tests {
     use super::*;
 
-    const ADDER: &str = include_str!("json/fixtures/adder.json");
+    const ADDER: &str = include_str!("../../tests/fixtures/adder/issues.json");
 
     fn adder() -> JsonTracker {
         JsonTracker::read(ADDER).unwrap()

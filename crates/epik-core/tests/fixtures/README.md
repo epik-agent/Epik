@@ -1,0 +1,20 @@
+# Shared fixtures
+
+`adder/` is the project the tests build end to end: a Python library
+with one function, `add`, the least a uv project needs to build and
+test it, one pytest test, and `issues.json`, the issue tracker whose
+three issues together are that library. Each issue's body is the
+relative paths of the files implementing it, one per line, so the
+files' bytes live here once and the tracker only names them. Issues 2
+and 3 depend on issue 1, so `dependents("1")` is the whole project in
+an order a plan can run.
+
+Who reads it: `agent::scripted::adder` includes the source files, the
+`tracker::json` tests include `issues.json`, the worktrees test and
+`tests/adder.rs` run the scripted engine over both.
+
+To check the project itself stands up:
+
+```sh
+cd adder && uv run pytest
+```

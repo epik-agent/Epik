@@ -96,25 +96,25 @@ fn said(event: &Event) -> String {
 
 /// A Python library with one function and the least uv needs to
 /// build and test it, by path relative to a project root; see
-/// fixtures/README.md. What an engine under test writes.
+/// tests/fixtures/README.md. What an engine under test writes.
 #[must_use]
 pub fn adder() -> BTreeMap<PathBuf, String> {
     [
         (
             ".python-version",
-            include_str!("scripted/fixtures/adder/.python-version"),
+            include_str!("../../tests/fixtures/adder/.python-version"),
         ),
         (
             "pyproject.toml",
-            include_str!("scripted/fixtures/adder/pyproject.toml"),
+            include_str!("../../tests/fixtures/adder/pyproject.toml"),
         ),
         (
             "src/adder/__init__.py",
-            include_str!("scripted/fixtures/adder/src/adder/__init__.py"),
+            include_str!("../../tests/fixtures/adder/src/adder/__init__.py"),
         ),
         (
             "tests/test_add.py",
-            include_str!("scripted/fixtures/adder/tests/test_add.py"),
+            include_str!("../../tests/fixtures/adder/tests/test_add.py"),
         ),
     ]
     .into_iter()

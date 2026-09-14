@@ -20,7 +20,7 @@ use epik_core::tracker::IssueTracker;
 use epik_core::tracker::json::JsonTracker;
 use epik_core::worktrees::Worktrees;
 
-const TRACKER: &str = include_str!("../src/tracker/json/fixtures/adder.json");
+const TRACKER: &str = include_str!("fixtures/adder/issues.json");
 
 #[tokio::test]
 async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_branch() {
