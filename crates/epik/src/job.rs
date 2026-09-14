@@ -21,7 +21,7 @@
 //! in production, an inline shell script in tests, the same asymmetry as
 //! CLI-in-prod/git2-in-tests — and one drainer thread folds its lines
 //! into the shared [`Record`]: stdout lines interpreted through
-//! [`claude::interpret`] into narration, then the exit, and at the
+//! [`ClaudeCode::interpret`] into narration, then the exit, and at the
 //! end the commit *observation* — did the branch advance past the base,
 //! is the worktree clean. Epik observes; the Agent commits. A clean
 //! worktree is removed; a dirty one is left where it is and its path
@@ -36,7 +36,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
 use crate::process::{Exit, Process};
 use crate::temp;
-use epik_core::agent::claude::{self, Update};
+use epik_core::agent::claude::ClaudeCode;
+use epik_core::agent::{Agent, Update};
 // Moved to epik-core; re-exported here until the rest of job follows.
 pub use epik_core::agent;
 
@@ -396,7 +397,7 @@ impl Record {
 
     /// Folds one line of stdout in: the narration it interprets to.
     fn absorb_stdout(&mut self, line: &str) {
-        self.narration.extend(claude::interpret(line));
+        self.narration.extend(ClaudeCode::interpret(line));
         if self.narration.len() > NARRATION_CAP {
             let excess = self.narration.len() - NARRATION_CAP;
             self.narration.drain(..excess);

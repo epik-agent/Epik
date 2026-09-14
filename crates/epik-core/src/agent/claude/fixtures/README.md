@@ -30,8 +30,9 @@ echo "run ls, then create files a.txt, b.txt, and c.txt with separate writes" \
       --max-turns 1 | tail -1 > result_error.json
 ```
 
-The interpreter is deliberately unknown-tolerant, so a newer CLI's
+The reading in [`protocol.rs`] is deliberately unknown-tolerant, so a newer CLI's
 extra fields or event types must not break the tests; recapture when
 the *modelled* fields move.
 
 [`ClaudeCode`]: ../../claude.rs
+[`protocol.rs`]: ../protocol.rs

@@ -12,7 +12,8 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use epik_core::agent::claude::{ClaudeCode, Update, interpret};
+use epik_core::agent::claude::ClaudeCode;
+use epik_core::agent::{Agent, Update};
 use epik_core::process::{Exit, Process};
 use epik_core::temp::Scratch;
 
@@ -40,7 +41,10 @@ fn canned(lines: &[&str], coda: &str) -> Process {
 /// Reads the whole run: every interpreted Update in order, and the
 /// final exit.
 fn updates_of(mut process: Process) -> (Vec<Update>, Result<Exit, String>) {
-    let updates = process.stdout().flat_map(|line| interpret(&line)).collect();
+    let updates = process
+        .stdout()
+        .flat_map(|line| ClaudeCode::interpret(&line))
+        .collect();
     (
         updates,
         process.wait().map_err(|error| format!("{error:#}")),
@@ -109,7 +113,7 @@ fn dropping_an_engine_mid_stream_takes_it_with_it() {
     // and the engine now hangs.
     let mut lines = engine.stdout();
     assert!(lines.any(|line| {
-        interpret(&line)
+        ClaudeCode::interpret(&line)
             .iter()
             .any(|update| matches!(update, Update::Session { .. }))
     }));
