@@ -1,4 +1,5 @@
 // Moved to epik-core; re-exported here until the rest follows.
+pub use epik_core::github;
 #[cfg(feature = "native")]
 pub use epik_core::process;
 pub mod chat;
@@ -7,17 +8,13 @@ pub mod config;
 #[cfg(all(feature = "native", unix))]
 pub mod job;
 // Compiled without `native` so the vocabulary stays wasm-clean, though
-// nothing but native code calls into it yet — likewise `github` and
-// `tools`.
+// nothing but native code calls into it yet — likewise `tools`.
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub mod feature;
 #[cfg(all(feature = "native", unix))]
 pub mod forge;
 #[cfg(feature = "native")]
 pub mod git;
-#[cfg(feature = "serde")]
-#[cfg_attr(not(feature = "native"), allow(dead_code))]
-pub mod github;
 pub mod keystore;
 // The vocabulary and the fold compile everywhere, like `feature`; only
 // the `Log` inside needs the host.

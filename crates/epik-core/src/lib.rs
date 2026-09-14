@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod dag;
 pub mod git;
+pub mod github;
 pub mod keystore;
 pub mod model_tools;
 #[cfg(feature = "native")]

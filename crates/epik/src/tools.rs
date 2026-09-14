@@ -179,6 +179,19 @@ impl Tool {
     }
 }
 
+/// A tool of epik-core's table as one of these: the same four parts,
+/// until this port follows the rest into epik-core.
+impl From<epik_core::model_tools::Tool> for Tool {
+    fn from(tool: epik_core::model_tools::Tool) -> Self {
+        Self {
+            name: tool.name().to_owned(),
+            description: tool.description().to_owned(),
+            parameters: tool.parameters().clone(),
+            handler: Box::new(move |arguments| tool.call(arguments)),
+        }
+    }
+}
+
 /// The tools on offer this turn.
 #[derive(Default)]
 pub struct Registry(Vec<Tool>);

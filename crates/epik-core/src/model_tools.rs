@@ -12,10 +12,13 @@
 //! client that speaks to the model. Each tool is declared as a
 //! [`Spec`], a row of data with its handler named beside it, and
 //! [`Registry::standard`] is every tool the model gets: [`git`], one
-//! tool per command, and [`CURRENT_TIME`], the one built-in.
+//! tool per command, and [`CURRENT_TIME`], the one built-in. The
+//! [`github`] verbs are a table too, bound to a client by the host.
 
 #[cfg(feature = "native")]
 pub mod git;
+#[cfg(feature = "native")]
+pub mod github;
 pub mod spec;
 
 #[cfg(feature = "native")]
@@ -189,6 +192,33 @@ impl Tool {
             parameters,
             handler,
         }
+    }
+
+    /// What the model calls it.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What it is for.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// The JSON Schema of its arguments.
+    #[must_use]
+    pub fn parameters(&self) -> &serde_json::Value {
+        &self.parameters
+    }
+
+    /// Runs it on parsed arguments: the answer, or the refusal in words.
+    ///
+    /// # Errors
+    ///
+    /// The handler's own words.
+    pub fn call(&self, arguments: &serde_json::Value) -> Result<serde_json::Value, String> {
+        (self.handler)(arguments)
     }
 }
 

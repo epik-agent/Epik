@@ -17,8 +17,10 @@ use super::Tool;
 /// or why not, for the model.
 pub type Handler = fn(&Value) -> Result<Value>;
 
-/// One tool, as data.
-pub struct Spec {
+/// One tool, as data. `H` is the handler's shape: a [`Handler`] over
+/// the arguments alone, unless the table binds each row to something
+/// more — a client, say — and names that shape instead.
+pub struct Spec<H = Handler> {
     /// What the model calls it.
     pub name: &'static str,
     /// What it is for, in a sentence for the model.
@@ -26,10 +28,10 @@ pub struct Spec {
     /// What it takes, in the order the schema lists them.
     pub parameters: &'static [Param],
     /// What runs it.
-    pub handler: Handler,
+    pub handler: H,
 }
 
-impl Spec {
+impl<H> Spec<H> {
     /// The JSON Schema of the parameters: an object of the properties,
     /// naming the required ones.
     #[must_use]
@@ -47,7 +49,9 @@ impl Spec {
             .collect();
         json!({ "type": "object", "properties": properties, "required": required })
     }
+}
 
+impl Spec {
     /// The tool this row describes.
     #[must_use]
     pub fn tool(&self) -> Tool {
@@ -100,6 +104,8 @@ pub enum Kind {
     Boolean,
     /// An array of strings.
     Strings,
+    /// One of these strings.
+    OneOf(&'static [&'static str]),
 }
 
 impl Kind {
@@ -112,6 +118,11 @@ impl Kind {
             Self::Strings => json!({
                 "type": "array",
                 "items": { "type": "string" },
+                "description": description,
+            }),
+            Self::OneOf(choices) => json!({
+                "type": "string",
+                "enum": choices,
                 "description": description,
             }),
         }
@@ -138,6 +149,7 @@ mod tests {
             optional("times", Kind::Integer, "How many times."),
             optional("loudly", Kind::Boolean, "Whether to shout."),
             optional("also", Kind::Strings, "Who else."),
+            optional("how", Kind::OneOf(&["softly", "loudly"]), "How."),
         ],
         handler: greet,
     };
@@ -156,6 +168,11 @@ mod tests {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Who else.",
+                    },
+                    "how": {
+                        "type": "string",
+                        "enum": ["softly", "loudly"],
+                        "description": "How.",
                     },
                 },
                 "required": ["name"],

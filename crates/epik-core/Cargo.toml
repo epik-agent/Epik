@@ -7,7 +7,7 @@ edition = "2024"
 # The machinery of an actual desktop: process supervision, and the
 # runtime a plan's tasks run on. Off by default so the crate stays
 # wasm-clean for the frontend.
-native = ["chrono/clock", "dep:libc", "dep:tokio"]
+native = ["chrono/clock", "dep:libc", "dep:tokio", "dep:ureq"]
 # Test infrastructure, for this crate's tests and its dependents': the
 # scratch directory. No shipping build enables it.
 testing = ["native"]
@@ -23,6 +23,8 @@ serde_json = "1"
 # A plan runs its tasks on the blocking pool, counts them with a
 # semaphore, and waits on the JoinSet; nothing else here is async.
 tokio = { version = "1", features = ["rt", "sync", "macros"], optional = true }
+# GitHub, spoken directly and blocking: the host's async is not ours.
+ureq = { version = "3", features = ["json"], optional = true }
 url = "2"
 
 [lints]

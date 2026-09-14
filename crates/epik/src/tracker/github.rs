@@ -1,8 +1,9 @@
-//! GitHub as a tracker: the issue verbs, and only those.
+//! GitHub as a tracker: the issue verbs, and only those, and the
+//! reading of an issue's graph in the plan's vocabulary.
 
 use super::Tracker;
-use crate::feature::{Feature, IssueId, Plan};
-use crate::github::{GitHub, Repo, fetched};
+use crate::feature::{self, Feature, IssueId, Plan};
+use crate::github::{GitHub, IssueGraph, Repo, State};
 
 /// The [`Tracker`] seam, spoken by GitHub: issue verbs only, each one of
 /// this module's verbs with its errors rendered in words a model reads.
@@ -52,9 +53,82 @@ impl Tracker for GitHubTracker<'_> {
     }
 }
 
+/// An [`IssueGraph`] in the plan's vocabulary: numbers become ids, the
+/// edges keep title and state, and the body stays behind — a plan carries
+/// what schedules and renders, nothing more.
+fn fetched(graph: IssueGraph) -> feature::Node {
+    feature::Node {
+        issue: domain(graph.issue.number, graph.issue.title, graph.issue.state),
+        children: graph
+            .sub_issues
+            .iter()
+            .map(|edge| IssueId::from(edge.number))
+            .collect(),
+        blockers: graph
+            .blocked_by
+            .into_iter()
+            .map(|edge| domain(edge.number, edge.title, edge.state))
+            .collect(),
+    }
+}
+
+fn domain(number: u64, title: String, state: State) -> feature::Issue {
+    feature::Issue {
+        id: IssueId::from(number),
+        title,
+        closed: state == State::Closed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::{Edge, Issue};
+
+    fn edge(number: u64, state: State) -> Edge {
+        Edge {
+            number,
+            title: format!("issue {number}"),
+            state,
+        }
+    }
+
+    fn graph(number: u64, sub_issues: Vec<Edge>, blocked_by: Vec<Edge>) -> IssueGraph {
+        IssueGraph {
+            issue: Issue {
+                number,
+                title: format!("issue {number}"),
+                body: "the body stays behind".to_owned(),
+                state: State::Open,
+            },
+            sub_issues,
+            blocked_by,
+        }
+    }
+
+    #[test]
+    fn a_graph_speaks_the_plans_vocabulary() {
+        let node = fetched(graph(
+            102,
+            vec![edge(105, State::Open), edge(106, State::Closed)],
+            vec![],
+        ));
+        assert_eq!(node.issue.id, IssueId::from(102));
+        assert!(!node.issue.closed);
+        assert_eq!(node.children, [IssueId::from(105), IssueId::from(106)]);
+        assert!(node.blockers.is_empty());
+    }
+
+    #[test]
+    fn a_blocker_carries_the_state_that_decides_whether_it_holds() {
+        let node = fetched(graph(106, vec![], vec![edge(105, State::Open)]));
+        assert!(node.children.is_empty());
+        assert_eq!(node.blockers.len(), 1);
+        assert_eq!(node.blockers[0].id, IssueId::from(105));
+        assert!(!node.blockers[0].closed);
+        let closed = fetched(graph(106, vec![], vec![edge(105, State::Closed)]));
+        assert!(closed.blockers[0].closed);
+    }
 
     #[test]
     fn the_tracker_renders_a_github_refusal_in_words() {
