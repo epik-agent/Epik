@@ -324,7 +324,7 @@ and the MCP door forwards to it — never a second supervisor.
 
 Every capability has entered Epik the same way twice now: a vocabulary,
 a trait, a scripted implementation, and thin hosts that add only what
-their transport demands. `ChatModel` is to chat what `CodingAgent` is to
+their transport demands. `ChatModel` is to chat what `Agent` is to
 implementation. The other recurring motif is #70's lesson generalized:
 a guarantee that lives in a prompt holds for one agent on a good day;
 guarantees worth having migrate into machinery — which is what the

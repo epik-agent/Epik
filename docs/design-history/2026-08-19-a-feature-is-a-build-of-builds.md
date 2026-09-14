@@ -22,7 +22,7 @@ sub-issue graph, ensures the feature branch, and folds blocked-by edges into a
 ready set with `ready()`; `run/issue.rs` walks one issue to a verdict. Those
 semantics are validated by real builds and are what this design ports. The
 *code* is not what is ported: it was written against the Actions-shaped
-`CodingAgent`/`Task`/`Budget` vocabulary that the 2026-08-15 restart
+`Agent`/`Task`/`Budget` vocabulary that the 2026-08-15 restart
 deliberately de-generalized, and it schedules in sequential rounds, which is the
 one property we are here to change.
 
