@@ -4,11 +4,7 @@
 //! An [`IssueTracker`] answers for issues and nothing else: what each
 //! one says, where it stands, and which issues wait on which. The
 //! order comes out as a [`Dag`] of ids, which is what a plan is built
-//! from. `json`, behind the testing feature, is a tracker read from one
-//! file, for tests.
-
-#[cfg(feature = "testing")]
-pub mod json;
+//! from.
 
 use anyhow::Result;
 

@@ -46,33 +46,9 @@ impl<A: Agent + Clone + Send + Sync> Task for Implement<A> {
     }
 }
 
-#[cfg(all(test, unix, feature = "testing"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::scripted::Scripted;
-    use crate::temp::Scratch;
-
-    #[test]
-    fn a_scripted_agent_runs_as_a_task_and_returns_what_it_said() {
-        let scratch = Scratch::new("implement");
-        let task = Implement(Scripted {
-            cwd: scratch.0.clone(),
-            files: [("note.txt".into(), "noted\n".to_owned())].into(),
-        });
-        let Narration(updates) = task.run().unwrap();
-        assert!(matches!(updates[0], Update::Session { .. }));
-        assert_eq!(
-            updates[1],
-            Update::ToolUse {
-                name: "Write".to_owned()
-            }
-        );
-        assert!(matches!(updates[2], Update::Result { ok: true, .. }));
-        assert_eq!(
-            std::fs::read_to_string(scratch.0.join("note.txt")).unwrap(),
-            "noted\n"
-        );
-    }
 
     #[test]
     fn narrations_sum_in_order() {

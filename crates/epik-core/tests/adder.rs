@@ -1,26 +1,86 @@
-//! The whole loop, end to end, with nothing real in it: a tracker read
-//! from a file says what the adder library is and which issue waits on
-//! which; a plan of scripted agents implements it in a worktree of a
-//! bare origin; the work is committed and pushed; the worktree goes;
-//! and a fresh clone holds the library.
+//! The adder library, built end to end with nothing real in it: a
+//! scripted agent, or a plan of them under a tracker read from a file,
+//! implements it in a worktree of a bare origin; the work is committed
+//! and pushed; the worktree goes; and a fresh clone holds the library.
 
 #![cfg(all(feature = "testing", unix))]
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use epik_core::agent::Update;
-use epik_core::agent::scripted::{self, Scripted, assert_written};
+use epik_core::agent::{Agent, Update};
 use epik_core::git::testing::{branch_of, cloned, committed_all, identified, pushed, seeded};
 use epik_core::git::url::Url;
 use epik_core::plan::implement::Narration;
-use epik_core::plan::{Implement, Plan, ProcessSlots};
+use epik_core::plan::{Implement, Plan, ProcessSlots, Task};
+use epik_core::process::Exit;
 use epik_core::temp::Scratch;
 use epik_core::tracker::IssueTracker;
-use epik_core::tracker::json::JsonTracker;
 use epik_core::worktrees::Worktrees;
 
+mod support;
+use support::json_tracker::JsonTracker;
+use support::scripted::{self, Scripted, assert_written};
+
 const TRACKER: &str = include_str!("fixtures/adder/issues.json");
+
+#[test]
+fn a_scripted_agent_runs_as_a_task_and_returns_what_it_said() {
+    let scratch = Scratch::new("implement");
+    let task = Implement(Scripted {
+        cwd: scratch.0.clone(),
+        files: [("note.txt".into(), "noted\n".to_owned())].into(),
+    });
+    let Narration(updates) = task.run().unwrap();
+    assert!(matches!(updates[0], Update::Session { .. }));
+    assert_eq!(
+        updates[1],
+        Update::ToolUse {
+            name: "Write".to_owned()
+        }
+    );
+    assert!(matches!(updates[2], Update::Result { ok: true, .. }));
+    assert_eq!(
+        std::fs::read_to_string(scratch.0.join("note.txt")).unwrap(),
+        "noted\n"
+    );
+}
+
+/// The loop with one agent and no plan: a bare origin, a worktree of
+/// it, the engine writing there, a commit and a push, the worktree
+/// gone with its drop, and the work back out by a fresh clone.
+#[test]
+fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
+    let scratch = Scratch::new("worktrees-adder");
+    let (bare, _) = seeded(&scratch);
+    let url = Url::Local(bare.path().to_owned());
+    let worktrees = Worktrees::new(scratch.0.join("root"));
+    let linked = worktrees.add(&url).unwrap();
+    let repository = linked.worktree().clone();
+    let branch = branch_of(&repository);
+
+    let files = scripted::adder();
+    let engine = Scripted {
+        cwd: repository.path().to_owned(),
+        files: files.clone(),
+    }
+    .start()
+    .unwrap();
+    assert_eq!(engine.finish().unwrap().exit, Exit::Code(0));
+
+    identified(&repository);
+    committed_all(
+        &repository,
+        files.keys().cloned().collect(),
+        "the adder library",
+    );
+    pushed(&repository, &branch);
+    drop(linked);
+    assert!(!repository.path().exists(), "the worktree removed itself");
+
+    let check = cloned(&scratch, &bare, "check", Some(&branch));
+    assert_written(check.path(), &files);
+}
 
 #[tokio::test]
 async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_branch() {

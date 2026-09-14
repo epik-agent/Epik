@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::Update;
+use epik_core::agent::Update;
 
 /// One event, as the script says one per line.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

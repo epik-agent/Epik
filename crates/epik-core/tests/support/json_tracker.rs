@@ -1,14 +1,13 @@
-//! A tracker read from one JSON file, for tests: a list of issues, each
-//! with an id, a title, a body, a status, and the ids it depends on.
-//! Statuses are plain strings.
+//! A tracker read from one JSON file: a list of issues, each with an
+//! id, a title, a body, a status, and the ids it depends on. Statuses
+//! are plain strings.
 
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
+use epik_core::dag::{Dag, Node};
+use epik_core::tracker::{IssueId, IssueTracker};
 use serde::Deserialize;
-
-use super::{IssueId, IssueTracker};
-use crate::dag::{Dag, Node};
 
 /// The issues of one JSON file, in the file's order.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -136,7 +135,7 @@ impl IssueTracker<String> for JsonTracker {
 mod tests {
     use super::*;
 
-    const ADDER: &str = include_str!("../../tests/fixtures/adder/issues.json");
+    const ADDER: &str = include_str!("../fixtures/adder/issues.json");
 
     fn adder() -> JsonTracker {
         JsonTracker::read(ADDER).unwrap()

@@ -195,49 +195,6 @@ mod tests {
         assert!(root.is_dir(), "and only the clone");
     }
 
-    /// The whole loop an agent's source goes through: a bare origin, a
-    /// worktree of it, an engine writing there, a commit and a push,
-    /// the worktree gone with its drop, and the work back out of the
-    /// origin by a fresh clone made outside `Worktrees`.
-    #[cfg(feature = "testing")]
-    #[test]
-    fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
-        use crate::agent::Agent;
-        use crate::agent::scripted::{self, Scripted, assert_written};
-        use crate::git::testing::{branch_of, cloned, committed_all, identified, pushed};
-        use crate::process::Exit;
-
-        let scratch = Scratch::new("worktrees-adder");
-        let (bare, _) = seeded(&scratch);
-        let url = Url::Local(bare.path().to_owned());
-        let worktrees = Worktrees::new(scratch.0.join("root"));
-        let linked = worktrees.add(&url).unwrap();
-        let repository = linked.worktree().clone();
-        let branch = branch_of(&repository);
-
-        let files = scripted::adder();
-        let engine = Scripted {
-            cwd: repository.path().to_owned(),
-            files: files.clone(),
-        }
-        .start()
-        .unwrap();
-        assert_eq!(engine.finish().unwrap().exit, Exit::Code(0));
-
-        identified(&repository);
-        committed_all(
-            &repository,
-            files.keys().cloned().collect(),
-            "the adder library",
-        );
-        pushed(&repository, &branch);
-        drop(linked);
-        assert!(!repository.path().exists(), "the worktree removed itself");
-
-        let check = cloned(&scratch, &bare, "check", Some(&branch));
-        assert_written(check.path(), &files);
-    }
-
     #[test]
     fn add_needs_a_url_git_can_clone() {
         let scratch = Scratch::new("worktrees-unclonable");

@@ -9,9 +9,10 @@ files' bytes live here once and the tracker only names them. Issues 2
 and 3 depend on issue 1, so `dependents("1")` is the whole project in
 an order a plan can run.
 
-Who reads it: `agent::scripted::adder` includes the source files, the
-`tracker::json` tests include `issues.json`, the worktrees test and
-`tests/adder.rs` run the scripted engine over both.
+Who reads it: the scripted engine in `../support/scripted.rs` includes
+the source files as `adder()`, the JSON tracker in
+`../support/json_tracker.rs` reads `issues.json`, and `adder.rs` runs
+the engine over both.
 
 To check the project itself stands up:
 

@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use super::{Agent, Update};
-use crate::process::Process;
-use crate::temp;
+use epik_core::agent::{Agent, Update};
+use epik_core::process::Process;
+use epik_core::temp;
 use protocol::Event;
 
 /// The files an engine would write, and where.
@@ -96,25 +96,25 @@ fn said(event: &Event) -> String {
 
 /// A Python library with one function and the least uv needs to
 /// build and test it, by path relative to a project root; see
-/// tests/fixtures/README.md. What an engine under test writes.
+/// ../fixtures/README.md. What an engine under test writes.
 #[must_use]
 pub fn adder() -> BTreeMap<PathBuf, String> {
     [
         (
             ".python-version",
-            include_str!("../../tests/fixtures/adder/.python-version"),
+            include_str!("../fixtures/adder/.python-version"),
         ),
         (
             "pyproject.toml",
-            include_str!("../../tests/fixtures/adder/pyproject.toml"),
+            include_str!("../fixtures/adder/pyproject.toml"),
         ),
         (
             "src/adder/__init__.py",
-            include_str!("../../tests/fixtures/adder/src/adder/__init__.py"),
+            include_str!("../fixtures/adder/src/adder/__init__.py"),
         ),
         (
             "tests/test_add.py",
-            include_str!("../../tests/fixtures/adder/tests/test_add.py"),
+            include_str!("../fixtures/adder/tests/test_add.py"),
         ),
     ]
     .into_iter()
@@ -149,8 +149,8 @@ fn quoted(text: impl AsRef<Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::Exit;
-    use crate::temp::Scratch;
+    use epik_core::process::Exit;
+    use epik_core::temp::Scratch;
 
     #[test]
     fn the_files_are_written_and_every_word_arrives() {
