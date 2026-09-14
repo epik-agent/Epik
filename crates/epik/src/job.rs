@@ -36,9 +36,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
 use crate::process::{Exit, Line, Process};
 use crate::temp;
-use epik_core::coding::agent::claude::{self, Update};
+use epik_core::agent::claude::{self, Update};
 // Moved to epik-core; re-exported here until the rest of job follows.
-pub use epik_core::coding::agent;
+pub use epik_core::agent;
 
 /// A job as ordered: the prompt, the repository — a git URL, of which
 /// a local path is one — the branch to build on, and the base to start

@@ -12,12 +12,12 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use epik_core::coding::agent::claude::{ClaudeCode, Update, interpret};
+use epik_core::agent::claude::{ClaudeCode, Update, interpret};
 use epik_core::process::{Exit, Line, Process};
 use epik_core::temp::Scratch;
 
-const SESSION: &str = include_str!("../src/coding/agent/claude/fixtures/session.jsonl");
-const RESULT_ERROR: &str = include_str!("../src/coding/agent/claude/fixtures/result_error.json");
+const SESSION: &str = include_str!("../src/agent/claude/fixtures/session.jsonl");
+const RESULT_ERROR: &str = include_str!("../src/agent/claude/fixtures/result_error.json");
 
 /// The scripted engine: `sh -c`, from `/`, saying `lines` — one printf
 /// argument each, single-quoted for the shell — and then running
