@@ -1,6 +1,9 @@
-#![allow(dead_code)]
+//! A plan: tasks and the order among them, run as the order allows.
+//! [`Task`] is the work, [`Implement`] is an agent's run as one, and
+//! [`Plan::execute`] runs them all in [`ProcessSlots`].
 
-mod task;
+pub mod implement;
+pub mod task;
 
 use std::iter::{Sum, repeat_with};
 use std::num::NonZeroUsize;
@@ -11,11 +14,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::dag::Dag;
-use task::Task;
+pub use implement::Implement;
+pub use task::Task;
 
 /// Tasks and the order among them: a task runs once every task before
 /// it has.
-type Plan<T> = Dag<T>;
+pub type Plan<T> = Dag<T>;
 
 impl<T> Plan<T>
 where

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "1",
+    "title": "Project scaffolding",
+    "body": "pyproject.toml\n.python-version",
+    "status": "open"
+  },
+  {
+    "id": "2",
+    "title": "The adder library",
+    "body": "src/adder/__init__.py",
+    "status": "open",
+    "depends_on": ["1"]
+  },
+  {
+    "id": "3",
+    "title": "The adder test",
+    "body": "tests/test_add.py",
+    "status": "open",
+    "depends_on": ["1"]
+  }
+]

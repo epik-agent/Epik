@@ -14,7 +14,7 @@
 //! which either did what was asked or failed in git's words.
 
 pub mod commands;
-#[cfg(all(test, unix, feature = "native"))]
+#[cfg(all(unix, feature = "native", any(test, feature = "testing")))]
 pub mod testing;
 pub mod url;
 

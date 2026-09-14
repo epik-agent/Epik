@@ -122,6 +122,23 @@ pub fn adder() -> BTreeMap<PathBuf, String> {
     .collect()
 }
 
+/// Every file of `files` under `root`, byte for byte: what an engine
+/// wrote, checked.
+///
+/// # Panics
+///
+/// A file missing or different, naming it.
+pub fn assert_written(root: &Path, files: &BTreeMap<PathBuf, String>) {
+    for (path, content) in files {
+        assert_eq!(
+            std::fs::read_to_string(root.join(path)).unwrap(),
+            *content,
+            "{}",
+            path.display()
+        );
+    }
+}
+
 /// `text` as one shell word, whatever it holds: single-quoted, with
 /// each single quote inside written as `'\''`.
 fn quoted(text: impl AsRef<Path>) -> String {
@@ -148,14 +165,7 @@ mod tests {
         let lines: Vec<String> = process.stdout().collect();
         assert_eq!(process.wait().unwrap(), Exit::Code(0));
 
-        for (path, content) in &files {
-            assert_eq!(
-                std::fs::read_to_string(scratch.0.join(path)).unwrap(),
-                *content,
-                "{}",
-                path.display()
-            );
-        }
+        assert_written(&scratch.0, &files);
 
         let events: Vec<Event> = lines
             .iter()

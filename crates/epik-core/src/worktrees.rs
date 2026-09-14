@@ -203,10 +203,8 @@ mod tests {
     #[test]
     fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
         use crate::agent::Agent;
-        use crate::agent::scripted::{self, Scripted};
-        use crate::git::commands::{Add, Commit, Push};
-        use crate::git::testing::{cloned, identified, origin};
-        use crate::git::{add, commit, push};
+        use crate::agent::scripted::{self, Scripted, assert_written};
+        use crate::git::testing::{branch_of, cloned, committed_all, identified, pushed};
         use crate::process::Exit;
 
         let scratch = Scratch::new("worktrees-adder");
@@ -215,12 +213,7 @@ mod tests {
         let worktrees = Worktrees::new(scratch.0.join("root"));
         let linked = worktrees.add(&url).unwrap();
         let repository = linked.worktree().clone();
-        let branch = repository
-            .path()
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap()
-            .to_owned();
+        let branch = branch_of(&repository);
 
         let files = scripted::adder();
         let engine = Scripted {
@@ -232,21 +225,17 @@ mod tests {
         assert_eq!(engine.finish().unwrap().exit, Exit::Code(0));
 
         identified(&repository);
-        add(Add::new(repository.clone(), files.keys().cloned().collect()).unwrap()).unwrap();
-        commit(Commit::new(repository.clone(), "the adder library".to_owned()).unwrap()).unwrap();
-        push(Push::new(repository.clone(), origin(), branch.clone()).unwrap()).unwrap();
+        committed_all(
+            &repository,
+            files.keys().cloned().collect(),
+            "the adder library",
+        );
+        pushed(&repository, &branch);
         drop(linked);
         assert!(!repository.path().exists(), "the worktree removed itself");
 
         let check = cloned(&scratch, &bare, "check", Some(&branch));
-        for (path, content) in &files {
-            assert_eq!(
-                std::fs::read_to_string(check.path().join(path)).unwrap(),
-                *content,
-                "{}",
-                path.display()
-            );
-        }
+        assert_written(check.path(), &files);
     }
 
     #[test]

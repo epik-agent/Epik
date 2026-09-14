@@ -1,9 +1,13 @@
 //! The fixtures the live git tests share: a repository with an
 //! identity and a commit in it, made through the verbs above.
 
-use super::commands::{Add, Clone, Commit, Hash, Init, Push, Remote, RevParse, SetConfig};
+use std::path::PathBuf;
+
+use super::commands::{
+    Add, Clone, Commit, Hash, Init, ListWorktrees, Push, Remote, RevParse, SetConfig,
+};
 use super::url::Url;
-use super::{Repository, add, clone, commit, init, push, rev_parse, set_config};
+use super::{Repository, add, clone, commit, init, list_worktrees, push, rev_parse, set_config};
 use crate::temp::Scratch;
 
 /// The remote a clone names its source.
@@ -34,6 +38,37 @@ pub fn committed(repository: &Repository, name: &str, content: &str, subject: &s
 
 pub fn head(repository: &Repository) -> Hash {
     rev_parse(RevParse::new(repository.clone(), "HEAD".to_owned()).unwrap()).unwrap()
+}
+
+/// `paths`, already written in `repository` by whoever, staged and
+/// committed under `subject`: the commit's hash.
+pub fn committed_all(repository: &Repository, paths: Vec<PathBuf>, subject: &str) -> Hash {
+    add(Add::new(repository.clone(), paths).unwrap()).unwrap();
+    commit(Commit::new(repository.clone(), subject.to_owned()).unwrap()).unwrap();
+    head(repository)
+}
+
+/// The branch `repository` has checked out, as git lists it. Git lists
+/// paths as it resolved them, symlinks followed, so the comparison is
+/// between resolved paths.
+pub fn branch_of(repository: &Repository) -> String {
+    let path = repository.path().canonicalize().unwrap();
+    list_worktrees(ListWorktrees::new(repository.clone()))
+        .unwrap()
+        .into_iter()
+        .find(|worktree| {
+            worktree
+                .path
+                .canonicalize()
+                .is_ok_and(|listed| listed == path)
+        })
+        .and_then(|worktree| worktree.branch)
+        .expect("a checked-out branch")
+}
+
+/// `branch` of `repository` pushed to its origin.
+pub fn pushed(repository: &Repository, branch: &str) {
+    push(Push::new(repository.clone(), origin(), branch.to_owned()).unwrap()).unwrap();
 }
 
 /// A clone of `origin` at `into` under `scratch`, on `branch` when
