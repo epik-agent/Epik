@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn one_tool_per_public_verb_plus_the_trackers_plan() {
-        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None), None).len(), 20);
+        assert_eq!(all(GitHub::at("http://127.0.0.1:1", None), None).len(), 21);
     }
 
     #[test]

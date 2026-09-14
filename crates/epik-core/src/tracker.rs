@@ -4,7 +4,10 @@
 //! An [`IssueTracker`] answers for issues and nothing else: what each
 //! one says, where it stands, and which issues wait on which. The
 //! order comes out as a [`Dag`] of ids, which is what a plan is built
-//! from.
+//! from. [`github`] is GitHub as one.
+
+#[cfg(feature = "native")]
+pub mod github;
 
 use anyhow::Result;
 

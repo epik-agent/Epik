@@ -98,6 +98,12 @@ pub const TOOLS: &[Spec<Verb>] = &[
         handler: close_issue,
     },
     Spec {
+        name: "github_reopen_issue",
+        description: "Reopens a closed GitHub issue. Needs the GitHub token.",
+        parameters: &[REPO, NUMBER],
+        handler: reopen_issue,
+    },
+    Spec {
         name: "github_open_pull",
         description: "Opens a GitHub pull request merging branch head into branch base. Needs the GitHub token.",
         parameters: &[
@@ -179,7 +185,7 @@ pub const TOOLS: &[Spec<Verb>] = &[
     },
     Spec {
         name: "github_issue_graph",
-        description: "A GitHub issue with its edges: the sub-issues it decomposes into and the issues blocking it. Needs the GitHub token.",
+        description: "A GitHub issue with its edges: the sub-issues it decomposes into, the issues blocking it, and the issues it blocks. Needs the GitHub token.",
         parameters: &[REPO, NUMBER],
         handler: issue_graph,
     },
@@ -287,6 +293,10 @@ fn comment(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
 
 fn close_issue(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
     answer(github.close_issue(repo, number(arguments, "number")?))
+}
+
+fn reopen_issue(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
+    answer(github.reopen_issue(repo, number(arguments, "number")?))
 }
 
 fn open_pull(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
@@ -405,7 +415,7 @@ mod tests {
 
     #[test]
     fn one_tool_per_public_verb() {
-        assert_eq!(TOOLS.len(), 19);
+        assert_eq!(TOOLS.len(), 20);
         let names: Vec<&str> = TOOLS.iter().map(|spec| spec.name).collect();
         assert!(
             names.iter().all(|name| name.starts_with("github_")),

@@ -103,6 +103,7 @@ mod tests {
             },
             sub_issues,
             blocked_by,
+            blocking: vec![],
         }
     }
 

@@ -23,9 +23,9 @@ What the captures are here to catch:
   both spellings decoding into the same `State`.
 - Every payload carries dozens of fields the client never modelled
   (`node_id`, `_links`, reactions, the works). None of it may break decoding.
-- The graph captures predate `pageInfo` in the query: its absence decodes
-  as a complete page, and the overflow refusal is covered by an inline
-  payload in the tests.
+- The graph captures predate `pageInfo` and `blocking` in the query:
+  their absence decodes as a complete page with nothing blocked, and the
+  overflow refusal is covered by an inline payload in the tests.
 
 To recapture the REST ones:
 
@@ -43,7 +43,8 @@ gh api graphql -f query='query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { issue(number: $number) {
     number title state body
     subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } }
-    blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }' \
+    blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } }
+    blocking(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }' \
   -F owner=epik-agent -F name=Epik -F number=102 > graph_parent.json
 ```
 

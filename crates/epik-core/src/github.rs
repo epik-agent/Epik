@@ -260,8 +260,8 @@ pub struct Edge {
     pub state: State,
 }
 
-/// One issue and the edges around it: the children it decomposes into, and
-/// the issues it waits on.
+/// One issue and the edges around it: the children it decomposes into,
+/// the issues it waits on, and the issues waiting on it.
 ///
 /// This is what the scheduler folds over — and, as a tool result, what a
 /// model reads to answer for an issue's place in a plan.
@@ -270,6 +270,7 @@ pub struct IssueGraph {
     pub issue: Issue,
     pub sub_issues: Vec<Edge>,
     pub blocked_by: Vec<Edge>,
+    pub blocking: Vec<Edge>,
 }
 
 /// What went wrong, as a value. Doors render these; nothing here is meant to
@@ -468,6 +469,21 @@ impl GitHub {
         )
     }
 
+    /// Reopens an issue.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
+    /// an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn reopen_issue(&self, repo: &Repo, number: u64) -> Result<Issue, Error> {
+        self.needs_token()?;
+        self.send(
+            Method::Patch,
+            &format!("repos/{repo}/issues/{number}"),
+            &json!({ "state": "open" }),
+        )
+    }
+
     /// Opens a pull request merging `head` into `base`.
     ///
     /// # Errors
@@ -637,8 +653,8 @@ impl GitHub {
 
     // ----- the GraphQL verbs -----
 
-    /// One issue and its edges: sub-issues and blocked-by, which REST never
-    /// learned to serve.
+    /// One issue and its edges: sub-issues, blocked-by, and blocking, which
+    /// REST never learned to serve.
     ///
     /// # Errors
     ///
@@ -929,8 +945,11 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
         sub_issues: Connection,
         #[serde(rename = "blockedBy")]
         blocked_by: Connection,
+        /// Absent from captures taken before the query asked for it.
+        #[serde(default)]
+        blocking: Connection,
     }
-    #[derive(Deserialize)]
+    #[derive(Default, Deserialize)]
     struct Connection {
         nodes: Vec<Edge>,
         #[serde(default, rename = "pageInfo")]
@@ -960,6 +979,9 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
     if wire.blocked_by.page_info.has_next_page {
         return Err(overflow("blocked-by"));
     }
+    if wire.blocking.page_info.has_next_page {
+        return Err(overflow("blocking"));
+    }
     Ok(IssueGraph {
         issue: Issue {
             number: wire.number,
@@ -969,6 +991,7 @@ fn graph(data: Value) -> Result<IssueGraph, Error> {
         },
         sub_issues: wire.sub_issues.nodes,
         blocked_by: wire.blocked_by.nodes,
+        blocking: wire.blocking.nodes,
     })
 }
 
@@ -1031,7 +1054,8 @@ const GRAPH_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!)
      repository(owner: $owner, name: $name) { issue(number: $number) { \
      number title state body \
      subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
-     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
+     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
+     blocking(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ADD_SUB_ISSUE: &str = "mutation($from: ID!, $to: ID!) { \
@@ -1264,6 +1288,7 @@ mod tests {
         let numbers: Vec<u64> = graph.sub_issues.iter().map(|edge| edge.number).collect();
         assert_eq!(numbers, [105, 106]);
         assert!(graph.blocked_by.is_empty());
+        assert!(graph.blocking.is_empty(), "absent from the capture");
     }
 
     #[test]
@@ -1397,6 +1422,7 @@ mod tests {
             github.edit_issue(&repo, 1, Some("t"), None).map(drop),
             github.comment(&repo, 1, "b"),
             github.close_issue(&repo, 1).map(drop),
+            github.reopen_issue(&repo, 1).map(drop),
             github.open_pull(&repo, "t", "h", "b", "").map(drop),
             github.merge_pull(&repo, 1, Merge::Squash),
             github.create_branch(&repo, "feature-1", &"a".repeat(40)),

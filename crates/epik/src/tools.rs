@@ -397,6 +397,7 @@ mod tests {
                 "edit_issue",
                 "comment",
                 "close_issue",
+                "reopen_issue",
                 "open_pull",
                 "pull",
                 "pull_for",
