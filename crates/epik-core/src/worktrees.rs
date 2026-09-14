@@ -195,6 +195,61 @@ mod tests {
         assert!(root.is_dir(), "and only the clone");
     }
 
+    /// The whole loop an agent's source goes through: a bare origin, a
+    /// worktree of it, an engine writing there, a commit and a push,
+    /// the worktree gone with its drop, and the work back out of the
+    /// origin by a fresh clone made outside `Worktrees`.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
+        use crate::agent::Agent;
+        use crate::agent::scripted::{self, Scripted};
+        use crate::git::commands::{Add, Commit, Push};
+        use crate::git::testing::{cloned, identified, origin};
+        use crate::git::{add, commit, push};
+        use crate::process::Exit;
+
+        let scratch = Scratch::new("worktrees-adder");
+        let (bare, _) = seeded(&scratch);
+        let url = Url::Local(bare.path().to_owned());
+        let worktrees = Worktrees::new(scratch.0.join("root"));
+        let linked = worktrees.add(&url).unwrap();
+        let repository = linked.worktree().clone();
+        let branch = repository
+            .path()
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap()
+            .to_owned();
+
+        let files = scripted::adder();
+        let mut engine = Scripted {
+            cwd: repository.path().to_owned(),
+            files: files.clone(),
+        }
+        .start()
+        .unwrap();
+        for _ in engine.stdout() {}
+        assert_eq!(engine.wait().unwrap(), Exit::Code(0));
+
+        identified(&repository);
+        add(Add::new(repository.clone(), files.keys().cloned().collect()).unwrap()).unwrap();
+        commit(Commit::new(repository.clone(), "the adder library".to_owned()).unwrap()).unwrap();
+        push(Push::new(repository.clone(), origin(), branch.clone()).unwrap()).unwrap();
+        drop(linked);
+        assert!(!repository.path().exists(), "the worktree removed itself");
+
+        let check = cloned(&scratch, &bare, "check", Some(&branch));
+        for (path, content) in &files {
+            assert_eq!(
+                std::fs::read_to_string(check.path().join(path)).unwrap(),
+                *content,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn add_needs_a_url_git_can_clone() {
         let scratch = Scratch::new("worktrees-unclonable");

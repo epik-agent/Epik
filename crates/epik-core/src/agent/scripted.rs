@@ -94,6 +94,34 @@ fn said(event: &Event) -> String {
     format!("printf '%s\\n' {}", quoted(json))
 }
 
+/// A Python library with one function and the least uv needs to
+/// build and test it, by path relative to a project root; see
+/// fixtures/README.md. What an engine under test writes.
+#[must_use]
+pub fn adder() -> BTreeMap<PathBuf, String> {
+    [
+        (
+            ".python-version",
+            include_str!("scripted/fixtures/adder/.python-version"),
+        ),
+        (
+            "pyproject.toml",
+            include_str!("scripted/fixtures/adder/pyproject.toml"),
+        ),
+        (
+            "src/adder/__init__.py",
+            include_str!("scripted/fixtures/adder/src/adder/__init__.py"),
+        ),
+        (
+            "tests/test_add.py",
+            include_str!("scripted/fixtures/adder/tests/test_add.py"),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, content)| (PathBuf::from(path), content.to_owned()))
+    .collect()
+}
+
 /// `text` as one shell word, whatever it holds: single-quoted, with
 /// each single quote inside written as `'\''`.
 fn quoted(text: impl AsRef<Path>) -> String {
@@ -106,32 +134,6 @@ mod tests {
     use super::*;
     use crate::process::Exit;
     use crate::temp::Scratch;
-
-    /// A Python library with one function and the least uv needs to
-    /// build and test it; see fixtures/README.md.
-    fn adder() -> BTreeMap<PathBuf, String> {
-        [
-            (
-                ".python-version",
-                include_str!("scripted/fixtures/adder/.python-version"),
-            ),
-            (
-                "pyproject.toml",
-                include_str!("scripted/fixtures/adder/pyproject.toml"),
-            ),
-            (
-                "src/adder/__init__.py",
-                include_str!("scripted/fixtures/adder/src/adder/__init__.py"),
-            ),
-            (
-                "tests/test_add.py",
-                include_str!("scripted/fixtures/adder/tests/test_add.py"),
-            ),
-        ]
-        .into_iter()
-        .map(|(path, content)| (PathBuf::from(path), content.to_owned()))
-        .collect()
-    }
 
     #[test]
     fn the_files_are_written_and_every_word_arrives() {
