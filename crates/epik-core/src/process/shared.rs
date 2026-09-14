@@ -1,4 +1,4 @@
-//! What a process says and how it ends, and the mechanics beneath a
+//! How a process ends, and the mechanics beneath a
 //! [`Process`](super::Process): the spawn, one at a time, into its own
 //! group; the pumps that drain its pipes; and the reading of its lines
 //! and its exit.
@@ -31,19 +31,6 @@ impl Exit {
     pub fn success(self) -> bool {
         self == Self::Code(0)
     }
-}
-
-/// One line a Process said, in the order said, without its newline — nor
-/// a carriage return before it, as [`BufRead::lines`](BufRead::lines)
-/// would have it. A line is decoded on its own, so bytes that are not
-/// UTF-8 come through as replacement characters rather than failing the
-/// stream.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Line {
-    /// One line of the Process's stdout.
-    Stdout(String),
-    /// One line of the Process's stderr.
-    Stderr(String),
 }
 
 /// An exit status as an [`Exit`]: the signal that took the process,
@@ -104,9 +91,9 @@ fn spawn_one_at_a_time(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
-/// Read `process_stream` on a new thread, sending each line to
-/// `line_sender` as soon as it is complete. The thread exits when the
-/// stream reaches end of file or the receiver has been dropped.
+/// Read `process_stream` on a new thread, sending each line, decoded,
+/// to `line_sender` as soon as it is complete. The thread exits when
+/// the stream reaches end of file or the receiver has been dropped.
 ///
 /// This is the piece [`std::process`] leaves to the caller. A pipe
 /// holds a few kilobytes; a process that fills one blocks on its next
@@ -116,8 +103,7 @@ fn spawn_one_at_a_time(command: &mut Command) -> std::io::Result<Child> {
 /// the process holds them open, whatever the caller does meanwhile.
 pub(super) fn pump<R: Read + Send + 'static>(
     process_stream: R,
-    line_sender: Sender<Line>,
-    create_line: fn(String) -> Line,
+    line_sender: Sender<String>,
 ) -> JoinHandle<Result<()>> {
     spawn(move || {
         let mut reader = BufReader::new(process_stream);
@@ -129,7 +115,7 @@ pub(super) fn pump<R: Read + Send + 'static>(
                 Ok(_) => {}
                 Err(e) => return Err(e.into()),
             }
-            if line_sender.send(create_line(decode(&buffer))).is_err() {
+            if line_sender.send(decode(&buffer)).is_err() {
                 // The receiver is gone, so nobody wants the rest.
                 break;
             }

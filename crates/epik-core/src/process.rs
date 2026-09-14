@@ -1,8 +1,9 @@
 //! Processes: what Epik launches to do work.
 //!
-//! A [`Process`] is a running process. It says what it says as
-//! [`Line`]s, one per line of stdout or stderr, and ends in the
-//! [`Exit`] that [`Process::wait`] reports. Nothing flows in — no stdin,
+//! A [`Process`] is a running process. It says what it says as lines,
+//! [`stdout`](Process::stdout) and [`stderr`](Process::stderr) each its
+//! own stream, and ends in the [`Exit`] that [`Process::wait`] reports.
+//! Nothing flows in — no stdin,
 //! no channel; what it needs to know goes in its arguments, its
 //! environment, and its working directory. Given a deadline, `wait`
 //! kills it when the deadline passes. Every process Epik starts is a
@@ -10,8 +11,8 @@
 //!
 //! # Example
 //!
-//! [`Process::new`] starts the process, [`Process::lines`] is drained until
-//! the process closes its output, and [`Process::wait`] collects the
+//! [`Process::new`] starts the process, [`Process::stdout`] is drained
+//! until the process closes it, and [`Process::wait`] collects the
 //! exit.
 //!
 //! ```no_run
@@ -24,8 +25,8 @@
 //!     [],
 //!     None,
 //! )?;
-//! for line in process.lines() {
-//!     println!("{line:?}");
+//! for line in process.stdout() {
+//!     println!("{line}");
 //! }
 //! let exit = process.wait()?;
 //! # }
@@ -35,10 +36,11 @@
 mod platform;
 mod shared;
 
-pub use shared::{Exit, Line};
+pub use shared::Exit;
 
 use std::process::{Child, Command};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -47,23 +49,36 @@ use anyhow::{Context, Result, anyhow};
 use crate::keystore::Secret;
 use shared::{exit, pump, spawn_piped};
 
-/// A process whose stdout and stderr are streamed as [`Line`]s.
+/// A process whose stdout and stderr are streamed as lines, each
+/// without its newline — nor a carriage return before it, as
+/// [`BufRead::lines`](std::io::BufRead::lines) would have it — and
+/// decoded on its own, so bytes that are not UTF-8 come through as
+/// replacement characters rather than failing the stream.
 ///
 /// The process is started in its own group, on Unix, and dropping the
 /// `Process` kills the whole group: a helper the process left in the
 /// background holds the pipes open, and would otherwise keep the pumps
 /// waiting after the process itself was gone.
 ///
-/// Drain [`Process::lines`] before calling [`Process::wait`]. The reader
-/// threads stop when the process closes its output, so the event
-/// iterator ends on its own once the process exits.
+/// Drain [`Process::stdout`] and [`Process::stderr`] before calling
+/// [`Process::wait`]. The reader threads stop when the process closes
+/// each stream, so each iterator ends on its own once the process
+/// exits. Reading one stream to its end blocks until the process
+/// closes it, whatever it says on the other meanwhile; a caller that
+/// follows both as they come reads each on a thread of its own, and a
+/// `Process` can be shared between threads for that. A stream has one
+/// reader at a time: a second call for the same stream blocks until
+/// the first iterator is dropped.
 pub struct Process {
     /// The program, for the words a failure comes back as.
     program: String,
     /// When the process is killed if still running, and how long it
     /// was given; `None` lets it run for as long as it likes.
     deadline: Option<(Instant, Duration)>,
-    line_receiver: Receiver<Line>,
+    /// Each behind a lock, so a `Process` can be shared between the
+    /// threads reading its two streams.
+    stdout_receiver: Mutex<Receiver<String>>,
+    stderr_receiver: Mutex<Receiver<String>>,
     child: Child,
     pumps: Vec<JoinHandle<Result<()>>>,
 }
@@ -88,8 +103,8 @@ impl Process {
     /// # Errors
     ///
     /// No program named, or the spawn itself failing — the program
-    /// missing, chiefly. Everything after that arrives as lines or
-    /// through [`Process::wait`].
+    /// missing, chiefly. Everything after that arrives on the streams
+    /// or through [`Process::wait`].
     pub fn new(
         argv: Vec<String>,
         cwd: impl Into<String>,
@@ -104,42 +119,47 @@ impl Process {
         for (name, value) in env {
             command.env(name, value.reveal());
         }
-        let (line_sender, line_receiver) = channel();
+        let (stdout_sender, stdout_receiver) = channel();
+        let (stderr_sender, stderr_receiver) = channel();
         let (child, stdout, stderr) = spawn_piped(command)?;
         let deadline = deadline.map(|allowed| (Instant::now() + allowed, allowed));
-        // Each pump owns one sender. When both reader threads finish
-        // and drop theirs, the channel disconnects and `lines` ends.
-        // Nothing else may hold a sender or the iterator would never
-        // terminate.
-        let pumps = vec![
-            pump(stdout, line_sender.clone(), Line::Stdout),
-            pump(stderr, line_sender, Line::Stderr),
-        ];
+        // Each pump owns its stream's one sender. When the reader thread
+        // finishes and drops it, the channel disconnects and the
+        // stream's iterator ends. Nothing else may hold a sender or the
+        // iterator would never terminate.
+        let pumps = vec![pump(stdout, stdout_sender), pump(stderr, stderr_sender)];
         Ok(Self {
             program: program.clone(),
             deadline,
-            line_receiver,
+            stdout_receiver: Mutex::new(stdout_receiver),
+            stderr_receiver: Mutex::new(stderr_receiver),
             child,
             pumps,
         })
     }
 
-    /// Lines in the order they were received. Blocks between lines
-    /// and ends when the process has closed both stdout and stderr.
-    pub fn lines(&self) -> impl Iterator<Item = Line> + '_ {
-        self.line_receiver.iter()
+    /// The lines of stdout, in order. Blocks between lines and ends
+    /// when the process has closed stdout.
+    pub fn stdout(&self) -> impl Iterator<Item = String> + '_ {
+        lines(&self.stdout_receiver)
+    }
+
+    /// The lines of stderr, in order. Blocks between lines and ends
+    /// when the process has closed stderr.
+    pub fn stderr(&self) -> impl Iterator<Item = String> + '_ {
+        lines(&self.stderr_receiver)
     }
 
     /// Wait for the reader threads to finish and the process to exit.
     ///
-    /// Normally called after draining [`Process::lines`]. Calling it
-    /// earlier is safe, since the channel is unbounded and the pumps
-    /// keep draining the pipes, but all output is then held in memory
-    /// until read. Calling this more than once returns the cached exit.
+    /// Normally called after draining the streams. Calling it earlier
+    /// is safe, since the channels are unbounded and the pumps keep
+    /// draining the pipes, but all output is then held in memory until
+    /// read. Calling this more than once returns the cached exit.
     ///
     /// The deadline is enforced here: a process still running when it
     /// passes is killed, with its group, and the kill is the error. A
-    /// caller with a deadline waits first and reads the lines after,
+    /// caller with a deadline waits first and reads the streams after,
     /// since draining them blocks for as long as the process holds its
     /// pipes open.
     ///
@@ -188,20 +208,20 @@ impl Process {
     /// [`Process::wait`]'s.
     pub fn finish(mut self) -> Result<Finished> {
         let exit = self.wait()?;
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        for line in self.lines() {
-            match line {
-                Line::Stdout(line) => stdout.push(line),
-                Line::Stderr(line) => stderr.push(line),
-            }
-        }
         let joined = |lines: Vec<String>| (!lines.is_empty()).then(|| lines.join("\n"));
         Ok(Finished {
             exit,
-            stdout: joined(stdout),
-            stderr: joined(stderr),
+            stdout: joined(self.stdout().collect()),
+            stderr: joined(self.stderr().collect()),
         })
     }
+}
+
+/// The lines a receiver has to give, holding its lock until the
+/// iterator is dropped: they end when the pump behind it has hung up.
+fn lines(receiver: &Mutex<Receiver<String>>) -> impl Iterator<Item = String> + '_ {
+    let receiver = receiver.lock().unwrap_or_else(PoisonError::into_inner);
+    std::iter::from_fn(move || receiver.recv().ok())
 }
 
 impl Drop for Process {
@@ -283,13 +303,8 @@ mod unix_tests {
     /// Run `script` with `sh -c` and collect its output and exit.
     fn run(script: &str) -> Collected {
         let mut process = sh(script);
-        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        for line in process.lines() {
-            match line {
-                Line::Stdout(line) => stdout.push(line),
-                Line::Stderr(line) => stderr.push(line),
-            }
-        }
+        let stdout = process.stdout().collect();
+        let stderr = process.stderr().collect();
         let exit = process.wait().expect("wait failed");
         Collected {
             stdout,
@@ -318,6 +333,19 @@ mod unix_tests {
         let out = run("echo out; echo err >&2; echo out again");
         assert_eq!(out.stdout, ["out", "out again"]);
         assert_eq!(out.stderr, ["err"]);
+    }
+
+    #[test]
+    fn both_streams_are_followed_at_once_from_two_threads() {
+        let mut process = sh("echo out; echo err >&2; echo out again");
+        let (stdout, stderr) = std::thread::scope(|scope| {
+            let stdout = scope.spawn(|| process.stdout().collect::<Vec<_>>());
+            let stderr = scope.spawn(|| process.stderr().collect::<Vec<_>>());
+            (stdout.join().unwrap(), stderr.join().unwrap())
+        });
+        assert_eq!(stdout, ["out", "out again"]);
+        assert_eq!(stderr, ["err"]);
+        assert_eq!(process.wait().unwrap(), Exit::Code(0));
     }
 
     #[test]
@@ -351,12 +379,7 @@ mod unix_tests {
     fn wait_before_draining_events_still_delivers_output() {
         let mut process = sh("head -c 1000000 /dev/zero");
         assert_eq!(process.wait().unwrap(), Exit::Code(0));
-        let total: usize = process
-            .lines()
-            .map(|line| match line {
-                Line::Stdout(line) | Line::Stderr(line) => line.len(),
-            })
-            .sum();
+        let total: usize = process.stdout().map(|line| line.len()).sum();
         assert_eq!(total, 1_000_000);
     }
 
@@ -380,7 +403,7 @@ mod unix_tests {
     #[test]
     fn wait_can_be_called_again() {
         let mut process = sh("exit 5");
-        for _ in process.lines() {}
+        for _ in process.stdout() {}
         assert_eq!(process.wait().unwrap(), Exit::Code(5));
         assert_eq!(process.wait().unwrap(), Exit::Code(5));
     }
@@ -398,12 +421,7 @@ mod unix_tests {
             None,
         )
         .unwrap();
-        let lines: Vec<String> = process
-            .lines()
-            .map(|line| match line {
-                Line::Stdout(line) | Line::Stderr(line) => line,
-            })
-            .collect();
+        let lines: Vec<String> = process.stdout().collect();
         assert_eq!(process.wait().unwrap(), Exit::Code(0));
         // macOS resolves /tmp through a symlink, so only the tail is fixed.
         assert!(lines[0].ends_with("/tmp"), "{lines:?}");
@@ -450,7 +468,7 @@ mod unix_tests {
         // The shell starts sleep in the background, reports its pid, and
         // then waits for it, so both are alive when the process is dropped.
         let process = sh("sleep 30 & echo $!; wait");
-        let Some(Line::Stdout(line)) = process.lines().next() else {
+        let Some(line) = process.stdout().next() else {
             panic!("expected the grandchild pid on stdout");
         };
         let grandchild: u32 = line.trim().parse().unwrap();
@@ -496,20 +514,14 @@ mod unix_tests {
         );
         assert!(!process_exists(pid), "killed and reaped");
         // What it said before the kill is still there to read.
-        assert_eq!(
-            process.lines().collect::<Vec<_>>(),
-            [Line::Stdout("started".to_owned())]
-        );
+        assert_eq!(process.stdout().collect::<Vec<_>>(), ["started"]);
     }
 
     #[test]
     fn a_deadline_that_is_not_reached_changes_nothing() {
         let mut process = sh_within("echo quick; exit 4", Duration::from_secs(30));
         assert_eq!(process.wait().unwrap(), Exit::Code(4));
-        assert_eq!(
-            process.lines().collect::<Vec<_>>(),
-            [Line::Stdout("quick".to_owned())]
-        );
+        assert_eq!(process.stdout().collect::<Vec<_>>(), ["quick"]);
     }
 
     #[test]
@@ -534,7 +546,7 @@ mod unix_tests {
     #[test]
     fn drop_after_wait_is_harmless() {
         let mut process = sh("true");
-        for _ in process.lines() {}
+        for _ in process.stdout() {}
         assert_eq!(process.wait().unwrap(), Exit::Code(0));
         drop(process);
     }

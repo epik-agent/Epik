@@ -16,8 +16,9 @@
 //!
 //! [`start`]: ClaudeCode::start
 //!
-//! The CLI's stream-json arrives as the Process's generic stdout
-//! [`Line`](crate::process::Line)s; the stream stays generic, and [`interpret`] layers
+//! The CLI's stream-json arrives as the Process's generic
+//! [`stdout`](crate::process::Process::stdout) lines; the stream stays
+//! generic, and [`interpret`] layers
 //! the engine's meaning on top as a pure function over lines — modelling
 //! only the fields Epik reads, absorbing everything else. A line that is
 //! not JSON, or JSON of an unmodelled shape, interprets to nothing;

@@ -4,7 +4,7 @@
 //! The scripted engine is the deterministic stand-in for the claude
 //! binary: `sh -c` printf of captured fixture lines — inline only, never
 //! a written script file (the ETXTBSY lesson) — and it exercises the
-//! whole path: Process → Line stream → interpret → typed Updates. Only
+//! whole path: Process → stdout lines → interpret → typed Updates. Only
 //! the live tier, behind EPIK_CLAUDE_LIVE=1, touches a real model.
 
 #![cfg(all(feature = "testing", unix))]
@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use epik_core::agent::claude::{ClaudeCode, Update, interpret};
-use epik_core::process::{Exit, Line, Process};
+use epik_core::process::{Exit, Process};
 use epik_core::temp::Scratch;
 
 const SESSION: &str = include_str!("../src/agent/claude/fixtures/session.jsonl");
@@ -40,14 +40,7 @@ fn canned(lines: &[&str], coda: &str) -> Process {
 /// Reads the whole run: every interpreted Update in order, and the
 /// final exit.
 fn updates_of(mut process: Process) -> (Vec<Update>, Result<Exit, String>) {
-    let updates = process
-        .lines()
-        .filter_map(|line| match line {
-            Line::Stdout(line) => Some(interpret(&line)),
-            Line::Stderr(_) => None,
-        })
-        .flatten()
-        .collect();
+    let updates = process.stdout().flat_map(|line| interpret(&line)).collect();
     (
         updates,
         process.wait().map_err(|error| format!("{error:#}")),
@@ -114,13 +107,12 @@ fn dropping_an_engine_mid_stream_takes_it_with_it() {
 
     // The stream is flowing — the session start has been interpreted —
     // and the engine now hangs.
-    let mut lines = engine.lines();
-    assert!(lines.any(|line| matches!(
-        line,
-        Line::Stdout(line) if interpret(&line)
+    let mut lines = engine.stdout();
+    assert!(lines.any(|line| {
+        interpret(&line)
             .iter()
             .any(|update| matches!(update, Update::Session { .. }))
-    )));
+    }));
     drop(lines);
 
     drop(engine);
