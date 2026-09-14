@@ -27,6 +27,8 @@ use super::{Agent, Update};
 use crate::keystore::Secret;
 #[cfg(feature = "native")]
 use crate::process::Process;
+#[cfg(feature = "native")]
+use std::path::PathBuf;
 
 /// The `claude` CLI as an [`Agent`]. Data only: the caller supplies the
 /// binary's absolute path — no PATH divination — and resolves any API
@@ -35,8 +37,8 @@ use crate::process::Process;
 #[cfg(feature = "native")]
 #[derive(Clone, Debug)]
 pub struct ClaudeCode {
-    pub binary: String,
-    pub cwd: String,
+    pub binary: PathBuf,
+    pub cwd: PathBuf,
     pub prompt: String,
     pub model: Option<String>,
     pub api_key: Option<Secret>,
@@ -47,11 +49,11 @@ impl Agent for ClaudeCode {
     /// The CLI in its working directory, the key in its environment
     /// when there is one.
     fn start(self) -> anyhow::Result<Process> {
-        let argv = self.argv();
+        let arguments = self.arguments();
         let env = self
             .api_key
             .map(|key| ("ANTHROPIC_API_KEY".to_owned(), key));
-        Process::new(argv, self.cwd, env, None)
+        Process::new(self.binary, arguments, self.cwd, env, None)
     }
 
     fn interpret(line: &str) -> Vec<Update> {
@@ -61,11 +63,10 @@ impl Agent for ClaudeCode {
 
 #[cfg(feature = "native")]
 impl ClaudeCode {
-    /// The whole command line: the binary, the settled posture, the
-    /// model when one is named, and the prompt last.
-    fn argv(&self) -> Vec<String> {
+    /// The arguments after the binary: the settled posture, the model
+    /// when one is named, and the prompt last.
+    fn arguments(&self) -> Vec<String> {
         let mut argv = vec![
-            self.binary.clone(),
             "-p".to_owned(),
             "--output-format".to_owned(),
             "stream-json".to_owned(),
@@ -104,8 +105,8 @@ mod tests {
 
     fn agent() -> ClaudeCode {
         ClaudeCode {
-            binary: "/nonexistent/claude".to_owned(),
-            cwd: "/work/repo".to_owned(),
+            binary: "/nonexistent/claude".into(),
+            cwd: "/work/repo".into(),
             prompt: "create a file\nnamed hello.txt".to_owned(),
             model: Some(ANTHROPIC_MODEL.to_owned()),
             api_key: Some(Secret::from("sk-ant-hush-hush")),
@@ -113,14 +114,13 @@ mod tests {
     }
 
     /// The isolation and skip-permissions flags are load-bearing;
-    /// the whole argv is pinned, the prompt last and the key
+    /// the whole argument list is pinned, the prompt last and the key
     /// nowhere in it.
     #[test]
-    fn the_argv_is_exactly_the_settled_posture() {
+    fn the_arguments_are_exactly_the_settled_posture() {
         assert_eq!(
-            agent().argv(),
+            agent().arguments(),
             [
-                "/nonexistent/claude",
                 "-p",
                 "--output-format",
                 "stream-json",
@@ -138,9 +138,8 @@ mod tests {
         let mut without_model = agent();
         without_model.model = None;
         assert_eq!(
-            without_model.argv(),
+            without_model.arguments(),
             [
-                "/nonexistent/claude",
                 "-p",
                 "--output-format",
                 "stream-json",

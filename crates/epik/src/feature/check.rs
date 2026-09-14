@@ -52,10 +52,8 @@ pub(super) fn run(check: &Check, workspace: &Path) -> Verdict {
 /// [`run`] against a stated deadline — which is how the tests exercise
 /// the kill without sitting through the real one.
 fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
-    let argv = vec!["sh".to_owned(), "-c".to_owned(), check.command.clone()];
-    match Process::new(argv, workspace.to_string_lossy(), [], Some(deadline))
-        .and_then(Process::finish)
-    {
+    let arguments = vec!["-c".to_owned(), check.command.clone()];
+    match Process::new("sh", arguments, workspace, [], Some(deadline)).and_then(Process::finish) {
         Ok(finished) => Verdict {
             green: finished.exit.success(),
             // The verdict's one transcript: stdout, then stderr.

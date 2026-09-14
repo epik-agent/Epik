@@ -831,8 +831,9 @@ mod tests {
     /// `script` under `sh -c` in the workspace's directory.
     fn agent_in(workspace: &Workspace, script: &str) -> Process {
         Process::new(
-            vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
-            workspace.directory.to_string_lossy().into_owned(),
+            "sh",
+            vec!["-c".to_owned(), script.to_owned()],
+            &workspace.directory,
             [],
             None,
         )

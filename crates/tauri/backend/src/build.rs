@@ -175,8 +175,8 @@ fn start(
     api_key: Option<Secret>,
 ) -> Result<Process, String> {
     ClaudeCode {
-        binary: claude.to_string_lossy().into_owned(),
-        cwd: workspace.directory.to_string_lossy().into_owned(),
+        binary: claude.to_path_buf(),
+        cwd: workspace.directory.clone(),
         prompt,
         model,
         api_key,
@@ -447,8 +447,7 @@ mod tests {
     }
 
     fn tidy(workspace: &Workspace) {
-        let argv = [
-            "git",
+        let arguments = [
             "-C",
             &workspace.repository,
             "worktree",
@@ -459,7 +458,7 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let _ = Process::new(argv, "/", [], None).and_then(Process::finish);
+        let _ = Process::new("git", arguments, "/", [], None).and_then(Process::finish);
     }
 
     /// The tools over `state`, with git beside them, as a turn would

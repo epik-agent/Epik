@@ -560,7 +560,7 @@ mod tests {
     /// tests run without an engine. The end-to-end build rides in the
     /// feature build's own tests.
     fn unreachable(_: &Issue, _: &Workspace, _: &str) -> Result<Process, String> {
-        Process::new(vec!["/nonexistent/agent".to_owned()], "/", [], None)
+        Process::new("/nonexistent/agent", vec![], "/", [], None)
             .map_err(|error| format!("{error:#}"))
     }
 

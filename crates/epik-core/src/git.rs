@@ -97,14 +97,11 @@ pub fn run(command: &Command) -> Result<Finished> {
 /// the kill without sitting through the real one.
 #[cfg(feature = "native")]
 fn run_within(command: &Command, timeout: Duration) -> Result<Finished> {
-    let argv = std::iter::once("git".to_owned())
-        .chain(command.argv())
-        .collect();
     // No terminal is attached, so a network verb that wants credentials
     // fails in words instead of waiting for a prompt nobody can see.
     // The user's helpers and SSH config still apply.
     let env = [("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"))];
-    Process::new(argv, ".", env, Some(timeout))?.finish()
+    Process::new("git", command.argv(), ".", env, Some(timeout))?.finish()
 }
 
 /// Runs `command` and settles the exit: what git said, for the verb

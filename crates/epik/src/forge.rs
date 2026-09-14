@@ -203,7 +203,8 @@ mod tests {
         let askpass = Askpass::new().unwrap();
         let ask = |prompt: &str| {
             crate::process::Process::new(
-                vec![askpass.path().unwrap().to_owned(), prompt.to_owned()],
+                askpass.path().unwrap(),
+                vec![prompt.to_owned()],
                 "/",
                 [
                     (

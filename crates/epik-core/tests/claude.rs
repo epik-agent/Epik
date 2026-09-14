@@ -29,13 +29,7 @@ fn canned(lines: &[&str], coda: &str) -> Process {
         .map(|line| format!("'{}'", line.replace('\'', r"'\''")))
         .collect();
     let script = format!("printf '%s\\n' {}; {coda}", quoted.join(" "));
-    Process::new(
-        vec!["sh".to_owned(), "-c".to_owned(), script],
-        "/",
-        [],
-        None,
-    )
-    .expect("sh starts")
+    Process::new("sh", vec!["-c".to_owned(), script], "/", [], None).expect("sh starts")
 }
 
 /// Reads the whole run: every interpreted Update in order, and the
@@ -156,8 +150,8 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
     );
 
     let agent = ClaudeCode {
-        binary,
-        cwd: scratch.path().to_owned(),
+        binary: binary.into(),
+        cwd: scratch.0.clone(),
         prompt: "create a file named hello.txt containing 'hello' and nothing else".to_owned(),
         model: None,
         api_key: None,

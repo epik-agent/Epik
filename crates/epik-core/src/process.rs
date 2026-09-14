@@ -20,7 +20,8 @@
 //! use epik_core::process::Process;
 //!
 //! let mut process = Process::new(
-//!     vec!["sh".to_string(), "-c".to_string(), "echo Hello".to_string()],
+//!     "sh",
+//!     vec!["-c".to_string(), "echo Hello".to_string()],
 //!     "/",
 //!     [],
 //!     None,
@@ -38,6 +39,7 @@ mod shared;
 
 pub use shared::Exit;
 
+use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Mutex, PoisonError};
@@ -94,28 +96,27 @@ pub struct Finished {
 }
 
 impl Process {
-    /// Start `argv` — the program, then its arguments — in `cwd`, with
-    /// `env` added to the environment Epik has, and begin streaming its
-    /// output. The process gets no stdin. With a `deadline`, a process
-    /// still running that long after its start is killed by
+    /// Start `program` with `arguments` in `cwd`, with `env` added to
+    /// the environment Epik has, and begin streaming its output. The
+    /// process gets no stdin. With a `deadline`, a process still
+    /// running that long after its start is killed by
     /// [`Process::wait`], which says so; `None` is no limit.
     ///
     /// # Errors
     ///
-    /// No program named, or the spawn itself failing — the program
-    /// missing, chiefly. Everything after that arrives on the streams
-    /// or through [`Process::wait`].
+    /// The spawn itself failing — the program missing, chiefly.
+    /// Everything after that arrives on the streams or through
+    /// [`Process::wait`].
     pub fn new(
-        argv: Vec<String>,
-        cwd: impl Into<String>,
+        program: impl AsRef<Path>,
+        arguments: Vec<String>,
+        cwd: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, Secret)>,
         deadline: Option<Duration>,
     ) -> Result<Self> {
-        let Some((program, arguments)) = argv.split_first() else {
-            return Err(anyhow!("no program to run"));
-        };
+        let program = program.as_ref();
         let mut command = Command::new(program);
-        command.args(arguments).current_dir(cwd.into());
+        command.args(arguments).current_dir(cwd);
         for (name, value) in env {
             command.env(name, value.reveal());
         }
@@ -129,7 +130,7 @@ impl Process {
         // iterator would never terminate.
         let pumps = vec![pump(stdout, stdout_sender), pump(stderr, stderr_sender)];
         Ok(Self {
-            program: program.clone(),
+            program: program.to_string_lossy().into_owned(),
             deadline,
             stdout_receiver: Mutex::new(stdout_receiver),
             stderr_receiver: Mutex::new(stderr_receiver),
@@ -251,26 +252,14 @@ mod tests {
 
     #[test]
     fn missing_program_is_an_error() {
-        let Err(error) = Process::new(
-            vec!["definitely-not-a-real-program".to_owned()],
-            "/",
-            [],
-            None,
-        ) else {
+        let Err(error) = Process::new("definitely-not-a-real-program", vec![], "/", [], None)
+        else {
             panic!("expected spawn to fail");
         };
         assert!(
             error.to_string().contains("could not start"),
             "unexpected error: {error:#}"
         );
-    }
-
-    #[test]
-    fn no_program_is_an_error() {
-        let Err(error) = Process::new(vec![], "/", [], None) else {
-            panic!("expected nothing to run");
-        };
-        assert_eq!(error.to_string(), "no program to run");
     }
 }
 
@@ -292,7 +281,8 @@ mod unix_tests {
     /// `script` under `sh -c`, from `/`.
     fn sh(script: &str) -> Process {
         Process::new(
-            vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            "sh",
+            vec!["-c".to_owned(), script.to_owned()],
             "/",
             [],
             None,
@@ -411,8 +401,8 @@ mod unix_tests {
     #[test]
     fn the_directory_and_environment_reach_the_process_and_stdin_is_closed() {
         let mut process = Process::new(
+            "sh",
             vec![
-                "sh".to_owned(),
                 "-c".to_owned(),
                 "pwd; printf '%s\\n' \"$HUSH\"; cat; echo after".to_owned(),
             ],
@@ -493,7 +483,8 @@ mod unix_tests {
     /// `script` under `sh -c`, from `/`, with `allowed` to finish.
     fn sh_within(script: &str, allowed: Duration) -> Process {
         Process::new(
-            vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            "sh",
+            vec!["-c".to_owned(), script.to_owned()],
             "/",
             [],
             Some(allowed),

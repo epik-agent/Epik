@@ -724,8 +724,9 @@ pub(crate) mod fixtures {
                 id = issue.id
             );
             crate::process::Process::new(
-                vec!["sh".to_owned(), "-c".to_owned(), script],
-                workspace.directory.to_string_lossy().into_owned(),
+                "sh",
+                vec!["-c".to_owned(), script],
+                &workspace.directory,
                 [],
                 None,
             )

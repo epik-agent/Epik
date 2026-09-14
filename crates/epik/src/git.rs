@@ -41,10 +41,7 @@ fn execute_within(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<Value, String> {
-    let argv = std::iter::once("git")
-        .chain(args.iter().copied())
-        .map(str::to_owned)
-        .collect();
+    let arguments = args.iter().map(|arg| (*arg).to_owned()).collect();
     // No terminal is attached, so a network verb that wants credentials
     // must fail in words rather than wait for a prompt nobody can see.
     // The user's helpers and SSH config still apply.
@@ -53,7 +50,7 @@ fn execute_within(
         .chain(&[("GIT_TERMINAL_PROMPT", "0")])
         .map(|(name, value)| ((*name).to_owned(), Secret::from(*value)));
     // From wherever Epik is: every call names its repository with `-C`.
-    let finished = Process::new(argv, ".", env, Some(timeout))
+    let finished = Process::new("git", arguments, ".", env, Some(timeout))
         .and_then(Process::finish)
         .map_err(|error| format!("{error:#}"))?;
     // The tools' one shape: everything git said, stdout then stderr.
