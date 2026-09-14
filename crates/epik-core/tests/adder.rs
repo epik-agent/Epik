@@ -97,7 +97,8 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
 
         // One task per issue, each a scripted agent writing the files
         // the issue names, in the order the tracker gives.
-        let plan: Plan<Implement<Scripted>> = tracker.dependents("1").unwrap().map(|id| {
+        let root = "1".to_owned();
+        let plan: Plan<Implement<Scripted>> = tracker.dependents(&root).unwrap().map(|id| {
             let files = tracker
                 .content(&id)
                 .unwrap()

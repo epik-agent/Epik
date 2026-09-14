@@ -2,9 +2,11 @@
 //! among them.
 //!
 //! An [`IssueTracker`] answers for issues and nothing else: what each
-//! one says, where it stands, and which issues wait on which. The
-//! order comes out as a [`Dag`] of ids, which is what a plan is built
-//! from. [`github`] is GitHub as one.
+//! one says, where it stands, and which issues wait on which. An id is
+//! whatever names an issue in that tracker — a number on GitHub, a key
+//! like `EPK-12` elsewhere — and the order comes out as a [`Dag`] of
+//! them, which is what a plan is built from. [`github`] is GitHub as
+//! one.
 
 #[cfg(feature = "native")]
 pub mod github;
@@ -13,32 +15,29 @@ use anyhow::Result;
 
 use crate::dag::Dag;
 
-/// What names an issue in its tracker.
-pub type IssueId = String;
-
-/// An issue tracker, its statuses of type `S`.
-pub trait IssueTracker<S> {
+/// An issue tracker: its ids of type `I`, its statuses of type `S`.
+pub trait IssueTracker<I, S> {
     /// The issue's content: what implementing it means, in the words
     /// the tracker holds.
     ///
     /// # Errors
     ///
     /// No such issue, or the tracker's own failure.
-    fn content(&self, id: &str) -> Result<String>;
+    fn content(&self, id: &I) -> Result<String>;
 
     /// Where the issue stands.
     ///
     /// # Errors
     ///
     /// No such issue, or the tracker's own failure.
-    fn get_status(&self, id: &str) -> Result<S>;
+    fn get_status(&self, id: &I) -> Result<S>;
 
     /// Moves the issue to `status`.
     ///
     /// # Errors
     ///
     /// No such issue, or the tracker's own failure.
-    fn set_status(&mut self, id: &str, status: S) -> Result<()>;
+    fn set_status(&mut self, id: &I, status: S) -> Result<()>;
 
     /// `root` and every issue that depends on it, transitively, each
     /// after the issues it depends on.
@@ -46,5 +45,5 @@ pub trait IssueTracker<S> {
     /// # Errors
     ///
     /// No such issue, or the tracker's own failure.
-    fn dependents(&self, root: &str) -> Result<Dag<IssueId>>;
+    fn dependents(&self, root: &I) -> Result<Dag<I>>;
 }

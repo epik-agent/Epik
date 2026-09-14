@@ -1,18 +1,18 @@
 //! GitHub as an issue tracker: one repository's issues, their open or
 //! closed state, and the blocked-by edges among them as the order.
 //!
-//! An issue's id is its number, since a bare `154` names an issue only
-//! inside one repository, and this tracker holds that repository. The
-//! dependents of an issue are the issues GitHub says it blocks,
+//! An issue's id is its number, which names an issue only inside one
+//! repository, so this tracker holds that repository. The dependents
+//! of an issue are the issues GitHub says it blocks,
 //! followed outward until no more are found, each after the members
 //! blocking it: what [`GitHub::issue_graph`] reads, one issue at a
 //! time, folded by [`closure`].
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 
-use super::{IssueId, IssueTracker};
+use super::IssueTracker;
 use crate::dag::{Dag, Node};
 use crate::github::{GitHub, IssueGraph, Repo, State};
 
@@ -23,40 +23,30 @@ pub struct GitHubIssues {
     pub repo: Repo,
 }
 
-impl GitHubIssues {
-    /// The number behind an id: GitHub numbers its issues, and an id
-    /// that is not a number belongs to some other tracker.
-    fn number(id: &str) -> Result<u64> {
-        id.parse()
-            .map_err(|_| anyhow!("{id} is not a GitHub issue number"))
-    }
-}
-
-impl IssueTracker<State> for GitHubIssues {
+impl IssueTracker<u64, State> for GitHubIssues {
     /// The title as a heading, then the body.
-    fn content(&self, id: &str) -> Result<String> {
-        let issue = self.github.issue(&self.repo, Self::number(id)?)?;
+    fn content(&self, number: &u64) -> Result<String> {
+        let issue = self.github.issue(&self.repo, *number)?;
         Ok(match issue.body.trim() {
             "" => format!("# {}", issue.title),
             body => format!("# {}\n\n{body}", issue.title),
         })
     }
 
-    fn get_status(&self, id: &str) -> Result<State> {
-        Ok(self.github.issue(&self.repo, Self::number(id)?)?.state)
+    fn get_status(&self, number: &u64) -> Result<State> {
+        Ok(self.github.issue(&self.repo, *number)?.state)
     }
 
-    fn set_status(&mut self, id: &str, status: State) -> Result<()> {
-        let number = Self::number(id)?;
+    fn set_status(&mut self, number: &u64, status: State) -> Result<()> {
         match status {
-            State::Open => self.github.reopen_issue(&self.repo, number)?,
-            State::Closed => self.github.close_issue(&self.repo, number)?,
+            State::Open => self.github.reopen_issue(&self.repo, *number)?,
+            State::Closed => self.github.close_issue(&self.repo, *number)?,
         };
         Ok(())
     }
 
-    fn dependents(&self, root: &str) -> Result<Dag<IssueId>> {
-        closure(Self::number(root)?, |number| {
+    fn dependents(&self, root: &u64) -> Result<Dag<u64>> {
+        closure(*root, |number| {
             self.github
                 .issue_graph(&self.repo, number)
                 .with_context(|| format!("reading issue {number}"))
@@ -67,7 +57,7 @@ impl IssueTracker<State> for GitHubIssues {
 /// `root` and every issue it blocks, transitively, each graph read by
 /// `fetch` once, in the order found; each after the members blocking
 /// it.
-fn closure(root: u64, fetch: impl Fn(u64) -> Result<IssueGraph>) -> Result<Dag<IssueId>> {
+fn closure(root: u64, fetch: impl Fn(u64) -> Result<IssueGraph>) -> Result<Dag<u64>> {
     // The graphs in discovery order, and each number's position among
     // them once read.
     let mut graphs: Vec<IssueGraph> = Vec::new();
@@ -87,7 +77,7 @@ fn closure(root: u64, fetch: impl Fn(u64) -> Result<IssueGraph>) -> Result<Dag<I
             .iter()
             .map(|graph| {
                 Node::new(
-                    graph.issue.number.to_string(),
+                    graph.issue.number,
                     graph
                         .blocked_by
                         .iter()
@@ -102,6 +92,7 @@ fn closure(root: u64, fetch: impl Fn(u64) -> Result<IssueGraph>) -> Result<Dag<I
 mod tests {
     use super::*;
     use crate::github::{Edge, Error, Issue};
+    use anyhow::anyhow;
 
     fn edge(number: u64) -> Edge {
         Edge {
@@ -126,8 +117,8 @@ mod tests {
         }
     }
 
-    fn ids(dag: &Dag<IssueId>) -> Vec<&str> {
-        dag.nodes().map(|node| node.value().as_str()).collect()
+    fn ids(dag: &Dag<u64>) -> Vec<u64> {
+        dag.nodes().map(|node| *node.value()).collect()
     }
 
     fn fetching(graphs: Vec<IssueGraph>) -> impl Fn(u64) -> Result<IssueGraph> {
@@ -154,13 +145,10 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(ids(&dag), ["1", "2", "3"]);
-        let three = dag.find(|id| id == "3").unwrap();
-        let before: Vec<&str> = three
-            .predecessors()
-            .map(|node| node.value().as_str())
-            .collect();
-        assert_eq!(before, ["1", "2"], "the outside blocker is no predecessor");
+        assert_eq!(ids(&dag), [1, 2, 3]);
+        let three = dag.find(|id| *id == 3).unwrap();
+        let before: Vec<u64> = three.predecessors().map(|node| *node.value()).collect();
+        assert_eq!(before, [1, 2], "the outside blocker is no predecessor");
     }
 
     #[test]
@@ -171,7 +159,7 @@ mod tests {
             Ok(graph(number, &[], &[]))
         })
         .unwrap();
-        assert_eq!(ids(&dag), ["7"]);
+        assert_eq!(ids(&dag), [7]);
         assert_eq!(reads.get(), 1);
     }
 
@@ -190,18 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn an_id_from_another_tracker_is_refused_in_words() {
-        let error = tracker().dependents("EPK-12").unwrap_err();
-        assert_eq!(error.to_string(), "EPK-12 is not a GitHub issue number");
-    }
-
-    #[test]
     fn the_verbs_that_need_a_token_refuse_before_any_wire_is_touched() {
         let mut tracker = tracker();
         for error in [
-            tracker.dependents("1").unwrap_err(),
-            tracker.set_status("1", State::Closed).unwrap_err(),
-            tracker.set_status("1", State::Open).unwrap_err(),
+            tracker.dependents(&1).unwrap_err(),
+            tracker.set_status(&1, State::Closed).unwrap_err(),
+            tracker.set_status(&1, State::Open).unwrap_err(),
         ] {
             assert!(
                 error.root_cause().downcast_ref::<Error>() == Some(&Error::TokenAbsent),

@@ -1,12 +1,12 @@
 //! A tracker read from one JSON file: a list of issues, each with an
-//! id, a title, a body, a status, and the ids it depends on. Statuses
-//! are plain strings.
+//! id, a title, a body, a status, and the ids it depends on. Ids and
+//! statuses are plain strings.
 
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 use epik_core::dag::{Dag, Node};
-use epik_core::tracker::{IssueId, IssueTracker};
+use epik_core::tracker::IssueTracker;
 use serde::Deserialize;
 
 /// The issues of one JSON file, in the file's order.
@@ -19,13 +19,13 @@ pub struct JsonTracker {
 /// One issue as the file spells it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 struct Issue {
-    id: IssueId,
+    id: String,
     title: String,
     body: String,
     #[serde(default)]
     status: String,
     #[serde(default)]
-    depends_on: Vec<IssueId>,
+    depends_on: Vec<String>,
 }
 
 impl JsonTracker {
@@ -71,25 +71,25 @@ impl JsonTracker {
     }
 }
 
-impl IssueTracker<String> for JsonTracker {
-    fn content(&self, id: &str) -> Result<String> {
+impl IssueTracker<String, String> for JsonTracker {
+    fn content(&self, id: &String) -> Result<String> {
         Ok(self.issue(id)?.body.clone())
     }
 
-    fn get_status(&self, id: &str) -> Result<String> {
+    fn get_status(&self, id: &String) -> Result<String> {
         Ok(self.issue(id)?.status.clone())
     }
 
-    fn set_status(&mut self, id: &str, status: String) -> Result<()> {
+    fn set_status(&mut self, id: &String, status: String) -> Result<()> {
         self.issue_mut(id)?.status = status;
         Ok(())
     }
 
     /// The closure of `root` under "depends on it", in the file's
     /// order, each issue after the members it depends on.
-    fn dependents(&self, root: &str) -> Result<Dag<IssueId>> {
+    fn dependents(&self, root: &String) -> Result<Dag<String>> {
         self.issue(root)?;
-        let mut members: BTreeSet<&str> = BTreeSet::from([root]);
+        let mut members: BTreeSet<&str> = BTreeSet::from([root.as_str()]);
         loop {
             let more: Vec<&str> = self
                 .issues
@@ -141,7 +141,11 @@ mod tests {
         JsonTracker::read(ADDER).unwrap()
     }
 
-    fn ids(dag: &Dag<IssueId>) -> Vec<&str> {
+    fn id(id: &str) -> String {
+        id.to_owned()
+    }
+
+    fn ids(dag: &Dag<String>) -> Vec<&str> {
         dag.nodes().map(|node| node.value().as_str()).collect()
     }
 
@@ -149,21 +153,21 @@ mod tests {
     fn the_adder_fixture_reads_and_answers_for_its_issues() {
         let mut tracker = adder();
         assert_eq!(
-            tracker.content("1").unwrap(),
+            tracker.content(&id("1")).unwrap(),
             "pyproject.toml\n.python-version"
         );
-        assert_eq!(tracker.get_status("2").unwrap(), "open");
-        tracker.set_status("2", "done".to_owned()).unwrap();
-        assert_eq!(tracker.get_status("2").unwrap(), "done");
+        assert_eq!(tracker.get_status(&id("2")).unwrap(), "open");
+        tracker.set_status(&id("2"), "done".to_owned()).unwrap();
+        assert_eq!(tracker.get_status(&id("2")).unwrap(), "done");
         assert_eq!(
-            tracker.content("9").unwrap_err().to_string(),
+            tracker.content(&id("9")).unwrap_err().to_string(),
             "there is no issue 9"
         );
     }
 
     #[test]
     fn the_dependents_of_the_root_are_the_whole_project_in_order() {
-        let dag = adder().dependents("1").unwrap();
+        let dag = adder().dependents(&id("1")).unwrap();
         assert_eq!(ids(&dag), ["1", "2", "3"]);
         let root = dag.find(|id| id == "1").unwrap();
         assert_eq!(root.predecessors().count(), 0);
@@ -179,7 +183,7 @@ mod tests {
 
     #[test]
     fn a_leaf_has_only_itself_as_dependents() {
-        assert_eq!(ids(&adder().dependents("3").unwrap()), ["3"]);
+        assert_eq!(ids(&adder().dependents(&id("3")).unwrap()), ["3"]);
     }
 
     #[test]
@@ -193,7 +197,7 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        let dag = tracker.dependents("a").unwrap();
+        let dag = tracker.dependents(&id("a")).unwrap();
         assert_eq!(ids(&dag), ["a", "b", "c"], "x is nobody's dependent");
     }
 
@@ -216,7 +220,7 @@ mod tests {
         ]"#;
         let error = JsonTracker::read(cycle)
             .unwrap()
-            .dependents("1")
+            .dependents(&id("1"))
             .unwrap_err()
             .to_string();
         assert!(error.contains("cycle"), "{error}");
