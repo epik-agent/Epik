@@ -1,5 +1,6 @@
 //! Agents: the Processes that write code, and the typed reading of
-//! what each one says. [`claude`] is the first.
+//! what each one says. [`claude`] is the first; [`scripted`] stands in
+//! for one in tests.
 //!
 //! An [`Agent`] is data that becomes a [`Process`]: [`start`] is where
 //! it turns into a command line and an environment. What the process
@@ -16,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::process::Process;
 
 pub mod claude;
+#[cfg(all(feature = "testing", unix))]
+pub mod scripted;
 
 /// One thing Epik understands from an agent, in the order said. The
 /// typed view is deliberately small: enough to narrate progress and
