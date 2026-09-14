@@ -1,41 +1,41 @@
-//! Agents: the processes Epik launches to do work.
+//! Processes: what Epik launches to do work.
 //!
-//! An [`Agent`] is a running process. It says what it says as
+//! A [`Process`] is a running process. It says what it says as
 //! [`Line`]s, one per line of stdout or stderr, and ends in the
-//! [`Exit`] that [`Agent::wait`] reports. Nothing flows in — no stdin,
+//! [`Exit`] that [`Process::wait`] reports. Nothing flows in — no stdin,
 //! no channel; what it needs to know goes in its arguments, its
 //! environment, and its working directory. Given a deadline, `wait`
-//! kills it when the deadline passes. Every process Epik starts is an
-//! Agent: a coding engine, a git command, a check.
+//! kills it when the deadline passes. Every process Epik starts is a
+//! Process: a coding engine, a git command, a check.
 //!
 //! # Example
 //!
-//! [`Agent::new`] starts the process, [`Agent::lines`] is drained until
-//! the process closes its output, and [`Agent::wait`] collects the
+//! [`Process::new`] starts the process, [`Process::lines`] is drained until
+//! the process closes its output, and [`Process::wait`] collects the
 //! exit.
 //!
 //! ```no_run
 //! # #[cfg(feature = "native")] {
-//! use epik_core::agent::Agent;
+//! use epik_core::process::Process;
 //!
-//! let mut agent = Agent::new(
+//! let mut process = Process::new(
 //!     vec!["sh".to_string(), "-c".to_string(), "echo Hello".to_string()],
 //!     "/",
 //!     [],
 //!     None,
 //! )?;
-//! for line in agent.lines() {
+//! for line in process.lines() {
 //!     println!("{line:?}");
 //! }
-//! let exit = agent.wait()?;
+//! let exit = process.wait()?;
 //! # }
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
 mod platform;
-mod process;
+mod shared;
 
-pub use process::{Exit, Line};
+pub use shared::{Exit, Line};
 
 use std::process::{Child, Command};
 use std::sync::mpsc::{Receiver, channel};
@@ -45,26 +45,26 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 
 use crate::keystore::Secret;
-use process::{exit, pump, spawn_piped};
+use shared::{exit, pump, spawn_piped};
 
 /// A process whose stdout and stderr are streamed as [`Line`]s.
 ///
 /// The process is started in its own group, on Unix, and dropping the
-/// `Agent` kills the whole group: a helper the process left in the
+/// `Process` kills the whole group: a helper the process left in the
 /// background holds the pipes open, and would otherwise keep the pumps
 /// waiting after the process itself was gone.
 ///
-/// Drain [`Agent::lines`] before calling [`Agent::wait`]. The reader
+/// Drain [`Process::lines`] before calling [`Process::wait`]. The reader
 /// threads stop when the process closes its output, so the event
 /// iterator ends on its own once the process exits.
-pub struct Agent {
+pub struct Process {
     /// The program, for the words a failure comes back as.
     program: String,
     /// When the process is killed if still running, and how long it
     /// was given; `None` lets it run for as long as it likes.
     deadline: Option<(Instant, Duration)>,
     line_receiver: Receiver<Line>,
-    process: Child,
+    child: Child,
     pumps: Vec<JoinHandle<Result<()>>>,
 }
 
@@ -78,18 +78,18 @@ pub struct Finished {
     pub stderr: Option<String>,
 }
 
-impl Agent {
+impl Process {
     /// Start `argv` — the program, then its arguments — in `cwd`, with
     /// `env` added to the environment Epik has, and begin streaming its
     /// output. The process gets no stdin. With a `deadline`, a process
     /// still running that long after its start is killed by
-    /// [`Agent::wait`], which says so; `None` is no limit.
+    /// [`Process::wait`], which says so; `None` is no limit.
     ///
     /// # Errors
     ///
     /// No program named, or the spawn itself failing — the program
     /// missing, chiefly. Everything after that arrives as lines or
-    /// through [`Agent::wait`].
+    /// through [`Process::wait`].
     pub fn new(
         argv: Vec<String>,
         cwd: impl Into<String>,
@@ -105,7 +105,7 @@ impl Agent {
             command.env(name, value.reveal());
         }
         let (line_sender, line_receiver) = channel();
-        let (process, stdout, stderr) = spawn_piped(command)?;
+        let (child, stdout, stderr) = spawn_piped(command)?;
         let deadline = deadline.map(|allowed| (Instant::now() + allowed, allowed));
         // Each pump owns one sender. When both reader threads finish
         // and drop theirs, the channel disconnects and `lines` ends.
@@ -119,7 +119,7 @@ impl Agent {
             program: program.clone(),
             deadline,
             line_receiver,
-            process,
+            child,
             pumps,
         })
     }
@@ -132,7 +132,7 @@ impl Agent {
 
     /// Wait for the reader threads to finish and the process to exit.
     ///
-    /// Normally called after draining [`Agent::lines`]. Calling it
+    /// Normally called after draining [`Process::lines`]. Calling it
     /// earlier is safe, since the channel is unbounded and the pumps
     /// keep draining the pipes, but all output is then held in memory
     /// until read. Calling this more than once returns the cached exit.
@@ -150,15 +150,15 @@ impl Agent {
     pub fn wait(&mut self) -> Result<Exit> {
         if let Some((deadline, allowed)) = self.deadline {
             while self
-                .process
+                .child
                 .try_wait()
                 .with_context(|| format!("could not wait for {}", self.program))?
                 .is_none()
             {
                 if Instant::now() >= deadline {
-                    platform::kill_tree(&mut self.process);
-                    let _ = self.process.wait();
-                    platform::kill_tree(&mut self.process);
+                    platform::kill_tree(&mut self.child);
+                    let _ = self.child.wait();
+                    platform::kill_tree(&mut self.child);
                     return Err(anyhow!(
                         "{} was killed after {allowed:?} without finishing",
                         self.program
@@ -172,7 +172,7 @@ impl Agent {
                 .map_err(|_| anyhow!("reader thread panicked"))??;
         }
         let status = self
-            .process
+            .child
             .wait()
             .with_context(|| format!("could not wait for {}", self.program))?;
         exit(status)
@@ -185,7 +185,7 @@ impl Agent {
     ///
     /// # Errors
     ///
-    /// [`Agent::wait`]'s.
+    /// [`Process::wait`]'s.
     pub fn finish(mut self) -> Result<Finished> {
         let exit = self.wait()?;
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -204,10 +204,10 @@ impl Agent {
     }
 }
 
-impl Drop for Agent {
+impl Drop for Process {
     /// Stop the process, and on Unix its descendants, if still running.
     ///
-    /// An `Agent` dropped without [`Agent::wait`] would otherwise leave
+    /// A `Process` dropped without [`Process::wait`] would otherwise leave
     /// the process running and the reader threads blocked on its pipes.
     /// Killing it closes the pipes, so the threads exit on their own,
     /// and the wait reaps it. The group is killed a second time once
@@ -219,9 +219,9 @@ impl Drop for Agent {
     /// report them and there is nothing to retry. Every call is
     /// harmless if `wait` already succeeded.
     fn drop(&mut self) {
-        platform::kill_tree(&mut self.process);
-        let _ = self.process.wait();
-        platform::kill_tree(&mut self.process);
+        platform::kill_tree(&mut self.child);
+        let _ = self.child.wait();
+        platform::kill_tree(&mut self.child);
     }
 }
 
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn missing_program_is_an_error() {
-        let Err(error) = Agent::new(
+        let Err(error) = Process::new(
             vec!["definitely-not-a-real-program".to_owned()],
             "/",
             [],
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn no_program_is_an_error() {
-        let Err(error) = Agent::new(vec![], "/", [], None) else {
+        let Err(error) = Process::new(vec![], "/", [], None) else {
             panic!("expected nothing to run");
         };
         assert_eq!(error.to_string(), "no program to run");
@@ -262,7 +262,7 @@ mod unix_tests {
 
     use super::*;
 
-    /// Everything an agent produced, one entry per line.
+    /// Everything a process produced, one entry per line.
     struct Collected {
         stdout: Vec<String>,
         stderr: Vec<String>,
@@ -270,8 +270,8 @@ mod unix_tests {
     }
 
     /// `script` under `sh -c`, from `/`.
-    fn sh(script: &str) -> Agent {
-        Agent::new(
+    fn sh(script: &str) -> Process {
+        Process::new(
             vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             "/",
             [],
@@ -282,15 +282,15 @@ mod unix_tests {
 
     /// Run `script` with `sh -c` and collect its output and exit.
     fn run(script: &str) -> Collected {
-        let mut agent = sh(script);
+        let mut process = sh(script);
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        for line in agent.lines() {
+        for line in process.lines() {
             match line {
                 Line::Stdout(line) => stdout.push(line),
                 Line::Stderr(line) => stderr.push(line),
             }
         }
-        let exit = agent.wait().expect("wait failed");
+        let exit = process.wait().expect("wait failed");
         Collected {
             stdout,
             stderr,
@@ -349,9 +349,9 @@ mod unix_tests {
 
     #[test]
     fn wait_before_draining_events_still_delivers_output() {
-        let mut agent = sh("head -c 1000000 /dev/zero");
-        assert_eq!(agent.wait().unwrap(), Exit::Code(0));
-        let total: usize = agent
+        let mut process = sh("head -c 1000000 /dev/zero");
+        assert_eq!(process.wait().unwrap(), Exit::Code(0));
+        let total: usize = process
             .lines()
             .map(|line| match line {
                 Line::Stdout(line) | Line::Stderr(line) => line.len(),
@@ -379,15 +379,15 @@ mod unix_tests {
 
     #[test]
     fn wait_can_be_called_again() {
-        let mut agent = sh("exit 5");
-        for _ in agent.lines() {}
-        assert_eq!(agent.wait().unwrap(), Exit::Code(5));
-        assert_eq!(agent.wait().unwrap(), Exit::Code(5));
+        let mut process = sh("exit 5");
+        for _ in process.lines() {}
+        assert_eq!(process.wait().unwrap(), Exit::Code(5));
+        assert_eq!(process.wait().unwrap(), Exit::Code(5));
     }
 
     #[test]
     fn the_directory_and_environment_reach_the_process_and_stdin_is_closed() {
-        let mut agent = Agent::new(
+        let mut process = Process::new(
             vec![
                 "sh".to_owned(),
                 "-c".to_owned(),
@@ -398,13 +398,13 @@ mod unix_tests {
             None,
         )
         .unwrap();
-        let lines: Vec<String> = agent
+        let lines: Vec<String> = process
             .lines()
             .map(|line| match line {
                 Line::Stdout(line) | Line::Stderr(line) => line,
             })
             .collect();
-        assert_eq!(agent.wait().unwrap(), Exit::Code(0));
+        assert_eq!(process.wait().unwrap(), Exit::Code(0));
         // macOS resolves /tmp through a symlink, so only the tail is fixed.
         assert!(lines[0].ends_with("/tmp"), "{lines:?}");
         assert_eq!(
@@ -426,10 +426,10 @@ mod unix_tests {
 
     #[test]
     fn drop_kills_and_reaps_the_process() {
-        let agent = sh("exec sleep 30");
-        let pid = agent.process.id();
+        let process = sh("exec sleep 30");
+        let pid = process.child.id();
         assert!(process_exists(pid), "sleep should be running");
-        drop(agent);
+        drop(process);
         assert!(!process_exists(pid), "sleep should be killed and reaped");
     }
 
@@ -448,9 +448,9 @@ mod unix_tests {
     #[test]
     fn drop_kills_background_descendants() {
         // The shell starts sleep in the background, reports its pid, and
-        // then waits for it, so both are alive when the agent is dropped.
-        let agent = sh("sleep 30 & echo $!; wait");
-        let Some(Line::Stdout(line)) = agent.lines().next() else {
+        // then waits for it, so both are alive when the process is dropped.
+        let process = sh("sleep 30 & echo $!; wait");
+        let Some(Line::Stdout(line)) = process.lines().next() else {
             panic!("expected the grandchild pid on stdout");
         };
         let grandchild: u32 = line.trim().parse().unwrap();
@@ -459,7 +459,7 @@ mod unix_tests {
         // ran out and the shell exited, and the grandchild would be gone by
         // the time it was checked. Timing the drop tells the two apart.
         let started = Instant::now();
-        drop(agent);
+        drop(process);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "drop should not wait for the background sleep to finish"
@@ -473,8 +473,8 @@ mod unix_tests {
     }
 
     /// `script` under `sh -c`, from `/`, with `allowed` to finish.
-    fn sh_within(script: &str, allowed: Duration) -> Agent {
-        Agent::new(
+    fn sh_within(script: &str, allowed: Duration) -> Process {
+        Process::new(
             vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             "/",
             [],
@@ -485,10 +485,10 @@ mod unix_tests {
 
     #[test]
     fn a_deadline_kills_a_process_that_will_not_finish_and_says_so() {
-        let mut agent = sh_within("echo started; exec sleep 30", Duration::from_millis(200));
-        let pid = agent.process.id();
+        let mut process = sh_within("echo started; exec sleep 30", Duration::from_millis(200));
+        let pid = process.child.id();
         let started = Instant::now();
-        let error = agent.wait().expect_err("the deadline should kill it");
+        let error = process.wait().expect_err("the deadline should kill it");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(
             error.to_string(),
@@ -497,17 +497,17 @@ mod unix_tests {
         assert!(!process_exists(pid), "killed and reaped");
         // What it said before the kill is still there to read.
         assert_eq!(
-            agent.lines().collect::<Vec<_>>(),
+            process.lines().collect::<Vec<_>>(),
             [Line::Stdout("started".to_owned())]
         );
     }
 
     #[test]
     fn a_deadline_that_is_not_reached_changes_nothing() {
-        let mut agent = sh_within("echo quick; exit 4", Duration::from_secs(30));
-        assert_eq!(agent.wait().unwrap(), Exit::Code(4));
+        let mut process = sh_within("echo quick; exit 4", Duration::from_secs(30));
+        assert_eq!(process.wait().unwrap(), Exit::Code(4));
         assert_eq!(
-            agent.lines().collect::<Vec<_>>(),
+            process.lines().collect::<Vec<_>>(),
             [Line::Stdout("quick".to_owned())]
         );
     }
@@ -533,9 +533,9 @@ mod unix_tests {
 
     #[test]
     fn drop_after_wait_is_harmless() {
-        let mut agent = sh("true");
-        for _ in agent.lines() {}
-        assert_eq!(agent.wait().unwrap(), Exit::Code(0));
-        drop(agent);
+        let mut process = sh("true");
+        for _ in process.lines() {}
+        assert_eq!(process.wait().unwrap(), Exit::Code(0));
+        drop(process);
     }
 }

@@ -1,7 +1,7 @@
 //! Epik's git: the user's `git` binary, run as argv.
 //!
 //! Every git invocation in the crate comes through [`run`]: a
-//! [`Command`] from [`commands`], argv straight into an [`Agent`] —
+//! [`Command`] from [`commands`], argv straight into a [`Process`] —
 //! never a shell — under a deadline, with no terminal to prompt on.
 //! Library code and a model's tool calls both arrive here, so the
 //! command's construction is the one check either gets. Above `run`,
@@ -27,9 +27,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 #[cfg(feature = "native")]
-use crate::agent::{Agent, Finished};
-#[cfg(feature = "native")]
 use crate::keystore::Secret;
+#[cfg(feature = "native")]
+use crate::process::{Finished, Process};
 #[cfg(feature = "native")]
 use commands::{
     AbortMerge, Add, AddWorktree, Branch, Change, Clone, Command, Commit, DeleteBranch, Diff,
@@ -104,7 +104,7 @@ fn run_within(command: &Command, timeout: Duration) -> Result<Finished> {
     // fails in words instead of waiting for a prompt nobody can see.
     // The user's helpers and SSH config still apply.
     let env = [("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"))];
-    Agent::new(argv, ".", env, Some(timeout))?.finish()
+    Process::new(argv, ".", env, Some(timeout))?.finish()
 }
 
 /// Runs `command` and settles the exit: what git said, for the verb
@@ -451,7 +451,7 @@ mod tests {
 
     /// The deadline, exercised on a short fuse rather than the real 60
     /// seconds: a clone from a loopback listener that never answers
-    /// blocks git forever, so the Agent has to kill it and say so. The
+    /// blocks git forever, so the Process has to kill it and say so. The
     /// kernel completes the connection on the listener's behalf, so git
     /// gets as far as waiting for a reply.
     #[test]

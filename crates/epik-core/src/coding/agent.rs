@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-//! Coding agents: the Agents that write code, and the typed reading
+//! Coding agents: the Processes that write code, and the typed reading
 //! of what each one says. [`claude`] is the first.
 
 #[cfg(feature = "native")]
-use crate::agent::Exit;
+use crate::process::Exit;
 
 pub mod claude;
 

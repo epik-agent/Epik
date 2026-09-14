@@ -705,7 +705,7 @@ pub(crate) mod fixtures {
     #[cfg(all(feature = "native", unix))]
     pub(crate) fn committing(
         gate: Option<std::path::PathBuf>,
-    ) -> impl Fn(&Issue, &crate::job::Workspace, &str) -> Result<crate::agent::Agent, String>
+    ) -> impl Fn(&Issue, &crate::job::Workspace, &str) -> Result<crate::process::Process, String>
     + Clone
     + Send
     + Sync
@@ -723,7 +723,7 @@ pub(crate) mod fixtures {
                  git -c commit.gpgsign=false commit -qm 'issue {id}'",
                 id = issue.id
             );
-            crate::agent::Agent::new(
+            crate::process::Process::new(
                 vec!["sh".to_owned(), "-c".to_owned(), script],
                 workspace.directory.to_string_lossy().into_owned(),
                 [],

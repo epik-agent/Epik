@@ -17,7 +17,7 @@
 //! sibling for a branch that already stands: the feature workspace a
 //! feature build keeps for itself, distinct from the jobs' own.
 //!
-//! [`launch`] takes a started [`Agent`] in the workspace — `ClaudeCode`
+//! [`launch`] takes a started [`Process`] in the workspace — `ClaudeCode`
 //! in production, an inline shell script in tests, the same asymmetry as
 //! CLI-in-prod/git2-in-tests — and one drainer thread folds its lines
 //! into the shared [`Record`]: stdout lines interpreted through
@@ -33,8 +33,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::agent::{Agent, Exit, Line};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
+use crate::process::{Exit, Line, Process};
 use crate::temp;
 use epik_core::coding::agent::claude::{self, Update};
 // Moved to epik-core; re-exported here until the rest of job follows.
@@ -485,18 +485,18 @@ pub fn abandon(workspace: &Workspace) {
 /// observation — so a host can return an Agent slot the instant the
 /// Agent is gone, even when the observation outlives the run.
 pub fn launch(
-    mut agent: Agent,
+    mut process: Process,
     record: Run,
     on_exit: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in agent.lines() {
+        for line in process.lines() {
             record
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .absorb(line);
         }
-        let phase = match agent.wait() {
+        let phase = match process.wait() {
             Ok(exit) => Phase::Finished(exit),
             Err(error) => Phase::Lost(format!("{error:#}")),
         };
@@ -815,8 +815,8 @@ mod tests {
     }
 
     /// `script` under `sh -c` in the workspace's directory.
-    fn agent_in(workspace: &Workspace, script: &str) -> Agent {
-        Agent::new(
+    fn agent_in(workspace: &Workspace, script: &str) -> Process {
+        Process::new(
             vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
             workspace.directory.to_string_lossy().into_owned(),
             [],

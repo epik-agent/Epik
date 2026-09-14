@@ -4,7 +4,7 @@
 //! The scripted engine is the deterministic stand-in for the claude
 //! binary: `sh -c` printf of captured fixture lines — inline only, never
 //! a written script file (the ETXTBSY lesson) — and it exercises the
-//! whole path: Agent → Line stream → interpret → typed Updates. Only
+//! whole path: Process → Line stream → interpret → typed Updates. Only
 //! the live tier, behind EPIK_CLAUDE_LIVE=1, touches a real model.
 
 #![cfg(all(feature = "testing", unix))]
@@ -12,8 +12,8 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use epik_core::agent::{Agent, Exit, Line};
 use epik_core::coding::agent::claude::{ClaudeCode, Update, interpret};
+use epik_core::process::{Exit, Line, Process};
 use epik_core::temp::Scratch;
 
 const SESSION: &str = include_str!("../src/coding/agent/claude/fixtures/session.jsonl");
@@ -22,13 +22,13 @@ const RESULT_ERROR: &str = include_str!("../src/coding/agent/claude/fixtures/res
 /// The scripted engine: `sh -c`, from `/`, saying `lines` — one printf
 /// argument each, single-quoted for the shell — and then running
 /// `coda`. Inline, never a written script file: the ETXTBSY lesson.
-fn canned(lines: &[&str], coda: &str) -> Agent {
+fn canned(lines: &[&str], coda: &str) -> Process {
     let quoted: Vec<String> = lines
         .iter()
         .map(|line| format!("'{}'", line.replace('\'', r"'\''")))
         .collect();
     let script = format!("printf '%s\\n' {}; {coda}", quoted.join(" "));
-    Agent::new(
+    Process::new(
         vec!["sh".to_owned(), "-c".to_owned(), script],
         "/",
         [],
@@ -39,8 +39,8 @@ fn canned(lines: &[&str], coda: &str) -> Agent {
 
 /// Reads the whole run: every interpreted Update in order, and the
 /// final exit.
-fn updates_of(mut agent: Agent) -> (Vec<Update>, Result<Exit, String>) {
-    let updates = agent
+fn updates_of(mut process: Process) -> (Vec<Update>, Result<Exit, String>) {
+    let updates = process
         .lines()
         .filter_map(|line| match line {
             Line::Stdout(line) => Some(interpret(&line)),
@@ -48,7 +48,10 @@ fn updates_of(mut agent: Agent) -> (Vec<Update>, Result<Exit, String>) {
         })
         .flatten()
         .collect();
-    (updates, agent.wait().map_err(|error| format!("{error:#}")))
+    (
+        updates,
+        process.wait().map_err(|error| format!("{error:#}")),
+    )
 }
 
 #[test]

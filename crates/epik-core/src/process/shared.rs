@@ -1,5 +1,5 @@
-//! What a process says and how it ends, and the mechanics beneath an
-//! [`Agent`](super::Agent): the spawn, one at a time, into its own
+//! What a process says and how it ends, and the mechanics beneath a
+//! [`Process`](super::Process): the spawn, one at a time, into its own
 //! group; the pumps that drain its pipes; and the reading of its lines
 //! and its exit.
 
@@ -15,13 +15,13 @@ use anyhow::{Context, Result, anyhow};
 
 use super::platform;
 
-/// How an Agent ended: an exit code, or the signal that took it.
+/// How a Process ended: an exit code, or the signal that took it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Exit {
-    /// The Agent exited on its own, with this code.
+    /// The Process exited on its own, with this code.
     Code(i32),
-    /// A signal took the Agent.
+    /// A signal took the Process.
     Signal(i32),
 }
 
@@ -33,16 +33,16 @@ impl Exit {
     }
 }
 
-/// One line an Agent said, in the order said, without its newline — nor
+/// One line a Process said, in the order said, without its newline — nor
 /// a carriage return before it, as [`BufRead::lines`](BufRead::lines)
 /// would have it. A line is decoded on its own, so bytes that are not
 /// UTF-8 come through as replacement characters rather than failing the
 /// stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Line {
-    /// One line of the Agent's stdout.
+    /// One line of the Process's stdout.
     Stdout(String),
-    /// One line of the Agent's stderr.
+    /// One line of the Process's stderr.
     Stderr(String),
 }
 
@@ -97,7 +97,7 @@ pub(super) fn spawn_piped(mut command: Command) -> Result<(Child, ChildStdout, C
 /// spawn pressure saw a sibling's EOF delayed by that child's whole
 /// lifetime, none with the lock. Spawning takes microseconds; nothing
 /// waits behind the lock for longer than that. Every process Epik
-/// starts comes through here, since every one is an Agent.
+/// starts comes through here, since every one is a Process.
 fn spawn_one_at_a_time(command: &mut Command) -> std::io::Result<Child> {
     static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
     let _held = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);

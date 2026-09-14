@@ -46,12 +46,12 @@ use serde_json::{Value, json};
 use super::check::{self, Check};
 use super::merge::Branch;
 use super::{Budget, Build, Feature, Issue, IssueId, Plan, RunId, build};
-use crate::agent::Agent;
 use crate::chat::{Answer, Ask};
 use crate::forge::Forge;
 use crate::git::plumbing;
 use crate::job::Workspace;
 use crate::monitor::{Change, Log};
+use crate::process::Process;
 use crate::tools::Tool;
 use crate::tools::arg;
 
@@ -286,7 +286,7 @@ pub fn start_feature<F, M>(
 ) -> Tool
 where
     F: Forge + Send + Sync + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Process, String> + Send + Sync + 'static,
 {
     Tool::new(
         "start_feature",
@@ -559,8 +559,8 @@ mod tests {
     /// dispatch fails at the start — which is exactly what lets the tool
     /// tests run without an engine. The end-to-end build rides in the
     /// feature build's own tests.
-    fn unreachable(_: &Issue, _: &Workspace, _: &str) -> Result<Agent, String> {
-        Agent::new(vec!["/nonexistent/agent".to_owned()], "/", [], None)
+    fn unreachable(_: &Issue, _: &Workspace, _: &str) -> Result<Process, String> {
+        Process::new(vec!["/nonexistent/agent".to_owned()], "/", [], None)
             .map_err(|error| format!("{error:#}"))
     }
 
@@ -603,7 +603,7 @@ mod tests {
         asker: impl Fn(Ask) -> Answer + 'static,
     ) -> Registry
     where
-        M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Clone + Send + Sync + 'static,
+        M: Fn(&Issue, &Workspace, &str) -> Result<Process, String> + Clone + Send + Sync + 'static,
     {
         let plans: BTreeMap<Feature, Plan> = plans
             .into_iter()

@@ -1,6 +1,6 @@
 // Moved to epik-core; re-exported here until the rest follows.
 #[cfg(feature = "native")]
-pub use epik_core::agent;
+pub use epik_core::process;
 pub mod chat;
 #[cfg(feature = "serde")]
 pub mod config;

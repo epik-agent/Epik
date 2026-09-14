@@ -1,6 +1,6 @@
 //! Everything that depends on the operating system.
 //!
-//! [`Agent`](super::Agent) needs two things the standard library does not
+//! [`Process`](super::Process) needs two things the standard library does not
 //! provide portably: starting a process so that its descendants can be found
 //! again later, and killing all of them at once. This module supplies each as
 //! one function. The Unix implementation uses process groups. The fallback

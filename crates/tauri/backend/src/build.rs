@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use epik::agent::Agent;
 use epik::chat::{Answer, Ask};
 use epik::feature::tools::{Builds, feature_status, start_feature};
 use epik::feature::{Budget, Feature, Issue, Plan};
@@ -38,6 +37,7 @@ use epik::job::agent::claude::{ClaudeCode, Update};
 use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
 use epik::monitor::{EVENT, Entry, Log};
+use epik::process::Process;
 use epik::tools::{Tool, arg};
 use epik::tracker::Tracker;
 use epik::tracker::github::GitHubTracker;
@@ -172,7 +172,7 @@ fn start(
     prompt: String,
     model: Option<String>,
     api_key: Option<Secret>,
-) -> Result<Agent, String> {
+) -> Result<Process, String> {
     ClaudeCode {
         binary: claude.to_string_lossy().into_owned(),
         cwd: workspace.directory.to_string_lossy().into_owned(),
@@ -458,7 +458,7 @@ mod tests {
         ]
         .map(str::to_owned)
         .to_vec();
-        let _ = Agent::new(argv, "/", [], None).and_then(Agent::finish);
+        let _ = Process::new(argv, "/", [], None).and_then(Process::finish);
     }
 
     /// The tools over `state`, with git beside them, as a turn would
@@ -585,7 +585,7 @@ mod tests {
                 input_tokens: None,
                 output_tokens: Some(7),
             });
-            record.phase = Phase::Finished(epik::agent::Exit::Code(0));
+            record.phase = Phase::Finished(epik::process::Exit::Code(0));
             record.commits = Some(job::Commits {
                 head: "tip".to_owned(),
                 advanced: true,

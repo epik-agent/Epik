@@ -1,6 +1,6 @@
 //! Epik's own git: the user's `git` binary, run as argv.
 //!
-//! Every invocation is argv straight into an [`Agent`] — never a shell,
+//! Every invocation is argv straight into a [`Process`] — never a shell,
 //! never a string spliced into a command line — under a deadline, with
 //! no terminal to prompt on. [`execute`] settles the outcome into the
 //! `{ ok, output }` shape the model's git tools answer with, and
@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agent::Agent;
 use crate::keystore::Secret;
+use crate::process::Process;
 
 /// How long one git invocation may take before it is killed and reported.
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -53,8 +53,8 @@ fn execute_within(
         .chain(&[("GIT_TERMINAL_PROMPT", "0")])
         .map(|(name, value)| ((*name).to_owned(), Secret::from(*value)));
     // From wherever Epik is: every call names its repository with `-C`.
-    let finished = Agent::new(argv, ".", env, Some(timeout))
-        .and_then(Agent::finish)
+    let finished = Process::new(argv, ".", env, Some(timeout))
+        .and_then(Process::finish)
         .map_err(|error| format!("{error:#}"))?;
     // The tools' one shape: everything git said, stdout then stderr.
     let output: Vec<String> = [finished.stdout, finished.stderr]

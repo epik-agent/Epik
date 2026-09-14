@@ -1,4 +1,4 @@
-//! Claude Code, the first real engine: an [`Agent`] whose process is the
+//! Claude Code, the first real engine: a [`Process`] whose program is the
 //! `claude` CLI in headless print mode, and a typed reading of what it
 //! says.
 //!
@@ -12,12 +12,12 @@
 //! there is no channel to answer a permission prompt, so the agent must
 //! never ask one. Its containment is the working directory and the
 //! environment it is handed. The prompt is the last argument: the CLI
-//! takes it positionally, and an Agent has no stdin.
+//! takes it positionally, and a Process has no stdin.
 //!
 //! [`start`]: ClaudeCode::start
 //!
-//! The CLI's stream-json arrives as the Agent's generic stdout
-//! [`Line`](crate::agent::Line)s; the stream stays generic, and [`interpret`] layers
+//! The CLI's stream-json arrives as the Process's generic stdout
+//! [`Line`](crate::process::Line)s; the stream stays generic, and [`interpret`] layers
 //! the engine's meaning on top as a pure function over lines — modelling
 //! only the fields Epik reads, absorbing everything else. A line that is
 //! not JSON, or JSON of an unmodelled shape, interprets to nothing;
@@ -26,9 +26,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "native")]
-use crate::agent::Agent;
-#[cfg(feature = "native")]
 use crate::keystore::Secret;
+#[cfg(feature = "native")]
+use crate::process::Process;
 
 /// One thing Epik understands from a Claude Code stream, in the order
 /// said. The typed view is deliberately small: enough to narrate
@@ -150,7 +150,7 @@ struct Usage {
     output_tokens: Option<u64>,
 }
 
-/// The `claude` CLI as an Agent. Data only: the caller supplies the
+/// The `claude` CLI as a Process. Data only: the caller supplies the
 /// binary's absolute path — no PATH divination — and resolves any API
 /// key itself; this type never touches the keystore. With no key, the
 /// CLI's own logged-in auth applies; both are legitimate.
@@ -172,12 +172,12 @@ impl ClaudeCode {
     /// # Errors
     ///
     /// The spawn itself failing — the binary missing, chiefly.
-    pub fn start(self) -> anyhow::Result<Agent> {
+    pub fn start(self) -> anyhow::Result<Process> {
         let argv = self.argv();
         let env = self
             .api_key
             .map(|key| ("ANTHROPIC_API_KEY".to_owned(), key));
-        Agent::new(argv, self.cwd, env, None)
+        Process::new(argv, self.cwd, env, None)
     }
 
     /// The whole command line: the binary, the settled posture, the
