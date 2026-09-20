@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod transcript;
+
+pub use transcript::{Body, Card, Change, Entry, PREVIEW_CAP, Tone, Transcript, ask_title, shown};
+
 /// A speaker, by its wire-protocol name.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]

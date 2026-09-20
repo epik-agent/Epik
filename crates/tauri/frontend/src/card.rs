@@ -3,7 +3,7 @@
 //! A card is how the transcript shows an observed act — a tool call, a
 //! tool's answer, a turn that failed, a question settled — as distinct
 //! from something a speaker said. One component renders all of them from
-//! a [`Spec`]: a title, a body, and a tone. Cards carry the
+//! an [`assistant::Card`]: a title, a body, and a tone. Cards carry the
 //! interactivity in this window: a machine body that is a JSON document
 //! delegates its own — per-node folding — to [`JsonTree`]; any other
 //! body past its preview gets the click-to-expand toggle.
@@ -17,97 +17,13 @@
 //! for the `QuestionResolved` event to replace it. It never updates
 //! itself; the window shows nothing it didn't receive.
 
-use epik::chat::{Answer, Ask, TranscriptItem};
+use epik_core::assistant::{self, Answer, Ask, Tone, shown};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::ipc;
 use crate::json::{self, JsonTree};
-
-/// How a card carries itself: matter-of-fact, or bad news.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Tone {
-    Neutral,
-    Error,
-}
-
-/// Everything a card is, decided before any rendering: the pure mapping
-/// the tests pin down.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Spec {
-    pub title: Option<String>,
-    pub body: String,
-    pub tone: Tone,
-    /// Machine text — arguments, results — is monospace; prose is not.
-    pub mono: bool,
-}
-
-/// A card title for `ask`: what kind of thing was asked for.
-pub const fn ask_title(ask: &Ask) -> &'static str {
-    match ask {
-        Ask::Repository { .. } => "repository",
-        Ask::Check { .. } => "check",
-    }
-}
-
-/// The card for `item`, if `item` is card-shaped: tool calls, tool
-/// results, failures, and settled questions are; speech is not, and
-/// neither is a pending question, which is a [`QuestionCard`].
-pub fn spec(item: &TranscriptItem) -> Option<Spec> {
-    match item {
-        TranscriptItem::QuestionResolved { ask, answer, .. } => Some(Spec {
-            title: Some(ask_title(ask).to_owned()),
-            body: match answer {
-                Answer::Repository { url } => url.clone(),
-                Answer::Check { command } => command.clone(),
-                Answer::Declined => "declined".to_owned(),
-            },
-            tone: Tone::Neutral,
-            // A settled check is a command; the others are prose.
-            mono: matches!(answer, Answer::Check { .. }),
-        }),
-        TranscriptItem::ToolCall { name, arguments } => Some(Spec {
-            title: Some(name.clone()),
-            body: arguments.clone(),
-            tone: Tone::Neutral,
-            mono: true,
-        }),
-        TranscriptItem::ToolResult { name, ok, content } => Some(Spec {
-            title: Some(name.clone()),
-            body: content.clone(),
-            tone: if *ok { Tone::Neutral } else { Tone::Error },
-            mono: true,
-        }),
-        TranscriptItem::TurnFailed { reason } => Some(Spec {
-            title: None,
-            body: reason.clone(),
-            tone: Tone::Error,
-            mono: false,
-        }),
-        TranscriptItem::Message { .. }
-        | TranscriptItem::AssistantDelta { .. }
-        | TranscriptItem::Question { .. } => None,
-    }
-}
-
-/// How many characters of body a folded card shows.
-pub const PREVIEW_CAP: usize = 200;
-
-/// The state logic of the expand toggle, as a pure function: what the
-/// card displays for `body` at `expanded`, and whether there is a toggle
-/// at all. A body within [`PREVIEW_CAP`] has nothing to expand.
-pub fn shown(body: &str, expanded: bool) -> (String, bool) {
-    if body.chars().count() <= PREVIEW_CAP {
-        return (body.to_owned(), false);
-    }
-    if expanded {
-        return (body.to_owned(), true);
-    }
-    let mut preview: String = body.chars().take(PREVIEW_CAP).collect();
-    preview.push('…');
-    (preview, true)
-}
 
 /// What every card wears; the tone colors it.
 const CHROME: &str = "self-stretch rounded-lg border px-3.5 py-2 text-sm";
@@ -132,7 +48,7 @@ const fn tone_class(tone: Tone) -> &'static str {
 /// A mono body that is a JSON document renders as a folding
 /// [`JsonTree`]; every other body is the folded-or-whole text.
 #[component]
-pub fn Card(spec: Spec) -> impl IntoView {
+pub fn Card(spec: assistant::Card) -> impl IntoView {
     let tone = tone_class(spec.tone);
     let title = spec
         .title
@@ -371,184 +287,5 @@ fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl I
             </div>
             <Note note />
         </li>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_settled_question_is_a_neutral_prose_card_titled_by_its_kind() {
-        let ask = Ask::Repository {
-            prompt: "Where should this live?".to_owned(),
-        };
-        let answered = TranscriptItem::QuestionResolved {
-            id: "1".to_owned(),
-            ask: ask.clone(),
-            answer: Answer::Repository {
-                url: "/tmp/wumpus.git".to_owned(),
-            },
-        };
-        assert_eq!(
-            spec(&answered),
-            Some(Spec {
-                title: Some("repository".to_owned()),
-                body: "/tmp/wumpus.git".to_owned(),
-                tone: Tone::Neutral,
-                mono: false,
-            })
-        );
-
-        let declined = TranscriptItem::QuestionResolved {
-            id: "2".to_owned(),
-            ask,
-            answer: Answer::Declined,
-        };
-        assert_eq!(
-            spec(&declined),
-            Some(Spec {
-                title: Some("repository".to_owned()),
-                body: "declined".to_owned(),
-                tone: Tone::Neutral,
-                mono: false,
-            })
-        );
-    }
-
-    #[test]
-    fn a_settled_check_is_a_mono_card_carrying_the_command_in_force() {
-        let ask = Ask::Check {
-            prompt: "What says green?".to_owned(),
-            proposal: Some("cargo test".to_owned()),
-        };
-        let confirmed = TranscriptItem::QuestionResolved {
-            id: "1".to_owned(),
-            ask: ask.clone(),
-            answer: Answer::Check {
-                command: "cargo test --workspace".to_owned(),
-            },
-        };
-        assert_eq!(
-            spec(&confirmed),
-            Some(Spec {
-                title: Some("check".to_owned()),
-                body: "cargo test --workspace".to_owned(),
-                tone: Tone::Neutral,
-                mono: true,
-            })
-        );
-
-        let skipped = TranscriptItem::QuestionResolved {
-            id: "2".to_owned(),
-            ask,
-            answer: Answer::Declined,
-        };
-        assert_eq!(
-            spec(&skipped),
-            Some(Spec {
-                title: Some("check".to_owned()),
-                body: "declined".to_owned(),
-                tone: Tone::Neutral,
-                mono: false,
-            })
-        );
-    }
-
-    #[test]
-    fn a_pending_question_is_not_a_static_card() {
-        assert_eq!(
-            spec(&TranscriptItem::Question {
-                id: "1".to_owned(),
-                ask: Ask::Repository {
-                    prompt: "Where?".to_owned(),
-                },
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn a_tool_call_is_a_neutral_mono_card_titled_by_its_tool() {
-        let item = TranscriptItem::ToolCall {
-            name: "current_time".to_owned(),
-            arguments: "{}".to_owned(),
-        };
-        assert_eq!(
-            spec(&item),
-            Some(Spec {
-                title: Some("current_time".to_owned()),
-                body: "{}".to_owned(),
-                tone: Tone::Neutral,
-                mono: true,
-            })
-        );
-    }
-
-    #[test]
-    fn a_tool_result_wears_its_outcome_as_tone() {
-        let ok = TranscriptItem::ToolResult {
-            name: "current_time".to_owned(),
-            ok: true,
-            content: "{}".to_owned(),
-        };
-        assert_eq!(spec(&ok).unwrap().tone, Tone::Neutral);
-
-        let failed = TranscriptItem::ToolResult {
-            name: "current_time".to_owned(),
-            ok: false,
-            content: "no such day".to_owned(),
-        };
-        assert_eq!(spec(&failed).unwrap().tone, Tone::Error);
-    }
-
-    #[test]
-    fn a_failed_turn_is_an_untitled_error_card_in_prose() {
-        let item = TranscriptItem::TurnFailed {
-            reason: "the wire went quiet".to_owned(),
-        };
-        assert_eq!(
-            spec(&item),
-            Some(Spec {
-                title: None,
-                body: "the wire went quiet".to_owned(),
-                tone: Tone::Error,
-                mono: false,
-            })
-        );
-    }
-
-    #[test]
-    fn speech_is_never_a_card() {
-        assert_eq!(
-            spec(&TranscriptItem::Message {
-                role: epik::chat::Role::User,
-                text: "hi".to_owned(),
-            }),
-            None
-        );
-        assert_eq!(
-            spec(&TranscriptItem::AssistantDelta {
-                text: "he".to_owned(),
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn a_body_at_the_cap_has_nothing_to_expand() {
-        let body = "x".repeat(PREVIEW_CAP);
-        assert_eq!(shown(&body, false), (body.clone(), false));
-        assert_eq!(shown(&body, true), (body, false));
-    }
-
-    #[test]
-    fn one_past_the_cap_folds_with_an_ellipsis_and_a_toggle() {
-        let body = "x".repeat(PREVIEW_CAP + 1);
-        assert_eq!(
-            shown(&body, false),
-            (format!("{}…", "x".repeat(PREVIEW_CAP)), true)
-        );
-        assert_eq!(shown(&body, true), (body, true), "expanded shows it all");
     }
 }
