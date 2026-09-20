@@ -1,4 +1,4 @@
-//! The chat round-trip. Commands carry intent in; events carry
+//! The assistant round-trip. Commands carry intent in; events carry
 //! observation out.
 //!
 //! [`send_message`] appends the user's message to the canonical
@@ -10,7 +10,7 @@
 //! `TurnFailed` instead; the window shows nothing it didn't receive as
 //! an event. One turn in
 //! flight at a time: a send during a turn is refused on the command
-//! channel, because a misplaced intent is not a chat failure.
+//! channel, because a misplaced intent is not an assistant failure.
 //!
 //! A turn can also ask. A tool handler runs on the turn's thread, which
 //! is allowed to block, so a question suspends the turn until the user
@@ -26,13 +26,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
 
-use epik::chat::{Answer, Ask, Conversation, Role, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::config::Config;
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, Resolved};
-use epik::tools::{self, Registry, Tool};
-use epik_core::assistant::{Client, Error, SYSTEM_PROMPT, run};
-use epik_core::model_tools;
+use epik_core::assistant::{
+    Answer, Ask, Client, Conversation, Error, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
+    TranscriptItem, run,
+};
+use epik_core::model_tools::{self, Registry, Tool};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::secrets::OsKeyring;
@@ -47,10 +48,10 @@ pub(crate) const GITHUB_TOKEN_NAME: &str = "GITHUB_TOKEN";
 /// Where to send someone whose turn failed for want of a key.
 const SET_KEY_HINT: &str = "Set the Anthropic key in Settings (Cmd+,).";
 
-/// The chat's whole state: the canonical transcript, whether a turn is
+/// The assistant's whole state: the canonical transcript, whether a turn is
 /// in flight, and the questions a turn is waiting on.
 #[derive(Default)]
-pub struct ChatState {
+pub struct AssistantState {
     conversation: Mutex<Conversation>,
     turning: AtomicBool,
     /// Question id to the sender the blocked handler is waiting on.
@@ -59,7 +60,7 @@ pub struct ChatState {
     next_question: AtomicU64,
 }
 
-impl ChatState {
+impl AssistantState {
     /// Claims the turn: true when it is now this caller's, false when it
     /// already belongs to a turn in flight, which keeps it.
     fn begin_turn(&self) -> bool {
@@ -110,7 +111,7 @@ impl ChatState {
 /// an answer resolves as declined: the persona should stop and wait,
 /// which is what a decline says.
 fn ask(
-    state: &ChatState,
+    state: &AssistantState,
     ask: Ask,
     append: impl Fn(&TranscriptItem),
     emit: impl Fn(&TranscriptItem),
@@ -133,7 +134,7 @@ fn ask(
 
 /// Delivers `answer` to the handler waiting on question `id`. An id with
 /// nothing pending — a stale card, a double click — is refused in words.
-fn answer(state: &ChatState, id: &str, answer: Answer) -> Result<(), String> {
+fn answer(state: &AssistantState, id: &str, answer: Answer) -> Result<(), String> {
     let sender = state
         .close_question(id)
         .ok_or_else(|| format!("no question with id {id} is waiting for an answer"))?;
@@ -210,7 +211,7 @@ fn replying_with<'a>(
     client: &'a Client,
     system: &'a str,
     transcript: &'a [TranscriptItem],
-    registry: &'a model_tools::Registry,
+    registry: &'a Registry,
     stop: &'a AtomicBool,
 ) -> impl Replier + 'a {
     move |on_delta, record| {
@@ -259,7 +260,7 @@ fn turn(reply: impl Replier, append: impl Fn(&TranscriptItem), emit: impl Fn(&Tr
 #[tauri::command]
 pub async fn send_message(
     app: AppHandle,
-    state: State<'_, ChatState>,
+    state: State<'_, AssistantState>,
     text: String,
 ) -> Result<(), String> {
     if !state.begin_turn() {
@@ -333,11 +334,10 @@ pub async fn send_message(
         // Assembled fresh each turn, so a token pasted mid-session
         // reaches the very next turn.
         let mut registry = Registry::standard();
-        registry.extend(tools::github::all(
+        registry.extend(model_tools::github::all(
             GitHub::new(github_token.clone()),
             config.github.owner.clone(),
         ));
-        registry.extend(tools::git::all());
         registry.extend(crate::build::tools(
             app.clone(),
             agent_key.clone(),
@@ -348,7 +348,7 @@ pub async fn send_message(
         // check card — blocks the turn's thread until the window answers.
         let asker = |app: AppHandle| {
             move |question| {
-                let state = app.state::<ChatState>();
+                let state = app.state::<AssistantState>();
                 ask(
                     &state,
                     question,
@@ -369,9 +369,9 @@ pub async fn send_message(
         ));
         registry.register(choose_repository(asker(app.clone())));
         let stop = AtomicBool::new(false);
-        let state = app.state::<ChatState>();
+        let state = app.state::<AssistantState>();
         turn(
-            replying_with(&client, &SYSTEM_PROMPT, &snapshot, &registry.into(), &stop),
+            replying_with(&client, &SYSTEM_PROMPT, &snapshot, &registry, &stop),
             |item| state.append(item),
             |item| {
                 let _ = app.emit(TRANSCRIPT_EVENT, item);
@@ -386,7 +386,7 @@ pub async fn send_message(
 /// question with that id is waiting.
 #[tauri::command]
 pub async fn answer_question(
-    state: State<'_, ChatState>,
+    state: State<'_, AssistantState>,
     id: String,
     answer: Answer,
 ) -> Result<(), String> {
@@ -395,7 +395,9 @@ pub async fn answer_question(
 
 /// The whole transcript so far, for a window that has just opened its eyes.
 #[tauri::command]
-pub async fn get_transcript(state: State<'_, ChatState>) -> Result<Vec<TranscriptItem>, String> {
+pub async fn get_transcript(
+    state: State<'_, AssistantState>,
+) -> Result<Vec<TranscriptItem>, String> {
     Ok(state
         .conversation
         .lock()
@@ -547,7 +549,7 @@ mod tests {
     /// loop drives a real client, and the turn observes it into items.
     #[test]
     fn a_scripted_tool_turn_flows_through_the_turn_as_items() {
-        use epik::testing::model::{Fragment, Scripted, Turn as Script};
+        use epik_core::assistant::scripted::{Fragment, Scripted, Turn as Script};
 
         let model = Scripted::spawn(vec![
             Script::ToolCalls(vec![vec![Fragment::open(
@@ -568,7 +570,7 @@ mod tests {
                 &client,
                 "system",
                 &[user("what time is it?")],
-                &registry.into(),
+                &registry,
                 &stop,
             ),
             |_| {},
@@ -591,7 +593,7 @@ mod tests {
 
     #[test]
     fn the_turn_belongs_to_one_caller_until_returned() {
-        let state = ChatState::default();
+        let state = AssistantState::default();
         assert!(state.begin_turn());
         assert!(!state.begin_turn(), "a second claim is refused");
         state.end_turn();
@@ -613,7 +615,7 @@ mod tests {
     fn an_ask_emits_the_question_and_resolves_when_answered() {
         use std::sync::Arc;
 
-        let state = Arc::new(ChatState::default());
+        let state = Arc::new(AssistantState::default());
         let (events_in, events) = channel::<TranscriptItem>();
         let asker = std::thread::spawn({
             let state = Arc::clone(&state);
@@ -677,7 +679,7 @@ mod tests {
 
     #[test]
     fn an_answer_to_no_pending_question_is_refused_in_words() {
-        let state = ChatState::default();
+        let state = AssistantState::default();
         let error = answer(&state, "42", Answer::Declined).unwrap_err();
         assert!(error.contains("42"), "{error}");
         assert!(error.contains("no question"), "{error}");
@@ -685,7 +687,7 @@ mod tests {
 
     #[test]
     fn a_question_answered_twice_is_refused_the_second_time() {
-        let state = ChatState::default();
+        let state = AssistantState::default();
         let (id, receiver) = state.open_question();
         answer(&state, &id, Answer::Declined).unwrap();
         assert_eq!(receiver.recv().unwrap(), Answer::Declined);
@@ -694,7 +696,7 @@ mod tests {
 
     #[test]
     fn question_ids_are_distinct_and_monotonic() {
-        let state = ChatState::default();
+        let state = AssistantState::default();
         let (first, _) = state.open_question();
         let (second, _) = state.open_question();
         assert!(first.parse::<u64>().unwrap() < second.parse::<u64>().unwrap());
@@ -706,7 +708,7 @@ mod tests {
     /// where a turn is suspended on a question and resumed.
     #[test]
     fn a_scripted_choose_repository_turn_suspends_until_the_user_answers() {
-        use epik::testing::model::{Fragment, Scripted, Turn as Script};
+        use epik_core::assistant::scripted::{Fragment, Scripted, Turn as Script};
         use std::sync::Arc;
 
         let model = Scripted::spawn(vec![
@@ -719,7 +721,7 @@ mod tests {
             Script::text(&["Making it there."]),
         ]);
         let base_url = model.base_url();
-        let state = Arc::new(ChatState::default());
+        let state = Arc::new(AssistantState::default());
         let (events_in, events) = channel::<TranscriptItem>();
 
         let turning = std::thread::spawn({
@@ -746,7 +748,7 @@ mod tests {
                         &client,
                         "system",
                         &[user("write me hunt the wumpus")],
-                        &registry.into(),
+                        &registry,
                         &AtomicBool::new(false),
                     ),
                     |item| state.append(item),

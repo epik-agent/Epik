@@ -5,8 +5,8 @@ use epik::monitor::Log;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Builder, Manager, Theme, WebviewUrl, WebviewWindowBuilder, Wry};
 
+mod assistant;
 mod build;
-mod chat;
 mod config;
 mod monitor;
 mod secrets;
@@ -117,7 +117,7 @@ pub fn run() {
             app.handle().set_theme(None);
             Ok(())
         })
-        .manage(chat::ChatState::default())
+        .manage(assistant::AssistantState::default())
         .manage(build::BuildState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
@@ -156,9 +156,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            chat::send_message,
-            chat::get_transcript,
-            chat::answer_question,
+            assistant::send_message,
+            assistant::get_transcript,
+            assistant::answer_question,
             build::monitor_log,
             secrets::secret_reveal,
             secrets::secret_save,

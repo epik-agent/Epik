@@ -7,7 +7,7 @@
 //! the file appear when they are absent and reads a file that is already
 //! there without touching it, so a first run and a deleted directory are
 //! the same case. The file as
-//! first written is [`starting`]: the chat model, because the source
+//! first written is [`starting`]: the assistant's model, because the source
 //! names that default, and nothing else. What the file can state is
 //! [`Config`], the library's shape; the path and the format are this
 //! crate's.
@@ -16,7 +16,7 @@
 //! no secrets in it, nothing to guard. A write reaches two places in one
 //! command: the file, through [`save`], and the `Config`
 //! in managed state, replaced only once the file has taken the new
-//! values, so the next chat turn and the next build use them with no
+//! values, so the next assistant turn and the next build use them with no
 //! restart and a failed write leaves what was running untouched.
 //!
 //! [`models_list`] and [`github_login`] need a secret and take none.
@@ -30,14 +30,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::Context;
-use epik::chat::{ANTHROPIC_MODEL, ModelInfo};
 use epik::config::{Config, Model};
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, Resolved, Secret};
-use epik_core::assistant::{self, Error};
+use epik_core::assistant::{self, ANTHROPIC_MODEL, Error, ModelInfo};
 use tauri::{AppHandle, Manager, State};
 
-use crate::chat::{API_KEY_NAME, GITHUB_TOKEN_NAME};
+use crate::assistant::{API_KEY_NAME, GITHUB_TOKEN_NAME};
 use crate::secrets::OsKeyring;
 
 /// The configuration file's name inside [`root`].
@@ -56,7 +55,7 @@ fn root(app: &AppHandle) -> anyhow::Result<PathBuf> {
         .context("no configuration directory on this platform")
 }
 
-/// The file as first written: the chat model, spelled from the constant,
+/// The file as first written: the assistant's model, spelled from the constant,
 /// and nothing else — no constant in the source names an agent model.
 fn starting() -> Config {
     Config {
@@ -354,14 +353,14 @@ mod tests {
                 listen: Some("127.0.0.1:7878".to_owned()),
             }),
         };
-        let chat_only = starting();
+        let assistant_only = starting();
         let owner_only = Config {
             github: GitHub {
                 owner: Some("o".to_owned()),
             },
             ..Config::default()
         };
-        for config in [full, chat_only, owner_only, Config::default()] {
+        for config in [full, assistant_only, owner_only, Config::default()] {
             let (_dir, root) = root();
             std::fs::create_dir_all(&root).unwrap();
             save(&root, &config).unwrap();

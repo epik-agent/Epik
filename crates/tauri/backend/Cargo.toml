@@ -38,8 +38,10 @@ tiny_http = "0.12"
 include_dir = "0.7"
 
 [dev-dependencies]
-# The scripted model rides in for tests only; no shipping build sees it.
+# The scripted model and the scratch directory ride in for tests only; no
+# shipping build sees them.
 epik = { path = "../../epik", features = ["testing"] }
+epik-core = { path = "../../epik-core", features = ["testing"] }
 rust_decimal = "1"
 
 [lints]
