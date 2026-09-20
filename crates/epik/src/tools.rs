@@ -120,7 +120,7 @@ impl ToolSpec {
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub(crate) arguments: String,
+    pub arguments: String,
 }
 
 impl serde::Serialize for ToolCall {
