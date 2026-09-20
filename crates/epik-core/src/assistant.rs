@@ -15,6 +15,7 @@ mod client;
 mod prompt;
 #[cfg(all(feature = "native", any(test, feature = "testing")))]
 pub mod scripted;
+mod transcript;
 #[cfg(feature = "native")]
 mod wire;
 
@@ -25,6 +26,7 @@ pub use client::{ANTHROPIC_MODEL, ModelInfo};
 pub use client::{Client, Error, models, run};
 #[cfg(feature = "native")]
 pub use prompt::SYSTEM_PROMPT;
+pub use transcript::{Body, Card, Change, Entry, PREVIEW_CAP, Tone, Transcript, ask_title, shown};
 
 /// A speaker, by its wire-protocol name.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
