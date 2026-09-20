@@ -222,7 +222,7 @@ fn replying_with<'a>(
             registry,
             on_delta,
             |call, result| {
-                record(TranscriptItem::tool_call(call));
+                record(TranscriptItem::tool_call(&call.name, &call.arguments));
                 record(TranscriptItem::tool_result(&call.name, result));
             },
             stop,

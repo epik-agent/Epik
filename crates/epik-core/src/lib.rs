@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod assistant;
 pub mod dag;
 pub mod git;
 pub mod github;
