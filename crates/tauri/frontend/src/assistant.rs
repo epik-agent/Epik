@@ -83,12 +83,18 @@ impl Window {
         }
     }
 
-    /// Folds one arriving item into the transcript and applies what
-    /// changed.
-    fn fold(self, item: TranscriptItem) {
+    /// A live item: the one that ends the turn clears `busy`, and every
+    /// one is folded.
+    fn hear(self, item: TranscriptItem) {
         if item.ends_turn() {
             self.busy.set(false);
         }
+        self.fold(item);
+    }
+
+    /// Folds one item, history or live, into the transcript and applies
+    /// what changed.
+    fn fold(self, item: TranscriptItem) {
         if let Some(change) = self
             .transcript
             .try_update_value(|transcript| transcript.fold(item))
@@ -165,11 +171,11 @@ fn bubble(segments: &[Segment], on_link: Callback<String>) -> impl IntoView + us
                 <RichText content=Signal::stored(text) options=options() on_link=on_link />
             }
             .into_any(),
-            Segment::Json(text) => view! {
+            Segment::Json(document) => view! {
                 // The code blocks' own chrome, so a tree looks like one.
                 <div class="rc-codeblock my-2">
                     <pre class="rc-code">
-                        <JsonTree text />
+                        <JsonTree document />
                     </pre>
                 </div>
             }
@@ -196,7 +202,7 @@ pub fn Assistant() -> impl IntoView {
             tab.fold(item);
         }
     });
-    ipc::listen_transcript(move |item| tab.fold(item));
+    ipc::listen_transcript(move |item| tab.hear(item));
 
     // Whether the app is currently dark. The media query is the source of
     // truth: it follows the system until the first click pins a theme, and
@@ -226,7 +232,7 @@ pub fn Assistant() -> impl IntoView {
             // A refusal from the command channel: the send never
             // started, so the failure that ends the turn is folded here.
             if let Err(reason) = ipc::send_message(text).await {
-                tab.fold(TranscriptItem::TurnFailed { reason });
+                tab.hear(TranscriptItem::TurnFailed { reason });
             }
         });
     };
@@ -469,16 +475,27 @@ mod tests {
     fn the_item_that_ends_a_turn_clears_busy() {
         let window = window();
         window.busy.set(true);
-        window.fold(delta("Hel"));
+        window.hear(delta("Hel"));
         assert!(window.busy.get_untracked(), "a reply in progress");
-        window.fold(said(Role::Assistant, "Hello"));
+        window.hear(said(Role::Assistant, "Hello"));
         assert!(!window.busy.get_untracked());
 
         window.busy.set(true);
-        window.fold(TranscriptItem::TurnFailed {
+        window.hear(TranscriptItem::TurnFailed {
             reason: "the wire went quiet".to_owned(),
         });
         assert!(!window.busy.get_untracked());
+    }
+
+    #[test]
+    fn history_leaves_busy_as_it_is() {
+        let window = window();
+        window.busy.set(true);
+        window.fold(said(Role::Assistant, "an earlier reply"));
+        assert!(
+            window.busy.get_untracked(),
+            "the turn in flight is still out"
+        );
     }
 
     #[test]
