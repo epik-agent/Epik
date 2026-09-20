@@ -29,8 +29,9 @@ architecture.
 | `2026-08-04-chatbot-walking-skeleton` | Chat is library infrastructure; model-agnostic over the OpenAI-compatible wire | **Live.** Rewritten since, decisions intact. |
 | `2026-08-05-coding-agents-and-tools` | Agents come home; GitHub in the library; tools behind one registry | **Partly live.** GitHub-in-the-library and the one registry hold; `epik-worker` as the agents' home is superseded by the runner, and the one-registry principle bends knowingly where Claude Code brings its own tools. |
 | `2026-08-17-build-from-chat` | The persona builds from typed instructions, no GitHub | **Live and built.** Reconstructed 2026-08-19; the original was lost before check-in. |
-| `2026-08-18-json-in-tool-cards` | One structural JSON renderer for cards and messages | **Live and built.** Reconstructed 2026-08-19; the original was lost before check-in. |
+| `2026-08-18-json-in-tool-cards` | One structural JSON renderer for cards and messages | **Principle live, mechanism superseded** by `2026-09-19-the-assistant-window-is-rich-chat`: the JSON logic moves to `epik-core`, and syntect's pruned set gives way to `leptos-rich-chat`'s. Reconstructed 2026-08-19; the original was lost before check-in. |
 | `2026-08-19-a-feature-is-a-build-of-builds` | Features are built concurrently under a DAG | **Live and built.** `epik::feature`: the plan, the build, the merge, and the chat verbs. |
+| `2026-09-19-the-assistant-window-is-rich-chat` | The window is `leptos-rich-chat`; the assistant lives in `epik-core::assistant` | **Accepted.** |
 
 Three entries carry a reconstruction note in their headers:
 `2026-07-29-github-app-as-credential`, `2026-08-17-build-from-chat`, and
