@@ -738,7 +738,7 @@ mod tests {
                 role: Role::User,
                 text: "status?".to_owned(),
             }],
-            &registry(),
+            &registry().into(),
             |_| {},
             |_, _| {},
             &std::sync::atomic::AtomicBool::new(false),

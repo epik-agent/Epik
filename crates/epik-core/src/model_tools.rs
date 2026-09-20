@@ -301,30 +301,33 @@ fn current_time(_: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     }))
 }
 
+/// The tool that says its `text` argument back: the fixture the loop
+/// tests drive.
+#[cfg(test)]
+fn echo() -> Tool {
+    Tool::new(
+        "echo",
+        "Says the argument back.",
+        serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"],
+        }),
+        Box::new(|arguments| Ok(serde_json::json!({ "echo": arguments["text"] }))),
+    )
+}
+
+/// A registry of exactly [`echo`].
+#[cfg(test)]
+pub(crate) fn echoing() -> Registry {
+    let mut registry = Registry::default();
+    registry.register(echo());
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The tool that says its `text` argument back.
-    fn echo() -> Tool {
-        Tool::new(
-            "echo",
-            "Says the argument back.",
-            serde_json::json!({
-                "type": "object",
-                "properties": { "text": { "type": "string" } },
-                "required": ["text"],
-            }),
-            Box::new(|arguments| Ok(serde_json::json!({ "echo": arguments["text"] }))),
-        )
-    }
-
-    /// A registry of exactly [`echo`].
-    fn echoing() -> Registry {
-        let mut registry = Registry::default();
-        registry.register(echo());
-        registry
-    }
 
     #[test]
     fn dispatch_hands_parsed_arguments_to_the_handler() {

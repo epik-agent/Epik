@@ -30,10 +30,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::Context;
-use epik::chat::{ANTHROPIC_MODEL, ChatError, ModelInfo};
+use epik::chat::{ANTHROPIC_MODEL, ModelInfo};
 use epik::config::{Config, Model};
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, Resolved, Secret};
+use epik_core::assistant::{self, Error};
 use tauri::{AppHandle, Manager, State};
 
 use crate::chat::{API_KEY_NAME, GITHUB_TOKEN_NAME};
@@ -161,8 +162,8 @@ async fn blocking<T: Send + 'static>(
 #[tauri::command]
 pub async fn models_list() -> Result<Vec<ModelInfo>, String> {
     blocking(|| {
-        let key = key_from(&OsKeyring, API_KEY_NAME, ChatError::NoKey)?;
-        epik::chat::models(&key).map_err(|error| error.to_string())
+        let key = key_from(&OsKeyring, API_KEY_NAME, Error::NoKey)?;
+        assistant::models(&key).map_err(|error| error.to_string())
     })
     .await
 }
@@ -243,8 +244,8 @@ mod tests {
 
     #[test]
     fn an_absent_key_is_the_callers_wording() {
-        let error = key_from(&InMemory::default(), "k", ChatError::NoKey).unwrap_err();
-        assert_eq!(error, ChatError::NoKey.to_string());
+        let error = key_from(&InMemory::default(), "k", Error::NoKey).unwrap_err();
+        assert_eq!(error, Error::NoKey.to_string());
     }
 
     #[test]

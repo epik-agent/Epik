@@ -650,7 +650,7 @@ mod tests {
                 role: Role::User,
                 text: "Write me text-mode hunt-the-wumpus.".to_owned(),
             }],
-            &registry,
+            &registry.into(),
             |_| {},
             |call, result| observed.push((call.name.clone(), result.clone())),
             &std::sync::atomic::AtomicBool::new(false),

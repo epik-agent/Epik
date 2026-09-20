@@ -10,10 +10,10 @@
 //! script's end answers with an error that names itself, so the test
 //! fails saying why.
 //!
-//! [`Client`]: crate::chat::Client
+//! [`Client`]: super::Client
 
-use std::io::Write;
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// One delta's worth of one tool call in a scripted stream: which index
@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Clone, Debug, Default)]
 pub struct Fragment {
     index: usize,
-    pub(super) id: Option<String>,
+    id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
 }
@@ -96,7 +96,7 @@ impl Scripted {
                 let Ok((mut socket, _)) = listener.accept() else {
                     return;
                 };
-                let Some(body) = crate::chat::read_request(&mut socket) else {
+                let Some(body) = read_request(&mut socket) else {
                     continue;
                 };
                 if let Ok(body) = serde_json::from_slice(&body) {
@@ -139,6 +139,28 @@ impl Scripted {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+}
+
+/// Drains one HTTP request off `socket` — headers, then content-length's
+/// worth of body — and answers with the body. What every loopback stand-in
+/// for the API does first: the scripted model, and the client's own
+/// tests' one-shot servers.
+pub(super) fn read_request(socket: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        socket.read_exact(&mut byte).ok()?;
+        head.push(byte[0]);
+    }
+    let headers = String::from_utf8_lossy(&head).to_lowercase();
+    let length: usize = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .and_then(|length| length.trim().parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    socket.read_exact(&mut body).ok()?;
+    Some(body)
 }
 
 fn sse_headers() -> &'static str {

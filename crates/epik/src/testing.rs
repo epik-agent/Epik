@@ -11,10 +11,9 @@
 //! builders in `feature::fixtures` are the example — and moves here on
 //! the day a second home needs it.
 
-pub mod model;
-
 use std::path::Path;
 
+pub use epik_core::assistant::scripted as model;
 pub use epik_core::temp::Scratch;
 
 use crate::git::plumbing;

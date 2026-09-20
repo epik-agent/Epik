@@ -1063,10 +1063,8 @@ dependencies = [
  "chrono",
  "epik-core",
  "git2",
- "include-crypt",
  "serde",
  "serde_json",
- "ureq",
 ]
 
 [[package]]
@@ -1075,6 +1073,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "epik",
+ "epik-core",
  "include_dir",
  "keyring",
  "rust_decimal",
@@ -1093,6 +1092,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "include-crypt",
  "libc",
  "pulldown-cmark",
  "rust_decimal",

@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 epik = { path = "../../epik", features = ["native", "serde"] }
+epik-core = { path = "../../epik-core", features = ["native"] }
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",

@@ -7,9 +7,15 @@ edition = "2024"
 # The machinery of an actual desktop: process supervision, and the
 # runtime a plan's tasks run on. Off by default so the crate stays
 # wasm-clean for the frontend.
-native = ["chrono/clock", "dep:libc", "dep:tokio", "dep:ureq"]
+native = [
+    "chrono/clock",
+    "dep:include-crypt",
+    "dep:libc",
+    "dep:tokio",
+    "dep:ureq",
+]
 # Test infrastructure, for this crate's tests and its dependents': the
-# scratch directory. No shipping build enables it.
+# scratch directory and the scripted model. No shipping build enables it.
 testing = ["native"]
 
 [dependencies]
@@ -17,6 +23,8 @@ anyhow = "1.0.104"
 # Parsing everywhere, so the vocabulary stays wasm-clean; the clock,
 # which only current_time reads, comes with native.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+# The system prompt, compiled in obfuscated.
+include-crypt = { version = "0.1", optional = true }
 libc = { version = "0.2", optional = true }
 # Where a message's fences are: the parser alone.
 pulldown-cmark = { version = "0.13", default-features = false }
