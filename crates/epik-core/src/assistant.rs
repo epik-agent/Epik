@@ -338,8 +338,8 @@ mod tests {
     /// and documented rather than papered over with an `Unknown`.
     #[test]
     fn an_ask_kind_from_a_newer_build_fails_to_decode() {
-        assert!(serde_json::from_str::<Ask>(r#"{"kind":"colour","prompt":"?"}"#).is_err());
-        assert!(serde_json::from_str::<Answer>(r#"{"kind":"colour","value":"red"}"#).is_err());
+        assert!(serde_json::from_str::<Ask>(r#"{"kind":"color","prompt":"?"}"#).is_err());
+        assert!(serde_json::from_str::<Answer>(r#"{"kind":"color","value":"red"}"#).is_err());
     }
 
     #[test]
