@@ -45,6 +45,7 @@ use crate::tools::Registry;
 #[cfg(feature = "serde")]
 use crate::tools::{ToolCall, ToolSpec};
 
+// Moved to epik-core; re-exported here until the rest of chat follows.
 pub use epik_core::assistant::{Answer, Ask, Conversation, Role, TRANSCRIPT_EVENT, TranscriptItem};
 
 #[cfg(feature = "native")]
