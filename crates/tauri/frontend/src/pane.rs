@@ -183,17 +183,17 @@ const fn form_class(form: Form, pulse: bool) -> &'static str {
     }
 }
 
-/// The strip: the chat first, where there is one, then a tab per build
+/// The strip: the assistant first, where there is one, then a tab per build
 /// the fold knows.
 #[component]
 pub fn TabStrip(view: RwSignal<View>) -> impl IntoView {
-    let chat = view.with_untracked(View::has_chat).then_some(move || {
-        let active = view.with(|view| view.tab() == Tab::Chat);
+    let assistant = view.with_untracked(View::has_assistant).then_some(move || {
+        let active = view.with(|view| view.tab() == Tab::Assistant);
         view! {
             <div
                 role="tab"
                 class=format!("{TAB} {}", if active { ACTIVE } else { INACTIVE })
-                on:click=move |_| view.update(|view| view.open(Tab::Chat))
+                on:click=move |_| view.update(|view| view.open(Tab::Assistant))
             >
                 "Epik"
             </div>
@@ -210,7 +210,7 @@ pub fn TabStrip(view: RwSignal<View>) -> impl IntoView {
             role="tablist"
             class="flex shrink-0 items-stretch gap-0.5 border-b border-neutral-200 bg-neutral-100 px-3 dark:border-neutral-800 dark:bg-neutral-950"
         >
-            {chat}
+            {assistant}
             {features}
         </nav>
     }

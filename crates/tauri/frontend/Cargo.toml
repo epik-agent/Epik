@@ -8,20 +8,13 @@ console_error_panic_hook = "0.1"
 epik = { path = "../../epik", features = ["serde"] }
 epik-core = { path = "../../epik-core" }
 leptos = { version = "0.8", features = ["csr"] }
-# The Markdown grammar. Parser only — Epik renders the events into its
-# own typed structure; the HTML output half is never used.
-pulldown-cmark = { version = "0.13", default-features = false }
-# Syntax highlighting over the pruned grammar set build.rs compiles.
-# fancy-regex only: the default onig backend is a C dependency and must
-# never appear in the tree.
-syntect = { version = "5", default-features = false, features = [
-    "parsing",
-    "regex-fancy",
-    "dump-load",
-] }
+# The assistant tab's window: Markdown, math and highlighted code, a
+# transcript that follows its tail, and the composer. It has no release,
+# so Cargo.lock records the commit.
+leptos-rich-chat = { git = "https://github.com/wpm/Rich-Chat" }
 serde = { version = "1", features = ["derive"] }
 # Already in the tree through epik (unconditional there) and already in
-# this lockfile; the line only makes it nameable for the JSON tree.
+# this lockfile; the line only makes it nameable for the browser's event stream.
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
@@ -30,7 +23,7 @@ wasm-bindgen-futures = "0.4"
 # `window` that tells the app's window from a browser.
 js-sys = "0.3"
 # Only for features leptos doesn't already enable (matchMedia, the
-# delegated link-click handler's Element walk, the browser's event
+# JSON tree's delegated click handler's Element walk, the browser's event
 # stream, and the reload a relaunched backend calls for).
 web-sys = { version = "0.3", features = [
     "Element",
@@ -49,13 +42,3 @@ web-sys = { version = "0.3", features = [
 # Matches the root workspace's lint, which this manifest cannot inherit.
 [lints.rust]
 unused_qualifications = "warn"
-
-[build-dependencies]
-# build.rs compiles grammars/ into the pruned SyntaxSet dump the
-# highlighter embeds. Same pure-Rust regex backend as the runtime.
-syntect = { version = "5", default-features = false, features = [
-    "parsing",
-    "regex-fancy",
-    "yaml-load",
-    "dump-create",
-] }
