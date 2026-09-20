@@ -10,6 +10,9 @@
 use serde::{Deserialize, Serialize};
 
 pub mod json;
+mod segments;
+
+pub use segments::{Segment, segments};
 
 /// A speaker, by its wire-protocol name.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
