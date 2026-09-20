@@ -225,9 +225,10 @@ impl Registry {
         self.0.extend(tools);
     }
 
-    /// The request's tools array.
+    /// The request's tools array, as the registration tests read it.
+    #[cfg(test)]
     #[must_use]
-    pub fn to_wire(&self) -> Vec<ToolSpec> {
+    pub(crate) fn to_wire(&self) -> Vec<ToolSpec> {
         self.0
             .iter()
             .map(|tool| {

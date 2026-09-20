@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The machinery of an actual desktop: the OS keyring, blocking HTTP,
-# process supervision. Off by default so the crate stays wasm-clean for
+# The machinery of an actual desktop: the OS keyring and process
+# supervision. Off by default so the crate stays wasm-clean for
 # the frontend. Wire protocols come with it, so native implies serde.
 native = [
     "dep:chrono",
