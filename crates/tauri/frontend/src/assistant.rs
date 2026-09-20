@@ -154,9 +154,6 @@ impl Window {
     }
 }
 
-/// What a JSON tree wears inside a bubble: the code blocks' look.
-const TREE: &str = "rc-code my-2 overflow-x-auto rounded-[9px] border border-(--rc-border)";
-
 /// A finished reply that holds JSON documents: a bubble of its Markdown
 /// runs with a folding tree for each document between them.
 fn bubble(segments: &[Segment], on_link: Callback<String>) -> impl IntoView + use<> {
@@ -169,9 +166,12 @@ fn bubble(segments: &[Segment], on_link: Callback<String>) -> impl IntoView + us
             }
             .into_any(),
             Segment::Json(text) => view! {
-                <pre class=TREE>
-                    <JsonTree text />
-                </pre>
+                // The code blocks' own chrome, so a tree looks like one.
+                <div class="rc-codeblock my-2">
+                    <pre class="rc-code">
+                        <JsonTree text />
+                    </pre>
+                </div>
             }
             .into_any(),
         })
