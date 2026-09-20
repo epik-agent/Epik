@@ -7,7 +7,6 @@
 //! the grammar's: backticks or tildes, any length, indented up to three
 //! spaces.
 
-use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
@@ -31,28 +30,20 @@ pub fn segments(text: &str) -> Vec<Segment> {
     // Where the Markdown run in progress began.
     let mut run = 0;
     let mut depth = 0;
-    // The top-level `json` fence being read: its lines and its
-    // contents so far. A code block holds text and nothing else, so the
-    // next `End` is its own.
-    let mut fence: Option<(Range<usize>, String)> = None;
-    for (event, range) in Parser::new(text).into_offset_iter() {
+    let mut events = Parser::new(text).into_offset_iter();
+    while let Some((event, range)) = events.next() {
         match event {
-            Event::Start(tag) => {
-                if depth == 0 && is_json_fence(&tag) {
-                    fence = Some((lines(text, range), String::new()));
-                }
-                depth += 1;
-            }
-            Event::Text(line) => {
-                if let Some((_, contents)) = &mut fence {
-                    contents.push_str(&line);
-                }
-            }
-            Event::End(_) => {
-                depth -= 1;
-                if let Some((lines, contents)) = fence.take()
-                    && json::rows(&contents, &HashSet::new()).is_some()
-                {
+            Event::Start(tag) if depth == 0 && is_json_fence(&tag) => {
+                // The fence's text, up to and including its own end.
+                let contents: String = events
+                    .by_ref()
+                    .map_while(|(event, _)| match event {
+                        Event::Text(line) => Some(line.into_string()),
+                        _ => None,
+                    })
+                    .collect();
+                if json::is_tree(&contents) {
+                    let lines = lines(text, range);
                     if run < lines.start {
                         segments.push(Segment::Markdown(text[run..lines.start].to_owned()));
                     }
@@ -60,6 +51,8 @@ pub fn segments(text: &str) -> Vec<Segment> {
                     run = lines.end;
                 }
             }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
             _ => {}
         }
     }
@@ -70,7 +63,7 @@ pub fn segments(text: &str) -> Vec<Segment> {
 }
 
 /// The whole lines a fence at `range` takes up: back over the opening
-/// fence's indentation, on through the closing fence's line ending.
+/// fence's indentation, on through its last line's ending.
 fn lines(text: &str, range: Range<usize>) -> Range<usize> {
     let start = text[..range.start].rfind('\n').map_or(0, |at| at + 1);
     let end = text[range.end..]
@@ -80,13 +73,13 @@ fn lines(text: &str, range: Range<usize>) -> Range<usize> {
 }
 
 /// Whether `tag` opens a fenced code block whose info string's first
-/// token is `json`, in any case.
+/// token is `json`, in any case. Tokens part at whitespace and commas.
 fn is_json_fence(tag: &Tag) -> bool {
     matches!(
         tag,
         Tag::CodeBlock(CodeBlockKind::Fenced(info))
             if info
-                .split_whitespace()
+                .split(|c: char| c == ',' || c.is_whitespace())
                 .next()
                 .is_some_and(|token| token.eq_ignore_ascii_case("json"))
     )
@@ -153,7 +146,7 @@ mod tests {
 
     #[test]
     fn the_info_string_is_matched_by_its_first_token_in_any_case() {
-        for fence in ["JSON", "Json", "json title=\"x\"", "  json"] {
+        for fence in ["JSON", "Json", "json title=\"x\"", "json,pretty", "  json"] {
             let text = format!("```{fence}\n[1]\n```\n");
             assert_eq!(segments(&text), [json("[1]\n")], "{fence:?}");
         }

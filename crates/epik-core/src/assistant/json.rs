@@ -101,6 +101,11 @@ pub fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
     Some(rows)
 }
 
+/// Whether `text` is a document [`rows`] lays out.
+pub fn is_tree(text: &str) -> bool {
+    parse(text).is_some()
+}
+
 /// The fold policy for a fresh rendering of `text`: every non-empty
 /// container at depth ≥ 1, and every string longer than [`VALUE_CAP`].
 /// The root stays open. Empty when the text does not parse.
@@ -657,6 +662,7 @@ mod tests {
     #[test]
     fn empty_containers_render_inline_and_never_fold() {
         let text = r#"{"a": {}, "b": []}"#;
+        assert!(is_tree(text));
         assert_eq!(initial_folds(text), none());
         assert_eq!(
             rows(text, &none()).unwrap(),
@@ -731,6 +737,7 @@ mod tests {
         ] {
             assert_eq!(rows(text, &none()), None, "{text:?}");
             assert_eq!(initial_folds(text), none(), "{text:?}");
+            assert!(!is_tree(text), "{text:?}");
         }
     }
 
