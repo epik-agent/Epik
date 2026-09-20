@@ -1,4 +1,4 @@
-//! Building from chat, host side: the one run slot, the shared Agent
+//! Building from the assistant, host side: the one run slot, the shared Agent
 //! budget, and the tools through which the persona starts builds and
 //! asks after them.
 //!
@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use epik::chat::{Answer, Ask};
 use epik::feature::tools::{Builds, feature_status, start_feature};
 use epik::feature::{Budget, Feature, Issue, Plan};
 use epik::github::{GitHub, Repo};
@@ -39,9 +38,10 @@ use epik::job::{self, Order, Phase, Record, Run, Workspace};
 use epik::keystore::Secret;
 use epik::monitor::{EVENT, Entry, Log};
 use epik::process::Process;
-use epik::tools::{Tool, arg};
 use epik::tracker::Tracker;
 use epik::tracker::github::GitHubTracker;
+use epik_core::assistant::{Answer, Ask};
+use epik_core::model_tools::{Tool, arg};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -159,7 +159,7 @@ fn start_claude(
     let record = Record::new(order, workspace);
     // The slot rides the launch's exit hook: released the moment the
     // run reports finished — never held hostage by the observation,
-    // whose join handle is dropped as ever, since the chat surface
+    // whose join handle is dropped as ever, since the assistant
     // reads the record as it fills and waits for nothing.
     job::launch(agent, record.clone(), move || drop(slot));
     Ok(record)
@@ -426,16 +426,16 @@ pub fn feature_tools(
         })
     };
     vec![
-        start_feature(Arc::clone(&builds), budget, plan, forge, agents, asker),
-        feature_status(builds),
+        start_feature(Arc::clone(&builds), budget, plan, forge, agents, asker).into(),
+        feature_status(builds).into(),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epik::testing::Scratch;
-    use epik::tools::Registry;
+    use epik::testing::{Scratch, seeded};
+    use epik_core::model_tools::Registry;
     use std::sync::Arc;
 
     /// The test starter: provisions for real, launches nothing. The
@@ -461,11 +461,10 @@ mod tests {
         let _ = Process::new("git", arguments, "/", [], None).and_then(Process::finish);
     }
 
-    /// The tools over `state`, with git beside them, as a turn would
+    /// The tools over `state`, on the standard registry, as a turn would
     /// have them.
     fn registry(state: &Arc<BuildState>) -> Registry {
-        let mut registry = Registry::default();
-        registry.extend(epik::tools::git::all());
+        let mut registry = Registry::standard();
         registry.register(start_build({
             let state = Arc::clone(state);
             move |order| state.start(order, provision_only)
@@ -477,20 +476,12 @@ mod tests {
         registry
     }
 
-    fn init(registry: &Registry, directory: &str) {
-        let made = registry
-            .dispatch("git_init", &json!({ "directory": directory }).to_string())
-            .unwrap();
-        assert_eq!(made["ok"], true, "{made}");
-    }
-
     #[test]
     fn the_slot_refuses_a_second_build_while_one_is_in_flight() {
         let scratch = Scratch::new("slot");
         let state = Arc::new(BuildState::default());
         let registry = registry(&state);
-        let repository = scratch.join("repo.git");
-        init(&registry, &repository);
+        let (repository, _) = seeded(&scratch);
 
         let first = registry
             .dispatch(
@@ -608,22 +599,22 @@ mod tests {
         assert_eq!(status["narration_total"], 2);
     }
 
-    /// The whole turn against the scripted model: git_init, then
+    /// The whole turn against the scripted model: git_status, then
     /// start_build with the injected starter, and the reply reaches text
     /// while the "build" is nominally running.
     #[test]
-    fn a_scripted_turn_inits_a_repository_starts_a_build_and_answers() {
-        use epik::chat::{Client, Role, TranscriptItem, run};
-        use epik::testing::model::{Fragment, Scripted, Turn as Script};
+    fn a_scripted_turn_reads_a_repository_starts_a_build_and_answers() {
+        use epik_core::assistant::scripted::{Fragment, Scripted, Turn as Script};
+        use epik_core::assistant::{Client, Role, TranscriptItem, run};
 
         let scratch = Scratch::new("turn");
-        let repository = scratch.join("wumpus.git");
+        let (repository, _) = seeded(&scratch);
         let model = Scripted::spawn(vec![
             Script::ToolCalls(vec![vec![Fragment::open(
                 0,
                 "call_1",
-                "git_init",
-                &json!({ "directory": repository }).to_string(),
+                "git_status",
+                &json!({ "repository": repository }).to_string(),
             )]]),
             Script::ToolCalls(vec![vec![Fragment::open(
                 0,
@@ -650,7 +641,7 @@ mod tests {
                 role: Role::User,
                 text: "Write me text-mode hunt-the-wumpus.".to_owned(),
             }],
-            &registry.into(),
+            &registry,
             |_| {},
             |call, result| observed.push((call.name.clone(), result.clone())),
             &std::sync::atomic::AtomicBool::new(false),
@@ -659,7 +650,7 @@ mod tests {
 
         assert_eq!(text, "Building on branch wumpus.");
         assert_eq!(observed.len(), 2);
-        assert_eq!(observed[0].0, "git_init");
+        assert_eq!(observed[0].0, "git_status");
         assert_eq!(observed[1].0, "start_build");
         let started = observed[1].1.as_ref().unwrap();
         assert_eq!(started["branch"], "wumpus");
