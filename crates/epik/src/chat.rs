@@ -3,7 +3,7 @@
 //! `chat`.
 
 pub use epik_core::assistant::{
-    ANTHROPIC_MODEL, Answer, Ask, Conversation, ModelInfo, Role, TRANSCRIPT_EVENT, TranscriptItem,
+    ANTHROPIC_MODEL, Answer, Ask, Conversation, Role, TRANSCRIPT_EVENT, TranscriptItem,
 };
 #[cfg(feature = "native")]
 pub use epik_core::assistant::{Client, run};

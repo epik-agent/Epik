@@ -13,14 +13,14 @@
 //! listener is up and holds them until the replay has been folded, then
 //! folds what it held — [`Progress::absorb`] drops by `seq` whatever the
 //! replay already covered — so an entry recorded between the two is
-//! applied exactly once. (`Chat` does history-then-listen without that
+//! applied exactly once. (`Assistant` does history-then-listen without that
 //! protection; this fold does not copy it.) A blink is a claim about the
 //! present, so the feed's health is view state: while it is not
 //! speaking, nothing pulses — and a transport that makes a loss good on
 //! its own, as a browser's event stream does, says so and the pulse
 //! returns.
 //!
-//! The page is the same on both [`Surface`]s; the chat tab is the one
+//! The page is the same on both [`Surface`]s; the assistant tab is the one
 //! difference. In a browser there is no backend to send to, so the
 //! strip does not offer it, and the oldest build is the tab that is
 //! open instead.
@@ -102,7 +102,7 @@ enum Link {
     Lost(String),
 }
 
-/// Where the page is shown: the window, whose first tab is the chat, or
+/// Where the page is shown: the window, whose first tab is the assistant, or
 /// a browser, where the page is the monitor alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Surface {
@@ -110,11 +110,11 @@ pub enum Surface {
     Browser,
 }
 
-/// Which tab is open. `Chat` in a browser is no tab at all: the strip,
+/// Which tab is open. `Assistant` in a browser is no tab at all: the strip,
 /// with nothing under it, until a build appears.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tab {
-    Chat,
+    Assistant,
     Feature(RunId),
 }
 
@@ -204,16 +204,16 @@ impl View {
             surface,
             progress: Progress::default(),
             link: Link::Attaching(Vec::new()),
-            tab: Tab::Chat,
+            tab: Tab::Assistant,
             selected: BTreeMap::new(),
             closed: BTreeSet::new(),
         }
     }
 
-    /// Whether the strip holds the chat tab: only in the window, where
+    /// Whether the strip holds the assistant tab: only in the window, where
     /// there is a backend to send to.
     #[must_use]
-    pub const fn has_chat(&self) -> bool {
+    pub const fn has_assistant(&self) -> bool {
         matches!(self.surface, Surface::Window)
     }
 
@@ -224,7 +224,7 @@ impl View {
     /// tab open settles on the oldest build as soon as there is one.
     pub fn step(&mut self, step: Step) -> usize {
         let counted = self.fold(step);
-        if self.tab == Tab::Chat {
+        if self.tab == Tab::Assistant {
             self.tab = self.home();
         }
         counted
@@ -267,15 +267,15 @@ impl View {
         }
     }
 
-    /// The tab that is open when none has been chosen: the chat, or in a
-    /// browser the oldest build still shown — or `Chat` for none.
+    /// The tab that is open when none has been chosen: the assistant, or in a
+    /// browser the oldest build still shown — or `Assistant` for none.
     fn home(&self) -> Tab {
         match self.surface {
-            Surface::Window => Tab::Chat,
+            Surface::Window => Tab::Assistant,
             Surface::Browser => self
                 .shown()
                 .next()
-                .map_or(Tab::Chat, |watch| Tab::Feature(watch.run())),
+                .map_or(Tab::Assistant, |watch| Tab::Feature(watch.run())),
         }
     }
 
@@ -313,7 +313,7 @@ impl View {
     }
 
     /// Closes a finished build's tab; a build still going stays. Closing
-    /// the open tab returns home: the chat, or in a browser the oldest
+    /// the open tab returns home: the assistant, or in a browser the oldest
     /// build left.
     pub fn close(&mut self, run: RunId) {
         let closable = self
@@ -355,7 +355,7 @@ impl View {
             .collect()
     }
 
-    /// The open feature's pane, or nothing on the chat tab.
+    /// The open feature's pane, or nothing on the assistant tab.
     #[must_use]
     pub fn pane(&self) -> Option<Pane> {
         let Tab::Feature(run) = self.tab else {
@@ -730,10 +730,10 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_has_no_chat_tab_and_opens_the_oldest_build() {
+    fn a_browser_has_no_assistant_tab_and_opens_the_oldest_build() {
         let mut view = View::new(Surface::Browser);
-        assert!(!view.has_chat());
-        assert_eq!(view.tab(), Tab::Chat, "nothing to show yet");
+        assert!(!view.has_assistant());
+        assert_eq!(view.tab(), Tab::Assistant, "nothing to show yet");
         assert!(view.pane().is_none());
 
         view.step(Step::Replayed(Ok(vec![
@@ -763,11 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn the_window_keeps_its_chat_tab_open_as_builds_appear() {
+    fn the_window_keeps_its_assistant_tab_open_as_builds_appear() {
         let mut view = View::default();
-        assert!(view.has_chat());
+        assert!(view.has_assistant());
         view.step(Step::Replayed(Ok(opening())));
-        assert_eq!(view.tab(), Tab::Chat);
+        assert_eq!(view.tab(), Tab::Assistant);
     }
 
     #[test]
@@ -884,7 +884,7 @@ mod tests {
         view.open(Tab::Feature(RunId(1)));
         assert!(view.pane().unwrap().detail.is_none());
         view.select(RunId(1), id(3));
-        view.open(Tab::Chat);
+        view.open(Tab::Assistant);
         assert!(view.pane().is_none());
         view.open(Tab::Feature(RunId(1)));
         let pane = view.pane().unwrap();
@@ -916,8 +916,8 @@ mod tests {
         assert!(view.tabs().is_empty());
         assert_eq!(
             view.tab(),
-            Tab::Chat,
-            "the open tab closing returns to the chat"
+            Tab::Assistant,
+            "the open tab closing returns to the assistant"
         );
     }
 

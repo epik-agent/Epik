@@ -1,11 +1,9 @@
 mod app;
+mod assistant;
 mod card;
-mod chat;
-mod highlight;
 mod http;
 mod ipc;
 mod json;
-mod markdown;
 mod monitor;
 mod pane;
 mod settings;

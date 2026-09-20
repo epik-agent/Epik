@@ -17,15 +17,16 @@
 //! for the `QuestionResolved` event to replace it. It never updates
 //! itself; the window shows nothing it didn't receive.
 
-use epik_core::assistant::{self, Answer, Ask, Tone, shown};
+use epik_core::assistant::{self, Answer, Ask, Tone, json, shown};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
 use crate::ipc;
-use crate::json::{self, JsonTree};
+use crate::json::JsonTree;
 
-/// What every card wears; the tone colors it.
+/// What every card wears; the tone colors it. `self-stretch` spans the
+/// transcript, where a bubble hugs its side.
 const CHROME: &str = "self-stretch rounded-lg border px-3.5 py-2 text-sm";
 /// What a card's title wears.
 const TITLE: &str = "mb-1 font-mono text-xs font-semibold tracking-wide opacity-70";
@@ -48,31 +49,34 @@ const fn tone_class(tone: Tone) -> &'static str {
 /// A mono body that is a JSON document renders as a folding
 /// [`JsonTree`]; every other body is the folded-or-whole text.
 #[component]
-pub fn Card(spec: assistant::Card) -> impl IntoView {
-    let tone = tone_class(spec.tone);
-    let title = spec
-        .title
-        .map(|title| view! { <div class=TITLE>{title}</div> });
-    let body = spec.body;
-    if spec.mono && json::rows(&body, &std::collections::HashSet::new()).is_some() {
+pub fn Card(card: assistant::Card) -> impl IntoView {
+    let assistant::Card {
+        title,
+        body,
+        tone,
+        mono,
+    } = card;
+    let tone = tone_class(tone);
+    let title = title.map(|title| view! { <div class=TITLE>{title}</div> });
+    if mono && json::is_tree(&body) {
         return view! {
-            <li class=format!("{CHROME} {tone}")>
+            <div class=format!("{CHROME} {tone}")>
                 {title}
                 <div class="font-mono text-xs">
                     <JsonTree text=body />
                 </div>
-            </li>
+            </div>
         }
         .into_any();
     }
     let expanded = RwSignal::new(false);
-    let body_class = if spec.mono {
+    let body_class = if mono {
         "font-mono text-xs break-words whitespace-pre-wrap"
     } else {
         "break-words whitespace-pre-wrap"
     };
     view! {
-        <li class=format!("{CHROME} {tone}")>
+        <div class=format!("{CHROME} {tone}")>
             {title}
             <div class=body_class>{
                 let body = body.clone();
@@ -90,7 +94,7 @@ pub fn Card(spec: assistant::Card) -> impl IntoView {
                     {move || if expanded.get() { "show less" } else { "show all" }}
                 </button>
             </Show>
-        </li>
+        </div>
     }
     .into_any()
 }
@@ -197,7 +201,7 @@ fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
     };
 
     view! {
-        <li class=format!("{CHROME} {}", tone_class(Tone::Neutral))>
+        <div class=format!("{CHROME} {}", tone_class(Tone::Neutral))>
             <div class=TITLE>"repository"</div>
             <div class="break-words whitespace-pre-wrap">{prompt}</div>
             <div class="mt-2 flex items-center gap-2">
@@ -233,7 +237,7 @@ fn RepositoryQuestion(id: String, prompt: String) -> impl IntoView {
                 </button>
             </div>
             <Note note />
-        </li>
+        </div>
     }
 }
 
@@ -253,7 +257,7 @@ fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl I
     };
 
     view! {
-        <li class=format!("{CHROME} {}", tone_class(Tone::Neutral))>
+        <div class=format!("{CHROME} {}", tone_class(Tone::Neutral))>
             <div class=TITLE>"check"</div>
             <div class="break-words whitespace-pre-wrap">{prompt}</div>
             <div class="mt-2 flex items-center gap-2">
@@ -286,6 +290,6 @@ fn CheckQuestion(id: String, prompt: String, proposal: Option<String>) -> impl I
                 </button>
             </div>
             <Note note />
-        </li>
+        </div>
     }
 }

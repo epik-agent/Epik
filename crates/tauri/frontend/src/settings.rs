@@ -12,9 +12,9 @@
 //! dropdown offers — is pure and sits beside the components, where a test
 //! can reach it.
 
-use epik::chat::{ANTHROPIC_MODEL, ModelInfo};
 use epik::config::{self, Config};
 use epik::keystore::{Resolved, Secret};
+use epik_core::assistant::{ANTHROPIC_MODEL, ModelInfo};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -43,7 +43,7 @@ impl Tab {
     fn fields(self) -> &'static [Field] {
         match self {
             Tab::GitHub => &[Field::Token, Field::Owner],
-            Tab::Models => &[Field::Key, Field::Chat, Field::Agent],
+            Tab::Models => &[Field::Key, Field::Assistant, Field::Agent],
         }
     }
 
@@ -70,7 +70,7 @@ pub enum Field {
     /// `ANTHROPIC_API_KEY`, in the keyring.
     Key,
     /// `[model] chat`.
-    Chat,
+    Assistant,
     /// `[model] agent`.
     Agent,
 }
@@ -81,7 +81,7 @@ impl Field {
             Field::Token => "Token",
             Field::Owner => "Owner",
             Field::Key => "Anthropic API key",
-            Field::Chat => "Chat",
+            Field::Assistant => "Assistant",
             Field::Agent => "Agent",
         }
     }
@@ -91,7 +91,7 @@ impl Field {
         match self {
             Field::Token => "GITHUB_TOKEN",
             Field::Key => "ANTHROPIC_API_KEY",
-            Field::Owner | Field::Chat | Field::Agent => unreachable!("not a secret"),
+            Field::Owner | Field::Assistant | Field::Agent => unreachable!("not a secret"),
         }
     }
 
@@ -102,7 +102,7 @@ impl Field {
             Field::Token => fields.token.reveal(),
             Field::Owner => &fields.owner,
             Field::Key => fields.key.reveal(),
-            Field::Chat => &fields.chat,
+            Field::Assistant => &fields.assistant,
             Field::Agent => &fields.agent,
         }
     }
@@ -112,7 +112,7 @@ impl Field {
             Field::Token => fields.token = Secret::from(text),
             Field::Owner => fields.owner = text,
             Field::Key => fields.key = Secret::from(text),
-            Field::Chat => fields.chat = text,
+            Field::Assistant => fields.assistant = text,
             Field::Agent => fields.agent = text,
         }
     }
@@ -126,7 +126,7 @@ pub struct Fields {
     pub token: Secret,
     pub owner: String,
     pub key: Secret,
-    pub chat: String,
+    pub assistant: String,
     pub agent: String,
     /// What the window does not show, carried so a write keeps it.
     pub monitor: Option<config::Monitor>,
@@ -134,13 +134,13 @@ pub struct Fields {
 
 impl Fields {
     /// The entries as the configuration states them; the secrets empty,
-    /// because they come from the keyring. An unstated chat model shows
-    /// as the one the chat window then speaks to, [`ANTHROPIC_MODEL`],
-    /// because the Chat box has no Default entry to show instead.
+    /// because they come from the keyring. An unstated assistant model shows
+    /// as the one the assistant then speaks to, [`ANTHROPIC_MODEL`],
+    /// because the Assistant box has no Default entry to show instead.
     pub fn from_config(config: &Config) -> Self {
         Self {
             owner: config.github.owner.clone().unwrap_or_default(),
-            chat: config
+            assistant: config
                 .model
                 .chat
                 .clone()
@@ -156,7 +156,7 @@ impl Fields {
         let entry = |text: &str| (!text.is_empty()).then(|| text.to_owned());
         Config {
             model: config::Model {
-                chat: entry(&self.chat),
+                chat: entry(&self.assistant),
                 agent: entry(&self.agent),
             },
             github: config::GitHub {
@@ -348,7 +348,7 @@ pub fn SettingsPage() -> impl IntoView {
         match ipc::read_config().await {
             Ok(config) => {
                 let fields = Fields::from_config(&config);
-                for field in [Field::Owner, Field::Chat, Field::Agent] {
+                for field in [Field::Owner, Field::Assistant, Field::Agent] {
                     panel.set_both(field, field.of(&fields));
                 }
             }
@@ -499,7 +499,7 @@ fn field_row(panel: Panel, field: Field) -> impl IntoView {
             <input id=id.clone() type="text" autocomplete="off" class=INPUT prop:value=value on:input=set />
         }
         .into_any(),
-        Field::Chat | Field::Agent => {
+        Field::Assistant | Field::Agent => {
             let listed = move || match panel.models.get() {
                 Models::Listed(list) => list,
                 Models::Loading | Models::Refused(_) => Vec::new(),
@@ -583,7 +583,7 @@ mod tests {
             token: Secret::from("ghp-kept"),
             owner: "octo".to_owned(),
             key: Secret::from("sk-kept"),
-            chat: "claude-chat".to_owned(),
+            assistant: "claude-assistant".to_owned(),
             agent: String::new(),
             monitor: None,
         }
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(Tab::GitHub.fields(), [Field::Token, Field::Owner]);
         assert_eq!(
             Tab::Models.fields(),
-            [Field::Key, Field::Chat, Field::Agent]
+            [Field::Key, Field::Assistant, Field::Agent]
         );
         assert_eq!(Tab::GitHub.secret().keystore_name(), "GITHUB_TOKEN");
         assert_eq!(Tab::Models.secret().keystore_name(), "ANTHROPIC_API_KEY");
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn a_first_secret_is_saved() {
         let start = Fields {
-            chat: "claude-chat".to_owned(),
+            assistant: "claude-assistant".to_owned(),
             ..Fields::default()
         };
         let mut current = start.clone();
@@ -683,7 +683,7 @@ mod tests {
         current.owner = "other".to_owned();
         let expected = Config {
             model: config::Model {
-                chat: Some("claude-chat".to_owned()),
+                chat: Some("claude-assistant".to_owned()),
                 agent: None,
             },
             github: config::GitHub {
@@ -719,10 +719,10 @@ mod tests {
     fn the_other_tabs_unapplied_edits_stay_out_of_the_write() {
         let mut current = loaded();
         current.owner = "other".to_owned();
-        current.chat = "claude-later".to_owned();
+        current.assistant = "claude-later".to_owned();
         let config = writes(Tab::GitHub, &loaded(), &current).config.unwrap();
         assert_eq!(config.github.owner.as_deref(), Some("other"));
-        assert_eq!(config.model.chat.as_deref(), Some("claude-chat"));
+        assert_eq!(config.model.chat.as_deref(), Some("claude-assistant"));
         let config = writes(Tab::Models, &loaded(), &current).config.unwrap();
         assert_eq!(config.model.chat.as_deref(), Some("claude-later"));
         assert_eq!(config.github.owner.as_deref(), Some("octo"));
@@ -734,7 +734,7 @@ mod tests {
         start.agent = "claude-agent".to_owned();
         let config = writes(Tab::Models, &start, &loaded()).config.unwrap();
         assert_eq!(config.model.agent, None);
-        assert_eq!(config.model.chat.as_deref(), Some("claude-chat"));
+        assert_eq!(config.model.chat.as_deref(), Some("claude-assistant"));
     }
 
     #[test]
@@ -747,9 +747,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unstated_chat_model_shows_as_the_pinned_one() {
+    fn an_unstated_assistant_model_shows_as_the_pinned_one() {
         let fields = Fields::from_config(&Config::default());
-        assert_eq!(fields.chat, ANTHROPIC_MODEL);
+        assert_eq!(fields.assistant, ANTHROPIC_MODEL);
         assert_eq!(fields.agent, "");
         assert_eq!(dirty(Tab::Models, &fields, &fields), []);
     }
@@ -762,8 +762,8 @@ mod tests {
         assert_eq!(back.token, Secret::default());
         assert_eq!(back.key, Secret::default());
         assert_eq!(
-            (back.owner, back.chat, back.agent),
-            (loaded().owner, loaded().chat, String::new())
+            (back.owner, back.assistant, back.agent),
+            (loaded().owner, loaded().assistant, String::new())
         );
     }
 
