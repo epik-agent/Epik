@@ -18,6 +18,8 @@ anyhow = "1.0.104"
 # which only current_time reads, comes with native.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 libc = { version = "0.2", optional = true }
+# Where a message's fences are: the parser alone.
+pulldown-cmark = { version = "0.13", default-features = false }
 # Money is a fixed-precision number, never a float.
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }

@@ -9,8 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod json;
+mod segments;
 mod transcript;
 
+pub use segments::{Segment, segments};
 pub use transcript::{Body, Card, Change, Entry, PREVIEW_CAP, Tone, Transcript, ask_title, shown};
 
 /// A speaker, by its wire-protocol name.
