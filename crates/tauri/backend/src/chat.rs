@@ -26,14 +26,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
 
-use epik::chat::{
-    Answer, Ask, ChatError, Client, Conversation, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
-    TranscriptItem, run,
-};
+use epik::chat::{Answer, Ask, Conversation, Role, TRANSCRIPT_EVENT, TranscriptItem};
 use epik::config::Config;
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, Resolved};
 use epik::tools::{self, Registry, Tool};
+use epik_core::assistant::{Client, Error, SYSTEM_PROMPT, run};
+use epik_core::model_tools;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::secrets::OsKeyring;
@@ -196,12 +195,12 @@ fn post(conversation: &mut Conversation, text: String, emit: impl FnOnce(&Transc
 /// What answers a [`turn`]: handed the delta and record sinks, it comes
 /// back with the model's final text, or why there is none.
 trait Replier:
-    FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, ChatError>
+    FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, Error>
 {
 }
 
 impl<F> Replier for F where
-    F: FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, ChatError>
+    F: FnOnce(&mut dyn FnMut(&str), &mut dyn FnMut(TranscriptItem)) -> Result<String, Error>
 {
 }
 
@@ -211,7 +210,7 @@ fn replying_with<'a>(
     client: &'a Client,
     system: &'a str,
     transcript: &'a [TranscriptItem],
-    registry: &'a Registry,
+    registry: &'a model_tools::Registry,
     stop: &'a AtomicBool,
 ) -> impl Replier + 'a {
     move |on_delta, record| {
@@ -372,7 +371,7 @@ pub async fn send_message(
         let stop = AtomicBool::new(false);
         let state = app.state::<ChatState>();
         turn(
-            replying_with(&client, &SYSTEM_PROMPT, &snapshot, &registry, &stop),
+            replying_with(&client, &SYSTEM_PROMPT, &snapshot, &registry.into(), &stop),
             |item| state.append(item),
             |item| {
                 let _ = app.emit(TRANSCRIPT_EVENT, item);
@@ -493,7 +492,7 @@ mod tests {
         let appended = RefCell::new(Vec::<TranscriptItem>::new());
 
         turn(
-            |_, _| Err(ChatError::Api("Your credit balance is too low.".to_owned())),
+            |_, _| Err(Error::Api("Your credit balance is too low.".to_owned())),
             into(&appended),
             into(&emitted),
         );
@@ -569,7 +568,7 @@ mod tests {
                 &client,
                 "system",
                 &[user("what time is it?")],
-                &registry,
+                &registry.into(),
                 &stop,
             ),
             |_| {},
@@ -747,7 +746,7 @@ mod tests {
                         &client,
                         "system",
                         &[user("write me hunt the wumpus")],
-                        &registry,
+                        &registry.into(),
                         &AtomicBool::new(false),
                     ),
                     |item| state.append(item),

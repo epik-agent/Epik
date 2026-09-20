@@ -192,6 +192,14 @@ impl From<epik_core::model_tools::Tool> for Tool {
     }
 }
 
+/// The inverse: one of these as a tool of epik-core's table, so it can
+/// join the registry the assistant's loop runs on.
+impl From<Tool> for epik_core::model_tools::Tool {
+    fn from(tool: Tool) -> Self {
+        Self::new(&tool.name, &tool.description, tool.parameters, tool.handler)
+    }
+}
+
 /// The tools on offer this turn.
 #[derive(Default)]
 pub struct Registry(Vec<Tool>);
@@ -219,7 +227,7 @@ impl Registry {
 
     /// The request's tools array.
     #[must_use]
-    pub(crate) fn to_wire(&self) -> Vec<ToolSpec> {
+    pub fn to_wire(&self) -> Vec<ToolSpec> {
         self.0
             .iter()
             .map(|tool| {
@@ -249,6 +257,16 @@ impl Registry {
                 .map_err(|error| format!("the arguments are not valid JSON: {error}"))?
         };
         (tool.handler)(&arguments)
+    }
+}
+
+/// Every tool converted, in order: the registry the assistant's loop
+/// runs on.
+impl From<Registry> for epik_core::model_tools::Registry {
+    fn from(registry: Registry) -> Self {
+        let mut converted = Self::default();
+        converted.extend(registry.0.into_iter().map(Into::into));
+        converted
     }
 }
 
@@ -463,6 +481,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One of these tools, converted, joins the registry the assistant's
+    /// loop runs on, and the scripted model's call reaches its handler.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_converted_tool_answers_the_scripted_models_call() {
+        use crate::chat::{Client, Role, TranscriptItem, run};
+        use crate::testing::model::{Fragment, Scripted, Turn};
+
+        let model = Scripted::spawn(vec![
+            Turn::ToolCalls(vec![vec![Fragment::open(
+                0,
+                "call_1",
+                "echo",
+                "{\"text\":\"hi\"}",
+            )]]),
+            Turn::text(&["done"]),
+        ]);
+        let mut registry = epik_core::model_tools::Registry::default();
+        registry.register(echo().into());
+        let mut observed = Vec::new();
+
+        let text = run(
+            &Client::new(model.base_url(), "scripted".to_owned(), None),
+            "system",
+            &[TranscriptItem::Message {
+                role: Role::User,
+                text: "go".to_owned(),
+            }],
+            &registry,
+            |_| {},
+            |call, result| observed.push((call.name.clone(), result.clone())),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+
+        assert_eq!(text, "done");
+        assert_eq!(
+            observed,
+            [("echo".to_owned(), Ok(serde_json::json!({ "echo": "hi" })))]
+        );
     }
 
     #[cfg(feature = "native")]

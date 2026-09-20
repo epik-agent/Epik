@@ -6,8 +6,25 @@
 //! tagged, and that tag is the forward-compatibility contract: new kinds
 //! of item become new variants on the same event channel and new arms in
 //! the same fold, never a schema break.
+//!
+//! The [`Client`] speaks to the model and [`run`] is a whole turn of it
+//! over a [`Registry`](crate::model_tools::Registry), under `native`.
+
+mod client;
+#[cfg(feature = "native")]
+mod prompt;
+#[cfg(all(feature = "native", any(test, feature = "testing")))]
+pub mod scripted;
+#[cfg(feature = "native")]
+mod wire;
 
 use serde::{Deserialize, Serialize};
+
+pub use client::{ANTHROPIC_MODEL, ModelInfo};
+#[cfg(feature = "native")]
+pub use client::{Client, Error, models, run};
+#[cfg(feature = "native")]
+pub use prompt::SYSTEM_PROMPT;
 
 /// A speaker, by its wire-protocol name.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
