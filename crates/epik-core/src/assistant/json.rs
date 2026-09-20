@@ -1,22 +1,24 @@
 //! A JSON document laid out as a folding tree: tool-call arguments,
 //! tool results, and fenced ```json blocks alike.
 //!
-//! [`rows`] is a pure function: (text, the set of folded pointers) →
-//! one [`Row`] per rendered line, laid out the way `to_string_pretty`
-//! would lay it out, with every span given its [`Kind`]. Fold state is
-//! an input, never mutated, which is what makes the folded rendering
-//! golden-testable; [`initial_folds`] is the fold policy — nested
-//! containers and long strings start folded, the root stays open. The
-//! window owns the fold set and draws the rows, coloring each kind as
-//! it sees fit.
+//! A [`Document`] is the text parsed once. [`Document::rows`] is a pure
+//! function: (document, the set of folded pointers) → one [`Row`] per
+//! rendered line, laid out the way `to_string_pretty` would lay it out,
+//! with every span given its [`Kind`]. Fold state is an input, never
+//! mutated, which is what makes the folded rendering golden-testable;
+//! [`Document::initial_folds`] is the fold policy — nested containers
+//! and long strings start folded, the root stays open. The window owns
+//! the fold set and draws the rows, coloring each kind as it sees fit.
 //!
 //! Text that is not a JSON object or array — a scalar, prose, a failure
 //! reason — is `None`, and the caller renders its plain block; never an
 //! error, never a panic. A tool result elided at `TOOL_RESULT_CAP`
 //! arrives as a truncated document; that is exactly what folding is
-//! for, so it is repaired here — cut at the last value boundary, closed,
-//! and marked truncated — as a layout concern the rest of the library
-//! need not know about.
+//! for, so [`Document::repaired`] repairs it — cut at the last value
+//! boundary, closed, and marked truncated — as a layout concern the
+//! rest of the library need not know about. A message's fence is the
+//! assistant's own words, so [`Document::whole`] takes it only as
+//! written.
 
 use std::collections::HashSet;
 
@@ -73,48 +75,78 @@ pub const VALUE_CAP: usize = 120;
 /// window.
 pub const MAX_ROWS: usize = 2000;
 
-/// The lines of `text` as a tree with `folded` pointers folded — or
-/// `None` when `text` is not a JSON object or array, even after repair.
-pub fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
-    let (value, truncated) = parse(text)?;
-    let mut walk = Walk {
-        folded,
-        rows: Vec::new(),
-        total: 0,
-    };
-    walk.value(&value, None, String::new(), 0, false);
-    let mut rows = walk.rows;
-    if walk.total > MAX_ROWS {
-        rows.push(Row {
-            depth: 0,
-            spans: vec![plain(format!("… ({} more lines)", walk.total - MAX_ROWS))],
-            fold: None,
-        });
-    }
-    if truncated {
-        rows.push(Row {
-            depth: 0,
-            spans: vec![span(Kind::Note, "… (result truncated)")],
-            fold: None,
-        });
-    }
-    Some(rows)
+/// A JSON object or array, parsed once and laid out under any number
+/// of fold sets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Document {
+    root: Value,
+    /// Whether the text was cut short and `root` is what repair salvaged.
+    truncated: bool,
 }
 
-/// Whether `text` is a document [`rows`] lays out.
-pub fn is_tree(text: &str) -> bool {
-    parse(text).is_some()
-}
-
-/// The fold policy for a fresh rendering of `text`: every non-empty
-/// container at depth ≥ 1, and every string longer than [`VALUE_CAP`].
-/// The root stays open. Empty when the text does not parse.
-pub fn initial_folds(text: &str) -> HashSet<String> {
-    let mut folds = HashSet::new();
-    if let Some((value, _)) = parse(text) {
-        collect_folds(&value, String::new(), 0, &mut folds);
+impl Document {
+    /// `text` as a document, when it parses whole — a message's fence,
+    /// which the assistant wrote in full.
+    pub fn whole(text: &str) -> Option<Self> {
+        let root = serde_json::from_str::<Value>(text).ok()?;
+        (root.is_object() || root.is_array()).then_some(Self {
+            root,
+            truncated: false,
+        })
     }
-    folds
+
+    /// `text` as a document, whole or repaired from a truncation — a
+    /// tool result, which the library may have elided.
+    pub fn repaired(text: &str) -> Option<Self> {
+        Self::whole(text).or_else(|| {
+            let root = repair(text)?;
+            // A repair keeps only a root that salvaged something.
+            let salvaged = match &root {
+                Value::Object(map) => !map.is_empty(),
+                Value::Array(items) => !items.is_empty(),
+                _ => false,
+            };
+            salvaged.then_some(Self {
+                root,
+                truncated: true,
+            })
+        })
+    }
+
+    /// The document's lines as a tree with `folded` pointers folded.
+    pub fn rows(&self, folded: &HashSet<String>) -> Vec<Row> {
+        let mut walk = Walk {
+            folded,
+            rows: Vec::new(),
+            total: 0,
+        };
+        walk.value(&self.root, None, String::new(), 0, false);
+        let mut rows = walk.rows;
+        if walk.total > MAX_ROWS {
+            rows.push(Row {
+                depth: 0,
+                spans: vec![plain(format!("… ({} more lines)", walk.total - MAX_ROWS))],
+                fold: None,
+            });
+        }
+        if self.truncated {
+            rows.push(Row {
+                depth: 0,
+                spans: vec![span(Kind::Note, "… (result truncated)")],
+                fold: None,
+            });
+        }
+        rows
+    }
+
+    /// The fold policy for a fresh rendering: every non-empty container
+    /// at depth ≥ 1, and every string longer than [`VALUE_CAP`]. The
+    /// root stays open.
+    pub fn initial_folds(&self) -> HashSet<String> {
+        let mut folds = HashSet::new();
+        collect_folds(&self.root, String::new(), 0, &mut folds);
+        folds
+    }
 }
 
 fn collect_folds(value: &Value, pointer: String, depth: usize, folds: &mut HashSet<String>) {
@@ -145,23 +177,6 @@ fn collect_folds(value: &Value, pointer: String, depth: usize, folds: &mut HashS
         }
         _ => {}
     }
-}
-
-/// `text` as a document — parsed straight, or repaired from a
-/// truncation — with whether repair was needed. `None` for anything
-/// that is not an object or array.
-fn parse(text: &str) -> Option<(Value, bool)> {
-    let (value, truncated) = match serde_json::from_str::<Value>(text) {
-        Ok(value) => (value, false),
-        Err(_) => (repair(text)?, true),
-    };
-    // A repair that salvaged nothing — an empty root — is no repair.
-    let root = match &value {
-        Value::Object(map) => !truncated || !map.is_empty(),
-        Value::Array(items) => !truncated || !items.is_empty(),
-        _ => false,
-    };
-    root.then_some((value, truncated))
 }
 
 /// A JSON Pointer reference token for `key`: `~` and `/` escaped.
@@ -537,6 +552,19 @@ fn open_frames(prefix: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// A tool result's rows: `text` repaired where it must be.
+    fn rows(text: &str, folded: &HashSet<String>) -> Option<Vec<Row>> {
+        Document::repaired(text).map(|document| document.rows(folded))
+    }
+
+    fn is_tree(text: &str) -> bool {
+        Document::repaired(text).is_some()
+    }
+
+    fn initial_folds(text: &str) -> HashSet<String> {
+        Document::repaired(text).map_or_else(none, |document| document.initial_folds())
+    }
+
     fn none() -> HashSet<String> {
         HashSet::new()
     }
@@ -780,6 +808,19 @@ mod tests {
             initial_folds(text),
             set(&["/issues", "/issues/0", "/issues/1"])
         );
+    }
+
+    #[test]
+    fn a_whole_document_is_taken_only_as_written() {
+        assert!(Document::whole("{\"a\": 1}").is_some());
+        for text in [
+            "{\"a\": 1, \"b\": \"cu",
+            "{\"a\": 1, // note\n \"b\": 2}",
+            "{\"a\": 1, ...}",
+            "42",
+        ] {
+            assert_eq!(Document::whole(text), None, "{text:?}");
+        }
     }
 
     #[test]

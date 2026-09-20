@@ -1,15 +1,16 @@
 //! The one JSON renderer in the window: a folding, colored tree for
 //! tool-call arguments, tool results, and fenced ```json blocks alike.
 //!
-//! The layout is [`epik_core::assistant::json`]'s: [`json::rows`] lays a
-//! document out as lines under a fold set, and [`json::initial_folds`]
-//! is the fold policy. [`JsonTree`] is the one component, owning the
+//! The layout is [`epik_core::assistant::json`]'s: a [`Document`] is the
+//! text parsed once, [`Document::rows`] lays it out as lines under a
+//! fold set, and [`Document::initial_folds`] is the fold policy.
+//! [`JsonTree`] is the one component, owning the
 //! fold set as a signal and rendering lines only, so a card body and a
 //! bubble each keep their own chrome. Each span's [`Kind`] wears
 //! `leptos_rich_chat`'s highlight classes, so a tree is colored like the
 //! code blocks around it.
 
-use epik_core::assistant::json::{self, Fold, Kind, Row};
+use epik_core::assistant::json::{Document, Fold, Kind, Row};
 use leptos::prelude::*;
 
 /// The highlight classes a span of `kind` wears: the ones
@@ -33,9 +34,9 @@ const fn class(kind: Kind) -> &'static str {
 /// position when the set changes, and attributes are patched on rebuild
 /// where a per-row closure would go stale.
 #[component]
-pub fn JsonTree(text: String) -> impl IntoView {
-    let folded = RwSignal::new(json::initial_folds(&text));
-    let text = StoredValue::new(text);
+pub fn JsonTree(document: Document) -> impl IntoView {
+    let folded = RwSignal::new(document.initial_folds());
+    let document = StoredValue::new(document);
     let toggle = move |event: leptos::ev::MouseEvent| {
         let Some(pointer) = clicked_pointer(&event) else {
             return;
@@ -50,8 +51,8 @@ pub fn JsonTree(text: String) -> impl IntoView {
         <div class="overflow-x-auto" on:click=toggle>
             {move || {
                 let folds = folded.get();
-                json::rows(&text.get_value(), &folds)
-                    .unwrap_or_default()
+                document
+                    .with_value(|document| document.rows(&folds))
                     .into_iter()
                     .map(row_view)
                     .collect_view()

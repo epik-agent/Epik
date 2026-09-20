@@ -17,7 +17,7 @@
 //! for the `QuestionResolved` event to replace it. It never updates
 //! itself; the window shows nothing it didn't receive.
 
-use epik_core::assistant::{self, Answer, Ask, Tone, json, shown};
+use epik_core::assistant::{self, Answer, Ask, Tone, json::Document, shown};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -58,12 +58,13 @@ pub fn Card(card: assistant::Card) -> impl IntoView {
     } = card;
     let tone = tone_class(tone);
     let title = title.map(|title| view! { <div class=TITLE>{title}</div> });
-    if mono && json::is_tree(&body) {
+    // A tool result may arrive elided, so its document is repaired.
+    if let Some(document) = mono.then(|| Document::repaired(&body)).flatten() {
         return view! {
             <div class=format!("{CHROME} {tone}")>
                 {title}
                 <div class="font-mono text-xs">
-                    <JsonTree text=body />
+                    <JsonTree document />
                 </div>
             </div>
         }

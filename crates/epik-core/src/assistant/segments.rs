@@ -11,20 +11,20 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
 
-use super::json;
+use super::json::Document;
 
 /// One piece of a message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Segment {
     /// A run of Markdown, exactly as it appears in the message.
     Markdown(String),
-    /// The contents of a JSON fence, without the fence lines.
-    Json(String),
+    /// The document a JSON fence holds.
+    Json(Document),
 }
 
 /// `text` in pieces, in order: each top-level `json` fence whose
-/// contents [`json::rows`] accepts, and the Markdown around them, byte
-/// for byte.
+/// contents are a [`Document`] as written, and the Markdown around
+/// them, byte for byte.
 pub fn segments(text: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
     // Where the Markdown run in progress began.
@@ -42,12 +42,12 @@ pub fn segments(text: &str) -> Vec<Segment> {
                         _ => None,
                     })
                     .collect();
-                if json::is_tree(&contents) {
+                if let Some(document) = Document::whole(&contents) {
                     let lines = lines(text, range);
                     if run < lines.start {
                         segments.push(Segment::Markdown(text[run..lines.start].to_owned()));
                     }
-                    segments.push(Segment::Json(contents));
+                    segments.push(Segment::Json(document));
                     run = lines.end;
                 }
             }
@@ -94,7 +94,7 @@ mod tests {
     }
 
     fn json(text: &str) -> Segment {
-        Segment::Json(text.to_owned())
+        Segment::Json(Document::whole(text).unwrap())
     }
 
     #[test]
@@ -127,6 +127,10 @@ mod tests {
             "Before.\n\n```json\n{not json}\n```\n\nAfter.\n",
             "Before.\n\n```json\n42\n```\n\nAfter.\n",
             "Before.\n\n```json\n```\n\nAfter.\n",
+            // Cut short, annotated, elided: the reply's own text, shown whole.
+            "```json\n{\"a\": 1, \"b\": \"cu\n```\n",
+            "```json\n{\"a\": 1, // note\n \"b\": 2}\n```\n",
+            "```json\n{\"a\": 1, ...}\n```\n",
         ] {
             assert_eq!(segments(text), [markdown(text)], "{text:?}");
         }
@@ -208,14 +212,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_truncated_document_is_still_a_tree() {
-        let text = "```json\n{\"a\": 1, \"b\": \"cu\n```\n";
-        assert_eq!(segments(text), [json("{\"a\": 1, \"b\": \"cu\n")]);
-    }
-
-    /// The pieces, put back: Markdown as it is, a JSON fence wherever
-    /// the input next has its contents' first line.
+    /// The Markdown pieces, found again in the input in the order they
+    /// came out.
     #[test]
     fn markdown_segments_are_substrings_of_the_input_in_order() {
         let text = "One.\n\n```json\n[1]\n```\n\nTwo, with ```json inline.\n\n~~~JSON\n{\"b\": 2}\n~~~\n\n```rust\nfn main() {}\n```\n\n- ```json\n  [3]\n  ```\n\nThree.";
@@ -229,7 +227,9 @@ mod tests {
         );
         let mut rest = text;
         for piece in &pieces {
-            let (Segment::Markdown(piece) | Segment::Json(piece)) = piece;
+            let Segment::Markdown(piece) = piece else {
+                continue;
+            };
             assert!(!piece.is_empty());
             let at = rest.find(piece.as_str()).expect("in input order");
             rest = &rest[at + piece.len()..];
