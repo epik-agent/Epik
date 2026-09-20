@@ -9,13 +9,14 @@
 //! delegated handler, and images never fetch.
 
 use epik::chat::{Role, TranscriptItem};
+use epik_core::assistant;
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::card::{self, Card, QuestionCard};
+use crate::card::{Card, QuestionCard};
 use crate::highlight;
 use crate::ipc;
 use crate::json::{self, JsonTree};
@@ -301,7 +302,7 @@ fn bubble(item: &TranscriptItem) -> AnyView {
             view! { <QuestionCard id=id.clone() ask=ask.clone() /> }.into_any()
         }
         item => {
-            let spec = card::spec(item).expect("every non-speech item is a card");
+            let spec = assistant::Card::of(item).expect("every non-speech item is a card");
             view! { <Card spec /> }.into_any()
         }
     }
