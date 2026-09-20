@@ -191,8 +191,9 @@ fn start_build(start: impl Fn(Order) -> Result<Workspace, String> + 'static) -> 
     Tool::new(
         "start_build",
         "Launches a coding agent to implement prompt in repository — a local git repository \
-         path (make one with git_init if the user's chosen location has none yet) — on a new \
-         branch named branch, started from base or the repository's default branch. Returns at \
+         path with at least one commit (a location that has none yet needs git_init, then a first \
+         commit with git_add and git_commit) — on a new branch named branch, started from base \
+         or the repository's default branch. Returns at \
          once with the branch and the private worktree directory the agent works in; the build \
          then runs on its own for minutes. As soon as it has started, tell the user the branch \
          and repository and end your turn — do not call build_status in the same turn; the user \
