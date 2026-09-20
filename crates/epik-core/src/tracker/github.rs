@@ -185,8 +185,9 @@ mod tests {
             tracker.set_status(&1, State::Closed).unwrap_err(),
             tracker.set_status(&1, State::Open).unwrap_err(),
         ] {
-            assert!(
-                error.root_cause().downcast_ref::<Error>() == Some(&Error::TokenAbsent),
+            assert_eq!(
+                error.root_cause().downcast_ref::<Error>(),
+                Some(&Error::TokenAbsent),
                 "{error:#}"
             );
         }
