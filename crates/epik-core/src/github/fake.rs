@@ -16,8 +16,9 @@ use serde_json::{Value, json};
 
 use super::{Branch, Check, Conclusion, GitHub, Issue, Pull, Repo, State};
 
-/// The default branch, and the commit it stands on when the fake starts.
+/// The default branch.
 pub const DEFAULT_BRANCH: &str = "main";
+/// The commit the default branch stands on when the fake starts.
 pub const TIP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// One request as the fake received it. The path carries its query.
@@ -53,19 +54,6 @@ pub struct World {
     /// GitHub's words for refusing every merge, when it refuses.
     pub merge_refusal: Option<String>,
     pub requests: Vec<Request>,
-}
-
-impl World {
-    /// An open issue titled `title`.
-    pub fn open_issue(&mut self, number: u64, title: &str) {
-        let issue = Issue {
-            number,
-            title: title.to_owned(),
-            body: String::new(),
-            state: State::Open,
-        };
-        self.issues.insert(number, issue);
-    }
 }
 
 /// A check run named `name`, still running when `conclusion` is `None`.
@@ -144,6 +132,17 @@ fn refused(status: u16, message: &str) -> (u16, Value) {
 }
 
 impl World {
+    /// An open issue titled `title`.
+    pub fn open_issue(&mut self, number: u64, title: &str) {
+        let issue = Issue {
+            number,
+            title: title.to_owned(),
+            body: String::new(),
+            state: State::Open,
+        };
+        self.issues.insert(number, issue);
+    }
+
     /// The status and body GitHub would answer `request` with, and the
     /// world changed as the request asks.
     fn answer(&mut self, request: &Request) -> (u16, Value) {

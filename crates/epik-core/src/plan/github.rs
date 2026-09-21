@@ -161,32 +161,25 @@ impl Feature {
             let checks = self
                 .ask(move |github, repo| Ok(github.check_conclusions(repo, &polled)?))
                 .await?;
-            let waiting_on = match Reading::of(&checks) {
+            let bound = wait.bound;
+            let out_of_time = Instant::now() + wait.every > deadline;
+            match Reading::of(&checks) {
                 Reading::Green => return Ok(Verdict::Green),
                 Reading::Empty if !wait.expected => return Ok(Verdict::Unclaimed),
                 Reading::Red(names) => bail!("checks failed on {sha}: {names}"),
-                Reading::Pending(names) => Some(names),
-                Reading::Empty => None,
-            };
-            if Instant::now() + wait.every > deadline {
-                return Err(self.timed_out(sha, wait.bound, waiting_on).await);
+                Reading::Pending(names) if out_of_time => {
+                    bail!("checks still running on {sha} after {bound:?}: {names}")
+                }
+                Reading::Empty if out_of_time => return Err(self.no_check_run(sha, bound).await),
+                Reading::Pending(_) | Reading::Empty => sleep(wait.every).await,
             }
-            sleep(wait.every).await;
         }
     }
 
-    /// Why a wait ran out: the runs still going, or none ever seen —
-    /// and then one read of the commit's statuses says whether the
-    /// repository's CI posts those instead.
-    async fn timed_out(
-        &self,
-        sha: &str,
-        bound: Duration,
-        waiting_on: Option<String>,
-    ) -> anyhow::Error {
-        if let Some(names) = waiting_on {
-            return anyhow::anyhow!("checks still running on {sha} after {bound:?}: {names}");
-        }
+    /// Why a wait ran out having seen no check run: one read of the
+    /// commit's statuses says whether the repository's CI posts those
+    /// instead.
+    async fn no_check_run(&self, sha: &str, bound: Duration) -> anyhow::Error {
         let polled = sha.to_owned();
         let statuses = self
             .ask(move |github, repo| Ok(github.status_count(repo, &polled)?))
@@ -304,12 +297,12 @@ mod tests {
         }
     }
 
-    fn get(path: &str) -> Request {
-        Request::new("GET", &format!("/repos/fake/repo{path}"), Value::Null)
-    }
-
     fn sent(method: &str, path: &str, body: Value) -> Request {
         Request::new(method, &format!("/repos/fake/repo{path}"), body)
+    }
+
+    fn get(path: &str) -> Request {
+        sent("GET", path, Value::Null)
     }
 
     fn check_runs(sha: &str) -> Request {
