@@ -10,7 +10,6 @@
 use anyhow::{Context, Result};
 
 use super::{IssueTracker, Member, Related};
-use crate::dag::Dag;
 use crate::github::{Edge, GitHub, IssueGraph, Repo, State};
 
 /// One repository's issues, read and written through `github`.
@@ -42,14 +41,12 @@ impl IssueTracker<u64, State> for GitHubIssues {
         Ok(())
     }
 
-    fn work(&self, root: &u64) -> Result<Dag<u64>> {
-        super::work(root, |&number| {
-            let graph = self
-                .github
-                .issue_graph(&self.repo, number)
-                .with_context(|| format!("reading issue {number}"))?;
-            Ok(member(&graph))
-        })
+    fn member(&self, number: &u64) -> Result<Member<u64>> {
+        let graph = self
+            .github
+            .issue_graph(&self.repo, *number)
+            .with_context(|| format!("reading issue {number}"))?;
+        Ok(member(&graph))
     }
 }
 

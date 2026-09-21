@@ -19,6 +19,7 @@ pub mod github;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
+use std::iter::successors;
 
 use anyhow::{Result, bail};
 
@@ -48,6 +49,13 @@ pub trait IssueTracker<I, S> {
     /// No such issue, or the tracker's own failure.
     fn set_status(&mut self, id: &I, status: S) -> Result<()>;
 
+    /// The issue as the shape of a plan reads it.
+    ///
+    /// # Errors
+    ///
+    /// No such issue, or the tracker's own failure.
+    fn member(&self, id: &I) -> Result<Member<I>>;
+
     /// The work under `root`, as [`work`] folds it: the open issues
     /// `root` contains that contain none themselves, each after the
     /// work blocking it.
@@ -56,7 +64,12 @@ pub trait IssueTracker<I, S> {
     ///
     /// No such issue, an open blocker outside `root`, or the tracker's
     /// own failure.
-    fn work(&self, root: &I) -> Result<Dag<I>>;
+    fn work(&self, root: &I) -> Result<Dag<I>>
+    where
+        I: Clone + Display + Ord,
+    {
+        work(root, |id| self.member(id))
+    }
 }
 
 /// An issue at the far end of an edge, and whether it is open.
@@ -95,80 +108,62 @@ pub fn work<I: Clone + Display + Ord>(
     root: &I,
     fetch: impl Fn(&I) -> Result<Member<I>>,
 ) -> Result<Dag<I>> {
+    // The members: `root` and every open sub-issue beneath it, each as
+    // read, and each but `root` with the member containing it.
     let mut read = BTreeMap::new();
+    let mut containers = BTreeMap::new();
     let mut unread = vec![root.clone()];
     while let Some(id) = unread.pop() {
         if read.contains_key(&id) {
             bail!("issue {id} is contained twice under issue {root}");
         }
         let member = fetch(&id)?;
-        unread.extend(open(&member.sub_issues).cloned());
+        for sub_issue in open_ids(&member.sub_issues) {
+            containers.insert(sub_issue.clone(), id.clone());
+            unread.push(sub_issue.clone());
+        }
         read.insert(id, member);
     }
-    let mut work = Vec::new();
-    Members { root, read }.descend(root, &[], &mut work)?;
-    let positions: BTreeMap<&I, usize> = work.iter().map(|(id, _)| id).zip(0..).collect();
-    Dag::new(
-        work.iter()
-            .map(|(id, blockers)| {
-                let before: BTreeSet<usize> = blockers.iter().map(|id| positions[id]).collect();
-                Node::new(id.clone(), before)
-            })
-            .collect(),
-    )
+    let work = leaves(&read, root);
+    let positions: BTreeMap<&I, usize> = work.iter().copied().zip(0..).collect();
+    let nodes = work.iter().map(|&leaf| {
+        // A leaf waits on its own blockers and those of every
+        // container above it.
+        let mut before = BTreeSet::new();
+        for id in successors(Some(leaf), |&id| containers.get(id)) {
+            for blocker in open_ids(&read[id].blocked_by) {
+                if !read.contains_key(blocker) {
+                    bail!(
+                        "issue {id} is blocked by issue {blocker}, \
+                         which is open and outside issue {root}"
+                    );
+                }
+                before.extend(leaves(&read, blocker).iter().map(|leaf| positions[leaf]));
+            }
+        }
+        Ok(Node::new(leaf.clone(), before))
+    });
+    Dag::new(nodes.collect::<Result<_>>()?)
 }
 
 /// The ids of the open issues among `related`.
-fn open<I>(related: &[Related<I>]) -> impl Iterator<Item = &I> {
+fn open_ids<I>(related: &[Related<I>]) -> impl Iterator<Item = &I> {
     related
         .iter()
         .filter(|issue| issue.open)
         .map(|issue| &issue.id)
 }
 
-/// The members under `root`, each as read: `root`, and every open
-/// sub-issue of a member. A tree by containment.
-struct Members<'a, I> {
-    root: &'a I,
-    read: BTreeMap<I, Member<I>>,
-}
-
-impl<I: Clone + Display + Ord> Members<'_, I> {
-    /// Adds to `work` each leaf at or beneath `id`, in the tree's
-    /// order, with the leaves blocking it: those `inherited` from the
-    /// containers above, and its own.
-    fn descend(&self, id: &I, inherited: &[I], work: &mut Vec<(I, Vec<I>)>) -> Result<()> {
-        let member = &self.read[id];
-        let mut blockers = inherited.to_vec();
-        for blocker in open(&member.blocked_by) {
-            if !self.read.contains_key(blocker) {
-                bail!(
-                    "issue {id} is blocked by issue {blocker}, \
-                     which is open and outside issue {}",
-                    self.root
-                );
-            }
-            blockers.extend(self.leaves(blocker));
-        }
-        if member.sub_issues.is_empty() {
-            if member.open {
-                work.push((id.clone(), blockers));
-            }
-            return Ok(());
-        }
-        open(&member.sub_issues).try_for_each(|id| self.descend(id, &blockers, work))
+/// The leaves at or beneath the member `id`, in the tree's order: the
+/// open members holding no sub-issues.
+fn leaves<'a, I: Ord>(read: &'a BTreeMap<I, Member<I>>, id: &'a I) -> Vec<&'a I> {
+    let member = &read[id];
+    if member.sub_issues.is_empty() {
+        return Vec::from_iter(member.open.then_some(id));
     }
-
-    /// The leaves at or beneath `id`, in the tree's order.
-    fn leaves(&self, id: &I) -> Vec<I> {
-        let member = &self.read[id];
-        if member.sub_issues.is_empty() {
-            return member.open.then(|| id.clone()).into_iter().collect();
-        }
-        open(&member.sub_issues)
-            .flat_map(|id| self.leaves(id))
-            .collect()
-    }
+    open_ids(&member.sub_issues)
+        .flat_map(|id| leaves(read, id))
+        .collect()
 }
 
 #[cfg(test)]

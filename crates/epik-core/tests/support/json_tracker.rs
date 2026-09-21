@@ -6,8 +6,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
-use epik_core::dag::Dag;
-use epik_core::tracker::{IssueTracker, Member, Related, work};
+use epik_core::tracker::{IssueTracker, Member, Related};
 use serde::Deserialize;
 
 /// The issues of one JSON file, in the file's order.
@@ -107,15 +106,13 @@ impl IssueTracker<String, String> for JsonTracker {
     }
 
     /// The file's `sub_issues` as containment and its `depends_on`
-    /// as blocked-by, folded by [`work`].
-    fn work(&self, root: &String) -> Result<Dag<String>> {
-        work(root, |id| {
-            let issue = self.issue(id)?;
-            Ok(Member {
-                open: issue.open(),
-                sub_issues: self.related(&issue.sub_issues)?,
-                blocked_by: self.related(&issue.depends_on)?,
-            })
+    /// as blocked-by.
+    fn member(&self, id: &String) -> Result<Member<String>> {
+        let issue = self.issue(id)?;
+        Ok(Member {
+            open: issue.open(),
+            sub_issues: self.related(&issue.sub_issues)?,
+            blocked_by: self.related(&issue.depends_on)?,
         })
     }
 }
@@ -123,6 +120,7 @@ impl IssueTracker<String, String> for JsonTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use epik_core::dag::Dag;
 
     const ADDER: &str = include_str!("../fixtures/adder/issues.json");
 
