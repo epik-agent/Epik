@@ -97,6 +97,24 @@ jobs:
       - name: test
         run: cargo test
 
+  # The one check branch protection requires. Matrix legs and job names
+  # can change without touching the ruleset; this name must not.
+  # always() keeps it from being skipped (a skipped required check
+  # counts as passing) when a job it needs fails. bundle is left out:
+  # it only runs on main, so pull requests would never satisfy it.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [check, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every needed job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
+
   bundle:
     name: bundle (${{ matrix.os }})
     needs: [check, frontend]
