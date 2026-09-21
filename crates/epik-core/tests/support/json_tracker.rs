@@ -1,12 +1,13 @@
 //! A tracker read from one JSON file: a list of issues, each with an
-//! id, a title, a body, a status, and the ids it depends on. Ids and
-//! statuses are plain strings.
+//! id, a title, a body, a status, the ids it contains, and the ids it
+//! depends on. Ids and statuses are plain strings, and an issue is
+//! open until its status is `closed`.
 
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
-use epik_core::dag::{Dag, Node};
-use epik_core::tracker::IssueTracker;
+use epik_core::dag::Dag;
+use epik_core::tracker::{IssueTracker, Member, Related, work};
 use serde::Deserialize;
 
 /// The issues of one JSON file, in the file's order.
@@ -25,7 +26,15 @@ struct Issue {
     #[serde(default)]
     status: String,
     #[serde(default)]
+    sub_issues: Vec<String>,
+    #[serde(default)]
     depends_on: Vec<String>,
+}
+
+impl Issue {
+    fn open(&self) -> bool {
+        self.status != "closed"
+    }
 }
 
 impl JsonTracker {
@@ -33,8 +42,8 @@ impl JsonTracker {
     ///
     /// # Errors
     ///
-    /// JSON of another shape, an id used twice, or a dependency on an
-    /// issue the file does not hold.
+    /// JSON of another shape, an id used twice, or a sub-issue or a
+    /// dependency the file does not hold.
     pub fn read(json: &str) -> Result<Self> {
         let tracker: Self = serde_json::from_str(json)?;
         let mut seen = BTreeSet::new();
@@ -44,12 +53,12 @@ impl JsonTracker {
             }
         }
         for issue in &tracker.issues {
-            for dependency in &issue.depends_on {
-                if !seen.contains(dependency) {
-                    bail!(
-                        "issue {} depends on {dependency}, which is not an issue",
-                        issue.id
-                    );
+            for (verb, ids) in [
+                ("contains", &issue.sub_issues),
+                ("depends on", &issue.depends_on),
+            ] {
+                if let Some(id) = ids.iter().find(|id| !seen.contains(id)) {
+                    bail!("issue {} {verb} {id}, which is not an issue", issue.id);
                 }
             }
         }
@@ -61,6 +70,18 @@ impl JsonTracker {
             .iter()
             .find(|issue| issue.id == id)
             .ok_or_else(|| anyhow!("there is no issue {id}"))
+    }
+
+    /// The issues `ids` name, each with whether it is open.
+    fn related(&self, ids: &[String]) -> Result<Vec<Related<String>>> {
+        ids.iter()
+            .map(|id| {
+                Ok(Related {
+                    id: id.clone(),
+                    open: self.issue(id)?.open(),
+                })
+            })
+            .collect()
     }
 
     fn issue_mut(&mut self, id: &str) -> Result<&mut Issue> {
@@ -85,49 +106,17 @@ impl IssueTracker<String, String> for JsonTracker {
         Ok(())
     }
 
-    /// The closure of `root` under "depends on it", in the file's
-    /// order, each issue after the members it depends on.
-    fn dependents(&self, root: &String) -> Result<Dag<String>> {
-        self.issue(root)?;
-        let mut members: BTreeSet<&str> = BTreeSet::from([root.as_str()]);
-        loop {
-            let more: Vec<&str> = self
-                .issues
-                .iter()
-                .filter(|issue| !members.contains(issue.id.as_str()))
-                .filter(|issue| {
-                    issue
-                        .depends_on
-                        .iter()
-                        .any(|dependency| members.contains(dependency.as_str()))
-                })
-                .map(|issue| issue.id.as_str())
-                .collect();
-            if more.is_empty() {
-                break;
-            }
-            members.extend(more);
-        }
-        let ordered: Vec<&Issue> = self
-            .issues
-            .iter()
-            .filter(|issue| members.contains(issue.id.as_str()))
-            .collect();
-        let position = |id: &str| ordered.iter().position(|issue| issue.id == id);
-        Dag::new(
-            ordered
-                .iter()
-                .map(|issue| {
-                    Node::new(
-                        issue.id.clone(),
-                        issue
-                            .depends_on
-                            .iter()
-                            .filter_map(|dependency| position(dependency)),
-                    )
-                })
-                .collect(),
-        )
+    /// The file's `sub_issues` as containment and its `depends_on`
+    /// as blocked-by, folded by [`work`].
+    fn work(&self, root: &String) -> Result<Dag<String>> {
+        work(root, |id| {
+            let issue = self.issue(id)?;
+            Ok(Member {
+                open: issue.open(),
+                sub_issues: self.related(&issue.sub_issues)?,
+                blocked_by: self.related(&issue.depends_on)?,
+            })
+        })
     }
 }
 
@@ -143,10 +132,6 @@ mod tests {
 
     fn id(id: &str) -> String {
         id.to_owned()
-    }
-
-    fn ids(dag: &Dag<String>) -> Vec<&str> {
-        dag.nodes().map(|node| node.value().as_str()).collect()
     }
 
     #[test]
@@ -165,40 +150,66 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_dependents_of_the_root_are_the_whole_project_in_order() {
-        let dag = adder().dependents(&id("1")).unwrap();
-        assert_eq!(ids(&dag), ["1", "2", "3"]);
-        let root = dag.find(|id| id == "1").unwrap();
-        assert_eq!(root.predecessors().count(), 0);
-        for id in ["2", "3"] {
-            let issue = dag.find(|found| found == id).unwrap();
-            let before: Vec<&str> = issue
-                .predecessors()
-                .map(|node| node.value().as_str())
-                .collect();
-            assert_eq!(before, ["1"], "{id} waits on the scaffolding");
-        }
+    /// Each work node with the nodes directly before it.
+    fn shape(dag: &Dag<String>) -> Vec<(&str, Vec<&str>)> {
+        dag.nodes()
+            .map(|node| {
+                let before = node.predecessors().map(|before| before.value().as_str());
+                (node.value().as_str(), before.collect())
+            })
+            .collect()
     }
 
     #[test]
-    fn a_leaf_has_only_itself_as_dependents() {
-        assert_eq!(ids(&adder().dependents(&id("3")).unwrap()), ["3"]);
+    fn the_work_under_the_project_is_its_three_issues_in_order() {
+        let dag = adder().work(&id("0")).unwrap();
+        assert_eq!(
+            shape(&dag),
+            [("1", vec![]), ("2", vec!["1"]), ("3", vec!["1"])],
+            "2 and 3 wait on the scaffolding"
+        );
     }
 
     #[test]
-    fn dependents_reach_through_a_chain_and_keep_the_order_within_the_closure() {
+    fn a_leaf_is_its_own_work() {
+        assert_eq!(shape(&adder().work(&id("1")).unwrap()), [("1", vec![])]);
+    }
+
+    #[test]
+    fn work_is_the_leaves_under_the_root_with_order_pushed_through_containers() {
+        // The container b waits on a, so its leaf c does; x is outside.
         let tracker = JsonTracker::read(
             r#"[
-                {"id": "c", "title": "", "body": "", "depends_on": ["b"]},
+                {"id": "root", "title": "", "body": "", "sub_issues": ["b", "a"]},
+                {"id": "c", "title": "", "body": ""},
                 {"id": "a", "title": "", "body": ""},
+                {"id": "b", "title": "", "body": "", "sub_issues": ["c"], "depends_on": ["a"]},
+                {"id": "x", "title": "", "body": ""}
+            ]"#,
+        )
+        .unwrap();
+        let dag = tracker.work(&id("root")).unwrap();
+        assert_eq!(shape(&dag), [("a", vec![]), ("c", vec!["a"])]);
+    }
+
+    #[test]
+    fn a_closed_issue_is_finished_as_a_member_and_as_a_blocker() {
+        let mut tracker = JsonTracker::read(
+            r#"[
+                {"id": "root", "title": "", "body": "", "sub_issues": ["a", "b"]},
+                {"id": "a", "title": "", "body": "", "depends_on": ["x"]},
                 {"id": "b", "title": "", "body": "", "depends_on": ["a"]},
                 {"id": "x", "title": "", "body": ""}
             ]"#,
         )
         .unwrap();
-        let dag = tracker.dependents(&id("a")).unwrap();
-        assert_eq!(ids(&dag), ["a", "b", "c"], "x is nobody's dependent");
+        assert_eq!(
+            tracker.work(&id("root")).unwrap_err().to_string(),
+            "issue a is blocked by issue x, which is open and outside issue root"
+        );
+        tracker.set_status(&id("x"), "closed".to_owned()).unwrap();
+        tracker.set_status(&id("a"), "closed".to_owned()).unwrap();
+        assert_eq!(shape(&tracker.work(&id("root")).unwrap()), [("b", vec![])]);
     }
 
     #[test]
@@ -214,13 +225,19 @@ mod tests {
             JsonTracker::read(dangling).unwrap_err().to_string(),
             "issue 1 depends on 2, which is not an issue"
         );
+        let childless = r#"[{"id": "1", "title": "", "body": "", "sub_issues": ["2"]}]"#;
+        assert_eq!(
+            JsonTracker::read(childless).unwrap_err().to_string(),
+            "issue 1 contains 2, which is not an issue"
+        );
         let cycle = r#"[
+            {"id": "0", "title": "", "body": "", "sub_issues": ["1", "2"]},
             {"id": "1", "title": "", "body": "", "depends_on": ["2"]},
             {"id": "2", "title": "", "body": "", "depends_on": ["1"]}
         ]"#;
         let error = JsonTracker::read(cycle)
             .unwrap()
-            .dependents(&id("1"))
+            .work(&id("0"))
             .unwrap_err()
             .to_string();
         assert!(error.contains("cycle"), "{error}");
