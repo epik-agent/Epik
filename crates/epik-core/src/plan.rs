@@ -4,6 +4,7 @@
 //! the processes they launch, and [`stream`] is where they say what
 //! they are doing.
 
+pub mod github;
 pub mod implement;
 pub mod stream;
 pub mod task;
