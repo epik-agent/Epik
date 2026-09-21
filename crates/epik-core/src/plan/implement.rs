@@ -1,67 +1,33 @@
 //! An agent's run as a task: the issue it implements is in the agent
-//! already, and what it said is the task's return.
-
-use std::iter::Sum;
+//! already, and the run holds a process slot from start to exit.
 
 use anyhow::{Result, bail};
 
+use super::ProcessSlots;
 use super::task::Task;
-use crate::agent::{Agent, Update};
+use crate::agent::Agent;
 use crate::process::Exit;
 
-/// One [`Agent`], run to its exit when the task runs. The agent is
-/// cloned to start, since starting consumes one and a task may only
-/// borrow itself.
+/// One [`Agent`], run to its exit in one of the `slots` when the task
+/// runs. The agent is cloned to start, since starting consumes one and
+/// a task may only borrow itself.
 #[derive(Clone, Debug)]
-pub struct Implement<A>(pub A);
-
-/// Everything the agents of a plan said, in the plan's order: a
-/// [`Sum`], so a plan of them returns one.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Narration(pub Vec<Update>);
-
-impl Sum for Narration {
-    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Self(iter.flat_map(|narration| narration.0).collect())
-    }
+pub struct Implement<A> {
+    pub agent: A,
+    pub slots: ProcessSlots,
 }
 
-impl<A: Agent + Clone + Send + Sync> Task for Implement<A> {
-    type Return = Narration;
-
-    /// The agent started, its stdout read as updates to the end, and
-    /// its exit waited for: what it said, or an exit other than
-    /// success as the error.
-    fn run(&self) -> Result<Narration> {
-        let mut process = self.0.clone().start()?;
-        let updates = process
-            .stdout()
-            .flat_map(|line| A::interpret(&line))
-            .collect();
-        match process.wait()? {
-            Exit::Code(0) => Ok(Narration(updates)),
-            Exit::Code(code) => bail!("the agent exited with code {code}"),
-            Exit::Signal(signal) => bail!("the agent was killed by signal {signal}"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn narrations_sum_in_order() {
-        let text = |text: &str| Update::Text {
-            text: text.to_owned(),
-        };
-        let summed: Narration = [
-            Narration(vec![text("a")]),
-            Narration(vec![]),
-            Narration(vec![text("b"), text("c")]),
-        ]
-        .into_iter()
-        .sum();
-        assert_eq!(summed, Narration(vec![text("a"), text("b"), text("c")]));
+impl<A: Agent + Clone + Send + Sync + 'static> Task for Implement<A> {
+    /// The agent started and its exit waited for, all within a slot:
+    /// an exit other than success is the error.
+    async fn run(&self) -> Result<()> {
+        let agent = self.agent.clone();
+        self.slots
+            .run(move || match agent.start()?.wait()? {
+                Exit::Code(0) => Ok(()),
+                Exit::Code(code) => bail!("the agent exited with code {code}"),
+                Exit::Signal(signal) => bail!("the agent was killed by signal {signal}"),
+            })
+            .await
     }
 }

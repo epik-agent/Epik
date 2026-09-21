@@ -8,10 +8,9 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use epik_core::agent::{Agent, Update};
+use epik_core::agent::Agent;
 use epik_core::git::testing::{branch_of, cloned, committed_all, identified, pushed, seeded};
 use epik_core::git::url::Url;
-use epik_core::plan::implement::Narration;
 use epik_core::plan::{Implement, Plan, ProcessSlots, Task};
 use epik_core::process::Exit;
 use epik_core::temp::Scratch;
@@ -24,22 +23,21 @@ use support::scripted::{self, Scripted, assert_written};
 
 const TRACKER: &str = include_str!("fixtures/adder/issues.json");
 
-#[test]
-fn a_scripted_agent_runs_as_a_task_and_returns_what_it_said() {
+fn slots(count: usize) -> ProcessSlots {
+    ProcessSlots::new(NonZeroUsize::new(count).unwrap())
+}
+
+#[tokio::test]
+async fn a_scripted_agent_runs_as_a_task() {
     let scratch = Scratch::new("implement");
-    let task = Implement(Scripted {
-        cwd: scratch.0.clone(),
-        files: [("note.txt".into(), "noted\n".to_owned())].into(),
-    });
-    let Narration(updates) = task.run().unwrap();
-    assert!(matches!(updates[0], Update::Session { .. }));
-    assert_eq!(
-        updates[1],
-        Update::ToolUse {
-            name: "Write".to_owned()
-        }
-    );
-    assert!(matches!(updates[2], Update::Result { ok: true, .. }));
+    let task = Implement {
+        agent: Scripted {
+            cwd: scratch.0.clone(),
+            files: [("note.txt".into(), "noted\n".to_owned())].into(),
+        },
+        slots: slots(1),
+    };
+    task.run().await.unwrap();
     assert_eq!(
         std::fs::read_to_string(scratch.0.join("note.txt")).unwrap(),
         "noted\n"
@@ -83,6 +81,19 @@ fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
 }
 
 #[tokio::test]
+async fn an_agent_that_exits_with_a_failure_is_the_tasks_error() {
+    let scratch = Scratch::new("implement-fails");
+    let task = Implement {
+        agent: Scripted {
+            cwd: scratch.0.join("missing"),
+            files: [].into(),
+        },
+        slots: slots(1),
+    };
+    task.run().await.unwrap_err();
+}
+
+#[tokio::test]
 async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_branch() {
     let scratch = Scratch::new("adder");
     let (origin, _) = seeded(&scratch);
@@ -98,6 +109,7 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
         // One task per issue, each a scripted agent writing the files
         // the issue names, in the order the tracker gives.
         let root = "1".to_owned();
+        let slots = slots(2);
         let plan: Plan<Implement<Scripted>> = tracker.dependents(&root).unwrap().map(|id| {
             let files = tracker
                 .content(&id)
@@ -105,38 +117,17 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
                 .lines()
                 .map(|path| (PathBuf::from(path), source[Path::new(path)].clone()))
                 .collect();
-            Implement(Scripted {
+            let agent = Scripted {
                 cwd: repository.path().to_owned(),
                 files,
-            })
+            };
+            Implement {
+                agent,
+                slots: slots.clone(),
+            }
         });
-        let Narration(updates) = plan
-            .execute(ProcessSlots::new(NonZeroUsize::new(2).unwrap()))
-            .await
-            .unwrap();
-
+        plan.execute().await.unwrap();
         assert_written(repository.path(), &source);
-        let count = |wanted: fn(&Update) -> bool| updates.iter().filter(|u| wanted(u)).count();
-        assert_eq!(
-            count(|u| matches!(u, Update::Session { .. })),
-            3,
-            "{updates:?}"
-        );
-        assert_eq!(
-            count(|u| matches!(u, Update::ToolUse { .. })),
-            4,
-            "{updates:?}"
-        );
-        assert_eq!(
-            count(|u| matches!(u, Update::Result { ok: true, .. })),
-            3,
-            "{updates:?}"
-        );
-        assert!(
-            matches!(updates[0], Update::Session { .. })
-                && matches!(updates[3], Update::Result { .. }),
-            "the scaffolding issue's run comes first, whole: {updates:?}"
-        );
 
         identified(&repository);
         committed_all(
