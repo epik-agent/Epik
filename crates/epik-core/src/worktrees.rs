@@ -11,14 +11,17 @@
 //! worktree of it is Epik's, whoever makes it. Dropping a [`LinkedWorktree`] frees
 //! its branch's name, and dropping the last of a URL deletes the
 //! clone with the directory, so the root holds only what is in use.
+//! Adds and drops come from many threads at once and take turns: each
+//! sees the clone as the one before it left it.
 
 use std::fmt::{Display, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Result, bail};
 
 use crate::git::commands::{
-    AddWorktree, Branch, Clone, DeleteBranch, Fetch, ListWorktrees, Remote, RemoveWorktree,
+    AddWorktree, Branch, Clone, DeleteBranch, Fetch, Hash, ListWorktrees, Remote, RemoveWorktree,
     RevParse, SetConfig,
 };
 use crate::git::url::Url;
@@ -35,6 +38,10 @@ pub const IDENTITY: [(&str, &str); 3] = [
     ("user.email", "epik@epik-agent.dev"),
     ("commit.gpgsign", "false"),
 ];
+
+/// Whose turn it is to change what stands under a root: held for the
+/// length of an add or a removal, one for the whole host.
+static TURN: Mutex<()> = Mutex::new(());
 
 /// A cloned URL and its linked worktrees.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +70,7 @@ impl Worktrees {
     /// commit, or a `name` some branch of the clone already has,
     /// among them.
     pub fn add(&self, url: &Url, name: &str, at: &str) -> Result<LinkedWorktree> {
+        let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         let group = self.root.join(slug(url));
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
@@ -81,12 +89,17 @@ impl Worktrees {
             main
         };
         let at = rev_parse(RevParse::new(main.clone(), at.to_owned())?)?;
-        branch(Branch::new(main.clone(), name.to_owned(), Some(at))?)?;
+        branch(Branch::new(
+            main.clone(),
+            name.to_owned(),
+            Some(at.clone()),
+        )?)?;
         let linked = group.join(slug(&name));
         let worktree = add_worktree(AddWorktree::new(main, linked, name.to_owned())?)?;
         Ok(LinkedWorktree {
             worktree,
             branch: name.to_owned(),
+            cut: at,
         })
     }
 }
@@ -114,6 +127,7 @@ fn slug(name: &impl Display) -> String {
 pub struct LinkedWorktree {
     worktree: Repository,
     branch: String,
+    cut: Hash,
 }
 
 impl LinkedWorktree {
@@ -129,10 +143,17 @@ impl LinkedWorktree {
         &self.branch
     }
 
+    /// The commit the branch was cut at.
+    #[must_use]
+    pub const fn cut(&self) -> &Hash {
+        &self.cut
+    }
+
     /// Removes the worktree, whatever it holds, then its branch from
     /// the clone — or the clone itself, when this was its last linked
     /// worktree.
     fn remove(&self) -> Result<()> {
+        let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         let worktree = &self.worktree;
         let listed = list_worktrees(ListWorktrees::new(worktree.clone()))?;
         let Some((main, others)) = listed.split_first() else {
@@ -264,6 +285,29 @@ mod tests {
         assert_eq!(head(late.worktree()), landed);
         assert!(late.worktree().path().join("early.txt").is_file());
         assert!(!early.worktree().path().join("early.txt").exists());
+    }
+
+    #[test]
+    fn adds_and_drops_of_one_url_from_two_threads_at_once_each_succeed() {
+        let scratch = Scratch::new("worktrees-at-once");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        // Each round starts with the URL never cloned, or with its
+        // clone going as the other thread's last worktree drops.
+        let rounds = |name: &'static str| {
+            let (worktrees, url) = (&worktrees, &url);
+            move || {
+                for _ in 0..5 {
+                    let linked = worktrees.add(url, name, "origin/main").unwrap();
+                    assert!(linked.worktree().path().join("hello.txt").is_file());
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(rounds("issue-1"));
+            scope.spawn(rounds("issue-2"));
+        });
     }
 
     #[test]

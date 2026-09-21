@@ -1,10 +1,12 @@
 //! A plan: tasks and the order among them, run as the order allows.
 //! [`Task`] is the work, [`Implement`] is an agent's run as one,
 //! [`Plan::execute`] runs them all at once, [`ProcessSlots`] bounds
-//! the processes they launch, and [`stream`] is where they say what
-//! they are doing.
+//! the processes they launch, [`stream`] is where they say what they
+//! are doing, and [`feature`] is a feature build as one.
 
 pub mod commit;
+#[cfg(unix)]
+pub mod feature;
 pub mod github;
 pub mod implement;
 #[cfg(unix)]
