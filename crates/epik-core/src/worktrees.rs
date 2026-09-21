@@ -3,20 +3,27 @@
 //!
 //! Under one root, each URL gets a directory named by [`slug`], its
 //! clone at `main` inside it and a linked worktree beside the clone
-//! for every [`add`](Worktrees::add) outstanding. The first add of
-//! a URL clones it; dropping the last [`LinkedWorktree`] of it deletes
-//! the clone with the directory, so the root holds only what is in
-//! use.
+//! for every [`add`](Worktrees::add) outstanding, in a directory
+//! named by the [`slug`] of its branch. The first add of a URL clones
+//! it and every later one fetches, so a branch is cut from what the
+//! URL holds as the add is made. Dropping a [`LinkedWorktree`] frees
+//! its branch's name, and dropping the last of a URL deletes the
+//! clone with the directory, so the root holds only what is in use.
 
-use std::fmt::Write;
+use std::fmt::{Display, Write};
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use crate::git::commands::{AddWorktree, Branch, Clone, ListWorktrees, RemoveWorktree};
+use crate::git::commands::{
+    AddWorktree, Branch, Clone, DeleteBranch, Fetch, ListWorktrees, Remote, RemoveWorktree,
+    RevParse,
+};
 use crate::git::url::Url;
-use crate::git::{Repository, add_worktree, branch, clone, list_worktrees, remove_worktree};
-use crate::temp;
+use crate::git::{
+    Repository, add_worktree, branch, clone, delete_branch, fetch, list_worktrees, remove_worktree,
+    rev_parse,
+};
 
 /// A cloned URL and its linked worktrees.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,35 +39,47 @@ impl Worktrees {
         Self { root }
     }
 
-    /// A fresh linked worktree of `url`, on a new branch at the
-    /// clone's `HEAD`. The clone is made on the first add and shared
-    /// by the rest.
+    /// A fresh linked worktree of `url`, on the new branch `name` cut
+    /// at `at`: a commit-ish read in the clone once it holds what
+    /// `url` holds now, where `origin/feature` is the tip of the
+    /// URL's `feature`. The clone is made on the first add, and
+    /// shared and fetched into by the rest.
     ///
     /// # Errors
     ///
     /// A relative root, a relative local `url`, and git's own words:
-    /// a URL that cannot be cloned, or a clone with no commit to
-    /// branch from, among them.
-    pub fn add(&self, url: &Url) -> Result<LinkedWorktree> {
+    /// a URL that cannot be cloned or fetched, an `at` naming no
+    /// commit, or a `name` some branch of the clone already has,
+    /// among them.
+    pub fn add(&self, url: &Url, name: &str, at: &str) -> Result<LinkedWorktree> {
         let group = self.root.join(slug(url));
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
-            Repository::open(clone_into)?
+            let main = Repository::open(clone_into)?;
+            fetch(Fetch::new(
+                main.clone(),
+                Remote::named("origin".to_owned())?,
+            ))?;
+            main
         } else {
             clone(Clone::new(url.clone(), clone_into, None)?)?
         };
-        let name = temp::name("worktree");
-        branch(Branch::new(main.clone(), name.clone(), None)?)?;
-        let linked = add_worktree(AddWorktree::new(main, group.join(&name), name)?)?;
-        Ok(LinkedWorktree(linked))
+        let at = rev_parse(RevParse::new(main.clone(), at.to_owned())?)?;
+        branch(Branch::new(main.clone(), name.to_owned(), Some(at))?)?;
+        let linked = group.join(slug(&name));
+        let worktree = add_worktree(AddWorktree::new(main, linked, name.to_owned())?)?;
+        Ok(LinkedWorktree {
+            worktree,
+            branch: name.to_owned(),
+        })
     }
 }
 
-/// `url` as one directory name, a different one for every URL: its
+/// `name` as one directory name, a different one for every name: its
 /// spelling, with each byte outside letters, digits, `.`, `-`, `_`,
 /// and `@` written as `%` and two hex digits.
-fn slug(url: &Url) -> String {
-    let spelling = url.to_string();
+fn slug(name: &impl Display) -> String {
+    let spelling = name.to_string();
     let mut slug = String::with_capacity(spelling.len());
     for byte in spelling.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'@') {
@@ -76,27 +95,40 @@ fn slug(url: &Url) -> String {
 /// A linked worktree [`Worktrees`] handed out, on a branch of its
 /// own, until it is dropped.
 #[derive(Debug, Eq, PartialEq)]
-pub struct LinkedWorktree(Repository);
+pub struct LinkedWorktree {
+    worktree: Repository,
+    branch: String,
+}
 
 impl LinkedWorktree {
     /// The worktree, for the git that runs in it.
     #[must_use]
     pub const fn worktree(&self) -> &Repository {
-        &self.0
+        &self.worktree
     }
 
-    /// Removes the worktree, whatever it holds, and deletes the clone
-    /// when this was its last linked worktree.
+    /// The branch the worktree was cut on.
+    #[must_use]
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// Removes the worktree, whatever it holds, then its branch from
+    /// the clone — or the clone itself, when this was its last linked
+    /// worktree.
     fn remove(&self) -> Result<()> {
-        let listed = list_worktrees(ListWorktrees::new(self.0.clone()))?;
+        let worktree = &self.worktree;
+        let listed = list_worktrees(ListWorktrees::new(worktree.clone()))?;
         let Some((main, others)) = listed.split_first() else {
-            bail!("git listed no worktree for {}", self.0.path().display());
+            bail!("git listed no worktree for {}", worktree.path().display());
         };
         let main = Repository::open(main.path.clone())?;
-        remove_worktree(RemoveWorktree::new(main.clone(), self.0.clone(), true))?;
+        remove_worktree(RemoveWorktree::new(main.clone(), worktree.clone(), true))?;
         if others.len() == 1 {
             let group = main.path().parent().unwrap_or(main.path());
             std::fs::remove_dir_all(group)?;
+        } else {
+            delete_branch(DeleteBranch::new(main, self.branch.clone())?)?;
         }
         Ok(())
     }
@@ -111,12 +143,12 @@ impl Drop for LinkedWorktree {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::ffi::OsStr;
     use std::path::Path;
 
     use super::*;
-    use crate::git::commands::{Hash, WorktreeInfo};
-    use crate::git::testing::{head, seeded};
+    use crate::git::commands::{Hash, Switch, WorktreeInfo};
+    use crate::git::switch;
+    use crate::git::testing::{branch_of, committed, head, pushed, seeded};
     use crate::temp::Scratch;
 
     fn listed(repository: &Repository) -> Vec<WorktreeInfo> {
@@ -133,16 +165,14 @@ mod tests {
         }
     }
 
-    /// `linked` as git lists it: on the branch its directory is named
-    /// after.
+    /// `linked` as git lists it: on its branch.
     fn linked(linked: &LinkedWorktree, head: &Hash) -> WorktreeInfo {
-        let path = linked.worktree().path();
-        let branch = path.file_name().and_then(OsStr::to_str).map(str::to_owned);
-        info(path.to_owned(), branch, head)
+        let path = linked.worktree().path().to_owned();
+        info(path, Some(linked.branch().to_owned()), head)
     }
 
     #[test]
-    fn a_url_is_cloned_once_and_each_add_is_its_own_worktree_on_its_own_branch_until_dropped() {
+    fn a_url_is_cloned_once_and_each_add_is_its_own_worktree_on_the_branch_named_until_dropped() {
         let scratch = Scratch::new("worktrees");
         let (origin, work) = seeded(&scratch);
         let url = Url::Local(origin.path().to_owned());
@@ -154,9 +184,14 @@ mod tests {
         let main = group.join("main");
         let main_info = info(main.clone(), Some("main".to_owned()), &head);
 
-        let first = worktrees.add(&url).unwrap();
+        let first = worktrees.add(&url, "issue-1", "origin/main").unwrap();
         assert!(main.is_dir(), "the first add cloned");
-        assert_eq!(first.worktree().path().parent(), Some(group.as_path()));
+        assert_eq!(
+            first.branch(),
+            "issue-1",
+            "the branch is named for its issue"
+        );
+        assert_eq!(first.worktree().path(), group.join("issue-1"));
         assert!(first.worktree().path().join("hello.txt").is_file());
         assert_eq!(
             listed(first.worktree()),
@@ -164,7 +199,7 @@ mod tests {
         );
 
         let cloned_at = std::fs::metadata(&main).unwrap().modified().unwrap();
-        let second = worktrees.add(&url).unwrap();
+        let second = worktrees.add(&url, "issue-2", "origin/main").unwrap();
         assert_eq!(
             std::fs::metadata(&main).unwrap().modified().unwrap(),
             cloned_at,
@@ -196,11 +231,84 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_cut_after_a_merge_landed_on_the_feature_branch_contains_it() {
+        let scratch = Scratch::new("worktrees-late");
+        let (origin, work) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        branch(Branch::new(work.clone(), "feature".to_owned(), None).unwrap()).unwrap();
+        switch(Switch::new(work.clone(), "feature".to_owned()).unwrap()).unwrap();
+        pushed(&work, "feature");
+
+        let early = worktrees.add(&url, "issue-1", "origin/feature").unwrap();
+        let landed = committed(&work, "early.txt", "early\n", "what landed early");
+        pushed(&work, "feature");
+        let late = worktrees.add(&url, "issue-2", "origin/feature").unwrap();
+
+        assert_eq!(head(late.worktree()), landed);
+        assert!(late.worktree().path().join("early.txt").is_file());
+        assert!(!early.worktree().path().join("early.txt").exists());
+    }
+
+    #[test]
+    fn a_branch_is_one_worktrees_until_the_drop_frees_its_name() {
+        let scratch = Scratch::new("worktrees-taken");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        let _other = worktrees.add(&url, "issue-1", "origin/main").unwrap();
+
+        let held = worktrees.add(&url, "issue-2", "origin/main").unwrap();
+        let taken = worktrees
+            .add(&url, "issue-2", "origin/main")
+            .unwrap_err()
+            .to_string();
+        assert!(taken.contains("'issue-2' already exists"), "{taken}");
+        assert!(held.worktree().path().is_dir(), "the holder stands");
+
+        drop(held);
+        worktrees.add(&url, "issue-2", "origin/main").unwrap();
+    }
+
+    #[test]
+    fn add_needs_a_commit_to_cut_the_branch_at() {
+        let scratch = Scratch::new("worktrees-nowhere");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        let error = worktrees
+            .add(&url, "issue-1", "origin/feature")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("\"origin/feature\" names no commit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_branch_with_a_slash_in_it_is_one_directory_beside_the_clone() {
+        let scratch = Scratch::new("worktrees-slash");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let root = scratch.0.canonicalize().unwrap().join("root");
+        let linked = Worktrees::new(root.clone())
+            .add(&url, "issue/1", "origin/main")
+            .unwrap();
+        assert_eq!(
+            linked.worktree().path(),
+            root.join(slug(&url)).join("issue%2F1")
+        );
+        assert_eq!(branch_of(linked.worktree()), "issue/1");
+    }
+
+    #[test]
     fn add_needs_a_url_git_can_clone() {
         let scratch = Scratch::new("worktrees-unclonable");
         let worktrees = Worktrees::new(scratch.join("root").into());
+        let url = "/nonexistent/repo.git".parse().unwrap();
         let error = worktrees
-            .add(&"/nonexistent/repo.git".parse().unwrap())
+            .add(&url, "issue-1", "origin/main")
             .unwrap_err()
             .to_string();
         assert!(error.contains("nonexistent"), "{error}");
@@ -222,7 +330,7 @@ mod tests {
             ("host:répo", "host%3Ar%C3%A9po"),
         ];
         for (text, expected) in cases {
-            let slug = slug(&text.parse().unwrap());
+            let slug = slug(&text.parse::<Url>().unwrap());
             assert_eq!(slug, expected);
             assert_eq!(Path::new(&slug).components().count(), 1, "{slug}");
         }
