@@ -1,9 +1,9 @@
 use anyhow::Result;
 
-/// Work that can be run from any thread.
+/// Work that can be run from any thread: its future parks wherever it
+/// waits, and a failure is its error.
 pub trait Task: Send + Sync {
-    type Return;
-    fn run(&self) -> Result<Self::Return>;
+    fn run(&self) -> impl Future<Output = Result<()>> + Send;
 }
 
 #[cfg(test)]
@@ -12,16 +12,8 @@ mod tests {
     use anyhow::Result;
     use std::fmt::{self, Display, Formatter};
 
-    struct Division {
-        x: f32,
-        y: f32,
-    }
-
-    impl Division {
-        fn new(x: f32, y: f32) -> Self {
-            Self { x, y }
-        }
-    }
+    /// Checks that it can be divided by.
+    struct Divisor(f32);
 
     #[derive(Debug)]
     struct DivideByZero;
@@ -34,26 +26,24 @@ mod tests {
 
     impl std::error::Error for DivideByZero {}
 
-    impl Task for Division {
-        type Return = f32;
-
-        fn run(&self) -> Result<f32> {
-            if self.y == 0.0 {
+    impl Task for Divisor {
+        async fn run(&self) -> Result<()> {
+            if self.0 == 0.0 {
                 Err(DivideByZero.into())
             } else {
-                Ok(self.x / self.y)
+                Ok(())
             }
         }
     }
 
-    #[test]
-    fn ten_over_two_succeeds() {
-        assert_eq!(Division::new(10.0, 2.0).run().unwrap(), 5.0);
+    #[tokio::test]
+    async fn two_succeeds() {
+        Divisor(2.0).run().await.unwrap();
     }
 
-    #[test]
-    fn ten_over_zero_fails() {
-        let error = Division::new(10.0, 0.0).run().unwrap_err();
+    #[tokio::test]
+    async fn zero_fails() {
+        let error = Divisor(0.0).run().await.unwrap_err();
         assert!(error.is::<DivideByZero>(), "{error}");
     }
 }
