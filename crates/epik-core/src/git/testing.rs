@@ -1,7 +1,10 @@
 //! The fixtures the live git tests share: a repository with an
 //! identity and a commit in it, made through the verbs above.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, channel};
 
 use super::commands::{
     Add, Clone, Commit, Hash, Init, ListWorktrees, Push, Remote, RevParse, SetConfig,
@@ -9,11 +12,6 @@ use super::commands::{
 use super::url::Url;
 use super::{Repository, add, clone, commit, init, list_worktrees, push, rev_parse, set_config};
 use crate::temp::Scratch;
-
-/// The remote a clone names its source.
-pub fn origin() -> Remote {
-    Remote::named("origin".to_owned()).unwrap()
-}
 
 /// The identity the tests' commits are made under, unsigned.
 pub fn identified(repository: &Repository) {
@@ -68,7 +66,7 @@ pub fn branch_of(repository: &Repository) -> String {
 
 /// `branch` of `repository` pushed to its origin.
 pub fn pushed(repository: &Repository, branch: &str) {
-    push(Push::new(repository.clone(), origin(), branch.to_owned()).unwrap()).unwrap();
+    push(Push::new(repository.clone(), Remote::origin(), branch.to_owned()).unwrap()).unwrap();
 }
 
 /// A clone of `origin` at `into` under `scratch`, on `branch` when
@@ -97,6 +95,44 @@ pub fn seeded(scratch: &Scratch) -> (Repository, Repository) {
     let work = cloned(scratch, &origin, "work", None);
     identified(&work);
     committed(&work, "hello.txt", "hello\n", "the first commit");
-    push(Push::new(work.clone(), self::origin(), "main".to_owned()).unwrap()).unwrap();
+    push(Push::new(work.clone(), Remote::origin(), "main".to_owned()).unwrap()).unwrap();
     (origin, work)
+}
+
+/// The origin of `repository` moved to `url`.
+pub fn aimed(repository: &Repository, url: String) {
+    let key = "remote.origin.url".to_owned();
+    set_config(SetConfig::new(repository.clone(), key, url).unwrap()).unwrap();
+}
+
+/// A loopback listener that answers every request with a demand
+/// for Basic authentication, and reports the first `Authorization`
+/// header it is sent.
+pub fn guarded() -> (String, Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
+    let (seen_in, seen) = channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream);
+            // The headers end at the first empty line.
+            let authorization = (&mut reader)
+                .lines()
+                .map_while(Result::ok)
+                .take_while(|line| !line.is_empty())
+                .filter_map(|line| line.strip_prefix("Authorization: ").map(str::to_owned))
+                .last();
+            let _ = reader.into_inner().write_all(
+                b"HTTP/1.1 401 Unauthorized\r\n\
+                  WWW-Authenticate: Basic realm=\"epik\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            if let Some(authorization) = authorization {
+                let _ = seen_in.send(authorization);
+                break;
+            }
+        }
+    });
+    (url, seen)
 }
