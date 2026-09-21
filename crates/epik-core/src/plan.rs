@@ -3,7 +3,10 @@
 //! [`Plan::execute`] runs them all at once, and [`ProcessSlots`]
 //! bounds the processes they launch.
 
+pub mod commit;
 pub mod implement;
+#[cfg(unix)]
+pub mod push;
 pub mod task;
 
 use std::iter::repeat_with;
