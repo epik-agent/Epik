@@ -55,7 +55,7 @@ fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
     let (bare, _) = seeded(&scratch);
     let url = Url::Local(bare.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
-    let linked = worktrees.add(&url).unwrap();
+    let linked = worktrees.add(&url, "adder", "origin/main").unwrap();
     let repository = linked.worktree().clone();
     let branch = branch_of(&repository);
 
@@ -92,7 +92,7 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
     let source = scripted::adder();
 
     let branch = {
-        let linked = worktrees.add(&url).unwrap();
+        let linked = worktrees.add(&url, "adder", "origin/main").unwrap();
         let repository = linked.worktree().clone();
 
         // One task per issue, each a scripted agent writing the files
