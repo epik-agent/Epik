@@ -1,7 +1,10 @@
 //! The fixtures the live git tests share: a repository with an
 //! identity and a commit in it, made through the verbs above.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, channel};
 
 use super::commands::{
     Add, Clone, Commit, Hash, Init, ListWorktrees, Push, Remote, RevParse, SetConfig,
@@ -99,4 +102,45 @@ pub fn seeded(scratch: &Scratch) -> (Repository, Repository) {
     committed(&work, "hello.txt", "hello\n", "the first commit");
     push(Push::new(work.clone(), self::origin(), "main".to_owned()).unwrap()).unwrap();
     (origin, work)
+}
+
+/// The origin of `repository` moved to `url`.
+pub fn aimed(repository: &Repository, url: String) {
+    let key = "remote.origin.url".to_owned();
+    set_config(SetConfig::new(repository.clone(), key, url).unwrap()).unwrap();
+}
+
+/// A loopback listener that answers every request with a demand
+/// for Basic authentication, and reports the first `Authorization`
+/// header it is sent.
+pub fn guarded() -> (String, Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
+    let (seen_in, seen) = channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream);
+            let mut authorization = None;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Authorization: ") {
+                    authorization = Some(value.trim().to_owned());
+                }
+            }
+            let _ = reader.into_inner().write_all(
+                b"HTTP/1.1 401 Unauthorized\r\n\
+                  WWW-Authenticate: Basic realm=\"epik\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            if let Some(authorization) = authorization {
+                let _ = seen_in.send(authorization);
+                break;
+            }
+        }
+    });
+    (url, seen)
 }

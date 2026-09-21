@@ -13,6 +13,8 @@
 //! the text from [`diff`] and [`show`]; and nothing from the rest,
 //! which either did what was asked or failed in git's words.
 
+#[cfg(all(unix, feature = "native"))]
+pub mod askpass;
 pub mod commands;
 #[cfg(all(unix, feature = "native", any(test, feature = "testing")))]
 pub mod testing;
@@ -30,6 +32,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::keystore::Secret;
 #[cfg(feature = "native")]
 use crate::process::{Finished, Process};
+#[cfg(all(unix, feature = "native"))]
+use askpass::{Askpass, Credentials};
 #[cfg(feature = "native")]
 use commands::{
     AbortMerge, Add, AddWorktree, Branch, Change, Clone, Command, Commit, DeleteBranch, Diff,
@@ -90,17 +94,23 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// verb above to read.
 #[cfg(feature = "native")]
 pub fn run(command: &Command) -> Result<Finished> {
-    run_within(command, TIMEOUT)
+    run_within(command, [], TIMEOUT)
 }
 
-/// [`run`] against a stated deadline, which is how the tests exercise
-/// the kill without sitting through the real one.
+/// [`run`] with `env` added to git's environment, which is how
+/// credentials travel, against a stated deadline, which is how the
+/// tests exercise the kill without sitting through the real one.
 #[cfg(feature = "native")]
-fn run_within(command: &Command, timeout: Duration) -> Result<Finished> {
+fn run_within(
+    command: &Command,
+    env: impl IntoIterator<Item = (String, Secret)>,
+    timeout: Duration,
+) -> Result<Finished> {
     // No terminal is attached, so a network verb that wants credentials
     // fails in words instead of waiting for a prompt nobody can see.
     // The user's helpers and SSH config still apply.
-    let env = [("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"))];
+    let prompt = ("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"));
+    let env = env.into_iter().chain([prompt]);
     Process::new("git", command.argv(), ".", env, Some(timeout))?.finish()
 }
 
@@ -144,7 +154,7 @@ pub fn clone(clone: Clone) -> Result<Repository> {
 #[cfg(feature = "native")]
 fn clone_within(clone: Clone, timeout: Duration) -> Result<Repository> {
     let into = clone.destination().to_owned();
-    settle(&run_within(&Command::Clone(clone), timeout)?)?;
+    settle(&run_within(&Command::Clone(clone), [], timeout)?)?;
     Ok(Repository(into))
 }
 
@@ -347,6 +357,20 @@ pub fn reset(reset: Reset) -> Result<()> {
 #[cfg(feature = "native")]
 pub fn push(push: Push) -> Result<()> {
     settled(Command::Push(push)).map(drop)
+}
+
+/// Pushes a branch to a remote that asks who is pushing: `credentials`
+/// answer, on the [`askpass`] rails.
+///
+/// # Errors
+///
+/// An askpass script that could not be written; then [`push`]'s, a
+/// remote that refuses the credentials among them.
+#[cfg(all(unix, feature = "native"))]
+pub fn push_as(push: Push, credentials: &Credentials) -> Result<()> {
+    let askpass = Askpass::new()?;
+    let env = askpass.env(credentials);
+    settle(&run_within(&Command::Push(push), env, TIMEOUT)?)
 }
 
 /// Lists the remotes.
