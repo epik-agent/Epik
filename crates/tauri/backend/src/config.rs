@@ -30,9 +30,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
-use epik::github::GitHub;
 use epik_core::assistant::{self, ANTHROPIC_MODEL, Error, ModelInfo};
 use epik_core::config::{Config, Model};
+use epik_core::github::GitHub;
 use epik_core::keystore::{Resolved, Secret};
 use tauri::{AppHandle, Manager, State};
 
@@ -174,7 +174,7 @@ pub async fn github_login() -> Result<String, String> {
         let token = key_from(
             &OsKeyring,
             GITHUB_TOKEN_NAME,
-            epik::github::Error::TokenAbsent,
+            epik_core::github::Error::TokenAbsent,
         )?;
         GitHub::new(Some(token))
             .login()
