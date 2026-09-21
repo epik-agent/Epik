@@ -21,6 +21,7 @@
 //! everything they do is testable against `InMemory` without a keychain
 //! in sight.
 
+use anyhow::Result;
 use epik_core::keystore::{Resolved, Secret};
 
 /// Somewhere a secret can be kept and found again.
@@ -31,14 +32,14 @@ pub(crate) trait KeyStore {
     ///
     /// Returns an error when the store itself could not be consulted — which
     /// is a different thing from there being no secret.
-    fn get(&self, name: &str) -> anyhow::Result<Option<Secret>>;
+    fn get(&self, name: &str) -> Result<Option<Secret>>;
 
     /// Files `secret` against `name`, replacing whatever was there.
     ///
     /// # Errors
     ///
     /// Returns an error when the store would not take it.
-    fn set(&mut self, name: &str, secret: Secret) -> anyhow::Result<()>;
+    fn set(&mut self, name: &str, secret: Secret) -> Result<()>;
 
     /// Where the secret for `name` stands, with a store that will not answer
     /// reported rather than raised.
@@ -66,11 +67,11 @@ pub(crate) struct InMemory(std::collections::BTreeMap<String, Secret>);
 
 #[cfg(test)]
 impl KeyStore for InMemory {
-    fn get(&self, name: &str) -> anyhow::Result<Option<Secret>> {
+    fn get(&self, name: &str) -> Result<Option<Secret>> {
         Ok(self.0.get(name).cloned())
     }
 
-    fn set(&mut self, name: &str, secret: Secret) -> anyhow::Result<()> {
+    fn set(&mut self, name: &str, secret: Secret) -> Result<()> {
         self.0.insert(name.to_owned(), secret);
         Ok(())
     }
@@ -84,14 +85,14 @@ const SERVICE: &str = "Epik";
 pub(crate) struct OsKeyring;
 
 impl OsKeyring {
-    fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
+    fn entry(name: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(SERVICE, name)
             .map_err(|error| anyhow::anyhow!("opening the {SERVICE}/{name} keyring entry: {error}"))
     }
 }
 
 impl KeyStore for OsKeyring {
-    fn get(&self, name: &str) -> anyhow::Result<Option<Secret>> {
+    fn get(&self, name: &str) -> Result<Option<Secret>> {
         match Self::entry(name)?.get_password() {
             Ok(secret) => Ok(Some(secret.into())),
             // No entry is the ordinary state of a fresh install, not a fault.
@@ -102,7 +103,7 @@ impl KeyStore for OsKeyring {
         }
     }
 
-    fn set(&mut self, name: &str, secret: Secret) -> anyhow::Result<()> {
+    fn set(&mut self, name: &str, secret: Secret) -> Result<()> {
         Self::entry(name)?
             .set_password(secret.reveal())
             .map_err(|error| {
