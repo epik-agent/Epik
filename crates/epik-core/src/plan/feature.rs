@@ -199,10 +199,13 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             issue_branch(self.number),
             format!("origin/{}", feature.branch()),
         );
-        let credentials = feature.github.credentials()?;
-        let holder = credentials.clone();
-        let added = slots.run(move || worktrees.add(&url, &branch, &at, &holder));
-        let linked = self.step(Step::Worktree, added).await?;
+        let github = feature.github.clone();
+        let added = slots.run(move || {
+            let credentials = github.credentials()?;
+            let linked = worktrees.add(&url, &branch, &at, &credentials)?;
+            Ok((linked, credentials))
+        });
+        let (linked, credentials) = self.step(Step::Worktree, added).await?;
         let pushed = self.worked(&linked, credentials).await;
         slots
             .run(move || {

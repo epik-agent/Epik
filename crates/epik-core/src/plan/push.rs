@@ -35,11 +35,10 @@ impl Task for Push {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
-    use std::time::Duration;
 
     use super::*;
     use crate::git::commands::RevParse;
-    use crate::git::testing::{OFFERED, aimed, committed, credentials, guarded, seeded};
+    use crate::git::testing::{OFFERED, PATIENCE, aimed, committed, credentials, guarded, seeded};
     use crate::git::url::Url;
     use crate::temp::Scratch;
     use crate::worktrees::{LinkedWorktree, Worktrees};
@@ -103,9 +102,6 @@ mod tests {
         let error = push(&linked).run().await.unwrap_err().to_string();
 
         assert!(!error.contains("sesame"), "{error}");
-        let authorization = seen
-            .recv_timeout(Duration::from_secs(30))
-            .expect("git asked again, with credentials");
-        assert_eq!(authorization, OFFERED);
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(OFFERED));
     }
 }

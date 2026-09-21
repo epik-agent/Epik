@@ -363,7 +363,7 @@ impl GitHub {
     /// # Errors
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token.
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "native"))]
     pub fn credentials(&self) -> Result<Credentials, Error> {
         let secret = self.token.clone().ok_or(Error::TokenAbsent)?;
         Ok(Credentials {

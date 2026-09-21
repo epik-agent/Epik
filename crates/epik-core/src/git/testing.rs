@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+use std::time::Duration;
 
 use super::askpass::Credentials;
 use super::commands::{
@@ -125,6 +126,10 @@ pub const INTRUDER: &str = "!f() { echo username=intruder; echo password=hunter2
 /// What a remote that asks is sent when [`INTRUDER`] answers: Base64
 /// of `intruder:hunter2`.
 pub const INTRUDED: &str = "Basic aW50cnVkZXI6aHVudGVyMg==";
+
+/// How long a test waits on what [`guarded`] reports: long enough for
+/// git to ask, be refused, and ask again.
+pub const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A loopback listener that answers every request with a demand
 /// for Basic authentication, and reports the first `Authorization`

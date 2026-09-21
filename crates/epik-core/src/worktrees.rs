@@ -196,13 +196,12 @@ impl Drop for LinkedWorktree {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::Path;
-    use std::time::Duration;
 
     use super::*;
     use crate::git::commands::{Hash, Show, Switch, WorktreeInfo};
     use crate::git::testing::{
-        INTRUDED, INTRUDER, OFFERED, aimed, branch_of, committed, credentials, guarded, head,
-        pushed, seeded,
+        INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, branch_of, committed, credentials, guarded,
+        head, pushed, seeded,
     };
     use crate::git::{fetch, show, switch};
     use crate::temp::Scratch;
@@ -433,9 +432,6 @@ mod tests {
         assert!(error.contains("nonexistent"), "{error}");
         assert!(!Path::new(&scratch.join("root")).exists());
     }
-
-    /// Long enough for git to ask, be refused, and ask again.
-    const PATIENCE: Duration = Duration::from_secs(30);
 
     #[test]
     fn a_clone_answers_a_remote_that_asks_with_the_credentials_and_fails_in_gits_words() {

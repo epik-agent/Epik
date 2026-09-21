@@ -83,18 +83,15 @@ impl Drop for Askpass {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::git::commands::{Clone, Command, Fetch, Push, Remote};
-    use crate::git::testing::{INTRUDED, INTRUDER, OFFERED, aimed, credentials, guarded, seeded};
+    use crate::git::testing::{
+        INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, credentials, guarded, seeded,
+    };
     use crate::git::url::Url;
-    use crate::git::{Repository, TIMEOUT, run_as, run_within};
+    use crate::git::{TIMEOUT, run_as, run_within};
     use crate::process::Process;
     use crate::temp::Scratch;
-
-    /// Long enough for git to ask, be refused, and ask again.
-    const PATIENCE: Duration = Duration::from_secs(30);
 
     #[test]
     fn the_script_answers_username_and_password_from_the_environment() {
@@ -134,17 +131,19 @@ mod tests {
         let scratch = Scratch::new("askpass-challenge");
         let (_, work) = seeded(&scratch);
         let into = PathBuf::from(scratch.join("clone"));
-        let commands: [fn(Repository, PathBuf, Url) -> Command; 3] = [
-            |_, into, url| Command::Clone(Clone::new(url, into, None).unwrap()),
-            |work, _, _| Command::Fetch(Fetch::new(work, Remote::origin())),
-            |work, _, _| {
-                Command::Push(Push::new(work, Remote::origin(), "main".to_owned()).unwrap())
+        // Each command of the remote at the URL, which is where the
+        // origin of `work` is aimed as it is made.
+        let commands: [&dyn Fn(Url) -> Command; 3] = [
+            &|url| Command::Clone(Clone::new(url, into.clone(), None).unwrap()),
+            &|_| Command::Fetch(Fetch::new(work.clone(), Remote::origin())),
+            &|_| {
+                Command::Push(Push::new(work.clone(), Remote::origin(), "main".to_owned()).unwrap())
             },
         ];
         for command in commands {
             let (url, seen) = guarded();
             aimed(&work, url.clone());
-            let command = command(work.clone(), into.clone(), url.parse().unwrap());
+            let command = command(url.parse().unwrap());
             let argv = command.argv().join(" ");
             assert!(!argv.contains("sesame"), "{argv}");
 
