@@ -27,14 +27,14 @@ pub struct Event<N> {
 }
 
 /// What a task has to tell: its lifecycle, and between the start and
-/// the end, what its agent said.
+/// the end, what its process said.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Happened {
     /// The task began to run.
     Started,
-    /// The agent said this on stdout, as its engine's protocol reads.
+    /// An agent said this on stdout, as its engine's protocol reads.
     Said(Update),
-    /// A line of the agent's stderr: where a CLI's last words land.
+    /// A line of the process's stderr: where a CLI's last words land.
     Stderr(String),
     /// The task succeeded.
     Finished,
@@ -97,11 +97,30 @@ impl<E> Debug for Sink<E> {
 }
 
 /// A task with its lifecycle on the stream: started, then finished or
-/// failed. The outcome is the task's own either way.
+/// failed. The outcome is the task's own either way, and a panic in
+/// the task passes through to the plan, which makes it the error.
 #[derive(Clone, Debug)]
 pub struct Reported<T> {
     pub task: T,
     pub sink: Sink<Happened>,
+}
+
+impl<T> Reported<T> {
+    /// The task `make` builds around `sink`, reported there: what it
+    /// says and how it ends are filed under the one node.
+    pub fn with(sink: Sink<Happened>, make: impl FnOnce(Sink<Happened>) -> T) -> Self {
+        Self {
+            task: make(sink.clone()),
+            sink,
+        }
+    }
+}
+
+/// Everything `receiver` has been sent so far. For tests — this
+/// crate's, and under the `testing` feature its dependents'.
+#[cfg(any(test, feature = "testing"))]
+pub fn received<E>(receiver: &mut UnboundedReceiver<E>) -> Vec<E> {
+    std::iter::from_fn(|| receiver.try_recv().ok()).collect()
 }
 
 impl<T: Task> Task for Reported<T> {
@@ -118,17 +137,11 @@ impl<T: Task> Task for Reported<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Event, Happened, Reported, Sink};
+    use super::{Event, Happened, Reported, Sink, received};
     use crate::agent::Update;
     use crate::plan::task::Task;
     use anyhow::{Context, Result, bail};
-    use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::task::spawn_blocking;
-
-    /// Everything the receiver has been sent so far.
-    fn received<E>(receiver: &mut UnboundedReceiver<E>) -> Vec<E> {
-        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
-    }
 
     /// A blocking call that is no process, as a request to GitHub is:
     /// it answers or it refuses, as made.

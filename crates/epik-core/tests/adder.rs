@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use epik_core::agent::{Agent, Update};
 use epik_core::git::testing::{branch_of, cloned, committed_all, identified, pushed, seeded};
 use epik_core::git::url::Url;
+use epik_core::plan::stream::received;
 use epik_core::plan::{Happened, Implement, Plan, ProcessSlots, Reported, Sink, Task};
 use epik_core::process::Exit;
 use epik_core::temp::Scratch;
@@ -127,21 +128,17 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
                 cwd: repository.path().to_owned(),
                 files,
             };
-            let sink = sink.node(id);
-            Reported {
-                task: Implement {
-                    agent,
-                    slots: slots.clone(),
-                    sink: sink.clone(),
-                },
+            Reported::with(sink.node(id), |sink| Implement {
+                agent,
+                slots: slots.clone(),
                 sink,
-            }
+            })
         });
         plan.execute().await.unwrap();
 
         // Each issue's account, picked out of the one stream: started,
         // the agent's session to its result, finished.
-        let events: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        let events = received(&mut receiver);
         for id in ids {
             let happened: Vec<_> = events
                 .iter()

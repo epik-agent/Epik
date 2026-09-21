@@ -62,7 +62,7 @@ mod tests {
     use crate::agent::claude::ClaudeCode;
     use crate::agent::{Agent, Update};
     use crate::dag::{Dag, Node};
-    use crate::plan::stream::{Event, Happened, Reported, Sink};
+    use crate::plan::stream::{Event, Happened, Reported, Sink, received};
     use crate::plan::{ProcessSlots, Task};
     use crate::process::Process;
     use crate::temp::Scratch;
@@ -76,7 +76,12 @@ mod tests {
     /// Long enough for anything here that makes progress at all.
     const PATIENCE: Duration = Duration::from_secs(30);
 
-    const SESSION: &str = include_str!("../agent/claude/fixtures/session.jsonl");
+    /// A complete captured session of Claude Code's, where it is on
+    /// disk.
+    const SESSION: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/agent/claude/fixtures/session.jsonl"
+    );
 
     /// The scripted engine: `sh -c` of an inline script, from `/`. A
     /// line that is Claude Code's protocol reads as it does there, and
@@ -123,11 +128,6 @@ mod tests {
             .await
             .expect("something arrives")
             .expect("the sink is still held")
-    }
-
-    /// Everything the receiver has been sent so far.
-    fn received<E>(receiver: &mut UnboundedReceiver<E>) -> Vec<E> {
-        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
     }
 
     /// A script that says `one`, runs until `flag` exists, and says
@@ -202,14 +202,8 @@ mod tests {
     #[tokio::test]
     async fn stderr_arrives_alongside_the_failure() {
         let (sink, mut receiver) = Sink::channel();
-        let task = Reported {
-            task: implement(
-                "echo 'error: unknown option --bogus' >&2; exit 2",
-                &slots(1),
-                sink.clone(),
-            ),
-            sink,
-        };
+        let script = "echo 'error: unknown option --bogus' >&2; exit 2";
+        let task = Reported::with(sink, |sink| implement(script, &slots(1), sink));
         task.run().await.unwrap_err();
         assert_eq!(
             received(&mut receiver),
@@ -231,14 +225,11 @@ mod tests {
             model: None,
             api_key: None,
         };
-        let task = Reported {
-            task: Implement {
-                agent,
-                slots: slots(1),
-                sink: sink.clone(),
-            },
+        let task = Reported::with(sink, |sink| Implement {
+            agent,
+            slots: slots(1),
             sink,
-        };
+        });
         task.run().await.unwrap_err();
         let events = received(&mut receiver);
         let [Happened::Started, Happened::Failed(words)] = events.as_slice() else {
@@ -252,13 +243,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_bill_is_recoverable_from_the_stream_alone() {
-        let quoted: Vec<String> = SESSION
-            .lines()
-            .map(|line| format!("'{}'", line.replace('\'', r"'\''")))
-            .collect();
-        let script = format!("printf '%s\\n' {}", quoted.join(" "));
         let (sink, mut receiver) = Sink::channel();
-        implement(&script, &slots(1), sink.node(203))
+        implement(&format!("cat '{SESSION}'"), &slots(1), sink.node(203))
             .run()
             .await
             .unwrap();
