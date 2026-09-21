@@ -5,8 +5,9 @@
 //! is where events go: every node of a plan holds the one sink,
 //! narrowed to its own name by [`Sink::node`], so many tasks running
 //! at once are told apart at the far end. [`Reported`] is any task
-//! with its lifecycle on the stream. Everything that crosses is serde:
-//! a log is a sink that writes each event as a line of JSON.
+//! with its lifecycle on the stream, and [`reported`] any step of one.
+//! Everything that crosses is serde: a log is a sink that writes each
+//! event as a line of JSON.
 
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
@@ -123,15 +124,24 @@ pub fn received<E>(receiver: &mut UnboundedReceiver<E>) -> Vec<E> {
     std::iter::from_fn(|| receiver.try_recv().ok()).collect()
 }
 
+/// `work` with its lifecycle emitted into `sink`: started, then
+/// finished or failed. The outcome is the work's own either way.
+pub async fn reported<R>(
+    sink: &Sink<Happened>,
+    work: impl Future<Output = Result<R>>,
+) -> Result<R> {
+    sink.emit(Happened::Started);
+    let outcome = work.await;
+    sink.emit(match &outcome {
+        Ok(_) => Happened::Finished,
+        Err(error) => Happened::Failed(format!("{error:#}")),
+    });
+    outcome
+}
+
 impl<T: Task> Task for Reported<T> {
     async fn run(&self) -> Result<()> {
-        self.sink.emit(Happened::Started);
-        let outcome = self.task.run().await;
-        self.sink.emit(match &outcome {
-            Ok(()) => Happened::Finished,
-            Err(error) => Happened::Failed(format!("{error:#}")),
-        });
-        outcome
+        reported(&self.sink, self.task.run()).await
     }
 }
 

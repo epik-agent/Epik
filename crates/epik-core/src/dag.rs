@@ -110,6 +110,26 @@ impl<T> Dag<T> {
         }
     }
 
+    /// The same shape between two more values: `first` before every
+    /// value, at position 0, and `last` after every value, at the end.
+    #[must_use]
+    pub fn between(self, first: T, last: T) -> Self {
+        let end = self.nodes.len() + 1;
+        let members = self.nodes.into_iter().map(|node| {
+            let after = node.predecessors.iter().map(|before| before + 1);
+            Node::new(node.value, std::iter::once(0).chain(after))
+        });
+        let nodes = std::iter::once(Node::new(first, []))
+            .chain(members)
+            .chain([Node::new(last, 0..end)])
+            .collect();
+        let order = std::iter::once(0)
+            .chain(self.order.iter().map(|at| at + 1))
+            .chain([end])
+            .collect();
+        Self { nodes, order }
+    }
+
     /// Every position reachable from `at` by following `step`, which
     /// names each position's neighbours: the neighbours' closure.
     fn reach(&self, at: usize, step: impl Fn(usize) -> Vec<usize>) -> BTreeSet<usize> {
@@ -405,6 +425,30 @@ mod tests {
         assert_eq!(values(doubled.nodes()), [2, 4, 6, 8, 10]);
         let node = doubled.find(|value| *value == 8).unwrap();
         assert_eq!(values(node.ancestors()), [2, 4, 6]);
+    }
+
+    #[test]
+    fn between_keeps_the_shape_after_a_first_and_before_a_last() {
+        let between = dag().between(0, 9);
+        assert_eq!(values(between.nodes()), [0, 1, 2, 3, 4, 5, 9]);
+        let first = between.find(|value| *value == 0).unwrap();
+        assert_eq!(first.position(), 0);
+        assert_eq!(values(first.descendants()), [1, 2, 3, 4, 5, 9]);
+        let last = between.find(|value| *value == 9).unwrap();
+        assert_eq!(last.position(), 6);
+        assert_eq!(values(last.predecessors()), [0, 1, 2, 3, 4, 5]);
+        let node = between.find(|value| *value == 4).unwrap();
+        assert_eq!(values(node.predecessors()), [0, 2, 3]);
+        let rebuilt = Dag::new(serde_json::from_value(serde_json::json!(between)).unwrap());
+        assert_eq!(
+            rebuilt.unwrap(),
+            between,
+            "the order is as `new` settles it"
+        );
+
+        let empty: Dag<u64> = Dag::new(vec![]).unwrap();
+        let ends = empty.between(0, 9);
+        assert_eq!(values(ends.nodes()), [0, 9]);
     }
 
     #[test]
