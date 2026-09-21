@@ -13,11 +13,6 @@ use super::url::Url;
 use super::{Repository, add, clone, commit, init, list_worktrees, push, rev_parse, set_config};
 use crate::temp::Scratch;
 
-/// The remote a clone names its source.
-pub fn origin() -> Remote {
-    Remote::named("origin".to_owned()).unwrap()
-}
-
 /// The identity the tests' commits are made under, unsigned.
 pub fn identified(repository: &Repository) {
     for (key, value) in [
@@ -71,7 +66,7 @@ pub fn branch_of(repository: &Repository) -> String {
 
 /// `branch` of `repository` pushed to its origin.
 pub fn pushed(repository: &Repository, branch: &str) {
-    push(Push::new(repository.clone(), origin(), branch.to_owned()).unwrap()).unwrap();
+    push(Push::new(repository.clone(), Remote::origin(), branch.to_owned()).unwrap()).unwrap();
 }
 
 /// A clone of `origin` at `into` under `scratch`, on `branch` when
@@ -100,7 +95,7 @@ pub fn seeded(scratch: &Scratch) -> (Repository, Repository) {
     let work = cloned(scratch, &origin, "work", None);
     identified(&work);
     committed(&work, "hello.txt", "hello\n", "the first commit");
-    push(Push::new(work.clone(), self::origin(), "main".to_owned()).unwrap()).unwrap();
+    push(Push::new(work.clone(), Remote::origin(), "main".to_owned()).unwrap()).unwrap();
     (origin, work)
 }
 
@@ -121,16 +116,13 @@ pub fn guarded() -> (String, Receiver<String>) {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { break };
             let mut reader = BufReader::new(stream);
-            let mut authorization = None;
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
-                    break;
-                }
-                if let Some(value) = line.strip_prefix("Authorization: ") {
-                    authorization = Some(value.trim().to_owned());
-                }
-            }
+            // The headers end at the first empty line.
+            let authorization = (&mut reader)
+                .lines()
+                .map_while(Result::ok)
+                .take_while(|line| !line.is_empty())
+                .filter_map(|line| line.strip_prefix("Authorization: ").map(str::to_owned))
+                .last();
             let _ = reader.into_inner().write_all(
                 b"HTTP/1.1 401 Unauthorized\r\n\
                   WWW-Authenticate: Basic realm=\"epik\"\r\n\

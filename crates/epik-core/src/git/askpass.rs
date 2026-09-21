@@ -12,7 +12,9 @@
 //!
 //! [`Command`]: super::commands::Command
 
-use std::os::unix::fs::PermissionsExt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -42,10 +44,16 @@ pub(super) struct Askpass(PathBuf);
 impl Askpass {
     pub(super) fn new() -> Result<Self> {
         let path = temp::unique("epik-askpass");
-        std::fs::write(&path, SCRIPT).context("could not write the askpass script")?;
+        // Made executable, and its owner's alone, as it is made.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&path)
+            .context("could not make the askpass script")?;
         let askpass = Self(path);
-        std::fs::set_permissions(&askpass.0, std::fs::Permissions::from_mode(0o700))
-            .context("could not mark the askpass script executable")?;
+        file.write_all(SCRIPT.as_bytes())
+            .context("could not write the askpass script")?;
         Ok(askpass)
     }
 
