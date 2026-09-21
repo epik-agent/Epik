@@ -229,8 +229,8 @@ impl Conclusion {
     /// conclusions a required check waves through — neutral and skipped.
     /// Everything else — [`Other`](Self::Other), the verdict invented
     /// after this enum was written, included — is nobody's green.
-    #[cfg(test)]
-    const fn green(self) -> bool {
+    #[must_use]
+    pub const fn green(self) -> bool {
         matches!(self, Self::Success | Self::Neutral | Self::Skipped)
     }
 }
@@ -238,14 +238,14 @@ impl Conclusion {
 impl Check {
     /// Still running: nothing concluded yet, so the check is
     /// not-yet-judgeable — neither green nor [`red`](Self::red).
-    #[cfg(test)]
-    const fn pending(&self) -> bool {
+    #[must_use]
+    pub const fn pending(&self) -> bool {
         self.conclusion.is_none()
     }
 
     /// Concluded, and not [green](Conclusion::green).
-    #[cfg(test)]
-    fn red(&self) -> bool {
+    #[must_use]
+    pub fn red(&self) -> bool {
         self.conclusion
             .is_some_and(|conclusion| !conclusion.green())
     }
@@ -649,6 +649,26 @@ impl GitHub {
             encoded(git_ref)
         ))?;
         Ok(wire.check_runs)
+    }
+
+    /// How many commit statuses `git_ref` carries: the older Status API's
+    /// side of a commit, which [`check_conclusions`](Self::check_conclusions)
+    /// never reads. Its one use is telling a repository whose CI posts
+    /// statuses from one whose CI has yet to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn status_count(&self, repo: &Repo, git_ref: &str) -> Result<usize, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            total_count: usize,
+        }
+        let wire: Wire = self.get(&format!(
+            "repos/{repo}/commits/{}/status?per_page=1",
+            encoded(git_ref)
+        ))?;
+        Ok(wire.total_count)
     }
 
     // ----- the GraphQL verbs -----
@@ -1073,6 +1093,9 @@ const ADD_BLOCKED_BY: &str = "mutation($from: ID!, $to: ID!) { \
 const REMOVE_BLOCKED_BY: &str = "mutation($from: ID!, $to: ID!) { \
      removeBlockedBy(input: {issueId: $from, blockingIssueId: $to}) { clientMutationId } }";
 
+#[cfg(all(test, feature = "native"))]
+pub(crate) mod fake;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,6 +1486,24 @@ mod tests {
         for base in ["http://localhost:9", "http://localhost:9/"] {
             assert_eq!(GitHub::at(base, None).api, "http://localhost:9");
         }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_status_count_is_the_combined_status_total() {
+        use fake::{FakeGitHub, Request, TIP};
+        let fake = FakeGitHub::spawn();
+        fake.world().statuses.insert(TIP.to_owned(), 2);
+        let count = fake.github().status_count(&FakeGitHub::repo(), TIP);
+        assert_eq!(count, Ok(2));
+        assert_eq!(
+            fake.requests(),
+            [Request::new(
+                "GET",
+                &format!("/repos/fake/repo/commits/{TIP}/status?per_page=1"),
+                Value::Null
+            )]
+        );
     }
 
     #[test]

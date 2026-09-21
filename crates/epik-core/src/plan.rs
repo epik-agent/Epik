@@ -3,6 +3,7 @@
 //! [`Plan::execute`] runs them all at once, and [`ProcessSlots`]
 //! bounds the processes they launch.
 
+pub mod github;
 pub mod implement;
 pub mod task;
 
