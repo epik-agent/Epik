@@ -26,12 +26,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
 
-use epik::github::GitHub;
 use epik_core::assistant::{
     Answer, Ask, Client, Conversation, Error, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
     TranscriptItem, run,
 };
 use epik_core::config::Config;
+use epik_core::github::GitHub;
 use epik_core::keystore::Resolved;
 use epik_core::model_tools::{self, Registry, Tool};
 use tauri::{AppHandle, Emitter, Manager, State};
