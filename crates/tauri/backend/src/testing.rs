@@ -1,6 +1,6 @@
 //! Fixtures shared by this crate's unit tests.
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use epik_core::keystore::Secret;
 
 use crate::secrets::KeyStore;
@@ -11,11 +11,11 @@ use crate::secrets::KeyStore;
 pub(crate) struct Broken;
 
 impl KeyStore for Broken {
-    fn get(&self, _: &str) -> anyhow::Result<Option<Secret>> {
+    fn get(&self, _: &str) -> Result<Option<Secret>> {
         Err(anyhow!("the keychain is locked"))
     }
 
-    fn set(&mut self, _: &str, _: Secret) -> anyhow::Result<()> {
+    fn set(&mut self, _: &str, _: Secret) -> Result<()> {
         Err(anyhow!("the keychain is locked"))
     }
 }

@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use epik::github::GitHub;
 use epik_core::assistant::{self, ANTHROPIC_MODEL, Error, ModelInfo};
 use epik_core::config::{Config, Model};
@@ -49,7 +49,7 @@ const FILE: &str = "config.toml";
 ///
 /// A platform that names no configuration directory — never a fallback
 /// somewhere else.
-fn root(app: &AppHandle) -> anyhow::Result<PathBuf> {
+fn root(app: &AppHandle) -> Result<PathBuf> {
     app.path()
         .app_config_dir()
         .context("no configuration directory on this platform")
@@ -75,7 +75,7 @@ fn starting() -> Config {
 /// # Errors
 ///
 /// The write that failed, naming the path.
-fn save(root: &Path, config: &Config) -> anyhow::Result<()> {
+fn save(root: &Path, config: &Config) -> Result<()> {
     let path = root.join(FILE);
     let text = toml::to_string(config).context("could not serialize the configuration")?;
     std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))
@@ -86,7 +86,7 @@ fn save(root: &Path, config: &Config) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// No configuration directory, or whatever `converge_at` reports.
-pub(crate) fn converge(app: &AppHandle) -> anyhow::Result<Config> {
+pub(crate) fn converge(app: &AppHandle) -> Result<Config> {
     converge_at(&root(app)?)
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn converge(app: &AppHandle) -> anyhow::Result<Config> {
 /// # Errors
 ///
 /// Which of creating, writing, reading, or parsing failed, and where.
-fn converge_at(root: &Path) -> anyhow::Result<Config> {
+fn converge_at(root: &Path) -> Result<Config> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("could not create {}", root.display()))?;
     let path = root.join(FILE);
