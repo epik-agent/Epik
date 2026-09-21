@@ -4,6 +4,7 @@
 //! bounds the processes they launch.
 
 pub mod commit;
+pub mod github;
 pub mod implement;
 #[cfg(unix)]
 pub mod push;
