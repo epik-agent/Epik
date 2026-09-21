@@ -1,5 +1,12 @@
 [
   {
+    "id": "0",
+    "title": "The adder project",
+    "body": "",
+    "status": "open",
+    "sub_issues": ["1", "2", "3"]
+  },
+  {
     "id": "1",
     "title": "Project scaffolding",
     "body": "pyproject.toml\n.python-version",
