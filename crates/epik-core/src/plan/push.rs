@@ -1,27 +1,23 @@
 //! An issue's branch, pushed as a task: to the URL its worktree was
-//! cloned from, as the holder of a GitHub token.
+//! cloned from, as the holder of the credentials it was cloned with.
 
 use anyhow::Result;
 
 use super::ProcessSlots;
 use super::task::Task;
 use crate::git::askpass::Credentials;
-use crate::git::commands::{self, Remote};
+use crate::git::commands::{self, Command, Remote};
 use crate::git::{self, Repository};
-use crate::keystore::Secret;
-
-/// The username GitHub reads a token's push under.
-const TOKEN_USER: &str = "x-access-token";
 
 /// `branch` of `worktree` pushed to its origin when the task runs,
-/// with `token` answering on the [askpass](crate::git::askpass) rails,
-/// in one of the `slots` for as long as git runs. A push that fails is
-/// the task's failure, in git's own words.
+/// [as](git::run_as) the holder of `credentials`, in one of the
+/// `slots` for as long as git runs. A push that fails is the task's
+/// failure, in git's own words.
 #[derive(Clone, Debug)]
 pub struct Push {
     pub worktree: Repository,
     pub branch: String,
-    pub token: Secret,
+    pub credentials: Credentials,
     pub slots: ProcessSlots,
 }
 
@@ -29,12 +25,9 @@ impl Task for Push {
     async fn run(&self) -> Result<()> {
         let push =
             commands::Push::new(self.worktree.clone(), Remote::origin(), self.branch.clone())?;
-        let credentials = Credentials {
-            username: TOKEN_USER.to_owned(),
-            secret: self.token.clone(),
-        };
+        let (push, credentials) = (Command::Push(push), self.credentials.clone());
         self.slots
-            .run(move || git::push_as(push, &credentials))
+            .run(move || git::run_as(&push, &credentials).map(drop))
             .await
     }
 }
@@ -46,7 +39,7 @@ mod tests {
 
     use super::*;
     use crate::git::commands::RevParse;
-    use crate::git::testing::{aimed, committed, guarded, seeded};
+    use crate::git::testing::{OFFERED, aimed, committed, credentials, guarded, seeded};
     use crate::git::url::Url;
     use crate::temp::Scratch;
     use crate::worktrees::{LinkedWorktree, Worktrees};
@@ -57,7 +50,7 @@ mod tests {
         let (origin, _) = seeded(scratch);
         let url = Url::Local(origin.path().to_owned());
         let linked = Worktrees::new(scratch.join("root").into())
-            .add(&url, "issue-1", "origin/main")
+            .add(&url, "issue-1", "origin/main", &credentials())
             .unwrap();
         committed(linked.worktree(), "work.txt", "work\n", "the work");
         (origin, linked)
@@ -67,7 +60,7 @@ mod tests {
         Push {
             worktree: linked.worktree().clone(),
             branch: linked.branch().to_owned(),
-            token: "ghp_sesame".into(),
+            credentials: credentials(),
             slots: ProcessSlots::new(NonZeroUsize::MIN),
         }
     }
@@ -101,7 +94,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_token_reaches_git_through_askpass_as_githubs_token_user() {
+    async fn the_credentials_reach_git_through_askpass() {
         let scratch = Scratch::new("push-token");
         let (_, linked) = worked(&scratch);
         let (url, seen) = guarded();
@@ -113,7 +106,6 @@ mod tests {
         let authorization = seen
             .recv_timeout(Duration::from_secs(30))
             .expect("git asked again, with credentials");
-        // Base64 of `x-access-token:ghp_sesame`.
-        assert_eq!(authorization, "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX3Nlc2FtZQ==");
+        assert_eq!(authorization, OFFERED);
     }
 }

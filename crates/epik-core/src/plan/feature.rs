@@ -29,11 +29,11 @@ use super::task::Task;
 use super::{Implement, Plan, ProcessSlots};
 use crate::agent::Agent;
 use crate::dag::Dag;
+use crate::git::askpass::Credentials;
 use crate::git::commands::{Hash, RevParse};
 use crate::git::url::Url;
 use crate::git::{self, Repository};
 use crate::github::Merge;
-use crate::keystore::Secret;
 use crate::worktrees::{LinkedWorktree, Worktrees};
 
 /// The branch issue `number` is implemented on.
@@ -74,14 +74,15 @@ pub enum Step {
     Close,
 }
 
-/// Everything one feature is built with.
+/// Everything one feature is built with. The token of the feature's
+/// GitHub client is the build's one token: its calls to GitHub carry
+/// it, and every git that talks to `url` answers with the
+/// [credentials](crate::github::GitHub::credentials) made of it.
 pub struct Build<A> {
     pub feature: Feature,
     /// Where the repository is cloned from and pushed to.
     pub url: Url,
     pub worktrees: Worktrees,
-    /// What the pushes are made as the holder of.
-    pub token: Secret,
     pub checks: CheckWait,
     /// How an issue's pull request merges into the feature branch.
     pub merge: Merge,
@@ -198,9 +199,11 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             issue_branch(self.number),
             format!("origin/{}", feature.branch()),
         );
-        let added = slots.run(move || worktrees.add(&url, &branch, &at));
+        let credentials = feature.github.credentials()?;
+        let holder = credentials.clone();
+        let added = slots.run(move || worktrees.add(&url, &branch, &at, &holder));
         let linked = self.step(Step::Worktree, added).await?;
-        let pushed = self.worked(&linked).await;
+        let pushed = self.worked(&linked, credentials).await;
         slots
             .run(move || {
                 drop(linked);
@@ -211,14 +214,9 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
     }
 
     /// The agent's run in `linked`, and what it left there committed
-    /// and pushed: the commit pushed.
-    async fn worked(&self, linked: &LinkedWorktree) -> Result<Hash> {
-        let Build {
-            token,
-            slots,
-            agent,
-            ..
-        } = &*self.build;
+    /// and pushed as the holder of `credentials`: the commit pushed.
+    async fn worked(&self, linked: &LinkedWorktree, credentials: Credentials) -> Result<Hash> {
+        let Build { slots, agent, .. } = &*self.build;
         let worktree = linked.worktree();
         let implement = Implement {
             agent: agent(self.number, worktree.path()),
@@ -230,7 +228,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
         let push = Push {
             worktree: worktree.clone(),
             branch: linked.branch().to_owned(),
-            token: token.clone(),
+            credentials,
             slots: slots.clone(),
         };
         self.step(Step::Push, push.run()).await?;
@@ -288,7 +286,7 @@ mod tests {
     use crate::agent::Update;
     use crate::dag::Node as After;
     use crate::git::commands::Branch;
-    use crate::git::testing::{pushed, seeded};
+    use crate::git::testing::{guarded, pushed, seeded};
     use crate::github::fake::{self, FakeGitHub};
     use crate::github::{Conclusion, Error, State};
     use crate::plan::github::feature_branch;
@@ -405,7 +403,6 @@ mod tests {
                 },
                 url: Url::Local(self.origin.path().to_owned()),
                 worktrees: Worktrees::new(self.scratch.join("root").into()),
-                token: "ghp_fake".into(),
                 checks: CheckWait {
                     expected: false,
                     every: Duration::from_millis(5),
@@ -684,6 +681,25 @@ mod tests {
             at(&events, waiting, &Happened::Finished),
         ];
         assert!(order[0].is_some() && order.is_sorted(), "{order:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_asks_is_answered_with_the_token_the_github_calls_are_made_with() {
+        let hosted = Hosted::new("feature-guarded", &[3]);
+        let (mut build, mut receiver) = hosted.build(1, edits);
+        let (url, seen) = guarded();
+        build.url = url.parse().unwrap();
+        timeout(PATIENCE, build.plan(alone(3)).execute())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        // Base64 of `x-access-token:ghp_fake`, the fake client's token.
+        let offered = "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX2Zha2U=";
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(offered));
+        let events = received(&mut receiver);
+        let words = failure(&events, Name::Step(3, Step::Worktree));
+        assert!(words.contains("Authentication failed"), "{words}");
     }
 
     #[tokio::test]

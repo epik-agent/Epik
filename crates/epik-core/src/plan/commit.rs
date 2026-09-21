@@ -71,7 +71,7 @@ mod tests {
 
     use super::*;
     use crate::git::commands::Show;
-    use crate::git::testing::{head, seeded};
+    use crate::git::testing::{credentials, head, seeded};
     use crate::git::url::Url;
     use crate::temp::Scratch;
     use crate::worktrees::{LinkedWorktree, Worktrees};
@@ -82,7 +82,7 @@ mod tests {
         let (origin, _) = seeded(scratch);
         let url = Url::Local(origin.path().to_owned());
         Worktrees::new(scratch.join("root").into())
-            .add(&url, "issue-1", "origin/main")
+            .add(&url, "issue-1", "origin/main", &credentials())
             .unwrap()
     }
 

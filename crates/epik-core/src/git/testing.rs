@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
+use super::askpass::Credentials;
 use super::commands::{
     Add, Clone, Commit, Hash, Init, ListWorktrees, Push, Remote, RevParse, SetConfig,
 };
@@ -104,6 +105,26 @@ pub fn aimed(repository: &Repository, url: String) {
     let key = "remote.origin.url".to_owned();
     set_config(SetConfig::new(repository.clone(), key, url).unwrap()).unwrap();
 }
+
+/// A GitHub token's credentials, for a remote to be answered with.
+#[must_use]
+pub fn credentials() -> Credentials {
+    Credentials {
+        username: "x-access-token".to_owned(),
+        secret: "ghp_sesame".into(),
+    }
+}
+
+/// What a remote that asks is sent of [`credentials`]: Base64 of
+/// `x-access-token:ghp_sesame`.
+pub const OFFERED: &str = "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX3Nlc2FtZQ==";
+
+/// A credential helper that answers every remote as an intruder.
+pub const INTRUDER: &str = "!f() { echo username=intruder; echo password=hunter2; }; f";
+
+/// What a remote that asks is sent when [`INTRUDER`] answers: Base64
+/// of `intruder:hunter2`.
+pub const INTRUDED: &str = "Basic aW50cnVkZXI6aHVudGVyMg==";
 
 /// A loopback listener that answers every request with a demand
 /// for Basic authentication, and reports the first `Authorization`

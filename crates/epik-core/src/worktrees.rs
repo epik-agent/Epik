@@ -6,11 +6,14 @@
 //! for every [`add`](Worktrees::add) outstanding, in a directory
 //! named by the [`slug`] of its branch. The first add of a URL clones
 //! it and every later one fetches, so a branch is cut from what the
-//! URL holds as the add is made. The clone is Epik's own, and its
-//! config carries the Epik [`IDENTITY`], so a commit made in any
-//! worktree of it is Epik's, whoever makes it. Dropping a [`LinkedWorktree`] frees
-//! its branch's name, and dropping the last of a URL deletes the
-//! clone with the directory, so the root holds only what is in use.
+//! URL holds as the add is made. Both run [as](run_as) the holder of
+//! the credentials the add is given, so a remote that asks who is
+//! there hears one answer, the same one its pushes give. The clone is
+//! Epik's own, and its config carries the Epik [`IDENTITY`], so a
+//! commit made in any worktree of it is Epik's, whoever makes it.
+//! Dropping a [`LinkedWorktree`] frees its branch's name, and dropping
+//! the last of a URL deletes the clone with the directory, so the
+//! root holds only what is in use.
 //! Adds and drops come from many threads at once and take turns: each
 //! sees the clone as the one before it left it.
 
@@ -20,14 +23,15 @@ use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Result, bail};
 
+use crate::git::askpass::Credentials;
 use crate::git::commands::{
-    AddWorktree, Branch, Clone, DeleteBranch, Fetch, Hash, ListWorktrees, Remote, RemoveWorktree,
-    RevParse, SetConfig,
+    AddWorktree, Branch, Clone, Command, DeleteBranch, Fetch, Hash, ListWorktrees, Remote,
+    RemoveWorktree, RevParse, SetConfig,
 };
 use crate::git::url::Url;
 use crate::git::{
-    Repository, add_worktree, branch, clone, delete_branch, fetch, list_worktrees, remove_worktree,
-    rev_parse, set_config,
+    Repository, add_worktree, branch, delete_branch, list_worktrees, remove_worktree, rev_parse,
+    run_as, set_config,
 };
 
 /// Who Epik's commits are by, unsigned, as the config keys that say
@@ -61,24 +65,35 @@ impl Worktrees {
     /// at `at`: a commit-ish read in the clone once it holds what
     /// `url` holds now, where `origin/feature` is the tip of the
     /// URL's `feature`. The clone is made on the first add, under the
-    /// Epik [`IDENTITY`], and shared and fetched into by the rest.
+    /// Epik [`IDENTITY`], and shared and fetched into by the rest,
+    /// each as the holder of `credentials`. A local path asks for
+    /// none, and is cloned whatever they are.
     ///
     /// # Errors
     ///
     /// A relative root, a relative local `url`, and git's own words:
-    /// a URL that cannot be cloned or fetched, an `at` naming no
-    /// commit, or a `name` some branch of the clone already has,
-    /// among them.
-    pub fn add(&self, url: &Url, name: &str, at: &str) -> Result<LinkedWorktree> {
+    /// a URL that cannot be cloned or fetched, a remote that refuses
+    /// `credentials`, an `at` naming no commit, or a `name` some
+    /// branch of the clone already has, among them.
+    pub fn add(
+        &self,
+        url: &Url,
+        name: &str,
+        at: &str,
+        credentials: &Credentials,
+    ) -> Result<LinkedWorktree> {
         let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         let group = self.root.join(slug(url));
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
             let main = Repository::open(clone_into)?;
-            fetch(Fetch::new(main.clone(), Remote::origin()))?;
+            let fetch = Fetch::new(main.clone(), Remote::origin());
+            run_as(&Command::Fetch(fetch), credentials)?;
             main
         } else {
-            let main = clone(Clone::new(url.clone(), clone_into, None)?)?;
+            let clone = Clone::new(url.clone(), clone_into.clone(), None)?;
+            run_as(&Command::Clone(clone), credentials)?;
+            let main = Repository::open(clone_into)?;
             for (key, value) in IDENTITY {
                 set_config(SetConfig::new(
                     main.clone(),
@@ -181,11 +196,15 @@ impl Drop for LinkedWorktree {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::Path;
+    use std::time::Duration;
 
     use super::*;
     use crate::git::commands::{Hash, Show, Switch, WorktreeInfo};
-    use crate::git::testing::{branch_of, committed, head, pushed, seeded};
-    use crate::git::{show, switch};
+    use crate::git::testing::{
+        INTRUDED, INTRUDER, OFFERED, aimed, branch_of, committed, credentials, guarded, head,
+        pushed, seeded,
+    };
+    use crate::git::{fetch, show, switch};
     use crate::temp::Scratch;
 
     fn listed(repository: &Repository) -> Vec<WorktreeInfo> {
@@ -221,7 +240,9 @@ mod tests {
         let main = group.join("main");
         let main_info = info(main.clone(), Some("main".to_owned()), &head);
 
-        let first = worktrees.add(&url, "issue-1", "origin/main").unwrap();
+        let first = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
         assert!(main.is_dir(), "the first add cloned");
         assert_eq!(
             first.branch(),
@@ -236,7 +257,9 @@ mod tests {
         );
 
         let cloned_at = std::fs::metadata(&main).unwrap().modified().unwrap();
-        let second = worktrees.add(&url, "issue-2", "origin/main").unwrap();
+        let second = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
         assert_eq!(
             std::fs::metadata(&main).unwrap().modified().unwrap(),
             cloned_at,
@@ -277,10 +300,14 @@ mod tests {
         switch(Switch::new(work.clone(), "feature".to_owned()).unwrap()).unwrap();
         pushed(&work, "feature");
 
-        let early = worktrees.add(&url, "issue-1", "origin/feature").unwrap();
+        let early = worktrees
+            .add(&url, "issue-1", "origin/feature", &credentials())
+            .unwrap();
         let landed = committed(&work, "early.txt", "early\n", "what landed early");
         pushed(&work, "feature");
-        let late = worktrees.add(&url, "issue-2", "origin/feature").unwrap();
+        let late = worktrees
+            .add(&url, "issue-2", "origin/feature", &credentials())
+            .unwrap();
 
         assert_eq!(head(late.worktree()), landed);
         assert!(late.worktree().path().join("early.txt").is_file());
@@ -299,7 +326,9 @@ mod tests {
             let (worktrees, url) = (&worktrees, &url);
             move || {
                 for _ in 0..5 {
-                    let linked = worktrees.add(url, name, "origin/main").unwrap();
+                    let linked = worktrees
+                        .add(url, name, "origin/main", &credentials())
+                        .unwrap();
                     assert!(linked.worktree().path().join("hello.txt").is_file());
                 }
             }
@@ -316,8 +345,12 @@ mod tests {
         let (origin, _) = seeded(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
-        let first = worktrees.add(&url, "issue-1", "origin/main").unwrap();
-        let second = worktrees.add(&url, "issue-2", "origin/main").unwrap();
+        let first = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
+        let second = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
 
         for linked in [&first, &second] {
             committed(linked.worktree(), "work.txt", "work\n", "the work");
@@ -336,18 +369,24 @@ mod tests {
         let (origin, _) = seeded(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
-        let _other = worktrees.add(&url, "issue-1", "origin/main").unwrap();
+        let _other = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
 
-        let held = worktrees.add(&url, "issue-2", "origin/main").unwrap();
+        let held = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
         let taken = worktrees
-            .add(&url, "issue-2", "origin/main")
+            .add(&url, "issue-2", "origin/main", &credentials())
             .unwrap_err()
             .to_string();
         assert!(taken.contains("'issue-2' already exists"), "{taken}");
         assert!(held.worktree().path().is_dir(), "the holder stands");
 
         drop(held);
-        worktrees.add(&url, "issue-2", "origin/main").unwrap();
+        worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
     }
 
     #[test]
@@ -357,7 +396,7 @@ mod tests {
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         let error = worktrees
-            .add(&url, "issue-1", "origin/feature")
+            .add(&url, "issue-1", "origin/feature", &credentials())
             .unwrap_err()
             .to_string();
         assert!(
@@ -373,7 +412,7 @@ mod tests {
         let url = Url::Local(origin.path().to_owned());
         let root = scratch.0.canonicalize().unwrap().join("root");
         let linked = Worktrees::new(root.clone())
-            .add(&url, "issue/1", "origin/main")
+            .add(&url, "issue/1", "origin/main", &credentials())
             .unwrap();
         assert_eq!(
             linked.worktree().path(),
@@ -388,11 +427,69 @@ mod tests {
         let worktrees = Worktrees::new(scratch.join("root").into());
         let url = "/nonexistent/repo.git".parse().unwrap();
         let error = worktrees
-            .add(&url, "issue-1", "origin/main")
+            .add(&url, "issue-1", "origin/main", &credentials())
             .unwrap_err()
             .to_string();
         assert!(error.contains("nonexistent"), "{error}");
         assert!(!Path::new(&scratch.join("root")).exists());
+    }
+
+    /// Long enough for git to ask, be refused, and ask again.
+    const PATIENCE: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_clone_answers_a_remote_that_asks_with_the_credentials_and_fails_in_gits_words() {
+        let scratch = Scratch::new("worktrees-guarded-clone");
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        let (url, seen) = guarded();
+
+        let error = worktrees
+            .add(
+                &url.parse().unwrap(),
+                "issue-1",
+                "origin/main",
+                &credentials(),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(OFFERED));
+        assert!(error.contains("Authentication failed"), "{error}");
+        assert!(!error.contains("sesame"), "{error}");
+    }
+
+    #[test]
+    fn a_fetch_answers_with_the_credentials_ahead_of_a_helper_that_would() {
+        let scratch = Scratch::new("worktrees-guarded-fetch");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let root = PathBuf::from(scratch.join("root"));
+        let worktrees = Worktrees::new(root.clone());
+        let _first = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
+        let main = Repository::open(root.join(slug(&url)).join("main")).unwrap();
+        let helper = SetConfig::new(
+            main.clone(),
+            "credential.helper".to_owned(),
+            INTRUDER.to_owned(),
+        );
+        set_config(helper.unwrap()).unwrap();
+
+        // The helper answers a fetch made with nothing in hand.
+        let (guard, seen) = guarded();
+        aimed(&main, guard);
+        fetch(Fetch::new(main.clone(), Remote::origin())).unwrap_err();
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(INTRUDED));
+
+        let (guard, seen) = guarded();
+        aimed(&main, guard);
+        let error = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(OFFERED));
+        assert!(error.contains("Authentication failed"), "{error}");
     }
 
     #[test]

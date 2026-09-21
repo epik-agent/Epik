@@ -11,7 +11,9 @@
 //! from outside comes through; a [`Hash`](struct@Hash) from [`rev_parse`]; the typed listing
 //! from [`status`], [`log`], [`list_worktrees`], and [`list_remotes`];
 //! the text from [`diff`] and [`show`]; and nothing from the rest,
-//! which either did what was asked or failed in git's words.
+//! which either did what was asked or failed in git's words. Beside
+//! `run`, [`run_as`] runs a command as the holder of credentials, for
+//! the remotes that ask.
 
 #[cfg(all(unix, feature = "native"))]
 pub mod askpass;
@@ -359,18 +361,22 @@ pub fn push(push: Push) -> Result<()> {
     settled(Command::Push(push)).map(drop)
 }
 
-/// Pushes a branch to a remote that asks who is pushing: `credentials`
-/// answer, on the [`askpass`] rails.
+/// Runs `command` as the holder of `credentials`, and settles the
+/// exit as the verbs do. A remote that asks who is there is answered
+/// with `credentials`, on the [`askpass`] rails, whichever command
+/// reached it: a clone, a fetch, a push.
 ///
 /// # Errors
 ///
-/// An askpass script that could not be written; then [`push`]'s, a
-/// remote that refuses the credentials among them.
+/// An askpass script that could not be written; then [`run`]'s, or
+/// git's own words on a nonzero exit — a remote that refuses the
+/// credentials among them.
 #[cfg(all(unix, feature = "native"))]
-pub fn push_as(push: Push, credentials: &Credentials) -> Result<()> {
+pub fn run_as(command: &Command, credentials: &Credentials) -> Result<Finished> {
     let askpass = Askpass::new()?;
-    let env = askpass.env(credentials);
-    settle(&run_within(&Command::Push(push), env, TIMEOUT)?)
+    let finished = run_within(command, askpass.env(credentials), TIMEOUT)?;
+    settle(&finished)?;
+    Ok(finished)
 }
 
 /// Lists the remotes.
