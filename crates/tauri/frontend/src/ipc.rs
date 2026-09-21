@@ -3,12 +3,12 @@
 //!
 //! The types on the wire are the library's own — [`Resolved`],
 //! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
-//! — so nothing here re-declares what `epik` already says.
+//! — so nothing here re-declares what the library already says.
 
-use epik::config::Config;
 use epik::keystore::{Resolved, Secret};
 use epik::monitor::{EVENT, Entry};
 use epik_core::assistant::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
+use epik_core::config::Config;
 use leptos::prelude::window;
 use leptos::task::spawn_local;
 use serde::de::DeserializeOwned;

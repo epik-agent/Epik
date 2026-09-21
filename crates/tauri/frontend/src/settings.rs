@@ -12,9 +12,9 @@
 //! dropdown offers — is pure and sits beside the components, where a test
 //! can reach it.
 
-use epik::config::{self, Config};
 use epik::keystore::{Resolved, Secret};
 use epik_core::assistant::{ANTHROPIC_MODEL, ModelInfo};
+use epik_core::config::{self, Config};
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;

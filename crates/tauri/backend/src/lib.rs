@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use epik::config::Config;
 use epik::monitor::Log;
+use epik_core::config::Config;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Builder, Manager, Theme, WebviewUrl, WebviewWindowBuilder, Wry};
 

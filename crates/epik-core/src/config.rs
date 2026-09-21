@@ -7,9 +7,9 @@
 //! no empty `[table]` header behind.
 //!
 //! Wire shape as much as file shape: [`Config`] crosses the IPC barrier
-//! to the settings window and back, so it is compiled everywhere `serde`
-//! is. The file itself — its path, its format, the startup that converges
-//! on it — belongs to the backend that keeps it.
+//! to the settings window and back, so it compiles under every feature
+//! set. The file itself — its path, its format, the startup that
+//! converges on it — belongs to the backend that keeps it.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ pub struct Monitor {
 #[serde(deny_unknown_fields)]
 pub struct Model {
     /// The chat window's model; `None` is
-    /// [`ANTHROPIC_MODEL`](crate::chat::ANTHROPIC_MODEL).
+    /// [`ANTHROPIC_MODEL`](crate::assistant::ANTHROPIC_MODEL).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat: Option<String>,
     /// The build Agent's model; `None` lets the agent CLI pick its own.
