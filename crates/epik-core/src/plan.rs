@@ -1,13 +1,15 @@
 //! A plan: tasks and the order among them, run as the order allows.
 //! [`Task`] is the work, [`Implement`] is an agent's run as one,
-//! [`Plan::execute`] runs them all at once, and [`ProcessSlots`]
-//! bounds the processes they launch.
+//! [`Plan::execute`] runs them all at once, [`ProcessSlots`] bounds
+//! the processes they launch, and [`stream`] is where they say what
+//! they are doing.
 
 pub mod commit;
 pub mod github;
 pub mod implement;
 #[cfg(unix)]
 pub mod push;
+pub mod stream;
 pub mod task;
 
 use std::iter::repeat_with;
@@ -20,6 +22,7 @@ use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::dag::Dag;
 pub use implement::Implement;
+pub use stream::{Event, Happened, Reported, Sink};
 pub use task::Task;
 
 /// Tasks and the order among them: a task runs once every task before

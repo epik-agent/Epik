@@ -8,10 +8,11 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use epik_core::agent::Agent;
+use epik_core::agent::{Agent, Update};
 use epik_core::git::testing::{branch_of, cloned, committed_all, identified, pushed, seeded};
 use epik_core::git::url::Url;
-use epik_core::plan::{Implement, Plan, ProcessSlots, Task};
+use epik_core::plan::stream::received;
+use epik_core::plan::{Happened, Implement, Plan, ProcessSlots, Reported, Sink, Task};
 use epik_core::process::Exit;
 use epik_core::temp::Scratch;
 use epik_core::tracker::IssueTracker;
@@ -36,6 +37,7 @@ async fn a_scripted_agent_runs_as_a_task() {
             files: [("note.txt".into(), "noted\n".to_owned())].into(),
         },
         slots: slots(1),
+        sink: Sink::new(drop),
     };
     task.run().await.unwrap();
     assert_eq!(
@@ -89,6 +91,7 @@ async fn an_agent_that_exits_with_a_failure_is_the_tasks_error() {
             files: [].into(),
         },
         slots: slots(1),
+        sink: Sink::new(drop),
     };
     task.run().await.unwrap_err();
 }
@@ -107,10 +110,14 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
         let repository = linked.worktree().clone();
 
         // One task per issue, each a scripted agent writing the files
-        // the issue names, in the order the tracker gives.
+        // the issue names, in the order the tracker gives, and all of
+        // them reporting to one sink under the issue's id.
         let root = "0".to_owned();
         let slots = slots(2);
-        let plan: Plan<Implement<Scripted>> = tracker.work(&root).unwrap().map(|id| {
+        let (sink, mut receiver) = Sink::channel();
+        let issues = tracker.work(&root).unwrap();
+        let ids: Vec<String> = issues.nodes().map(|node| node.value().clone()).collect();
+        let plan: Plan<Reported<Implement<Scripted>>> = issues.map(|id| {
             let files = tracker
                 .content(&id)
                 .unwrap()
@@ -121,12 +128,37 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
                 cwd: repository.path().to_owned(),
                 files,
             };
-            Implement {
+            Reported::with(sink.node(id), |sink| Implement {
                 agent,
                 slots: slots.clone(),
-            }
+                sink,
+            })
         });
         plan.execute().await.unwrap();
+
+        // Each issue's account, picked out of the one stream: started,
+        // the agent's session to its result, finished.
+        let events = received(&mut receiver);
+        for id in ids {
+            let happened: Vec<_> = events
+                .iter()
+                .filter(|event| event.node == id)
+                .map(|event| &event.happened)
+                .collect();
+            assert!(
+                matches!(
+                    happened.as_slice(),
+                    [
+                        Happened::Started,
+                        Happened::Said(Update::Session { .. }),
+                        ..,
+                        Happened::Said(Update::Result { ok: true, .. }),
+                        Happened::Finished,
+                    ]
+                ),
+                "issue {id}: {happened:?}"
+            );
+        }
         assert_written(repository.path(), &source);
 
         identified(&repository);
