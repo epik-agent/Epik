@@ -16,12 +16,12 @@
 
 use std::fmt::{Display, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Result, bail};
 
 use crate::git::commands::{
-    AddWorktree, Branch, Clone, DeleteBranch, Fetch, ListWorktrees, Remote, RemoveWorktree,
+    AddWorktree, Branch, Clone, DeleteBranch, Fetch, Hash, ListWorktrees, Remote, RemoveWorktree,
     RevParse, SetConfig,
 };
 use crate::git::url::Url;
@@ -40,24 +40,21 @@ pub const IDENTITY: [(&str, &str); 3] = [
 ];
 
 /// Whose turn it is to change what stands under a root: held for the
-/// length of an add or a removal.
-type Turn = Arc<Mutex<()>>;
+/// length of an add or a removal, one for the whole host.
+static TURN: Mutex<()> = Mutex::new(());
 
-/// A cloned URL and its linked worktrees. Clones share the one turn,
-/// with every [`LinkedWorktree`] handed out.
-#[derive(Clone, Debug)]
+/// A cloned URL and its linked worktrees.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Worktrees {
     root: PathBuf,
-    turn: Turn,
 }
 
 impl Worktrees {
     /// The worktrees under `root`, an absolute path that need not
     /// exist yet.
     #[must_use]
-    pub fn new(root: PathBuf) -> Self {
-        let turn = Turn::default();
-        Self { root, turn }
+    pub const fn new(root: PathBuf) -> Self {
+        Self { root }
     }
 
     /// A fresh linked worktree of `url`, on the new branch `name` cut
@@ -73,7 +70,7 @@ impl Worktrees {
     /// commit, or a `name` some branch of the clone already has,
     /// among them.
     pub fn add(&self, url: &Url, name: &str, at: &str) -> Result<LinkedWorktree> {
-        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         let group = self.root.join(slug(url));
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
@@ -92,13 +89,17 @@ impl Worktrees {
             main
         };
         let at = rev_parse(RevParse::new(main.clone(), at.to_owned())?)?;
-        branch(Branch::new(main.clone(), name.to_owned(), Some(at))?)?;
+        branch(Branch::new(
+            main.clone(),
+            name.to_owned(),
+            Some(at.clone()),
+        )?)?;
         let linked = group.join(slug(&name));
         let worktree = add_worktree(AddWorktree::new(main, linked, name.to_owned())?)?;
         Ok(LinkedWorktree {
             worktree,
             branch: name.to_owned(),
-            turn: Arc::clone(&self.turn),
+            cut: at,
         })
     }
 }
@@ -122,11 +123,11 @@ fn slug(name: &impl Display) -> String {
 
 /// A linked worktree [`Worktrees`] handed out, on a branch of its
 /// own, until it is dropped.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct LinkedWorktree {
     worktree: Repository,
     branch: String,
-    turn: Turn,
+    cut: Hash,
 }
 
 impl LinkedWorktree {
@@ -142,11 +143,17 @@ impl LinkedWorktree {
         &self.branch
     }
 
+    /// The commit the branch was cut at.
+    #[must_use]
+    pub const fn cut(&self) -> &Hash {
+        &self.cut
+    }
+
     /// Removes the worktree, whatever it holds, then its branch from
     /// the clone — or the clone itself, when this was its last linked
     /// worktree.
     fn remove(&self) -> Result<()> {
-        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
+        let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
         let worktree = &self.worktree;
         let listed = list_worktrees(ListWorktrees::new(worktree.clone()))?;
         let Some((main, others)) = listed.split_first() else {

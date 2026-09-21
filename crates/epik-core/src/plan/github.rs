@@ -260,7 +260,7 @@ impl Task for OpenPull {
 mod tests {
     use super::*;
     use crate::dag::{Dag, Node};
-    use crate::github::fake::{DEFAULT_BRANCH, FakeGitHub, Request, TIP, check};
+    use crate::github::fake::{DEFAULT_BRANCH, FakeGitHub, Request, TIP, check, check_runs};
     use crate::github::{Conclusion, State};
     use crate::plan::ProcessSlots;
     use serde_json::{Value, json};
@@ -303,10 +303,6 @@ mod tests {
 
     fn get(path: &str) -> Request {
         sent("GET", path, Value::Null)
-    }
-
-    fn check_runs(sha: &str) -> Request {
-        get(&format!("/commits/{sha}/check-runs?per_page=100"))
     }
 
     #[test]

@@ -101,39 +101,33 @@ impl<A> Build<A> {
     /// as its tracker orders them, between the feature's branch and
     /// its pull request.
     #[must_use]
-    pub fn plan(self, work: Dag<u64>) -> Plan<Node<A>> {
+    pub fn plan(self, work: Dag<u64>) -> Plan<Reported<Node<A>>> {
         let build = Arc::new(self);
-        let (sink, feature) = (&build.sink, &build.feature);
-        let branch = Reported {
-            task: CreateBranch(feature.clone()),
-            sink: sink.node(Name::Branch),
-        };
-        let pull = Reported {
-            task: OpenPull(feature.clone()),
-            sink: sink.node(Name::PullRequest),
+        let node = |task: Node<A>| Reported {
+            sink: build.sink.node(task.name()),
+            task,
         };
         let issue = |number| {
-            Node::Issue(Reported {
-                task: Issue {
-                    number,
-                    build: Arc::clone(&build),
-                },
-                sink: sink.node(Name::Issue(number)),
-            })
+            let build = Arc::clone(&build);
+            node(Node::Issue(Issue { number, build }))
         };
-        work.map(issue)
-            .between(Node::Branch(branch), Node::PullRequest(pull))
+        let feature = &build.feature;
+        work.map(issue).between(
+            node(Node::Branch(CreateBranch(feature.clone()))),
+            node(Node::PullRequest(OpenPull(feature.clone()))),
+        )
     }
 }
 
-/// A node of a feature's plan, its lifecycle on the stream.
+/// A node of a feature's plan. The plan holds each one [`Reported`]
+/// under its [`name`](Self::name).
 pub enum Node<A> {
     /// The plan's source: the feature's branch, created.
-    Branch(Reported<CreateBranch>),
+    Branch(CreateBranch),
     /// One issue, implemented and merged into the feature branch.
-    Issue(Reported<Issue<A>>),
+    Issue(Issue<A>),
     /// The plan's sink: the feature's pull request, left open.
-    PullRequest(Reported<OpenPull>),
+    PullRequest(OpenPull),
 }
 
 impl<A> Node<A> {
@@ -142,7 +136,7 @@ impl<A> Node<A> {
     pub const fn name(&self) -> Name {
         match self {
             Self::Branch(_) => Name::Branch,
-            Self::Issue(issue) => Name::Issue(issue.task.number),
+            Self::Issue(issue) => Name::Issue(issue.number),
             Self::PullRequest(_) => Name::PullRequest,
         }
     }
@@ -204,13 +198,9 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             issue_branch(self.number),
             format!("origin/{}", feature.branch()),
         );
-        let cut = slots.run(move || {
-            let linked = worktrees.add(&url, &branch, &at)?;
-            let cut = head(linked.worktree().clone())?;
-            Ok((linked, cut))
-        });
-        let (linked, cut) = self.step(Step::Worktree, cut).await?;
-        let pushed = self.worked(&linked, &cut).await;
+        let added = slots.run(move || worktrees.add(&url, &branch, &at));
+        let linked = self.step(Step::Worktree, added).await?;
+        let pushed = self.worked(&linked).await;
         slots
             .run(move || {
                 drop(linked);
@@ -222,7 +212,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
 
     /// The agent's run in `linked`, and what it left there committed
     /// and pushed: the commit pushed.
-    async fn worked(&self, linked: &LinkedWorktree, cut: &Hash) -> Result<Hash> {
+    async fn worked(&self, linked: &LinkedWorktree) -> Result<Hash> {
         let Build {
             token,
             slots,
@@ -236,7 +226,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             sink: self.sink(Step::Agent),
         };
         self.step(Step::Agent, implement.run()).await?;
-        let pushed = self.step(Step::Commit, self.committed(linked, cut)).await?;
+        let pushed = self.step(Step::Commit, self.committed(linked)).await?;
         let push = Push {
             worktree: worktree.clone(),
             branch: linked.branch().to_owned(),
@@ -250,12 +240,13 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
     /// The tip of the issue's branch once everything in `linked` is
     /// committed. Whether work happened is read from git: an agent
     /// that committed its own work leaves a clean worktree on a branch
-    /// that has moved from `cut`, and its tip is the work.
+    /// that has moved from its [`cut`](LinkedWorktree::cut), and its tip
+    /// is the work.
     ///
     /// # Errors
     ///
-    /// [`NothingToCommit`] for a clean worktree still at `cut`.
-    async fn committed(&self, linked: &LinkedWorktree, cut: &Hash) -> Result<Hash> {
+    /// [`NothingToCommit`] for a clean worktree still at its cut.
+    async fn committed(&self, linked: &LinkedWorktree) -> Result<Hash> {
         let slots = &self.build.slots;
         let commit = Commit {
             worktree: linked.worktree().clone(),
@@ -266,7 +257,11 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             Err(error) if error.is::<NothingToCommit>() => {
                 let worktree = linked.worktree().clone();
                 let tip = slots.run(|| head(worktree)).await?;
-                if tip == *cut { Err(error) } else { Ok(tip) }
+                if tip == *linked.cut() {
+                    Err(error)
+                } else {
+                    Ok(tip)
+                }
             }
             made => made,
         }
@@ -434,8 +429,8 @@ mod tests {
 
         /// Whether the fake has been asked for the check runs of `sha`.
         fn polled(&self, sha: &Hash) -> bool {
-            let path = format!("/repos/fake/repo/commits/{sha}/check-runs?per_page=100");
-            self.fake.requests().iter().any(|asked| asked.path == path)
+            let read = fake::check_runs(&sha.to_string());
+            self.fake.requests().contains(&read)
         }
 
         fn green(&self, sha: &Hash) {
@@ -484,23 +479,25 @@ mod tests {
         let hosted = Hosted::new("feature-shape", &[]);
         let plan = hosted.build(1, edits).0.plan(diamond());
 
-        let names: Vec<_> = plan.nodes().map(|node| node.value().name()).collect();
+        let names: Vec<_> = plan.nodes().map(|node| node.value().task.name()).collect();
         let issues = [154, 155, 156, 157].map(Name::Issue);
         assert_eq!(names.len(), 6);
         assert_eq!(names[0], Name::Branch);
         assert_eq!(names[1..5], issues);
         assert_eq!(names[5], Name::PullRequest);
 
-        let issue = |name| plan.find(|node| node.name() == name).unwrap();
+        let issue = |name| plan.find(|node| node.task.name() == name).unwrap();
         for name in issues {
             let mut before = issue(name).ancestors();
-            assert!(before.any(|node| node.value().name() == Name::Branch));
+            assert!(before.any(|node| node.value().task.name() == Name::Branch));
             let mut after = issue(name).descendants();
-            assert!(after.any(|node| node.value().name() == Name::PullRequest));
+            assert!(after.any(|node| node.value().task.name() == Name::PullRequest));
         }
         let directly_before = |name| {
             let before = issue(name).predecessors();
-            before.map(|node| node.value().name()).collect::<Vec<_>>()
+            before
+                .map(|node| node.value().task.name())
+                .collect::<Vec<_>>()
         };
         assert_eq!(
             directly_before(issues[2]),

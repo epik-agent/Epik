@@ -64,6 +64,12 @@ pub fn check(name: &str, conclusion: Option<Conclusion>) -> Check {
     }
 }
 
+/// The read of commit `sha`'s check runs, as the fake receives it.
+pub fn check_runs(sha: &str) -> Request {
+    let path = format!("/repos/fake/repo/commits/{sha}/check-runs?per_page=100");
+    Request::new("GET", &path, Value::Null)
+}
+
 /// The fake, listening on loopback until the process ends.
 pub struct FakeGitHub {
     url: String,
