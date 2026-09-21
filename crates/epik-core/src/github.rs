@@ -34,6 +34,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+#[cfg(all(unix, feature = "native"))]
+use crate::git::askpass::Credentials;
 #[cfg(feature = "native")]
 use crate::keystore::Secret;
 
@@ -51,6 +53,10 @@ const API_VERSION: &str = "2022-11-28";
 /// exchanges, not streams, so the whole call gets a deadline.
 #[cfg(feature = "native")]
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The username GitHub reads a token under, when git offers one.
+#[cfg(all(unix, feature = "native"))]
+const TOKEN_USER: &str = "x-access-token";
 
 /// A repository, named the way GitHub names one.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,6 +354,22 @@ impl GitHub {
             token,
             agent,
         }
+    }
+
+    /// What git answers GitHub with, as the holder of the client's own
+    /// token: every git of a build that talks to the remote runs
+    /// [as](crate::git::run_as) these.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`Error::TokenAbsent`] when there is no token.
+    #[cfg(all(unix, feature = "native"))]
+    pub fn credentials(&self) -> Result<Credentials, Error> {
+        let secret = self.token.clone().ok_or(Error::TokenAbsent)?;
+        Ok(Credentials {
+            username: TOKEN_USER.to_owned(),
+            secret,
+        })
     }
 
     // ----- the REST verbs -----
@@ -1172,6 +1194,18 @@ mod tests {
     fn login_refuses_without_a_token_before_asking() {
         let github = GitHub::at("http://127.0.0.1:9", None);
         assert!(matches!(github.login(), Err(Error::TokenAbsent)));
+    }
+
+    #[cfg(all(unix, feature = "native"))]
+    #[test]
+    fn the_clients_token_is_what_git_answers_github_with() {
+        let github = GitHub::at("http://127.0.0.1:9", Some("ghp_sesame".into()));
+        let credentials = github.credentials().unwrap();
+        assert_eq!(credentials.username, "x-access-token");
+        assert_eq!(credentials.secret, "ghp_sesame".into());
+
+        let tokenless = GitHub::at("http://127.0.0.1:9", None);
+        assert!(matches!(tokenless.credentials(), Err(Error::TokenAbsent)));
     }
 
     #[test]

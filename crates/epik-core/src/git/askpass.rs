@@ -83,21 +83,15 @@ impl Drop for Askpass {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-    use crate::git::commands::{Command, Push, Remote};
-    use crate::git::push_as;
-    use crate::git::testing::{aimed, guarded, seeded};
+    use crate::git::commands::{Clone, Command, Fetch, Push, Remote};
+    use crate::git::testing::{
+        INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, credentials, guarded, seeded,
+    };
+    use crate::git::url::Url;
+    use crate::git::{TIMEOUT, run_as, run_within};
     use crate::process::Process;
     use crate::temp::Scratch;
-
-    fn credentials() -> Credentials {
-        Credentials {
-            username: "x-access-token".to_owned(),
-            secret: "ghp_sesame".into(),
-        }
-    }
 
     #[test]
     fn the_script_answers_username_and_password_from_the_environment() {
@@ -129,26 +123,68 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// The whole rail, with no GitHub: what reaches a remote that
-    /// demands authentication is the credentials, which were in the
-    /// environment and in no argument.
+    /// The whole rail, with no GitHub: whichever command meets a remote
+    /// that demands authentication, what reaches it is the credentials,
+    /// which were in the environment and in no argument.
     #[test]
-    fn a_push_answers_the_challenge_with_the_credentials() {
+    fn a_clone_a_fetch_and_a_push_each_answer_the_challenge_with_the_credentials() {
         let scratch = Scratch::new("askpass-challenge");
         let (_, work) = seeded(&scratch);
+        let into = PathBuf::from(scratch.join("clone"));
+        // Each command of the remote at the URL, which is where the
+        // origin of `work` is aimed as it is made.
+        let commands: [&dyn Fn(Url) -> Command; 3] = [
+            &|url| Command::Clone(Clone::new(url, into.clone(), None).unwrap()),
+            &|_| Command::Fetch(Fetch::new(work.clone(), Remote::origin())),
+            &|_| {
+                Command::Push(Push::new(work.clone(), Remote::origin(), "main".to_owned()).unwrap())
+            },
+        ];
+        for command in commands {
+            let (url, seen) = guarded();
+            aimed(&work, url.clone());
+            let command = command(url.parse().unwrap());
+            let argv = command.argv().join(" ");
+            assert!(!argv.contains("sesame"), "{argv}");
+
+            let error = run_as(&command, &credentials()).unwrap_err().to_string();
+            assert!(error.contains("Authentication failed"), "{error}");
+            assert!(!error.contains("sesame"), "{error}");
+            assert_eq!(
+                seen.recv_timeout(PATIENCE).as_deref(),
+                Ok(OFFERED),
+                "{argv}"
+            );
+        }
+    }
+
+    /// A clone has no repository yet whose config could name a helper,
+    /// so the machine's does, from a file of the test's own. The helper
+    /// answers a clone left to it, and the rails' environment puts the
+    /// credentials ahead of it.
+    #[test]
+    fn a_clone_answers_with_the_credentials_ahead_of_a_helper_on_the_machine() {
+        let scratch = Scratch::new("askpass-helper");
+        let config = format!("[credential]\n\thelper = \"{INTRUDER}\"\n");
+        scratch.write("gitconfig", &config);
+        let machine = || {
+            let config = Secret::from(scratch.join("gitconfig"));
+            [("GIT_CONFIG_GLOBAL".to_owned(), config)]
+        };
+        let clone = |url: String, into: &str| {
+            Command::Clone(
+                Clone::new(url.parse().unwrap(), scratch.join(into).into(), None).unwrap(),
+            )
+        };
+
         let (url, seen) = guarded();
-        aimed(&work, url);
-        let push = Push::new(work, Remote::origin(), "main".to_owned()).unwrap();
-        let argv = Command::Push(push.clone()).argv().join(" ");
-        assert!(!argv.contains("sesame"), "{argv}");
+        run_within(&clone(url, "helped"), machine(), TIMEOUT).unwrap();
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(INTRUDED));
 
-        let error = push_as(push, &credentials()).unwrap_err().to_string();
-        assert!(!error.contains("sesame"), "{error}");
-
-        let authorization = seen
-            .recv_timeout(Duration::from_secs(30))
-            .expect("git asked again, with credentials");
-        // Base64 of `x-access-token:ghp_sesame`.
-        assert_eq!(authorization, "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX3Nlc2FtZQ==");
+        let (url, seen) = guarded();
+        let askpass = Askpass::new().unwrap();
+        let env = machine().into_iter().chain(askpass.env(&credentials()));
+        run_within(&clone(url, "railed"), env, TIMEOUT).unwrap();
+        assert_eq!(seen.recv_timeout(PATIENCE).as_deref(), Ok(OFFERED));
     }
 }

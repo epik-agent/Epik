@@ -9,7 +9,9 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use epik_core::agent::{Agent, Update};
-use epik_core::git::testing::{branch_of, cloned, committed_all, identified, pushed, seeded};
+use epik_core::git::testing::{
+    branch_of, cloned, committed_all, credentials, identified, pushed, seeded,
+};
 use epik_core::git::url::Url;
 use epik_core::plan::stream::received;
 use epik_core::plan::{Happened, Implement, Plan, ProcessSlots, Reported, Sink, Task};
@@ -55,7 +57,9 @@ fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
     let (bare, _) = seeded(&scratch);
     let url = Url::Local(bare.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
-    let linked = worktrees.add(&url, "adder", "origin/main").unwrap();
+    let linked = worktrees
+        .add(&url, "adder", "origin/main", &credentials())
+        .unwrap();
     let repository = linked.worktree().clone();
     let branch = branch_of(&repository);
 
@@ -106,7 +110,9 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
     let source = scripted::adder();
 
     let branch = {
-        let linked = worktrees.add(&url, "adder", "origin/main").unwrap();
+        let linked = worktrees
+            .add(&url, "adder", "origin/main", &credentials())
+            .unwrap();
         let repository = linked.worktree().clone();
 
         // One task per issue, each a scripted agent writing the files
