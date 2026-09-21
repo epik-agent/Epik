@@ -149,6 +149,12 @@ impl fmt::Display for Hash {
 pub struct Remote(String);
 
 impl Remote {
+    /// The remote a clone names its source.
+    #[must_use]
+    pub fn origin() -> Self {
+        Self("origin".to_owned())
+    }
+
     /// The remote configured under `name`.
     ///
     /// # Errors

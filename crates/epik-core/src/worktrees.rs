@@ -6,7 +6,9 @@
 //! for every [`add`](Worktrees::add) outstanding, in a directory
 //! named by the [`slug`] of its branch. The first add of a URL clones
 //! it and every later one fetches, so a branch is cut from what the
-//! URL holds as the add is made. Dropping a [`LinkedWorktree`] frees
+//! URL holds as the add is made. The clone is Epik's own, and its
+//! config carries the Epik [`IDENTITY`], so a commit made in any
+//! worktree of it is Epik's, whoever makes it. Dropping a [`LinkedWorktree`] frees
 //! its branch's name, and dropping the last of a URL deletes the
 //! clone with the directory, so the root holds only what is in use.
 
@@ -17,13 +19,22 @@ use anyhow::{Result, bail};
 
 use crate::git::commands::{
     AddWorktree, Branch, Clone, DeleteBranch, Fetch, ListWorktrees, Remote, RemoveWorktree,
-    RevParse,
+    RevParse, SetConfig,
 };
 use crate::git::url::Url;
 use crate::git::{
     Repository, add_worktree, branch, clone, delete_branch, fetch, list_worktrees, remove_worktree,
-    rev_parse,
+    rev_parse, set_config,
 };
+
+/// Who Epik's commits are by, unsigned, as the config keys that say
+/// so: written to each clone as it is made, where they outrank the
+/// machine's own.
+pub const IDENTITY: [(&str, &str); 3] = [
+    ("user.name", "Epik"),
+    ("user.email", "epik@epik-agent.dev"),
+    ("commit.gpgsign", "false"),
+];
 
 /// A cloned URL and its linked worktrees.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,8 +53,8 @@ impl Worktrees {
     /// A fresh linked worktree of `url`, on the new branch `name` cut
     /// at `at`: a commit-ish read in the clone once it holds what
     /// `url` holds now, where `origin/feature` is the tip of the
-    /// URL's `feature`. The clone is made on the first add, and
-    /// shared and fetched into by the rest.
+    /// URL's `feature`. The clone is made on the first add, under the
+    /// Epik [`IDENTITY`], and shared and fetched into by the rest.
     ///
     /// # Errors
     ///
@@ -56,13 +67,18 @@ impl Worktrees {
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
             let main = Repository::open(clone_into)?;
-            fetch(Fetch::new(
-                main.clone(),
-                Remote::named("origin".to_owned())?,
-            ))?;
+            fetch(Fetch::new(main.clone(), Remote::origin()))?;
             main
         } else {
-            clone(Clone::new(url.clone(), clone_into, None)?)?
+            let main = clone(Clone::new(url.clone(), clone_into, None)?)?;
+            for (key, value) in IDENTITY {
+                set_config(SetConfig::new(
+                    main.clone(),
+                    key.to_owned(),
+                    value.to_owned(),
+                )?)?;
+            }
+            main
         };
         let at = rev_parse(RevParse::new(main.clone(), at.to_owned())?)?;
         branch(Branch::new(main.clone(), name.to_owned(), Some(at))?)?;
@@ -146,9 +162,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::git::commands::{Hash, Switch, WorktreeInfo};
-    use crate::git::switch;
+    use crate::git::commands::{Hash, Show, Switch, WorktreeInfo};
     use crate::git::testing::{branch_of, committed, head, pushed, seeded};
+    use crate::git::{show, switch};
     use crate::temp::Scratch;
 
     fn listed(repository: &Repository) -> Vec<WorktreeInfo> {
@@ -248,6 +264,26 @@ mod tests {
         assert_eq!(head(late.worktree()), landed);
         assert!(late.worktree().path().join("early.txt").is_file());
         assert!(!early.worktree().path().join("early.txt").exists());
+    }
+
+    #[test]
+    fn a_commit_in_any_worktree_is_epiks_by_the_clones_own_config() {
+        let scratch = Scratch::new("worktrees-identity");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        let first = worktrees.add(&url, "issue-1", "origin/main").unwrap();
+        let second = worktrees.add(&url, "issue-2", "origin/main").unwrap();
+
+        for linked in [&first, &second] {
+            committed(linked.worktree(), "work.txt", "work\n", "the work");
+            let shown =
+                show(Show::new(linked.worktree().clone(), "HEAD".to_owned()).unwrap()).unwrap();
+            assert!(
+                shown.contains("Author: Epik <epik@epik-agent.dev>"),
+                "{shown}"
+            );
+        }
     }
 
     #[test]
