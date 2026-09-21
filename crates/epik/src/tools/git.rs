@@ -715,7 +715,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[test]
     fn a_scripted_git_status_turn_reaches_the_model_as_a_tool_message() {
-        use crate::chat::{Client, Role, TranscriptItem};
+        use crate::chat::{Client, Role, TranscriptItem, run};
         use crate::testing::model::{Fragment, Scripted, Turn};
 
         let repo = seeded("loop");
@@ -731,14 +731,14 @@ mod tests {
         ]);
         let client = Client::new(model.base_url(), "scripted".to_owned(), None);
 
-        let text = crate::tools::run(
+        let text = run(
             &client,
             "system",
             &[TranscriptItem::Message {
                 role: Role::User,
                 text: "status?".to_owned(),
             }],
-            &registry(),
+            &registry().into(),
             |_| {},
             |_, _| {},
             &std::sync::atomic::AtomicBool::new(false),

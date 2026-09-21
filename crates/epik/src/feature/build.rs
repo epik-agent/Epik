@@ -48,11 +48,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use super::merge::{Branch, Outcome};
 use super::{Issue, IssueId, Plan, Problem, RunId, State, merged};
-use crate::agent::{Agent, Exit};
 use crate::forge::Forge;
 use crate::git::plumbing;
 use crate::job::{Order, Phase, Record, Run, Workspace, abandon, launch, provision};
 use crate::monitor::{Change, Log};
+use crate::process::{Exit, Process};
 
 /// The most Agents a feature build runs at once. A constant, not a
 /// setting: configuration is its own unbuilt subject, and a number is
@@ -300,7 +300,7 @@ pub fn build<F, M>(
 ) -> Arc<Mutex<Build>>
 where
     F: Forge + Send + Sync + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Process, String> + Send + Sync + 'static,
 {
     let build = Build::new(run, Arc::clone(&log), plan);
     log.record(build.started(branch.check().map(|check| check.command.clone())));
@@ -342,7 +342,7 @@ impl<F: Forge, M> Clone for Machinery<F, M> {
 impl<F, M> Machinery<F, M>
 where
     F: Forge + Send + Sync + 'static,
-    M: Fn(&Issue, &Workspace, &str) -> Result<Agent, String> + Send + Sync + 'static,
+    M: Fn(&Issue, &Workspace, &str) -> Result<Process, String> + Send + Sync + 'static,
 {
     /// The record, locked; a poisoned lock is taken anyway, since the
     /// record's every write is one insert.

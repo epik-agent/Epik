@@ -4,14 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# The machinery of an actual desktop: the OS keyring, blocking HTTP,
-# process supervision. Off by default so the crate stays wasm-clean for
+# The machinery of an actual desktop: the OS keyring and process
+# supervision. Off by default so the crate stays wasm-clean for
 # the frontend. Wire protocols come with it, so native implies serde.
 native = [
     "dep:chrono",
-    "dep:include-crypt",
-    "dep:libc",
-    "dep:ureq",
+    "epik-core/native",
     "serde",
 ]
 # Wire form for the types both sides of the IPC barrier share — including
@@ -24,18 +22,16 @@ serde = []
 # deterministic agent with just enough behavior to test against, and the
 # shared fixtures. No shipping build enables it, and no test here ever
 # depends on a real LLM.
-testing = ["native"]
+testing = ["native", "epik-core/testing"]
 
 [dependencies]
 anyhow = "1"
+epik-core = { path = "../epik-core" }
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
 ], optional = true }
-include-crypt = { version = "0.1", optional = true }
-libc = { version = "0.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ureq = { version = "3", features = ["json"], optional = true }
 
 [dev-dependencies]
 # The independent git implementation the git.rs tests verify against:

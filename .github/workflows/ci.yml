@@ -78,7 +78,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     defaults:
       run:
-        working-directory: crates/epik-frontend
+        working-directory: crates/tauri/frontend
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -87,7 +87,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/epik-frontend -> target
+          workspaces: crates/tauri/frontend -> target
           save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: fmt
@@ -120,7 +120,7 @@ jobs:
         with:
           workspaces: |
             . -> target
-            crates/epik-frontend -> target
+            crates/tauri/frontend -> target
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: cargo-bins/cargo-binstall@main
       - name: Install trunk and tauri-cli
@@ -159,7 +159,7 @@ jobs:
 
       - name: Bundle
         run: cargo tauri build
-        working-directory: crates/epik-backend
+        working-directory: crates/tauri/backend
 
       - name: Signature
         if: runner.os == 'macOS'

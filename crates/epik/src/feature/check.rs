@@ -17,7 +17,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::agent::Agent;
+use crate::process::Process;
 
 /// A repository's own idea of green: a command, judged by its exit code.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,12 +52,16 @@ pub(super) fn run(check: &Check, workspace: &Path) -> Verdict {
 /// [`run`] against a stated deadline — which is how the tests exercise
 /// the kill without sitting through the real one.
 fn run_within(check: &Check, workspace: &Path, deadline: Duration) -> Verdict {
-    let argv = vec!["sh".to_owned(), "-c".to_owned(), check.command.clone()];
-    match Agent::new(argv, workspace.to_string_lossy(), [], Some(deadline)).and_then(Agent::finish)
-    {
+    let arguments = vec!["-c".to_owned(), check.command.clone()];
+    match Process::new("sh", arguments, workspace, [], Some(deadline)).and_then(Process::finish) {
         Ok(finished) => Verdict {
             green: finished.exit.success(),
-            output: finished.output,
+            // The verdict's one transcript: stdout, then stderr.
+            output: [finished.stdout, finished.stderr]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n"),
         },
         Err(error) => Verdict {
             green: false,

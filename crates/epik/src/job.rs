@@ -17,11 +17,11 @@
 //! sibling for a branch that already stands: the feature workspace a
 //! feature build keeps for itself, distinct from the jobs' own.
 //!
-//! [`launch`] takes a started [`Agent`] in the workspace — `ClaudeCode`
+//! [`launch`] takes a started [`Process`] in the workspace — `ClaudeCode`
 //! in production, an inline shell script in tests, the same asymmetry as
 //! CLI-in-prod/git2-in-tests — and one drainer thread folds its lines
 //! into the shared [`Record`]: stdout lines interpreted through
-//! [`claude_code::interpret`] into narration, then the exit, and at the
+//! [`ClaudeCode::interpret`] into narration, then the exit, and at the
 //! end the commit *observation* — did the branch advance past the base,
 //! is the worktree clean. Epik observes; the Agent commits. A clean
 //! worktree is removed; a dirty one is left where it is and its path
@@ -33,10 +33,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::agent::claude_code::{self, Update};
-use crate::agent::{Agent, Exit, Line};
 use crate::git::{PERSONA_EMAIL, PERSONA_NAME, base_commit, plumbing};
+use crate::process::{Exit, Process};
 use crate::temp;
+use epik_core::agent::claude::ClaudeCode;
+use epik_core::agent::{Agent, Update};
+// Moved to epik-core; re-exported here until the rest of job follows.
+pub use epik_core::agent;
 
 /// A job as ordered: the prompt, the repository — a git URL, of which
 /// a local path is one — the branch to build on, and the base to start
@@ -392,22 +395,20 @@ impl Record {
             .find(|update| matches!(update, Update::Result { .. }))
     }
 
-    /// Folds one event in: narration or stderr.
-    fn absorb(&mut self, line: Line) {
-        match line {
-            Line::Stdout(line) => {
-                self.narration.extend(claude_code::interpret(&line));
-                if self.narration.len() > NARRATION_CAP {
-                    let excess = self.narration.len() - NARRATION_CAP;
-                    self.narration.drain(..excess);
-                }
-            }
-            Line::Stderr(line) => {
-                self.stderr.push(line);
-                if self.stderr.len() > STDERR_CAP {
-                    self.stderr.remove(0);
-                }
-            }
+    /// Folds one line of stdout in: the narration it interprets to.
+    fn absorb_stdout(&mut self, line: &str) {
+        self.narration.extend(ClaudeCode::interpret(line));
+        if self.narration.len() > NARRATION_CAP {
+            let excess = self.narration.len() - NARRATION_CAP;
+            self.narration.drain(..excess);
+        }
+    }
+
+    /// Folds one line of stderr in, verbatim.
+    fn absorb_stderr(&mut self, line: String) {
+        self.stderr.push(line);
+        if self.stderr.len() > STDERR_CAP {
+            self.stderr.remove(0);
         }
     }
 }
@@ -470,7 +471,8 @@ pub fn abandon(workspace: &Workspace) {
 
 /// Attaches the started `agent` to the run `record` describes, and
 /// returns at once. One drainer thread owns the Agent for the run's
-/// life: it folds the lines into the record, records the exit, and
+/// life: it folds each stream into the record as it comes, records the
+/// exit, and
 /// then takes the commit observation and removes the worktree if clean.
 /// The drainer's own [`JoinHandle`](std::thread::JoinHandle) comes back:
 /// joining it is how a caller waits for the commit observation — the
@@ -483,18 +485,32 @@ pub fn abandon(workspace: &Workspace) {
 /// observation — so a host can return an Agent slot the instant the
 /// Agent is gone, even when the observation outlives the run.
 pub fn launch(
-    mut agent: Agent,
+    mut process: Process,
     record: Run,
     on_exit: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        for line in agent.lines() {
-            record
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .absorb(line);
-        }
-        let phase = match agent.wait() {
+        // A stream read to its end blocks until the process closes it,
+        // so each is followed on a thread of its own.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for line in process.stdout() {
+                    record
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .absorb_stdout(&line);
+                }
+            });
+            scope.spawn(|| {
+                for line in process.stderr() {
+                    record
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .absorb_stderr(line);
+                }
+            });
+        });
+        let phase = match process.wait() {
             Ok(exit) => Phase::Finished(exit),
             Err(error) => Phase::Lost(format!("{error:#}")),
         };
@@ -772,12 +788,11 @@ mod tests {
             },
         );
         let mut record = run.lock().unwrap();
-        record.absorb(Line::Stdout(
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#
-                .to_owned(),
-        ));
-        record.absorb(Line::Stdout("not json".to_owned()));
-        record.absorb(Line::Stderr("grumble".to_owned()));
+        record.absorb_stdout(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        );
+        record.absorb_stdout("not json");
+        record.absorb_stderr("grumble".to_owned());
         assert_eq!(
             record.narration,
             [Update::Text {
@@ -789,8 +804,9 @@ mod tests {
         assert!(record.result().is_none());
 
         for _ in 0..(NARRATION_CAP + 5) {
-            record.absorb(Line::Stdout(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}"#
-                    .to_owned()));
+            record.absorb_stdout(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}"#,
+            );
         }
         assert_eq!(record.narration.len(), NARRATION_CAP);
         assert!(
@@ -798,9 +814,9 @@ mod tests {
             "the oldest went first"
         );
 
-        record.absorb(Line::Stdout(
-            r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#.to_owned(),
-        ));
+        record.absorb_stdout(
+            r#"{"type":"result","is_error":false,"result":"done","total_cost_usd":0.5}"#,
+        );
         assert!(matches!(
             record.result(),
             Some(Update::Result { ok: true, .. })
@@ -813,10 +829,11 @@ mod tests {
     }
 
     /// `script` under `sh -c` in the workspace's directory.
-    fn agent_in(workspace: &Workspace, script: &str) -> Agent {
-        Agent::new(
-            vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
-            workspace.directory.to_string_lossy().into_owned(),
+    fn agent_in(workspace: &Workspace, script: &str) -> Process {
+        Process::new(
+            "sh",
+            vec!["-c".to_owned(), script.to_owned()],
+            &workspace.directory,
             [],
             None,
         )

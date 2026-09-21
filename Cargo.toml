@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/epik", "crates/epik-backend"]
+members = ["crates/epik", "crates/epik-core", "crates/tauri/backend"]
 
 # A path spelled out where its import already reaches is noise; the
 # frontend, its own workspace, says the same in its own manifest.

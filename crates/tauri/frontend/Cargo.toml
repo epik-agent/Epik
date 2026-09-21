@@ -1,0 +1,45 @@
+[package]
+name = "epik-frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+console_error_panic_hook = "0.1"
+epik = { path = "../../epik", features = ["serde"] }
+epik-core = { path = "../../epik-core" }
+leptos = { version = "0.8", features = ["csr"] }
+# The assistant tab's window: Markdown, math and highlighted code, a
+# transcript that follows its tail, and the composer. It has no release,
+# so `rev` names the commit: the page's styles lean on this crate's
+# class names, tokens and layer, which a later commit may rename.
+leptos-rich-chat = { git = "https://github.com/wpm/Rich-Chat", rev = "f3b9d626d7483bac1dd516c90dcc103383458eb6" }
+serde = { version = "1", features = ["derive"] }
+# Already in the tree through epik (unconditional there) and already in
+# this lockfile; the line only makes it nameable for the browser's event stream.
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# Already in the tree through leptos; named for the one look at
+# `window` that tells the app's window from a browser.
+js-sys = "0.3"
+# Only for features leptos doesn't already enable (matchMedia, the
+# JSON tree's delegated click handler's Element walk, the browser's event
+# stream, and the reload a relaunched backend calls for).
+web-sys = { version = "0.3", features = [
+    "Element",
+    "EventSource",
+    "EventTarget",
+    "Location",
+    "MediaQueryList",
+    "MessageEvent",
+    "Window",
+] }
+
+# Deliberately its own workspace: this crate targets wasm while the root
+# workspace targets native, so it must not attach to the root.
+[workspace]
+
+# Matches the root workspace's lint, which this manifest cannot inherit.
+[lints.rust]
+unused_qualifications = "warn"

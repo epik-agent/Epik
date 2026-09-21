@@ -202,8 +202,9 @@ mod tests {
     fn the_askpass_script_answers_username_and_password_from_the_environment() {
         let askpass = Askpass::new().unwrap();
         let ask = |prompt: &str| {
-            crate::agent::Agent::new(
-                vec![askpass.path().unwrap().to_owned(), prompt.to_owned()],
+            crate::process::Process::new(
+                askpass.path().unwrap(),
+                vec![prompt.to_owned()],
                 "/",
                 [
                     (
@@ -217,7 +218,8 @@ mod tests {
             .unwrap()
             .finish()
             .unwrap()
-            .output
+            .stdout
+            .unwrap()
         };
         assert_eq!(ask("Username for 'https://github.com': "), "x-access-token");
         assert_eq!(
