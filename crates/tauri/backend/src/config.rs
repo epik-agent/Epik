@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::Context;
-use epik::config::{Config, Model};
 use epik::github::GitHub;
 use epik::keystore::{KeyStore, Resolved, Secret};
 use epik_core::assistant::{self, ANTHROPIC_MODEL, Error, ModelInfo};
+use epik_core::config::{Config, Model};
 use tauri::{AppHandle, Manager, State};
 
 use crate::assistant::{API_KEY_NAME, GITHUB_TOKEN_NAME};
@@ -63,7 +63,7 @@ fn starting() -> Config {
             chat: Some(ANTHROPIC_MODEL.to_owned()),
             agent: None,
         },
-        github: epik::config::GitHub::default(),
+        github: epik_core::config::GitHub::default(),
         monitor: None,
     }
 }
@@ -187,8 +187,8 @@ pub async fn github_login() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    use epik::config::{GitHub, Monitor};
     use epik::keystore::InMemory;
+    use epik_core::config::{GitHub, Monitor};
 
     use crate::testing::Broken;
     use epik::testing::Scratch;
