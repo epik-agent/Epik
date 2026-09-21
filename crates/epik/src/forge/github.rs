@@ -3,7 +3,7 @@
 
 use super::{Credentials, Forge};
 use crate::github::Repo;
-use crate::keystore::Secret;
+use epik_core::keystore::Secret;
 
 /// GitHub as a forge: one repository, written over HTTPS as the
 /// `x-access-token` user with the token from the keystore. The API

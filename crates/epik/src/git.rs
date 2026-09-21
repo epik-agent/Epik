@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::keystore::Secret;
 use crate::process::Process;
+use epik_core::keystore::Secret;
 
 /// How long one git invocation may take before it is killed and reported.
 const TIMEOUT: Duration = Duration::from_secs(60);

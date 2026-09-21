@@ -12,8 +12,7 @@ native = [
     "epik-core/native",
     "serde",
 ]
-# Wire form for the types both sides of the IPC barrier share — including
-# Secret, whose serialization is the one door its bytes leave through. A
+# Wire form for the types both sides of the IPC barrier share. A
 # marker: the serde crates themselves are unconditional, because the agent
 # vocabulary is wire protocol under every feature set.
 serde = []
