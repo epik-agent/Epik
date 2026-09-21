@@ -33,8 +33,8 @@ rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # A plan runs its tasks on a JoinSet, counts their processes with a
-# semaphore, sends what blocks to the blocking pool, and sleeps through
-# its waits; nothing else here is async.
+# semaphore, and sends what blocks to the blocking pool; time is for a
+# task's waits. Nothing else here is async.
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"], optional = true }
 # GitHub, spoken directly and blocking: the host's async is not ours.
 ureq = { version = "3", features = ["json"], optional = true }

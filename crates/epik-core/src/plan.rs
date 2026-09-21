@@ -6,7 +6,6 @@
 pub mod implement;
 pub mod task;
 
-use std::collections::HashMap;
 use std::iter::repeat_with;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -39,7 +38,6 @@ impl<T: Task + 'static> Plan<T> {
         let mut started = vec![false; count];
         let mut outcomes: Vec<Option<Result<()>>> = repeat_with(|| None).take(count).collect();
         let mut running = JoinSet::new();
-        let mut positions = HashMap::new();
         loop {
             let ready: Vec<_> = tasks
                 .nodes()
@@ -52,29 +50,21 @@ impl<T: Task + 'static> Plan<T> {
                 .collect();
             for (at, task) in ready {
                 started[at] = true;
-                let spawned = running.spawn(async move { task.run().await });
-                positions.insert(spawned.id(), at);
+                // The task runs as a spawn of its own, so a panic in it
+                // comes back here, beside its position, as its error.
+                running.spawn(async move {
+                    let outcome = tokio::spawn(async move { task.run().await }).await;
+                    (at, outcome.unwrap_or_else(|panic| Err(panic.into())))
+                });
             }
-            let Some(joined) = running.join_next_with_id().await else {
+            let Some(joined) = running.join_next().await else {
                 break;
             };
-            let (id, outcome) = match joined {
-                Ok(finished) => finished,
-                Err(panic) => (panic.id(), Err(panic.into())),
-            };
-            outcomes[positions[&id]] = Some(outcome);
+            let (at, outcome) = joined.expect("no task is ever aborted");
+            outcomes[at] = Some(outcome);
         }
         outcomes.into_iter().flatten().collect()
     }
-}
-
-/// `work` on the blocking pool for as long as it takes: where a call
-/// that blocks goes, a request to GitHub for one. A panic in the work
-/// is its error.
-pub async fn blocking<R: Send + 'static>(
-    work: impl FnOnce() -> Result<R> + Send + 'static,
-) -> Result<R> {
-    spawn_blocking(work).await?
 }
 
 /// A set of slots in which concurrent processes may be run. A process blocks until a slot becomes
@@ -92,8 +82,8 @@ impl ProcessSlots {
     /// The one door a process goes through: `work` starts a process
     /// and waits out its life. The wait for a slot parks until a task
     /// anywhere on the host gives one back; then `work` runs on the
-    /// [`blocking`] pool, holding the slot, and its return gives the
-    /// slot back.
+    /// blocking pool, holding the slot, and its return gives the slot
+    /// back. A panic in the work is its error.
     pub async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce() -> Result<R> + Send + 'static,
@@ -102,11 +92,11 @@ impl ProcessSlots {
             .acquire_owned()
             .await
             .expect("the slots are never closed");
-        blocking(move || {
+        spawn_blocking(move || {
             let _slot = slot;
             work()
         })
-        .await
+        .await?
     }
 }
 
@@ -115,7 +105,7 @@ mod tests {
     use super::task::Task;
     use super::{Plan, ProcessSlots};
     use crate::dag::{Dag, Node};
-    use crate::process::{Exit, Process};
+    use crate::process::Process;
     use crate::temp::Scratch;
     use anyhow::{Result, anyhow, ensure};
     use std::num::NonZeroUsize;
@@ -262,10 +252,9 @@ mod tests {
     /// `script` under `sh -c`, from `/`, to a successful exit.
     fn sh(script: &str) -> Result<()> {
         let arguments = vec!["-c".to_owned(), script.to_owned()];
-        match Process::new("sh", arguments, "/", [], Some(PATIENCE))?.wait()? {
-            Exit::Code(0) => Ok(()),
-            exit => Err(anyhow!("sh ended with {exit:?}")),
-        }
+        let exit = Process::new("sh", arguments, "/", [], Some(PATIENCE))?.wait()?;
+        ensure!(exit.success(), "sh ended with {exit:?}");
+        Ok(())
     }
 
     /// A process that runs until `flag` exists, or a wait for a moment
