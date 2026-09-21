@@ -13,7 +13,6 @@ pub mod feature;
 pub mod forge;
 #[cfg(feature = "native")]
 pub mod git;
-pub mod keystore;
 // The vocabulary and the fold compile everywhere, like `feature`; only
 // the `Log` inside needs the host.
 pub mod monitor;

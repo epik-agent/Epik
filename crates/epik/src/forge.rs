@@ -8,7 +8,7 @@
 //! that names the wrong boundary.
 //!
 //! [`github::GitHub`] implements it with the token already on the
-//! [`keystore`](crate::keystore) rails, so pushing needs nothing
+//! [`keystore`](epik_core::keystore) rails, so pushing needs nothing
 //! installed on the machine. [`push`] is the one writing verb: the
 //! credentials answer git's askpass through a script that dies with the
 //! push and environment variables that die with the process — never
@@ -19,8 +19,8 @@
 
 use std::path::Path;
 
-use crate::keystore::Secret;
 use crate::temp;
+use epik_core::keystore::Secret;
 
 pub mod github;
 

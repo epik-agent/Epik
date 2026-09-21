@@ -48,6 +48,36 @@ impl From<&str> for Secret {
     }
 }
 
+/// Where resolution got to.
+///
+/// Three states rather than an `Option`, because "there is no secret" and
+/// "there is no way to find out" are different situations and a caller
+/// usually wants to treat them differently.
+///
+/// This is also the wire shape of a resolution: both sides of the IPC
+/// barrier speak this type, defined once, here.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum Resolved {
+    /// A secret, from the store.
+    Found(Secret),
+    /// None, and nothing wrong. The ordinary state of a fresh install.
+    Absent,
+    /// The store would not answer, so whether a secret exists is unknown.
+    /// The reason, for whoever has somewhere to say it.
+    Unreachable(String),
+}
+
+impl Resolved {
+    /// The secret, if there is one. What a caller about to use it takes.
+    #[cfg(test)]
+    fn key(self) -> Option<Secret> {
+        match self {
+            Self::Found(secret) => Some(secret),
+            Self::Absent | Self::Unreachable(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +89,26 @@ mod tests {
 
         assert!(!debugged.contains("sk-super-secret"), "{debugged}");
         assert_eq!(debugged, "[redacted]");
+    }
+
+    #[test]
+    fn resolution_yields_the_secret_a_caller_takes() {
+        assert_eq!(Resolved::Found("sk-x".into()).key(), Some("sk-x".into()));
+        assert_eq!(Resolved::Absent.key(), None);
+        assert_eq!(Resolved::Unreachable("broken".to_owned()).key(), None);
+    }
+
+    /// Serialization is the one deliberate door out: a resolution crosses
+    /// the wire with its bytes intact and comes back the same resolution —
+    /// while Debug keeps redacting on both sides of the trip.
+    #[test]
+    fn a_resolution_crosses_the_wire_and_comes_back_itself() {
+        let sent = Resolved::Found("sk-super-secret".into());
+        let wire = serde_json::to_string(&sent).unwrap();
+        let received: Resolved = serde_json::from_str(&wire).unwrap();
+
+        assert!(wire.contains("sk-super-secret"), "the wire carries bytes");
+        assert_eq!(received, sent);
+        assert!(!format!("{received:?}").contains("sk-super-secret"));
     }
 }

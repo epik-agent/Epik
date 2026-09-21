@@ -1,10 +1,13 @@
 //! Fixtures shared by this crate's unit tests.
 
 use anyhow::anyhow;
-use epik::keystore::{KeyStore, Secret};
+use epik_core::keystore::Secret;
 
-/// The backend's own broken store: the library's `Unplugged` is private
-/// to its tests, and this crate's coping deserves its own proof.
+use crate::secrets::KeyStore;
+
+/// A store that has broken down rather than one that is merely empty: the
+/// machine with no secret service — a container, a headless Linux box, a
+/// CI runner — or a keychain that stays locked.
 pub(crate) struct Broken;
 
 impl KeyStore for Broken {

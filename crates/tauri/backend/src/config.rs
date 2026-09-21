@@ -31,13 +31,13 @@ use std::sync::{Mutex, PoisonError};
 
 use anyhow::Context;
 use epik::github::GitHub;
-use epik::keystore::{KeyStore, Resolved, Secret};
 use epik_core::assistant::{self, ANTHROPIC_MODEL, Error, ModelInfo};
 use epik_core::config::{Config, Model};
+use epik_core::keystore::{Resolved, Secret};
 use tauri::{AppHandle, Manager, State};
 
 use crate::assistant::{API_KEY_NAME, GITHUB_TOKEN_NAME};
-use crate::secrets::OsKeyring;
+use crate::secrets::{KeyStore, OsKeyring};
 
 /// The configuration file's name inside [`root`].
 const FILE: &str = "config.toml";
@@ -187,7 +187,7 @@ pub async fn github_login() -> Result<String, String> {
 mod tests {
     use super::*;
 
-    use epik::keystore::InMemory;
+    use crate::secrets::InMemory;
     use epik_core::config::{GitHub, Monitor};
 
     use crate::testing::Broken;
