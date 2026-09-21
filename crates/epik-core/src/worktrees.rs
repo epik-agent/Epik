@@ -11,9 +11,12 @@
 //! worktree of it is Epik's, whoever makes it. Dropping a [`LinkedWorktree`] frees
 //! its branch's name, and dropping the last of a URL deletes the
 //! clone with the directory, so the root holds only what is in use.
+//! Adds and drops come from many threads at once and take turns: each
+//! sees the clone as the one before it left it.
 
 use std::fmt::{Display, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Result, bail};
 
@@ -36,18 +39,25 @@ pub const IDENTITY: [(&str, &str); 3] = [
     ("commit.gpgsign", "false"),
 ];
 
-/// A cloned URL and its linked worktrees.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Whose turn it is to change what stands under a root: held for the
+/// length of an add or a removal.
+type Turn = Arc<Mutex<()>>;
+
+/// A cloned URL and its linked worktrees. Clones share the one turn,
+/// with every [`LinkedWorktree`] handed out.
+#[derive(Clone, Debug)]
 pub struct Worktrees {
     root: PathBuf,
+    turn: Turn,
 }
 
 impl Worktrees {
     /// The worktrees under `root`, an absolute path that need not
     /// exist yet.
     #[must_use]
-    pub const fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: PathBuf) -> Self {
+        let turn = Turn::default();
+        Self { root, turn }
     }
 
     /// A fresh linked worktree of `url`, on the new branch `name` cut
@@ -63,6 +73,7 @@ impl Worktrees {
     /// commit, or a `name` some branch of the clone already has,
     /// among them.
     pub fn add(&self, url: &Url, name: &str, at: &str) -> Result<LinkedWorktree> {
+        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
         let group = self.root.join(slug(url));
         let clone_into = group.join("main");
         let main = if clone_into.is_dir() {
@@ -87,6 +98,7 @@ impl Worktrees {
         Ok(LinkedWorktree {
             worktree,
             branch: name.to_owned(),
+            turn: Arc::clone(&self.turn),
         })
     }
 }
@@ -110,10 +122,11 @@ fn slug(name: &impl Display) -> String {
 
 /// A linked worktree [`Worktrees`] handed out, on a branch of its
 /// own, until it is dropped.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct LinkedWorktree {
     worktree: Repository,
     branch: String,
+    turn: Turn,
 }
 
 impl LinkedWorktree {
@@ -133,6 +146,7 @@ impl LinkedWorktree {
     /// the clone — or the clone itself, when this was its last linked
     /// worktree.
     fn remove(&self) -> Result<()> {
+        let _turn = self.turn.lock().unwrap_or_else(PoisonError::into_inner);
         let worktree = &self.worktree;
         let listed = list_worktrees(ListWorktrees::new(worktree.clone()))?;
         let Some((main, others)) = listed.split_first() else {
@@ -264,6 +278,29 @@ mod tests {
         assert_eq!(head(late.worktree()), landed);
         assert!(late.worktree().path().join("early.txt").is_file());
         assert!(!early.worktree().path().join("early.txt").exists());
+    }
+
+    #[test]
+    fn adds_and_drops_of_one_url_from_two_threads_at_once_each_succeed() {
+        let scratch = Scratch::new("worktrees-at-once");
+        let (origin, _) = seeded(&scratch);
+        let url = Url::Local(origin.path().to_owned());
+        let worktrees = Worktrees::new(scratch.join("root").into());
+        // Each round starts with the URL never cloned, or with its
+        // clone going as the other thread's last worktree drops.
+        let rounds = |name: &'static str| {
+            let (worktrees, url) = (&worktrees, &url);
+            move || {
+                for _ in 0..5 {
+                    let linked = worktrees.add(url, name, "origin/main").unwrap();
+                    assert!(linked.worktree().path().join("hello.txt").is_file());
+                }
+            }
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(rounds("issue-1"));
+            scope.spawn(rounds("issue-2"));
+        });
     }
 
     #[test]
