@@ -39,16 +39,30 @@ impl Request {
     }
 }
 
+/// The commit a push left a branch on, read from wherever the test's
+/// pushes land.
+pub type Pushed = Box<dyn Fn(&str) -> Option<String> + Send>;
+
 /// What the fake repository holds.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct World {
     /// Each branch and the commit it stands on.
     pub branches: BTreeMap<String, String>,
+    /// Where a branch [`branches`](Self::branches) does not name stands,
+    /// for a test whose pushes land somewhere the fake can read: what a
+    /// push reaching GitHub leaves behind.
+    pub pushes_to: Option<Pushed>,
     pub issues: BTreeMap<u64, Issue>,
     /// Pull request `n` is `pulls[n - 1]`.
     pub pulls: Vec<Pull>,
     /// Each commit's check runs, as the next read finds them.
     pub checks: BTreeMap<String, Vec<Check>>,
+    /// Check runs a commit gains once its runs have been read that many
+    /// times: GitHub creates a job's run when the job is queued, so a
+    /// run whose job waits on another appears mid-wait.
+    pub appearing: Vec<(String, usize, Check)>,
+    /// How many times each commit's check runs have been read.
+    pub reads: BTreeMap<String, usize>,
     /// How many commit statuses each commit carries.
     pub statuses: BTreeMap<String, usize>,
     /// GitHub's words for refusing every merge, when it refuses.
@@ -160,8 +174,7 @@ impl World {
         let answer = match (request.method.as_str(), segments.as_slice()) {
             ("GET", []) => Some((200, json!({ "default_branch": DEFAULT_BRANCH }))),
             ("GET", ["git", "ref", "heads", branch]) => self
-                .branches
-                .get(*branch)
+                .sha_of(branch)
                 .map(|sha| (200, json!({ "object": { "sha": sha } }))),
             ("POST", ["git", "refs"]) => Some(self.create_branch(&request.body)),
             ("GET", ["issues", number]) => self.issue(number).map(|issue| (200, json!(issue))),
@@ -172,12 +185,18 @@ impl World {
                 (200, json!(issue))
             }),
             ("POST", ["pulls"]) => Some(self.open_pull(&request.body)),
+            ("GET", ["pulls"]) => Some(self.pulls_for(&request.path)),
             ("GET", ["pulls", number]) => self.pull(number).map(|pull| (200, json!(pull))),
             ("PUT", ["pulls", number, "merge"]) => {
                 let refusal = self.merge_refusal.clone();
-                self.pull(number).map(|pull| match refusal {
-                    Some(words) => refused(405, &words),
-                    None => {
+                let asked = request.body["sha"].as_str().map(str::to_owned);
+                self.pull(number).map(|pull| match (refusal, asked) {
+                    (Some(words), _) => refused(405, &words),
+                    (None, Some(sha)) if sha != pull.head.sha => refused(
+                        409,
+                        "Head branch was modified. Review and try the merge again.",
+                    ),
+                    (None, _) => {
                         pull.merged = true;
                         pull.state = State::Closed;
                         (200, json!({ "merged": true }))
@@ -185,7 +204,16 @@ impl World {
                 })
             }
             ("GET", ["commits", sha, "check-runs"]) => {
-                let runs = self.checks.get(*sha).cloned().unwrap_or_default();
+                let read = self.reads.entry((*sha).to_owned()).or_default();
+                *read += 1;
+                let read = *read;
+                let appearing = self.appearing.iter();
+                let due: Vec<Check> = appearing
+                    .filter(|(at, after, _)| at == sha && read > *after)
+                    .map(|(_, _, run)| run.clone())
+                    .collect();
+                let mut runs = self.checks.get(*sha).cloned().unwrap_or_default();
+                runs.extend(due);
                 Some((
                     200,
                     json!({ "total_count": runs.len(), "check_runs": runs }),
@@ -198,6 +226,13 @@ impl World {
             _ => None,
         };
         answer.unwrap_or_else(|| refused(404, "Not Found"))
+    }
+
+    /// The commit `branch` stands on: what the world holds, or, for a
+    /// branch it does not name, where a push left it.
+    fn sha_of(&self, branch: &str) -> Option<String> {
+        let held = self.branches.get(branch).cloned();
+        held.or_else(|| self.pushes_to.as_ref().and_then(|pushed| pushed(branch)))
     }
 
     fn issue(&mut self, number: &str) -> Option<&mut Issue> {
@@ -225,17 +260,46 @@ impl World {
         (201, json!({ "ref": body["ref"], "object": { "sha": sha } }))
     }
 
+    /// The pull requests `path`'s `head=<owner>:<branch>` produced,
+    /// newest first, as GitHub's list endpoint answers.
+    fn pulls_for(&self, path: &str) -> (u16, Value) {
+        let query = path.split('?').nth(1).unwrap_or_default();
+        let head = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| *key == "head")
+            .and_then(|(_, value)| value.split_once("%3A").or_else(|| value.split_once(':')));
+        let Some((_, branch)) = head else {
+            return refused(422, "Validation Failed");
+        };
+        let found: Vec<&Pull> = self
+            .pulls
+            .iter()
+            .rev()
+            .filter(|pull| pull.head.name == branch)
+            .collect();
+        (200, json!(found))
+    }
+
     fn open_pull(&mut self, body: &Value) -> (u16, Value) {
         let end = |key: &str| {
             let name = body[key].as_str()?;
             Some(Branch {
                 name: name.to_owned(),
-                sha: self.branches.get(name)?.clone(),
+                sha: self.sha_of(name)?,
             })
         };
         let (Some(head), Some(base)) = (end("head"), end("base")) else {
             return refused(422, "Validation Failed");
         };
+        let standing = self
+            .pulls
+            .iter()
+            .find(|pull| pull.head.name == head.name && pull.state == State::Open);
+        if let Some(pull) = standing {
+            let words = format!("A pull request already exists for fake:{}.", pull.head.name);
+            return refused(422, &words);
+        }
         let pull = Pull {
             number: self.pulls.len() as u64 + 1,
             title: body["title"].as_str().unwrap_or_default().to_owned(),

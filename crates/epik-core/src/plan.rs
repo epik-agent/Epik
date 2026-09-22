@@ -14,6 +14,7 @@ pub mod push;
 pub mod stream;
 pub mod task;
 
+use std::collections::HashMap;
 use std::iter::repeat_with;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -39,6 +40,11 @@ impl<T: Task + 'static> Plan<T> {
     /// [`nodes`](Dag::nodes) order is the plan's. A panic in a task is
     /// its error.
     ///
+    /// The tasks live in the [`JoinSet`] this future holds, so they
+    /// last exactly as long as it does: dropping the future — a timeout
+    /// around it, a caller that gave up — aborts what is still running
+    /// rather than leaving it to merge and close on its own.
+    ///
     /// The plan is consumed: each task moves to the runtime to run,
     /// and the runtime owns what it runs.
     pub async fn execute(self) -> Result<()> {
@@ -47,6 +53,7 @@ impl<T: Task + 'static> Plan<T> {
         let mut started = vec![false; count];
         let mut outcomes: Vec<Option<Result<()>>> = repeat_with(|| None).take(count).collect();
         let mut running = JoinSet::new();
+        let mut positions = HashMap::new();
         loop {
             let ready: Vec<_> = tasks
                 .nodes()
@@ -59,17 +66,26 @@ impl<T: Task + 'static> Plan<T> {
                 .collect();
             for (at, task) in ready {
                 started[at] = true;
-                // The task runs as a spawn of its own, so a panic in it
-                // comes back here, beside its position, as its error.
-                running.spawn(async move {
-                    let outcome = tokio::spawn(async move { task.run().await }).await;
-                    (at, outcome.unwrap_or_else(|panic| Err(panic.into())))
-                });
+                // The tasks are the set's own, so they die with it. Each
+                // one's node is remembered under the id the set gives
+                // it, which is all a panic comes back with.
+                let handle = running.spawn(async move { (at, task.run().await) });
+                positions.insert(handle.id(), at);
             }
-            let Some(joined) = running.join_next().await else {
+            let Some(joined) = running.join_next_with_id().await else {
                 break;
             };
-            let (at, outcome) = joined.expect("no task is ever aborted");
+            // A task that panicked comes back as a `JoinError` carrying
+            // the panic, which is that node's error. An abort is the
+            // set's doing, and the set aborts only when dropped, which
+            // ends this loop rather than turning it.
+            let (at, outcome) = match joined {
+                Ok((_, ran)) => ran,
+                Err(join) => {
+                    let at = positions[&join.id()];
+                    (at, Err(anyhow::Error::from(join)))
+                }
+            };
             outcomes[at] = Some(outcome);
         }
         outcomes.into_iter().flatten().collect()
@@ -119,6 +135,7 @@ mod tests {
     use anyhow::{Result, anyhow, ensure};
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::Barrier;
@@ -234,6 +251,50 @@ mod tests {
         let plan = Dag::new(vec![Node::new(Panic, [])]).unwrap();
         let error = plan.execute().await.unwrap_err();
         assert!(error.to_string().contains("panicked"), "{error}");
+    }
+
+    /// Counts a step every tick, for longer than any test waits: a task
+    /// still running is one whose count is still climbing.
+    struct Tick(Arc<Mutex<usize>>);
+
+    impl Task for Tick {
+        async fn run(&self) -> Result<()> {
+            loop {
+                sleep(Duration::from_millis(5)).await;
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dropped_execute_stops_the_tasks_it_was_running() {
+        let steps = Arc::new(Mutex::new(0));
+        let plan = Dag::new(vec![Node::new(Tick(Arc::clone(&steps)), [])]).unwrap();
+        let taken = || *steps.lock().unwrap();
+
+        // The plan runs until the task is under way, and is then dropped
+        // where it stands. The future is boxed so that dropping it drops
+        // the plan itself, tasks and all.
+        let mut execute: Pin<Box<dyn Future<Output = Result<()>>>> = Box::pin(plan.execute());
+        timeout(PATIENCE, async {
+            while taken() == 0 {
+                tokio::select! {
+                    _ = &mut execute => panic!("the plan ended on its own"),
+                    () = sleep(Duration::from_millis(5)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(execute);
+
+        // A task outliving the plan would go on counting. The abort
+        // lands at the task's next await, so the count is read once it
+        // has had that chance.
+        sleep(Duration::from_millis(50)).await;
+        let when_stopped = taken();
+        sleep(Duration::from_millis(150)).await;
+        assert_eq!(taken(), when_stopped, "the task ran on past the plan");
     }
 
     /// Meets the others at a barrier: all must be running at once.

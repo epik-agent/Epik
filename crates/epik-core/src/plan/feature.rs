@@ -30,9 +30,8 @@ use super::{Implement, Plan, ProcessSlots};
 use crate::agent::Agent;
 use crate::dag::Dag;
 use crate::git::askpass::Credentials;
-use crate::git::commands::{Hash, RevParse};
+use crate::git::commands::Hash;
 use crate::git::url::Url;
-use crate::git::{self, Repository};
 use crate::github::Merge;
 use crate::worktrees::{LinkedWorktree, Worktrees};
 
@@ -68,7 +67,7 @@ pub enum Step {
     PullRequest,
     /// The wait for the pushed commit's checks.
     Checks,
-    /// The pull request merged.
+    /// The pull request merged, at the commit its checks judged.
     Merge,
     /// The issue closed.
     Close,
@@ -175,7 +174,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
         let pull = self.step(Step::PullRequest, opened).await?;
         let verdict = feature.await_checks(&pushed, *checks);
         self.step(Step::Checks, verdict).await?;
-        let merged = feature.merge(pull.number, *merge);
+        let merged = feature.merge(pull.number, &pushed, *merge);
         self.step(Step::Merge, merged).await?;
         self.step(Step::Close, feature.close(number)).await
     }
@@ -244,20 +243,25 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
     /// that has moved from its [`cut`](LinkedWorktree::cut), and its tip
     /// is the work.
     ///
+    /// The tip read is the branch's own, which is the commit the push,
+    /// the pull request and the checks each go on to name. An agent
+    /// that left the worktree somewhere else is a fact to state, so
+    /// [`Commit`] refuses rather than committing off the branch.
+    ///
     /// # Errors
     ///
-    /// [`NothingToCommit`] for a clean worktree still at its cut.
+    /// A worktree off the issue's branch, and [`NothingToCommit`] for a
+    /// clean worktree still at its cut.
     async fn committed(&self, linked: &LinkedWorktree) -> Result<Hash> {
-        let slots = &self.build.slots;
         let commit = Commit {
             worktree: linked.worktree().clone(),
+            branch: linked.branch().to_owned(),
             message: format!("Implement #{}", self.number),
-            slots: slots.clone(),
+            slots: self.build.slots.clone(),
         };
         match commit.commit().await {
             Err(error) if error.is::<NothingToCommit>() => {
-                let worktree = linked.worktree().clone();
-                let tip = slots.run(|| head(worktree)).await?;
+                let tip = commit.tip().await?;
                 if tip == *linked.cut() {
                     Err(error)
                 } else {
@@ -278,18 +282,15 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
     }
 }
 
-/// The commit `worktree` stands on.
-fn head(worktree: Repository) -> Result<Hash> {
-    git::rev_parse(RevParse::new(worktree, "HEAD".to_owned())?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::Update;
     use crate::dag::Node as After;
-    use crate::git::commands::Branch;
+    use crate::git::Repository;
+    use crate::git::commands::{Branch, RevParse};
     use crate::git::testing::{guarded, pushed, seeded};
+    use crate::git::{self};
     use crate::github::fake::{self, FakeGitHub};
     use crate::github::{Conclusion, Error, State};
     use crate::plan::github::feature_branch;
@@ -353,11 +354,11 @@ mod tests {
         .unwrap()
     }
 
-    /// A repository as GitHub and as git hold it, neither knowing the
-    /// other: a fake GitHub where feature 7 and its `issues` are open,
-    /// and a bare origin where the feature branch already stands. Each
-    /// issue's branch stands on the fake from the start, since a push
-    /// to the origin never reaches it.
+    /// A repository as GitHub and as git hold it: a fake GitHub where
+    /// feature 7 and its `issues` are open, and a bare origin where the
+    /// feature branch already stands. The two are one repository, so
+    /// the fake reads an issue's branch out of the origin the build
+    /// pushes to, the way a push reaches GitHub.
     struct Hosted {
         scratch: Scratch,
         origin: Repository,
@@ -377,10 +378,12 @@ mod tests {
                 world.open_issue(FEATURE, "Build the thing");
                 for &issue in issues {
                     world.open_issue(issue, &format!("Lay stone {issue}"));
-                    world
-                        .branches
-                        .insert(issue_branch(issue), fake::TIP.to_owned());
                 }
+                let pushed_to = origin.clone();
+                world.pushes_to = Some(Box::new(move |branch| {
+                    let asked = RevParse::new(pushed_to.clone(), branch.to_owned()).ok()?;
+                    git::rev_parse(asked).ok().map(|tip| tip.to_string())
+                }));
             }
             Self {
                 scratch,
@@ -410,6 +413,7 @@ mod tests {
                     expected: false,
                     every: Duration::from_millis(5),
                     bound: PATIENCE,
+                    settles: NonZeroUsize::MIN,
                 },
                 merge: Merge::Squash,
                 slots: ProcessSlots::new(NonZeroUsize::new(slots).unwrap()),
@@ -735,6 +739,53 @@ mod tests {
         assert_eq!(words, "the worktree holds nothing to commit");
         assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
         assert_eq!(hosted.pulls(), []);
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_left_the_worktree_off_the_issues_branch_fails_saying_where_it_is() {
+        let hosted = Hosted::new("feature-wandered", &[3]);
+        let (build, mut receiver) = hosted.build(1, |issue| {
+            let edits = edits(issue);
+            format!("git switch -qc fix; {edits}; git add . && git commit -qm 'over here'")
+        });
+        let error = timeout(PATIENCE, build.plan(alone(3)).execute())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the worktree is on branch fix, not on issue-3"
+        );
+
+        let events = received(&mut receiver);
+        assert_eq!(
+            failure(&events, Name::Step(3, Step::Commit)),
+            "the worktree is on branch fix, not on issue-3"
+        );
+        assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
+        assert_eq!(hosted.pulls(), []);
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_detached_the_head_fails_rather_than_committing_off_the_branch() {
+        let hosted = Hosted::new("feature-detached", &[3]);
+        let (build, mut receiver) = hosted.build(1, |issue| {
+            let edits = edits(issue);
+            format!("git switch -q --detach; {edits}")
+        });
+        let error = timeout(PATIENCE, build.plan(alone(3)).execute())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the worktree is on no branch, not on issue-3"
+        );
+
+        let events = received(&mut receiver);
+        let words = failure(&events, Name::Step(3, Step::Commit));
+        assert_eq!(words, "the worktree is on no branch, not on issue-3");
+        assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
     }
 
     #[test]
