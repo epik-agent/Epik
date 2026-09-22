@@ -118,7 +118,6 @@ pub fn run() {
             Ok(())
         })
         .manage(assistant::AssistantState::default())
-        .manage(build::BuildState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             // The default About, wherever this platform put it, gives way

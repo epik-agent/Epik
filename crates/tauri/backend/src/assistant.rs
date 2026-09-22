@@ -338,11 +338,6 @@ pub async fn send_message(
             GitHub::new(github_token.clone()),
             config.github.owner.clone(),
         ));
-        registry.extend(crate::build::tools(
-            app.clone(),
-            agent_key.clone(),
-            config.model.agent.clone(),
-        ));
         // The one question rail: whoever asks — the persona through
         // choose_repository, or the feature build machinery raising its
         // check card — blocks the turn's thread until the window answers.
