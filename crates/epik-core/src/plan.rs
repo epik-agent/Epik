@@ -1,8 +1,8 @@
 //! A plan: tasks and the order among them, run as the order allows.
 //! [`Task`] is the work, [`Implement`] is an agent's run as one,
-//! [`Plan::execute`] runs them all at once, [`ProcessSlots`] bounds
-//! the processes they launch, [`stream`] is where they say what they
-//! are doing, and [`feature`] is a feature build as one.
+//! [`Plan::execute`] runs them all at once, [`AgentSlots`] bounds the
+//! agents they launch, [`stream`] is where they say what they are
+//! doing, and [`feature`] is a feature build as one.
 
 pub mod commit;
 #[cfg(unix)]
@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::dag::Dag;
@@ -92,20 +92,31 @@ impl<T: Task + 'static> Plan<T> {
     }
 }
 
-/// A set of slots in which concurrent processes may be run. A process blocks until a slot becomes
-/// available and then takes ownership of that slot for the duration of its lifetime.
+/// A set of slots in which agents run. A slot is one agent: a model in
+/// a loop that runs for minutes and costs money, held from the moment
+/// the agent launches until it has exited and its streams are drained.
+/// Short-lived commands — git, and everything else a build shells out
+/// to — run [`briefly`], as many at a time as the build calls for.
+///
+/// One set per host, cloned to every build that draws on it, so several
+/// builds at once run no more agents between them than a single one
+/// would.
+///
+/// Callers keep their own discipline over the one set: [`run`](Self::run)
+/// waits for a slot, [`claim`](Self::claim) refuses at once when none is
+/// free, and a slot either gives back is there for both.
 #[derive(Clone, Debug)]
-pub struct ProcessSlots(Arc<Semaphore>);
+pub struct AgentSlots(Arc<Semaphore>);
 
-impl ProcessSlots {
+impl AgentSlots {
     /// `concurrency` slots.
     #[must_use]
     pub fn new(concurrency: NonZeroUsize) -> Self {
         Self(Arc::new(Semaphore::new(concurrency.get())))
     }
 
-    /// The one door a process goes through: `work` starts a process
-    /// and waits out its life. The wait for a slot parks until a task
+    /// The door an agent goes through: `work` starts the agent and
+    /// waits out its life. The wait for a slot parks until a task
     /// anywhere on the host gives one back; then `work` runs on the
     /// blocking pool, holding the slot, and its return gives the slot
     /// back. A panic in the work is its error.
@@ -117,18 +128,48 @@ impl ProcessSlots {
             .acquire_owned()
             .await
             .expect("the slots are never closed");
-        spawn_blocking(move || {
+        Self::held(slot, work).await
+    }
+
+    /// The same door for a caller that will not queue: `work` run in a
+    /// free slot, or `None` at once when every slot is out — the work
+    /// not started, and the refusal the caller's own to word.
+    pub async fn claim<R: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<R> + Send + 'static,
+    ) -> Option<Result<R>> {
+        let slot = Arc::clone(&self.0).try_acquire_owned().ok()?;
+        Some(Self::held(slot, work).await)
+    }
+
+    /// `work` through the same pool as anything else, holding `slot`
+    /// until it returns.
+    async fn held<R: Send + 'static>(
+        slot: OwnedSemaphorePermit,
+        work: impl FnOnce() -> Result<R> + Send + 'static,
+    ) -> Result<R> {
+        briefly(move || {
             let _slot = slot;
             work()
         })
-        .await?
+        .await
     }
+}
+
+/// `work` on the blocking pool for its own length: the door every
+/// short-lived command a build launches goes through, a slot being an
+/// agent's. The pool is the one bound — a plan of fifty issues may have
+/// fifty of these in flight, each one short.
+pub async fn briefly<R: Send + 'static>(
+    work: impl FnOnce() -> Result<R> + Send + 'static,
+) -> Result<R> {
+    spawn_blocking(work).await?
 }
 
 #[cfg(test)]
 mod tests {
     use super::task::Task;
-    use super::{Plan, ProcessSlots};
+    use super::{AgentSlots, Plan, briefly};
     use crate::dag::{Dag, Node};
     use crate::process::Process;
     use crate::temp::Scratch;
@@ -144,8 +185,8 @@ mod tests {
     /// Long enough for anything here that makes progress at all.
     const PATIENCE: Duration = Duration::from_secs(30);
 
-    fn slots(count: usize) -> ProcessSlots {
-        ProcessSlots::new(NonZeroUsize::new(count).unwrap())
+    fn slots(count: usize) -> AgentSlots {
+        AgentSlots::new(NonZeroUsize::new(count).unwrap())
     }
 
     /// Writes its name to a shared log when it runs, then succeeds or
@@ -330,7 +371,7 @@ mod tests {
     /// A process that runs until `flag` exists, or a wait for a moment
     /// and then the making of it.
     enum Flag {
-        Awaited(PathBuf, ProcessSlots),
+        Awaited(PathBuf, AgentSlots),
         Raised(PathBuf),
     }
 
@@ -351,7 +392,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn with_one_slot_a_sleeping_task_and_a_process_make_progress_at_once() {
+    async fn with_one_slot_a_sleeping_task_and_an_agent_make_progress_at_once() {
         let scratch = Scratch::new("plan-flag");
         let flag = scratch.0.join("flag");
         // The process holds the one slot until the sleeper has woken.
@@ -365,7 +406,7 @@ mod tests {
 
     /// Runs a process through the door, counting how many run at once.
     struct Hold {
-        slots: ProcessSlots,
+        slots: AgentSlots,
         running: Arc<Mutex<(usize, usize)>>,
     }
 
@@ -389,7 +430,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_slots_bound_the_processes_however_many_nodes_run() {
+    async fn the_slots_bound_the_agents_however_many_nodes_run() {
         let slots = slots(2);
         let running = Arc::new(Mutex::new((0, 0)));
         let plan = Dag::new(
@@ -409,7 +450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_slots_let_two_processes_run_at_once() {
+    async fn two_slots_let_two_agents_run_at_once() {
         let slots = slots(2);
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let meet = || {
@@ -442,5 +483,107 @@ mod tests {
                 .is_err()
         );
         slots.run(|| Ok(())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_claim_on_a_free_slot_runs_the_work() {
+        assert_eq!(slots(1).claim(|| Ok(7)).await.unwrap().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_claim_with_no_free_slot_returns_at_once_without_running_the_work() {
+        let slots = slots(1);
+        let ran = Arc::new(Mutex::new(false));
+        // The one slot is out until the barrier is met from here.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let holding = tokio::spawn({
+            let (slots, barrier) = (slots.clone(), Arc::clone(&barrier));
+            async move { slots.run(move || Ok(barrier.wait())).await }
+        });
+        timeout(PATIENCE, async {
+            while slots.0.available_permits() > 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let mark = Arc::clone(&ran);
+        let claim = slots.claim(move || {
+            *mark.lock().unwrap() = true;
+            Ok(())
+        });
+        let refused = timeout(PATIENCE, claim).await.expect("it answered at once");
+        assert!(refused.is_none(), "nothing was free");
+        assert!(!*ran.lock().unwrap(), "the refused work never started");
+
+        barrier.wait();
+        holding.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_waiting_caller_and_a_refusing_caller_share_the_same_slots() {
+        let slots = slots(1);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        // A waiter holds the one slot; a claim while it does is refused.
+        let waiting = tokio::spawn({
+            let (slots, barrier) = (slots.clone(), Arc::clone(&barrier));
+            async move { slots.run(move || Ok(barrier.wait())).await }
+        });
+        timeout(PATIENCE, async {
+            while slots.claim(|| Ok(())).await.is_some() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // The slot the waiter gives back is the claimant's to take.
+        barrier.wait();
+        waiting.await.unwrap().unwrap();
+        assert!(slots.claim(|| Ok(())).await.is_some(), "the slot passed on");
+    }
+
+    #[tokio::test]
+    async fn a_claimed_slot_comes_back_when_the_work_ends() {
+        let slots = slots(1);
+        slots.claim(|| Ok(())).await.unwrap().unwrap();
+        assert!(slots.claim(|| Ok(())).await.is_some(), "the slot came back");
+        assert!(
+            slots
+                .claim(|| -> Result<()> { panic!("oops") })
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert!(slots.claim(|| Ok(())).await.is_some(), "and after a panic");
+    }
+
+    #[tokio::test]
+    async fn work_run_briefly_takes_no_slot() {
+        assert_eq!(briefly(|| Ok(7)).await.unwrap(), 7);
+        let error = briefly(|| Err::<(), _>(anyhow!("no"))).await;
+        assert_eq!(error.unwrap_err().to_string(), "no");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn short_commands_run_however_many_at_once_with_every_slot_out() {
+        // The one slot is out for as long as the flag is unraised, and
+        // the raising is a short command like git's: it runs anyway.
+        let scratch = Scratch::new("plan-briefly");
+        let flag = scratch.0.join("flag");
+        let slots = slots(1);
+        let script = format!("until [ -e '{}' ]; do sleep 0.01; done", flag.display());
+        let agent = slots.run(move || sh(&script));
+        let raise = async {
+            briefly(move || Ok(std::fs::write(&flag, "")?)).await?;
+            Ok(())
+        };
+        timeout(PATIENCE, async { tokio::try_join!(agent, raise) })
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

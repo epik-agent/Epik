@@ -1,23 +1,24 @@
 //! An agent's run as a task: the issue it implements is in the agent
-//! already, the run holds a process slot from start to exit, and what
+//! already, the run holds an agent slot from start to exit, and what
 //! the agent says leaves on the stream as it arrives.
 
 use anyhow::{Result, bail};
 
-use super::ProcessSlots;
+use super::AgentSlots;
 use super::stream::{Happened, Sink};
 use super::task::Task;
 use crate::agent::Agent;
 use crate::process::Exit;
 
 /// One [`Agent`], run to its exit in one of the `slots` when the task
-/// runs, with what it says emitted into the `sink` as it says it. The
-/// agent is cloned to start, since starting consumes one and a task
+/// runs, with what it says emitted into the `sink` as it says it. This
+/// is the one task that takes a slot: an agent is what a slot bounds.
+/// The agent is cloned to start, since starting consumes one and a task
 /// may only borrow itself.
 #[derive(Clone, Debug)]
 pub struct Implement<A> {
     pub agent: A,
-    pub slots: ProcessSlots,
+    pub slots: AgentSlots,
     pub sink: Sink<Happened>,
 }
 
@@ -63,7 +64,7 @@ mod tests {
     use crate::agent::{Agent, Update};
     use crate::dag::{Dag, Node};
     use crate::plan::stream::{Event, Happened, Reported, Sink, received};
-    use crate::plan::{ProcessSlots, Task};
+    use crate::plan::{AgentSlots, Task};
     use crate::process::Process;
     use crate::temp::Scratch;
     use anyhow::Result;
@@ -110,11 +111,11 @@ mod tests {
         }
     }
 
-    fn slots(count: usize) -> ProcessSlots {
-        ProcessSlots::new(NonZeroUsize::new(count).unwrap())
+    fn slots(count: usize) -> AgentSlots {
+        AgentSlots::new(NonZeroUsize::new(count).unwrap())
     }
 
-    fn implement(script: &str, slots: &ProcessSlots, sink: Sink<Happened>) -> Implement<Script> {
+    fn implement(script: &str, slots: &AgentSlots, sink: Sink<Happened>) -> Implement<Script> {
         Implement {
             agent: Script(script.to_owned()),
             slots: slots.clone(),

@@ -2,7 +2,7 @@
 //! on, the pull requests into and out of it, the wait for check
 //! verdicts, the merge, and the closing of an issue.
 //!
-//! None of these launches a process, so none takes a slot. Each call
+//! None of these launches an agent, so none takes a slot. Each call
 //! goes to the blocking pool for its own length, and the wait between
 //! two polls is an async sleep.
 //!
@@ -16,9 +16,9 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tokio::task::spawn_blocking;
 use tokio::time::{Instant, sleep};
 
+use super::briefly;
 use super::task::Task;
 use crate::github::{Check, Error, GitHub, Merge, Pull, Repo, State};
 
@@ -258,7 +258,7 @@ impl Feature {
         call: impl FnOnce(&GitHub, &Repo) -> Result<R> + Send + 'static,
     ) -> Result<R> {
         let Self { github, repo, .. } = self.clone();
-        spawn_blocking(move || call(&github, &repo)).await?
+        briefly(move || call(&github, &repo)).await
     }
 }
 
@@ -302,7 +302,7 @@ mod tests {
     use crate::dag::{Dag, Node};
     use crate::github::fake::{DEFAULT_BRANCH, FakeGitHub, Request, TIP, check, check_runs};
     use crate::github::{Conclusion, State};
-    use crate::plan::ProcessSlots;
+    use crate::plan::AgentSlots;
     use serde_json::{Value, json};
     use std::num::NonZeroUsize;
     use tokio::time::timeout;
@@ -751,7 +751,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn with_one_slot_a_process_runs_to_completion_while_a_wait_is_pending() {
+    async fn with_one_slot_an_agent_runs_to_completion_while_a_wait_is_pending() {
         use crate::process::Process;
 
         let fake = FakeGitHub::spawn();
@@ -767,7 +767,7 @@ mod tests {
             sleep(Duration::from_millis(1)).await;
         }
 
-        let slots = ProcessSlots::new(NonZeroUsize::MIN);
+        let slots = AgentSlots::new(NonZeroUsize::MIN);
         let process = slots.run(|| {
             let arguments = vec!["-c".to_owned(), "true".to_owned()];
             Process::new("sh", arguments, "/", [], Some(PATIENCE))?.wait()

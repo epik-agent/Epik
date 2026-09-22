@@ -7,7 +7,7 @@
 ## Context
 
 `crates/epik-core` holds the pieces of a feature build — `plan.rs` with its
-`Dag`-shaped `Plan` and `ProcessSlots`, `plan/implement.rs` running one agent
+`Dag`-shaped `Plan` and `AgentSlots`, `plan/implement.rs` running one agent
 as a `Task`, `agent/claude.rs`, `worktrees.rs`, `github.rs`, and
 `tracker/github.rs` — and nothing yet assembles them into a build.
 
@@ -133,6 +133,10 @@ and its `Sum` implementation go with them. No value travels between nodes:
 the feature branch's name is computed from the feature's number, and the pull
 request number the checks and the merge need is threaded within one issue's
 sequence.
+
+Slots bound agents, not nodes and not processes: a slot is one agent, held
+while the agent runs, so an issue waiting on its checks holds nothing, and git
+and the other short-lived commands take no slot at all (#240, revising #223).
 
 ### Pull requests carry `Closes #<n>`, and issues are closed explicitly
 

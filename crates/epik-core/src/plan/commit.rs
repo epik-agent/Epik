@@ -6,15 +6,16 @@ use std::fmt::{self, Display, Formatter};
 
 use anyhow::{Result, bail};
 
-use super::ProcessSlots;
+use super::briefly;
 use super::task::Task;
 use crate::git::commands::{self, Add, Hash, ListWorktrees, RevParse, Status};
 use crate::git::{self, Repository};
 
 /// Everything `worktree` holds, staged and committed on `branch` under
 /// `message` when the task runs, by the identity the worktree was
-/// provisioned with. Each git is a process of its own, in one of the
-/// `slots` for as long as it runs.
+/// provisioned with. Each git is a process of its own, short enough to
+/// go straight to the blocking pool: a [slot](super::AgentSlots) is an
+/// agent's.
 ///
 /// The commit is `branch`'s: a worktree standing anywhere else is
 /// refused rather than committed, because a commit made on a wandering
@@ -25,7 +26,6 @@ pub struct Commit {
     pub worktree: Repository,
     pub branch: String,
     pub message: String,
-    pub slots: ProcessSlots,
 }
 
 /// A worktree that is as its branch's tip left it: the fact, for
@@ -56,11 +56,11 @@ impl Commit {
         let commit = commands::Commit::new(worktree.clone(), self.message.clone())?;
 
         self.on_branch().await?;
-        if self.slots.run(|| git::status(status)).await?.is_empty() {
+        if briefly(|| git::status(status)).await?.is_empty() {
             return Err(NothingToCommit.into());
         }
-        self.slots.run(|| git::add(add)).await?;
-        self.slots.run(|| git::commit(commit)).await?;
+        briefly(|| git::add(add)).await?;
+        briefly(|| git::commit(commit)).await?;
         self.tip().await
     }
 
@@ -71,7 +71,7 @@ impl Commit {
     /// No such branch, and git's own words.
     pub async fn tip(&self) -> Result<Hash> {
         let tip = RevParse::new(self.worktree.clone(), format!("refs/heads/{}", self.branch))?;
-        self.slots.run(|| git::rev_parse(tip)).await
+        briefly(|| git::rev_parse(tip)).await
     }
 
     /// That the worktree has `branch` checked out, which is what makes
@@ -83,7 +83,7 @@ impl Commit {
     async fn on_branch(&self) -> Result<()> {
         let worktree = self.worktree.clone();
         let listed = ListWorktrees::new(worktree.clone());
-        let listed = self.slots.run(move || git::list_worktrees(listed)).await?;
+        let listed = briefly(move || git::list_worktrees(listed)).await?;
         // Git lists paths as it resolved them, symlinks followed, so the
         // comparison is between resolved paths.
         let here = worktree.path().canonicalize()?;
@@ -107,8 +107,6 @@ impl Task for Commit {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::num::NonZeroUsize;
-
     use super::*;
     use crate::git::commands::{Branch, Show, Switch};
     use crate::git::testing::{committed, credentials, head, seeded};
@@ -139,7 +137,6 @@ mod tests {
             worktree: linked.worktree().clone(),
             branch: linked.branch().to_owned(),
             message: "feat: the work (#1)".to_owned(),
-            slots: ProcessSlots::new(NonZeroUsize::MIN),
         }
     }
 
