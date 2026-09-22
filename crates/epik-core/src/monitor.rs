@@ -77,22 +77,25 @@ pub enum State {
     Merged { commit: String, checked: bool },
     /// Failed, in the words of the step that failed.
     Failed { report: String },
-    /// Never started, and never will be: the blocker it is stuck on,
-    /// which this build can never settle.
-    Skipped { reason: String },
+    /// Never started, and never will be: the issue whose failure
+    /// stopped it, which this build can never settle. The number, not
+    /// words about it — a record keeps facts, and the pane says them.
+    Skipped { blocker: u64 },
 }
 
-/// The step an issue's node is in, and how far it has got there.
+/// How far an issue has got, by the stream's account. An issue the
+/// stream has said nothing of has no `Progressed` at all, so merely
+/// having one means its node has spoken.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Progressed {
-    /// The last step to have started, and whether it finished.
-    step: Option<(Step, bool)>,
+    /// The last step to have spoken.
+    step: Option<Step>,
     /// The commit the push threaded, once it has.
     commit: Option<String>,
     /// The words of the step that failed, once one has.
     failed: Option<String>,
-    /// Whether the issue's own node has started.
-    started: bool,
+    /// Whether the close finished: the issue is landed.
+    closed: bool,
 }
 
 impl Progressed {
@@ -105,17 +108,18 @@ impl Progressed {
                 report: report.clone(),
             };
         }
-        match self.step {
-            Some((Step::Close, true)) => State::Merged {
+        if self.closed {
+            return State::Merged {
                 commit: self.commit.clone().unwrap_or_default(),
                 checked,
-            },
-            Some((step, _)) => match step {
-                Step::Worktree | Step::Agent | Step::Commit | Step::Push => State::Running,
-                _ => State::Merging,
-            },
-            None if self.started => State::Running,
-            None => State::Waiting,
+            };
+        }
+        // The steps are declared in the order they run, so one
+        // comparison divides the agent's half from GitHub's. A node
+        // that has spoken without reaching a step is under way.
+        match self.step {
+            Some(step) if step > Step::Push => State::Merging,
+            _ => State::Running,
         }
     }
 }
@@ -326,28 +330,27 @@ impl Watch {
         let Some(work) = &self.work else {
             return BTreeMap::new();
         };
-        let mut states = BTreeMap::new();
+        let mut states: BTreeMap<u64, State> = BTreeMap::new();
+        // The graph's order puts every predecessor before the node it
+        // precedes, so one pass settles every state: a node reads what
+        // is already settled behind it, and the issue that failed
+        // carries its own number forward from skip to skip.
         for node in work.nodes() {
             let id = *node.value();
-            let progressed = self.progressed.get(&id).cloned().unwrap_or_default();
-            // A node the stream has not reached, held back by a
-            // blocker that will never settle, is skipped in that
-            // blocker's name: the plan runs nothing after a failure.
-            let blocker = (progressed == Progressed::default())
-                .then(|| {
-                    node.ancestors().find(|before| {
-                        matches!(
-                            states.get(before.value()),
-                            Some(State::Failed { .. } | State::Skipped { .. })
-                        )
+            let state = match self.progressed.get(&id) {
+                Some(progressed) => progressed.state(self.checked),
+                // A node the stream has not reached, held back by a
+                // blocker that will never settle, is skipped in the
+                // name of the failure that stopped it: the plan runs
+                // nothing after one.
+                None => node
+                    .predecessors()
+                    .find_map(|before| match states.get(before.value())? {
+                        State::Failed { .. } => Some(*before.value()),
+                        State::Skipped { blocker } => Some(*blocker),
+                        _ => None,
                     })
-                })
-                .flatten();
-            let state = match blocker {
-                Some(blocker) => State::Skipped {
-                    reason: format!("#{} never settled", blocker.value()),
-                },
-                None => progressed.state(self.checked),
+                    .map_or(State::Waiting, |blocker| State::Skipped { blocker }),
             };
             states.insert(id, state);
         }
@@ -371,9 +374,11 @@ impl Watch {
     /// it only here.
     #[must_use]
     pub fn live(&self) -> bool {
-        self.states()
+        // Only an issue the stream has spoken of can be Running, so
+        // this asks what it has said and never walks the graph.
+        self.progressed
             .values()
-            .any(|state| matches!(state, State::Running))
+            .any(|progressed| matches!(progressed.state(self.checked), State::Running))
     }
 
     /// How many issues stand where: the picture's nodes tallied by
@@ -398,7 +403,10 @@ impl Watch {
         counts
     }
 
-    fn apply(&mut self, change: Change) {
+    /// One change about this run, taken in. Borrowed: the stream's
+    /// commonest event by far is an agent's narration, which moves
+    /// nothing, so the fold clones only what it keeps.
+    fn apply(&mut self, change: &Change) {
         match change {
             Change::Reserved { .. } => {}
             Change::Started {
@@ -409,16 +417,20 @@ impl Watch {
                 checked,
                 ..
             } => {
-                self.work = Some(work);
-                self.title = Some(title);
-                self.titles = titles.into_iter().collect();
-                self.problems = problems;
-                self.checked = checked;
+                self.work = Some(work.clone());
+                self.title = Some(title.clone());
+                self.titles = titles.iter().cloned().collect();
+                self.problems = problems.clone();
+                self.checked = *checked;
                 self.stage = Stage::Building;
             }
-            Change::Happened { event, .. } => self.heard(&event),
+            Change::Happened { event, .. } => self.heard(event),
             Change::Finished { .. } => self.stage = Stage::Finished,
-            Change::Abandoned { reason, .. } => self.stage = Stage::Abandoned { reason },
+            Change::Abandoned { reason, .. } => {
+                self.stage = Stage::Abandoned {
+                    reason: reason.clone(),
+                };
+            }
         }
     }
 
@@ -431,22 +443,33 @@ impl Watch {
             Name::Step(issue, step) => (issue, Some(step)),
             Name::Branch | Name::PullRequest => return,
         };
+        // What an agent says is for the transcript, not the state, and
+        // it is most of what crosses: turned away before a node is
+        // made for an issue whose only traffic so far is narration.
+        if matches!(event.happened, Happened::Said(_) | Happened::Stderr(_)) {
+            return;
+        }
         let progressed = self.progressed.entry(issue).or_default();
         match (&event.happened, step) {
-            // The issue's own node: its start, and its failure in the
-            // words of whichever step failed.
-            (Happened::Started, None) => progressed.started = true,
-            (Happened::Failed(report), None) => {
+            // A failure is the issue's, in the words of whichever step
+            // failed: the first to fail is the one that stopped it.
+            (Happened::Failed(report), _) => {
                 progressed.failed.get_or_insert_with(|| report.clone());
             }
-            (Happened::Started, Some(step)) => progressed.step = Some((step, false)),
-            (Happened::Finished, Some(step)) => progressed.step = Some((step, true)),
-            (Happened::Failed(report), Some(_)) => {
-                progressed.failed.get_or_insert_with(|| report.clone());
+            (Happened::Started, Some(step)) => progressed.step = Some(step),
+            (Happened::Finished, Some(step)) => {
+                progressed.step = Some(step);
+                progressed.closed = step == Step::Close;
             }
-            (Happened::Pushed(commit), _) => progressed.commit = Some(commit.clone()),
-            // What an agent says is for the transcript, not the state.
-            (Happened::Said(_) | Happened::Stderr(_), _) | (Happened::Finished, None) => {}
+            (Happened::Pushed(commit), Some(Step::Push)) => {
+                progressed.commit = Some(commit.clone());
+            }
+            // The issue's own node: its start puts it Running before
+            // its first step speaks, and its end is already told by
+            // the close finishing.
+            (Happened::Started, None) => {}
+            (Happened::Finished | Happened::Pushed(_), _) => {}
+            (Happened::Said(_) | Happened::Stderr(_), _) => unreachable!("turned away above"),
         }
     }
 }
@@ -475,7 +498,7 @@ impl Progress {
             return false;
         }
         self.applied = Some(entry.seq);
-        match entry.change.clone() {
+        match &entry.change {
             Change::Reserved {
                 run,
                 feature,
@@ -483,8 +506,14 @@ impl Progress {
                 branch,
                 base,
             } => {
-                self.watches
-                    .insert(run, Watch::reserved(run, feature, repository, branch, base));
+                let watch = Watch::reserved(
+                    *run,
+                    *feature,
+                    repository.clone(),
+                    branch.clone(),
+                    base.clone(),
+                );
+                self.watches.insert(*run, watch);
             }
             change => {
                 if let Some(watch) = self.watches.get_mut(&change.run()) {
@@ -652,7 +681,7 @@ mod tests {
         .unwrap()
     }
 
-    fn reserved(run: u64) -> Change {
+    pub(super) fn reserved(run: u64) -> Change {
         Change::Reserved {
             run: RunId(run),
             feature: 158,
@@ -831,9 +860,7 @@ mod tests {
         for held in [156, 157] {
             assert_eq!(
                 states[&held],
-                State::Skipped {
-                    reason: "#155 never settled".to_owned(),
-                },
+                State::Skipped { blocker: 155 },
                 "#{held} waited on 155",
             );
         }
@@ -1019,25 +1046,10 @@ mod tests {
     /// GitHub being what runs them.
     #[test]
     fn checked_says_whether_checks_were_expected() {
-        let mut changes = vec![reserved(1)];
-        let Change::Started {
-            work,
-            title,
-            titles,
-            problems,
-            ..
-        } = started(1, diamond())
-        else {
-            unreachable!("started makes a Started")
-        };
-        changes.push(Change::Started {
-            run: RunId(1),
-            work,
-            title,
-            titles,
-            problems,
-            checked: true,
-        });
+        let mut changes = vec![reserved(1), started(1, diamond())];
+        if let Change::Started { checked, .. } = &mut changes[1] {
+            *checked = true;
+        }
         changes.extend(built(1, 154));
         let progress = fold(&changes);
         assert_eq!(
@@ -1050,22 +1062,15 @@ mod tests {
     }
 }
 
+/// The log, which only a host keeps: recorded from many threads and
+/// read by cursor, over the same changes the fold above takes in.
 #[cfg(all(test, feature = "native"))]
 mod log_tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use super::tests::reserved;
     use super::*;
-
-    fn reserved(run: u64) -> Change {
-        Change::Reserved {
-            run: RunId(run),
-            feature: 158,
-            repository: "/r".to_owned(),
-            branch: "feature-158".to_owned(),
-            base: Some("main".to_owned()),
-        }
-    }
 
     #[test]
     fn the_log_stamps_seq_and_the_injected_clocks_time() {

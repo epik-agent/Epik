@@ -2,11 +2,13 @@
 //!
 //! [`layout`] is the pure function from the work a build runs and the
 //! states derived for it to a picture in grid cells, so a pane has
-//! only to scale it. A node's column is its longest path over the
-//! graph's edges; its row is its place in the graph's order. The
-//! states decide what each node reads as: [`Form`] is the state with
-//! Waiting split into ready and blocked, ready being every
-//! predecessor merged.
+//! only to scale it. A node's row is its place in the graph's order,
+//! which a [`Dag`] settles topologically; its column is its longest
+//! path over the graph's edges, which one forward pass over those
+//! rows settles, every predecessor being an earlier row. The states
+//! decide what each node reads as: [`Form`] is the state with Waiting
+//! split into ready and blocked, ready being every predecessor
+//! merged.
 //!
 //! A [`Container`] is a box around a sub-feature's nodes. The work a
 //! build runs is a flat [`Dag`] of issue numbers, which carries no
@@ -141,35 +143,38 @@ pub fn layout(
         into[issue].push(blocker);
         blocks[blocker].push(drawn[issue]);
     }
-    let mut column = vec![None; drawn.len()];
+    // Every predecessor is an earlier row, the graph's order being
+    // topological, so one forward pass settles every column.
+    let mut column = vec![0; drawn.len()];
     for row in 0..drawn.len() {
-        longest(row, &into, &mut column, &mut Vec::new());
+        column[row] = into[row]
+            .iter()
+            .map(|&blocker| column[blocker] + 1)
+            .max()
+            .unwrap_or(0);
     }
 
-    let merged: BTreeSet<u64> = states
-        .iter()
-        .filter(|(_, state)| matches!(state, State::Merged { .. }))
-        .map(|(&id, _)| id)
-        .collect();
+    let merged = |id: &u64| matches!(states.get(id), Some(State::Merged { .. }));
     let nodes = drawn
         .iter()
+        .zip(blocks)
         .enumerate()
-        .map(|(row, &id)| {
+        .map(|(row, (&id, blocks))| {
             let state = states.get(&id).cloned().unwrap_or(State::Waiting);
             let blocked_by: Vec<u64> = into[row]
                 .iter()
                 .map(|&blocker| drawn[blocker])
-                .filter(|blocker| !merged.contains(blocker))
+                .filter(|blocker| !merged(blocker))
                 .collect();
             Node {
                 id,
                 title: titles.get(&id).cloned().unwrap_or_default(),
                 form: form(&state, blocked_by.is_empty()),
                 state,
-                column: column[row].unwrap_or(0),
+                column: column[row],
                 row,
                 blocked_by,
-                blocks: std::mem::take(&mut blocks[row]),
+                blocks,
             }
         })
         .collect();
@@ -185,33 +190,6 @@ pub fn layout(
             .collect(),
         containers: Vec::new(),
     }
-}
-
-/// The longest path into `row`: one past the longest into any of its
-/// blockers. A [`Dag`] is acyclic, so the walk ends; the guard on a
-/// row already on the path is what makes that true of any `into`.
-fn longest(
-    row: usize,
-    into: &[Vec<usize>],
-    column: &mut [Option<usize>],
-    path: &mut Vec<usize>,
-) -> Option<usize> {
-    if let Some(known) = column[row] {
-        return Some(known);
-    }
-    if path.contains(&row) {
-        return None;
-    }
-    path.push(row);
-    let found = into[row]
-        .iter()
-        .filter_map(|&blocker| longest(blocker, into, column, path))
-        .map(|column| column + 1)
-        .max()
-        .unwrap_or(0);
-    path.pop();
-    column[row] = Some(found);
-    Some(found)
 }
 
 const fn form(state: &State, ready: bool) -> Form {

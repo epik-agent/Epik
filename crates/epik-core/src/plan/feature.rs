@@ -201,12 +201,17 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             credentials,
             slots: slots.clone(),
         };
-        self.step(Step::Push, push.run()).await?;
-        // The branch is on the remote now, so the commit is a fact a
-        // watcher can name: said after the push, under the step that
-        // made it true.
-        self.sink(Step::Push)
-            .emit(Happened::Pushed(pushed.to_string()));
+        // The commit is a fact once the push has put it on the
+        // remote, and it is the commit every step after this one
+        // names. Said within the step, before its end, so nothing
+        // arrives under a step that has already finished.
+        let sink = self.sink(Step::Push);
+        reported(&sink, async {
+            push.run().await?;
+            sink.emit(Happened::Pushed(pushed.to_string()));
+            Ok(())
+        })
+        .await?;
         Ok(pushed)
     }
 
@@ -759,6 +764,30 @@ mod tests {
         let words = failure(&events, Name::Step(3, Step::Commit));
         assert_eq!(words, "the worktree is on no branch, not on issue-3");
         assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
+    }
+
+    /// The commit crosses within the step that put it on the remote,
+    /// before that step's end: a watcher hears no fact under a step
+    /// that has already finished.
+    #[tokio::test]
+    async fn the_push_says_the_commit_it_threaded_before_it_ends() {
+        let hosted = Hosted::new("feature-pushed", &[3]);
+        let (build, mut receiver) = hosted.build(1, edits);
+        timeout(PATIENCE, build.plan(alone(3)).execute())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let tip = hosted.tip(&issue_branch(3)).expect("a pushed branch");
+        let events = received(&mut receiver);
+        assert_eq!(
+            happened(&events, Name::Step(3, Step::Push)),
+            [
+                Happened::Started,
+                Happened::Pushed(tip.to_string()),
+                Happened::Finished,
+            ]
+        );
     }
 
     /// The acceptance the monitor is for: a real build of #158's
