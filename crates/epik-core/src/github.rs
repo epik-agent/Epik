@@ -566,20 +566,32 @@ impl GitHub {
             .transpose()
     }
 
-    /// Merges a pull request. A branch that is not mergeable — red checks, a
-    /// ruleset, a conflict — comes back as [`Error::Refused`] in GitHub's
-    /// own words.
+    /// Merges a pull request. A `head` pins the merge to the commit the
+    /// branch is expected to stand on: GitHub refuses with 409 when it has
+    /// moved, so what merges is the commit the caller meant. A branch that
+    /// is not mergeable — red checks, a ruleset, a conflict — comes back as
+    /// [`Error::Refused`] in GitHub's own words.
     ///
     /// # Errors
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn merge_pull(&self, repo: &Repo, number: u64, method: Merge) -> Result<(), Error> {
+    pub fn merge_pull(
+        &self,
+        repo: &Repo,
+        number: u64,
+        head: Option<&str>,
+        method: Merge,
+    ) -> Result<(), Error> {
         self.needs_token()?;
+        let mut body = json!({ "merge_method": method.wire() });
+        if let Some(sha) = head {
+            body["sha"] = json!(sha);
+        }
         self.send::<Value>(
             Method::Put,
             &format!("repos/{repo}/pulls/{number}/merge"),
-            &json!({ "merge_method": method.wire() }),
+            &body,
         )?;
         Ok(())
     }
@@ -1481,7 +1493,7 @@ mod tests {
             github.close_issue(&repo, 1).map(drop),
             github.reopen_issue(&repo, 1).map(drop),
             github.open_pull(&repo, "t", "h", "b", "").map(drop),
-            github.merge_pull(&repo, 1, Merge::Squash),
+            github.merge_pull(&repo, 1, None, Merge::Squash),
             github.create_branch(&repo, "feature-1", &"a".repeat(40)),
             github.issue_graph(&repo, 1).map(drop),
             github.add_sub_issue(&repo, 1, 2),

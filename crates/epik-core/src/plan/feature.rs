@@ -68,7 +68,7 @@ pub enum Step {
     PullRequest,
     /// The wait for the pushed commit's checks.
     Checks,
-    /// The pull request merged.
+    /// The pull request merged, at the commit its checks judged.
     Merge,
     /// The issue closed.
     Close,
@@ -175,7 +175,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
         let pull = self.step(Step::PullRequest, opened).await?;
         let verdict = feature.await_checks(&pushed, *checks);
         self.step(Step::Checks, verdict).await?;
-        let merged = feature.merge(pull.number, *merge);
+        let merged = feature.merge(pull.number, &pushed, *merge);
         self.step(Step::Merge, merged).await?;
         self.step(Step::Close, feature.close(number)).await
     }
@@ -353,11 +353,11 @@ mod tests {
         .unwrap()
     }
 
-    /// A repository as GitHub and as git hold it, neither knowing the
-    /// other: a fake GitHub where feature 7 and its `issues` are open,
-    /// and a bare origin where the feature branch already stands. Each
-    /// issue's branch stands on the fake from the start, since a push
-    /// to the origin never reaches it.
+    /// A repository as GitHub and as git hold it: a fake GitHub where
+    /// feature 7 and its `issues` are open, and a bare origin where the
+    /// feature branch already stands. The two are one repository, so
+    /// the fake reads an issue's branch out of the origin the build
+    /// pushes to, the way a push reaches GitHub.
     struct Hosted {
         scratch: Scratch,
         origin: Repository,
@@ -377,10 +377,12 @@ mod tests {
                 world.open_issue(FEATURE, "Build the thing");
                 for &issue in issues {
                     world.open_issue(issue, &format!("Lay stone {issue}"));
-                    world
-                        .branches
-                        .insert(issue_branch(issue), fake::TIP.to_owned());
                 }
+                let pushed_to = origin.clone();
+                world.pushes_to = Some(Box::new(move |branch| {
+                    let asked = RevParse::new(pushed_to.clone(), branch.to_owned()).ok()?;
+                    git::rev_parse(asked).ok().map(|tip| tip.to_string())
+                }));
             }
             Self {
                 scratch,
@@ -410,6 +412,7 @@ mod tests {
                     expected: false,
                     every: Duration::from_millis(5),
                     bound: PATIENCE,
+                    settles: NonZeroUsize::MIN,
                 },
                 merge: Merge::Squash,
                 slots: ProcessSlots::new(NonZeroUsize::new(slots).unwrap()),
