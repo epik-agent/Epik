@@ -34,6 +34,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+#[cfg(all(unix, feature = "native"))]
+use crate::git::askpass::Credentials;
 #[cfg(feature = "native")]
 use crate::keystore::Secret;
 
@@ -52,8 +54,12 @@ const API_VERSION: &str = "2022-11-28";
 #[cfg(feature = "native")]
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The username GitHub reads a token under, when git offers one.
+#[cfg(all(unix, feature = "native"))]
+const TOKEN_USER: &str = "x-access-token";
+
 /// A repository, named the way GitHub names one.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Repo {
     pub owner: String,
     name: String,
@@ -229,8 +235,8 @@ impl Conclusion {
     /// conclusions a required check waves through — neutral and skipped.
     /// Everything else — [`Other`](Self::Other), the verdict invented
     /// after this enum was written, included — is nobody's green.
-    #[cfg(test)]
-    const fn green(self) -> bool {
+    #[must_use]
+    pub const fn green(self) -> bool {
         matches!(self, Self::Success | Self::Neutral | Self::Skipped)
     }
 }
@@ -238,14 +244,14 @@ impl Conclusion {
 impl Check {
     /// Still running: nothing concluded yet, so the check is
     /// not-yet-judgeable — neither green nor [`red`](Self::red).
-    #[cfg(test)]
-    const fn pending(&self) -> bool {
+    #[must_use]
+    pub const fn pending(&self) -> bool {
         self.conclusion.is_none()
     }
 
     /// Concluded, and not [green](Conclusion::green).
-    #[cfg(test)]
-    fn red(&self) -> bool {
+    #[must_use]
+    pub fn red(&self) -> bool {
         self.conclusion
             .is_some_and(|conclusion| !conclusion.green())
     }
@@ -253,11 +259,55 @@ impl Check {
 
 /// An issue as it appears at the far end of an edge: enough to schedule
 /// against, not the whole issue.
+///
+/// A number names an issue only inside one repository, and GitHub's
+/// sub-issue and blocked-by edges may leave the repository they start
+/// in, so an edge carries the repository it lands in.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Edge {
     pub number: u64,
     pub title: String,
     pub state: State,
+    /// Where the issue lives. `None` in a payload captured before the
+    /// query asked, which is the repository the edge starts in.
+    #[serde(default, deserialize_with = "named_repo")]
+    pub repository: Option<Repo>,
+}
+
+/// The `repository { nameWithOwner }` of an edge's node: GitHub spells a
+/// repository `owner/name`, which is what [`Repo::parse`] reads.
+fn named_repo<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Repo>, D::Error> {
+    #[derive(Deserialize)]
+    struct Named {
+        #[serde(rename = "nameWithOwner")]
+        name_with_owner: String,
+    }
+    let Some(named) = Option::<Named>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    Repo::parse(&named.name_with_owner)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!("{} is no repository", named.name_with_owner))
+        })
+        .map(Some)
+}
+
+impl Edge {
+    /// Whether the edge stays inside `repo`.
+    #[must_use]
+    pub fn within(&self, repo: &Repo) -> bool {
+        self.repository.as_ref().is_none_or(|there| there == repo)
+    }
+
+    /// The issue named as GitHub names it across repositories:
+    /// `owner/name#number` abroad, `#number` at home in `repo`.
+    #[must_use]
+    pub fn spelled(&self, repo: &Repo) -> String {
+        match &self.repository {
+            Some(there) if there != repo => format!("{there}#{}", self.number),
+            _ => format!("#{}", self.number),
+        }
+    }
 }
 
 /// One issue and the edges around it: the children it decomposes into,
@@ -348,6 +398,22 @@ impl GitHub {
             token,
             agent,
         }
+    }
+
+    /// What git answers GitHub with, as the holder of the client's own
+    /// token: every git of a build that talks to the remote runs
+    /// [as](crate::git::run_as) these.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`Error::TokenAbsent`] when there is no token.
+    #[cfg(all(unix, feature = "native"))]
+    pub fn credentials(&self) -> Result<Credentials, Error> {
+        let secret = self.token.clone().ok_or(Error::TokenAbsent)?;
+        Ok(Credentials {
+            username: TOKEN_USER.to_owned(),
+            secret,
+        })
     }
 
     // ----- the REST verbs -----
@@ -544,20 +610,32 @@ impl GitHub {
             .transpose()
     }
 
-    /// Merges a pull request. A branch that is not mergeable — red checks, a
-    /// ruleset, a conflict — comes back as [`Error::Refused`] in GitHub's
-    /// own words.
+    /// Merges a pull request. A `head` pins the merge to the commit the
+    /// branch is expected to stand on: GitHub refuses with 409 when it has
+    /// moved, so what merges is the commit the caller meant. A branch that
+    /// is not mergeable — red checks, a ruleset, a conflict — comes back as
+    /// [`Error::Refused`] in GitHub's own words.
     ///
     /// # Errors
     ///
     /// Refuses with [`Error::TokenAbsent`] when there is no token; otherwise
     /// an [`Error`] when GitHub cannot be asked or answers no.
-    pub fn merge_pull(&self, repo: &Repo, number: u64, method: Merge) -> Result<(), Error> {
+    pub fn merge_pull(
+        &self,
+        repo: &Repo,
+        number: u64,
+        head: Option<&str>,
+        method: Merge,
+    ) -> Result<(), Error> {
         self.needs_token()?;
+        let mut body = json!({ "merge_method": method.wire() });
+        if let Some(sha) = head {
+            body["sha"] = json!(sha);
+        }
         self.send::<Value>(
             Method::Put,
             &format!("repos/{repo}/pulls/{number}/merge"),
-            &json!({ "merge_method": method.wire() }),
+            &body,
         )?;
         Ok(())
     }
@@ -649,6 +727,26 @@ impl GitHub {
             encoded(git_ref)
         ))?;
         Ok(wire.check_runs)
+    }
+
+    /// How many commit statuses `git_ref` carries: the older Status API's
+    /// side of a commit, which [`check_conclusions`](Self::check_conclusions)
+    /// never reads. Its one use is telling a repository whose CI posts
+    /// statuses from one whose CI has yet to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn status_count(&self, repo: &Repo, git_ref: &str) -> Result<usize, Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            total_count: usize,
+        }
+        let wire: Wire = self.get(&format!(
+            "repos/{repo}/commits/{}/status?per_page=1",
+            encoded(git_ref)
+        ))?;
+        Ok(wire.total_count)
     }
 
     // ----- the GraphQL verbs -----
@@ -1043,7 +1141,9 @@ fn variables(repo: &Repo, number: u64) -> Value {
 // itself caps sub-issues at one hundred per parent, and an issue blocked by
 // more than a hundred others has problems no client can fix. `pageInfo`
 // rides along so an overflowing page is a refusal in [`graph`], never a
-// silent truncation.
+// silent truncation. Each edge names its repository, because both edge
+// kinds may leave the repository they start in and a bare number would
+// read there as this repository's own.
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
@@ -1053,9 +1153,10 @@ const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { 
 const GRAPH_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { issue(number: $number) { \
      number title state body \
-     subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
-     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
-     blocking(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
+     subIssues(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } \
+     blockedBy(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } \
+     blocking(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } } } } \
+     fragment edge on Issue { number title state repository { nameWithOwner } }";
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ADD_SUB_ISSUE: &str = "mutation($from: ID!, $to: ID!) { \
@@ -1072,6 +1173,9 @@ const ADD_BLOCKED_BY: &str = "mutation($from: ID!, $to: ID!) { \
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const REMOVE_BLOCKED_BY: &str = "mutation($from: ID!, $to: ID!) { \
      removeBlockedBy(input: {issueId: $from, blockingIssueId: $to}) { clientMutationId } }";
+
+#[cfg(all(test, feature = "native"))]
+pub(crate) mod fake;
 
 #[cfg(test)]
 mod tests {
@@ -1149,6 +1253,18 @@ mod tests {
     fn login_refuses_without_a_token_before_asking() {
         let github = GitHub::at("http://127.0.0.1:9", None);
         assert!(matches!(github.login(), Err(Error::TokenAbsent)));
+    }
+
+    #[cfg(all(unix, feature = "native"))]
+    #[test]
+    fn the_clients_token_is_what_git_answers_github_with() {
+        let github = GitHub::at("http://127.0.0.1:9", Some("ghp_sesame".into()));
+        let credentials = github.credentials().unwrap();
+        assert_eq!(credentials.username, "x-access-token");
+        assert_eq!(credentials.secret, "ghp_sesame".into());
+
+        let tokenless = GitHub::at("http://127.0.0.1:9", None);
+        assert!(matches!(tokenless.credentials(), Err(Error::TokenAbsent)));
     }
 
     #[test]
@@ -1424,7 +1540,7 @@ mod tests {
             github.close_issue(&repo, 1).map(drop),
             github.reopen_issue(&repo, 1).map(drop),
             github.open_pull(&repo, "t", "h", "b", "").map(drop),
-            github.merge_pull(&repo, 1, Merge::Squash),
+            github.merge_pull(&repo, 1, None, Merge::Squash),
             github.create_branch(&repo, "feature-1", &"a".repeat(40)),
             github.issue_graph(&repo, 1).map(drop),
             github.add_sub_issue(&repo, 1, 2),
@@ -1463,6 +1579,24 @@ mod tests {
         for base in ["http://localhost:9", "http://localhost:9/"] {
             assert_eq!(GitHub::at(base, None).api, "http://localhost:9");
         }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn the_status_count_is_the_combined_status_total() {
+        use fake::{FakeGitHub, Request, TIP};
+        let fake = FakeGitHub::spawn();
+        fake.world().statuses.insert(TIP.to_owned(), 2);
+        let count = fake.github().status_count(&FakeGitHub::repo(), TIP);
+        assert_eq!(count, Ok(2));
+        assert_eq!(
+            fake.requests(),
+            [Request::new(
+                "GET",
+                &format!("/repos/fake/repo/commits/{TIP}/status?per_page=1"),
+                Value::Null
+            )]
+        );
     }
 
     #[test]

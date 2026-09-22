@@ -320,7 +320,7 @@ fn pull_for(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
 fn merge_pull(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {
     let method: Merge = serde_json::from_value(arguments["method"].clone())
         .map_err(|_| anyhow!("method must be commit, squash, or rebase"))?;
-    done(github.merge_pull(repo, number(arguments, "number")?, method))
+    done(github.merge_pull(repo, number(arguments, "number")?, None, method))
 }
 
 fn branch_sha(github: &GitHub, repo: &Repo, arguments: &Value) -> Result<Value> {

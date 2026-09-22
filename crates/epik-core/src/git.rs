@@ -11,8 +11,12 @@
 //! from outside comes through; a [`Hash`](struct@Hash) from [`rev_parse`]; the typed listing
 //! from [`status`], [`log`], [`list_worktrees`], and [`list_remotes`];
 //! the text from [`diff`] and [`show`]; and nothing from the rest,
-//! which either did what was asked or failed in git's words.
+//! which either did what was asked or failed in git's words. Beside
+//! `run`, [`run_as`] runs a command as the holder of credentials, for
+//! the remotes that ask.
 
+#[cfg(all(unix, feature = "native"))]
+pub mod askpass;
 pub mod commands;
 #[cfg(all(unix, feature = "native", any(test, feature = "testing")))]
 pub mod testing;
@@ -30,6 +34,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::keystore::Secret;
 #[cfg(feature = "native")]
 use crate::process::{Finished, Process};
+#[cfg(all(unix, feature = "native"))]
+use askpass::{Askpass, Credentials};
 #[cfg(feature = "native")]
 use commands::{
     AbortMerge, Add, AddWorktree, Branch, Change, Clone, Command, Commit, DeleteBranch, Diff,
@@ -90,17 +96,23 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// verb above to read.
 #[cfg(feature = "native")]
 pub fn run(command: &Command) -> Result<Finished> {
-    run_within(command, TIMEOUT)
+    run_within(command, [], TIMEOUT)
 }
 
-/// [`run`] against a stated deadline, which is how the tests exercise
-/// the kill without sitting through the real one.
+/// [`run`] with `env` added to git's environment, which is how
+/// credentials travel, against a stated deadline, which is how the
+/// tests exercise the kill without sitting through the real one.
 #[cfg(feature = "native")]
-fn run_within(command: &Command, timeout: Duration) -> Result<Finished> {
+fn run_within(
+    command: &Command,
+    env: impl IntoIterator<Item = (String, Secret)>,
+    timeout: Duration,
+) -> Result<Finished> {
     // No terminal is attached, so a network verb that wants credentials
     // fails in words instead of waiting for a prompt nobody can see.
     // The user's helpers and SSH config still apply.
-    let env = [("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"))];
+    let prompt = ("GIT_TERMINAL_PROMPT".to_owned(), Secret::from("0"));
+    let env = env.into_iter().chain([prompt]);
     Process::new("git", command.argv(), ".", env, Some(timeout))?.finish()
 }
 
@@ -144,7 +156,7 @@ pub fn clone(clone: Clone) -> Result<Repository> {
 #[cfg(feature = "native")]
 fn clone_within(clone: Clone, timeout: Duration) -> Result<Repository> {
     let into = clone.destination().to_owned();
-    settle(&run_within(&Command::Clone(clone), timeout)?)?;
+    settle(&run_within(&Command::Clone(clone), [], timeout)?)?;
     Ok(Repository(into))
 }
 
@@ -347,6 +359,24 @@ pub fn reset(reset: Reset) -> Result<()> {
 #[cfg(feature = "native")]
 pub fn push(push: Push) -> Result<()> {
     settled(Command::Push(push)).map(drop)
+}
+
+/// Runs `command` as the holder of `credentials`, and settles the
+/// exit as the verbs do. A remote that asks who is there is answered
+/// with `credentials`, on the [`askpass`] rails, whichever command
+/// reached it: a clone, a fetch, a push.
+///
+/// # Errors
+///
+/// An askpass script that could not be written; then [`run`]'s, or
+/// git's own words on a nonzero exit — a remote that refuses the
+/// credentials among them.
+#[cfg(all(unix, feature = "native"))]
+pub fn run_as(command: &Command, credentials: &Credentials) -> Result<Finished> {
+    let askpass = Askpass::new()?;
+    let finished = run_within(command, askpass.env(credentials), TIMEOUT)?;
+    settle(&finished)?;
+    Ok(finished)
 }
 
 /// Lists the remotes.

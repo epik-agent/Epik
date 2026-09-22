@@ -13,5 +13,5 @@ pub mod process;
 #[cfg(feature = "native")]
 pub mod temp;
 pub mod tracker;
-#[cfg(feature = "native")]
+#[cfg(all(unix, feature = "native"))]
 pub mod worktrees;
