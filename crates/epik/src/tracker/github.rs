@@ -90,6 +90,7 @@ mod tests {
             number,
             title: format!("issue {number}"),
             state,
+            repository: None,
         }
     }
 

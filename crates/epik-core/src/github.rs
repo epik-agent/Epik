@@ -59,7 +59,7 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_USER: &str = "x-access-token";
 
 /// A repository, named the way GitHub names one.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Repo {
     pub owner: String,
     name: String,
@@ -259,11 +259,55 @@ impl Check {
 
 /// An issue as it appears at the far end of an edge: enough to schedule
 /// against, not the whole issue.
+///
+/// A number names an issue only inside one repository, and GitHub's
+/// sub-issue and blocked-by edges may leave the repository they start
+/// in, so an edge carries the repository it lands in.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Edge {
     pub number: u64,
     pub title: String,
     pub state: State,
+    /// Where the issue lives. `None` in a payload captured before the
+    /// query asked, which is the repository the edge starts in.
+    #[serde(default, deserialize_with = "named_repo")]
+    pub repository: Option<Repo>,
+}
+
+/// The `repository { nameWithOwner }` of an edge's node: GitHub spells a
+/// repository `owner/name`, which is what [`Repo::parse`] reads.
+fn named_repo<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Repo>, D::Error> {
+    #[derive(Deserialize)]
+    struct Named {
+        #[serde(rename = "nameWithOwner")]
+        name_with_owner: String,
+    }
+    let Some(named) = Option::<Named>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    Repo::parse(&named.name_with_owner)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!("{} is no repository", named.name_with_owner))
+        })
+        .map(Some)
+}
+
+impl Edge {
+    /// Whether the edge stays inside `repo`.
+    #[must_use]
+    pub fn within(&self, repo: &Repo) -> bool {
+        self.repository.as_ref().is_none_or(|there| there == repo)
+    }
+
+    /// The issue named as GitHub names it across repositories:
+    /// `owner/name#number` abroad, `#number` at home in `repo`.
+    #[must_use]
+    pub fn spelled(&self, repo: &Repo) -> String {
+        match &self.repository {
+            Some(there) if there != repo => format!("{there}#{}", self.number),
+            _ => format!("#{}", self.number),
+        }
+    }
 }
 
 /// One issue and the edges around it: the children it decomposes into,
@@ -1085,7 +1129,9 @@ fn variables(repo: &Repo, number: u64) -> Value {
 // itself caps sub-issues at one hundred per parent, and an issue blocked by
 // more than a hundred others has problems no client can fix. `pageInfo`
 // rides along so an overflowing page is a refusal in [`graph`], never a
-// silent truncation.
+// silent truncation. Each edge names its repository, because both edge
+// kinds may leave the repository they start in and a bare number would
+// read there as this repository's own.
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
@@ -1095,9 +1141,10 @@ const ID_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { 
 const GRAPH_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { \
      repository(owner: $owner, name: $name) { issue(number: $number) { \
      number title state body \
-     subIssues(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
-     blockedBy(first: 100) { nodes { number title state } pageInfo { hasNextPage } } \
-     blocking(first: 100) { nodes { number title state } pageInfo { hasNextPage } } } } }";
+     subIssues(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } \
+     blockedBy(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } \
+     blocking(first: 100) { nodes { ...edge } pageInfo { hasNextPage } } } } } \
+     fragment edge on Issue { number title state repository { nameWithOwner } }";
 
 #[cfg_attr(not(feature = "native"), allow(dead_code))]
 const ADD_SUB_ISSUE: &str = "mutation($from: ID!, $to: ID!) { \
