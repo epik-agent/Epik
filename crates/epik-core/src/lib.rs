@@ -4,8 +4,10 @@ pub mod config;
 pub mod dag;
 pub mod git;
 pub mod github;
+pub mod happening;
 pub mod keystore;
 pub mod model_tools;
+pub mod monitor;
 #[cfg(feature = "native")]
 pub mod plan;
 #[cfg(feature = "native")]
