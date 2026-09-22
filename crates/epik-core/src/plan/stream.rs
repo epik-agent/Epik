@@ -13,35 +13,10 @@ use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::task::Task;
-use crate::agent::Update;
-
-/// Something that happened at `node`, which is whatever the plan names
-/// its nodes by.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Event<N> {
-    pub node: N,
-    pub happened: Happened,
-}
-
-/// What a task has to tell: its lifecycle, and between the start and
-/// the end, what its process said.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum Happened {
-    /// The task began to run.
-    Started,
-    /// An agent said this on stdout, as its engine's protocol reads.
-    Said(Update),
-    /// A line of the process's stderr: where a CLI's last words land.
-    Stderr(String),
-    /// The task succeeded.
-    Finished,
-    /// The task failed, in the error's own words, causes and all.
-    Failed(String),
-}
+pub use crate::happening::{Event, Happened};
 
 /// Where `E`s go as they happen, from any thread. Clones share the one
 /// receiver, which is called as each `E` is emitted and keeps its own

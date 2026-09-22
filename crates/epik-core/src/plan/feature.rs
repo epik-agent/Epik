@@ -19,7 +19,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 
 use super::commit::{Commit, NothingToCommit};
 use super::github::{CheckWait, CreateBranch, Feature, OpenPull};
@@ -33,44 +32,13 @@ use crate::git::askpass::Credentials;
 use crate::git::commands::Hash;
 use crate::git::url::Url;
 use crate::github::Merge;
+pub use crate::happening::{Name, Step};
 use crate::worktrees::{LinkedWorktree, Worktrees};
 
 /// The branch issue `number` is implemented on.
 #[must_use]
 pub fn issue_branch(number: u64) -> String {
     format!("issue-{number}")
-}
-
-/// What a feature build's events are filed under: a node of its plan,
-/// or one step of an issue's node.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum Name {
-    Branch,
-    Issue(u64),
-    Step(u64, Step),
-    PullRequest,
-}
-
-/// The steps of an issue's node, in the order they run.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum Step {
-    /// The issue's branch cut at the feature branch's tip, in a
-    /// worktree of its own.
-    Worktree,
-    /// The agent's run there.
-    Agent,
-    /// What the agent left, committed as Epik.
-    Commit,
-    /// The issue's branch pushed.
-    Push,
-    /// The issue's pull request opened into the feature branch.
-    PullRequest,
-    /// The wait for the pushed commit's checks.
-    Checks,
-    /// The pull request merged, at the commit its checks judged.
-    Merge,
-    /// The issue closed.
-    Close,
 }
 
 /// Everything one feature is built with. The token of the feature's
@@ -234,6 +202,11 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             slots: slots.clone(),
         };
         self.step(Step::Push, push.run()).await?;
+        // The branch is on the remote now, so the commit is a fact a
+        // watcher can name: said after the push, under the step that
+        // made it true.
+        self.sink(Step::Push)
+            .emit(Happened::Pushed(pushed.to_string()));
         Ok(pushed)
     }
 
@@ -786,6 +759,85 @@ mod tests {
         let words = failure(&events, Name::Step(3, Step::Commit));
         assert_eq!(words, "the worktree is on no branch, not on issue-3");
         assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
+    }
+
+    /// The acceptance the monitor is for: a real build of #158's
+    /// shape, every event of it recorded, folded into one watch of
+    /// four issues each ending Merged at the commit its push threaded.
+    /// The fold reads the build's own stream — nothing here speaks a
+    /// state.
+    #[tokio::test]
+    async fn a_build_folds_into_one_watch_of_merged_issues() {
+        use crate::monitor::{Change, Entry, Progress, RunId, State};
+
+        let issues = [154, 155, 156, 157];
+        let hosted = Hosted::new("feature-folded", &issues);
+        let (build, mut receiver) = hosted.build(2, edits);
+        timeout(PATIENCE, build.plan(diamond()).execute())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The run as a host records it: the reservation, the plan, the
+        // build's whole stream, and the end.
+        let run = RunId(1);
+        let work = diamond();
+        let titles = work
+            .nodes()
+            .map(|node| (*node.value(), format!("Lay stone {}", node.value())))
+            .collect();
+        let changes = [
+            Change::Reserved {
+                run,
+                feature: FEATURE,
+                repository: "/r".to_owned(),
+                branch: feature_branch(FEATURE),
+                base: Some("main".to_owned()),
+            },
+            Change::Started {
+                run,
+                work,
+                title: "Build the thing".to_owned(),
+                titles,
+                problems: Vec::new(),
+                checked: false,
+            },
+        ];
+        let heard = received(&mut receiver);
+        let spoken = heard
+            .into_iter()
+            .map(|event| Change::Happened { run, event });
+        let changes = changes
+            .into_iter()
+            .chain(spoken)
+            .chain([Change::Finished { run }]);
+
+        let mut progress = Progress::default();
+        for (seq, change) in changes.enumerate() {
+            progress.absorb(&Entry {
+                seq: seq as u64,
+                at: 1_000 + seq as u64,
+                change,
+            });
+        }
+
+        let watch = progress.watch(run).unwrap();
+        let states = watch.states();
+        assert_eq!(states.len(), issues.len());
+        for issue in issues {
+            let tip = hosted.tip(&issue_branch(issue)).expect("a pushed branch");
+            assert_eq!(
+                states[&issue],
+                State::Merged {
+                    commit: tip.to_string(),
+                    checked: false,
+                },
+                "#{issue} merged at the commit it pushed"
+            );
+        }
+        let counts = watch.counts();
+        assert_eq!((counts.merged, counts.total), (issues.len(), issues.len()));
+        assert!(!watch.live());
     }
 
     #[test]
