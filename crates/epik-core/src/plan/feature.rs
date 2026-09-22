@@ -4,16 +4,17 @@
 //! A [`Build`] is everything a feature is built with, and
 //! [`Build::plan`] lays the three kinds of [`Node`] over the tracker's
 //! [`Dag`] of issue numbers. Every node holds the one build, so every
-//! process any of them launches goes through the one set of slots, and
+//! agent any of them launches goes through the one set of slots, and
 //! everything any of them says goes into the one sink, under its
 //! [`Name`].
 //!
 //! An [`Issue`] is a sequence of [`Step`]s, each awaited in order and
-//! each with its lifecycle on the stream. The steps that run a process
-//! hold a slot while it runs; the steps that talk to GitHub hold none,
-//! so an issue waiting on its checks leaves its slot to another's
-//! agent. The pushed commit and the pull request's number are threaded
-//! from step to step inside the one node.
+//! each with its lifecycle on the stream. The agent's step holds a slot
+//! while it runs; the git steps and the steps that talk to GitHub hold
+//! none, so an issue waiting on its checks — or committing what its
+//! agent left — leaves its slot to another issue's agent. The pushed
+//! commit and the pull request's number are threaded from step to step
+//! inside the one node.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use super::github::{CheckWait, CreateBranch, Feature, OpenPull};
 use super::push::Push;
 use super::stream::{Event, Happened, Reported, Sink, reported};
 use super::task::Task;
-use super::{Implement, Plan, ProcessSlots};
+use super::{AgentSlots, Implement, Plan, briefly};
 use crate::agent::Agent;
 use crate::dag::Dag;
 use crate::git::askpass::Credentials;
@@ -53,8 +54,10 @@ pub struct Build<A> {
     pub checks: CheckWait,
     /// How an issue's pull request merges into the feature branch.
     pub merge: Merge,
-    /// The slots every process of the build runs in.
-    pub slots: ProcessSlots,
+    /// The slots the build's agents run in. Held by the host and
+    /// cloned to every build it starts, so builds at once run no more
+    /// agents between them than one does.
+    pub slots: AgentSlots,
     pub sink: Sink<Event<Name>>,
     pub agent: Agents<A>,
 }
@@ -149,16 +152,15 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
 }
 
 impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
-    /// The steps that run processes, each in a slot for as long as its
-    /// process runs: the commit the issue's branch was pushed at. The
-    /// worktree stands until the push returns, and its removal is
-    /// git's work too, so it goes through the door.
+    /// The steps that launch a process: the commit the issue's branch
+    /// was pushed at. Only the agent among them takes a slot; the
+    /// worktree's making and its removal are git, short and unbounded.
+    /// The worktree stands until the push returns.
     async fn pushed(&self) -> Result<Hash> {
         let Build {
             feature,
             url,
             worktrees,
-            slots,
             ..
         } = &*self.build;
         let (worktrees, url) = (worktrees.clone(), url.clone());
@@ -167,19 +169,18 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             format!("origin/{}", feature.branch()),
         );
         let github = feature.github.clone();
-        let added = slots.run(move || {
+        let added = briefly(move || {
             let credentials = github.credentials()?;
             let linked = worktrees.add(&url, &branch, &at, &credentials)?;
             Ok((linked, credentials))
         });
         let (linked, credentials) = self.step(Step::Worktree, added).await?;
         let pushed = self.worked(&linked, credentials).await;
-        slots
-            .run(move || {
-                drop(linked);
-                Ok(())
-            })
-            .await?;
+        briefly(move || {
+            drop(linked);
+            Ok(())
+        })
+        .await?;
         pushed
     }
 
@@ -199,7 +200,6 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             worktree: worktree.clone(),
             branch: linked.branch().to_owned(),
             credentials,
-            slots: slots.clone(),
         };
         // The commit is a fact once the push has put it on the
         // remote, and it is the commit every step after this one
@@ -235,7 +235,6 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             worktree: linked.worktree().clone(),
             branch: linked.branch().to_owned(),
             message: format!("Implement #{}", self.number),
-            slots: self.build.slots.clone(),
         };
         match commit.commit().await {
             Err(error) if error.is::<NothingToCommit>() => {
@@ -394,7 +393,7 @@ mod tests {
                     settles: NonZeroUsize::MIN,
                 },
                 merge: Merge::Squash,
-                slots: ProcessSlots::new(NonZeroUsize::new(slots).unwrap()),
+                slots: AgentSlots::new(NonZeroUsize::new(slots).unwrap()),
                 sink,
                 agent: Box::new(move |issue, cwd| Script {
                     cwd: cwd.to_owned(),
@@ -666,6 +665,114 @@ mod tests {
             at(&events, waiting, &Happened::Finished),
         ];
         assert!(order[0].is_some() && order.is_sorted(), "{order:?}");
+    }
+
+    /// A script that leaves an edit and then waits for `flag`, so the
+    /// agent holds its slot until the test raises it.
+    fn paused(flag: &str) -> impl Fn(u64) -> String + Send + Sync + 'static {
+        let flag = flag.to_owned();
+        move |issue| {
+            format!("echo work > issue-{issue}.txt; until [ -e '{flag}' ]; do sleep 0.01; done")
+        }
+    }
+
+    #[tokio::test]
+    async fn with_every_slot_held_by_an_agent_the_git_of_a_waiting_issue_still_runs() {
+        // Four issues in one slot, every agent paused: whichever holds
+        // it holds it until the flag is raised, and the three waiting
+        // issues cut their worktrees meanwhile — git, and so unslotted.
+        let issues = [1, 2, 3, 4];
+        let hosted = Hosted::new("feature-git-unslotted", &issues);
+        let flag = hosted.scratch.join("flag");
+        let (build, mut receiver) = hosted.build(1, paused(&flag));
+        let slots = build.slots.clone();
+        let work = Dag::new(issues.map(|issue| After::new(issue, [])).into()).unwrap();
+        let run = tokio::spawn(build.plan(work).execute());
+
+        // Every worktree is cut though the one slot never comes free.
+        let mut events = Vec::new();
+        let cut = |events: &[Event<Name>], issue| {
+            at(
+                events,
+                Name::Step(issue, Step::Worktree),
+                &Happened::Finished,
+            )
+            .is_some()
+        };
+        timeout(PATIENCE, async {
+            loop {
+                sleep(Duration::from_millis(5)).await;
+                events.extend(received(&mut receiver));
+                if issues.iter().all(|&issue| cut(&events, issue)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("every worktree was cut while the one slot was held");
+        assert_eq!(slots.0.available_permits(), 0, "an agent holds the slot");
+
+        std::fs::write(&flag, "").unwrap();
+        timeout(PATIENCE, run).await.unwrap().unwrap().unwrap();
+        assert_eq!(slots.0.available_permits(), 1, "and gives it back");
+    }
+
+    #[tokio::test]
+    async fn four_slots_bound_the_agents_of_every_build_that_draws_on_them() {
+        // Two features of three issues each, on the host's one set of
+        // four slots. Every agent pauses on the one flag, so the six
+        // pile up against the four: four take a slot and two wait.
+        const SLOTS: usize = 4;
+        let issues = [1, 2, 3];
+        let first = Hosted::new("feature-host-a", &issues);
+        let second = Hosted::new("feature-host-b", &issues);
+        let flag = first.scratch.join("flag");
+        let slots = AgentSlots::new(NonZeroUsize::new(SLOTS).unwrap());
+        let started = |hosted: &Hosted| {
+            let (mut build, receiver) = hosted.build(SLOTS, paused(&flag));
+            build.slots = slots.clone();
+            let work = Dag::new(issues.map(|issue| After::new(issue, [])).into()).unwrap();
+            (tokio::spawn(build.plan(work).execute()), receiver)
+        };
+        let (a, mut heard_a) = started(&first);
+        let (b, mut heard_b) = started(&second);
+
+        // The four slots fill and stay full: the fifth and sixth agents
+        // wait, and no wait of theirs can take a slot that is out.
+        timeout(PATIENCE, async {
+            while slots.0.available_permits() > 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("four agents filled the four slots");
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(slots.0.available_permits(), 0, "never a fifth slot");
+
+        // Released, all six run and every slot comes back.
+        std::fs::write(&flag, "").unwrap();
+        let (mut ran_a, mut ran_b) = (Vec::new(), Vec::new());
+        timeout(PATIENCE, async {
+            while !(a.is_finished() && b.is_finished()) {
+                sleep(Duration::from_millis(5)).await;
+                ran_a.extend(received(&mut heard_a));
+                ran_b.extend(received(&mut heard_b));
+            }
+        })
+        .await
+        .unwrap();
+        timeout(PATIENCE, a).await.unwrap().unwrap().unwrap();
+        timeout(PATIENCE, b).await.unwrap().unwrap().unwrap();
+        ran_a.extend(received(&mut heard_a));
+        ran_b.extend(received(&mut heard_b));
+
+        for ran in [&ran_a, &ran_b] {
+            for issue in issues {
+                let name = Name::Step(issue, Step::Agent);
+                assert!(at(ran, name, &Happened::Finished).is_some(), "{name:?}");
+            }
+        }
+        assert_eq!(slots.0.available_permits(), SLOTS, "and gave them back");
     }
 
     #[tokio::test]

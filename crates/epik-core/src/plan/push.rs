@@ -3,16 +3,17 @@
 
 use anyhow::Result;
 
-use super::ProcessSlots;
+use super::briefly;
 use super::task::Task;
 use crate::git::askpass::Credentials;
 use crate::git::commands::{self, Command};
 use crate::git::{self, Repository};
 
 /// `branch` of `worktree` pushed to its origin when the task runs,
-/// [as](git::run_as) the holder of `credentials`, in one of the
-/// `slots` for as long as git runs. A push that fails is the task's
-/// failure, in git's own words.
+/// [as](git::run_as) the holder of `credentials`. The push is one git,
+/// short enough to go straight to the blocking pool: a
+/// [slot](super::AgentSlots) is an agent's. A push that fails is the
+/// task's failure, in git's own words.
 ///
 /// The branch is cut afresh each run, so a run that failed after its
 /// push leaves one standing that the next cut does not descend from.
@@ -25,23 +26,18 @@ pub struct Push {
     pub worktree: Repository,
     pub branch: String,
     pub credentials: Credentials,
-    pub slots: ProcessSlots,
 }
 
 impl Task for Push {
     async fn run(&self) -> Result<()> {
         let push = commands::Push::over(self.worktree.clone(), self.branch.clone())?;
         let (push, credentials) = (Command::Push(push), self.credentials.clone());
-        self.slots
-            .run(move || git::run_as(&push, &credentials).map(drop))
-            .await
+        briefly(move || git::run_as(&push, &credentials).map(drop)).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
-
     use super::*;
     use crate::git::commands::{Branch, Hash, RevParse, Switch};
     use crate::git::testing::{
@@ -74,7 +70,6 @@ mod tests {
             worktree: linked.worktree().clone(),
             branch: linked.branch().to_owned(),
             credentials: credentials(),
-            slots: ProcessSlots::new(NonZeroUsize::MIN),
         }
     }
 

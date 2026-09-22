@@ -14,7 +14,7 @@ use epik_core::git::testing::{
 };
 use epik_core::git::url::Url;
 use epik_core::plan::stream::received;
-use epik_core::plan::{Happened, Implement, Plan, ProcessSlots, Reported, Sink, Task};
+use epik_core::plan::{AgentSlots, Happened, Implement, Plan, Reported, Sink, Task};
 use epik_core::process::Exit;
 use epik_core::temp::Scratch;
 use epik_core::tracker::IssueTracker;
@@ -26,8 +26,8 @@ use support::scripted::{self, Scripted, assert_written};
 
 const TRACKER: &str = include_str!("fixtures/adder/issues.json");
 
-fn slots(count: usize) -> ProcessSlots {
-    ProcessSlots::new(NonZeroUsize::new(count).unwrap())
+fn slots(count: usize) -> AgentSlots {
+    AgentSlots::new(NonZeroUsize::new(count).unwrap())
 }
 
 #[tokio::test]
