@@ -1006,33 +1006,83 @@ impl Reset {
     }
 }
 
+/// What a [`Push`] claims of the branch already at the remote.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Lease {
+    /// It is an ancestor of what is sent, so the push only adds. Git
+    /// refuses anything else as a non-fast-forward.
+    Descent,
+    /// It is where this repository's last fetch of the remote left it,
+    /// and nowhere if that fetch found none. What is sent replaces it
+    /// however the two histories relate; a branch moved since that
+    /// fetch is refused as `stale info`.
+    AsLastSeen,
+}
+
+impl Lease {
+    /// The flag that states the lease, for the branch it is about.
+    fn flag(self, branch: &str) -> Option<String> {
+        match self {
+            Self::Descent => None,
+            Self::AsLastSeen => Some(format!("--force-with-lease=refs/heads/{branch}")),
+        }
+    }
+}
+
 /// `git push`: `branch` of `repository` sent to `remote` under the same
 /// name, by the exact refspec, so no configuration decides where it
-/// goes.
+/// goes, and under a [`Lease`] on what stands there.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Push {
     repository: Repository,
     remote: Remote,
     branch: String,
+    lease: Lease,
 }
 
 impl Push {
-    /// `branch` pushed to `remote`.
+    /// `branch` pushed to `remote`, adding to what stands there.
     ///
     /// # Errors
     ///
     /// A branch beginning with `-`: git would read it as a flag.
     pub fn new(repository: Repository, remote: Remote, branch: String) -> Result<Self> {
+        Self::leased(repository, remote, branch, Lease::Descent)
+    }
+
+    /// `branch` pushed to the origin over the branch of the same name
+    /// as this repository last saw it: how a rerun sends a branch it
+    /// cut afresh, where the run before it left one standing.
+    ///
+    /// The lease is stated against the remote-tracking ref, which only
+    /// a configured remote has and only a fetch of it writes, so it
+    /// asserts what this repository itself last read and nothing more.
+    ///
+    /// # Errors
+    ///
+    /// [`Push::new`]'s.
+    pub fn over(repository: Repository, branch: String) -> Result<Self> {
+        Self::leased(repository, Remote::origin(), branch, Lease::AsLastSeen)
+    }
+
+    fn leased(
+        repository: Repository,
+        remote: Remote,
+        branch: String,
+        lease: Lease,
+    ) -> Result<Self> {
         plain("branch", &branch)?;
         Ok(Self {
             repository,
             remote,
             branch,
+            lease,
         })
     }
 
     fn argv(&self) -> Vec<String> {
         let mut argv = within(&self.repository, "push");
+        argv.extend(self.lease.flag(&self.branch));
         argv.extend([
             "--".to_owned(),
             self.remote.to_string(),
@@ -1712,6 +1762,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_leased_push_names_the_branch_the_lease_is_stated_against() {
+        let push = Push::over(repository(), "issue-1".to_owned()).unwrap();
+        assert_eq!(
+            Command::Push(push).argv(),
+            [
+                "-C",
+                "/work/repo",
+                "push",
+                "--force-with-lease=refs/heads/issue-1",
+                "--",
+                "origin",
+                "refs/heads/issue-1:refs/heads/issue-1"
+            ]
+        );
+        assert!(Push::over(repository(), "-f".to_owned()).is_err());
     }
 
     #[test]
