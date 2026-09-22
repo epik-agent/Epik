@@ -11,6 +11,8 @@
 //! [`Pull`] whose number [`merge`](Feature::merge) takes. A step that is
 //! a whole node is a [`Task`]: [`CreateBranch`] and [`OpenPull`].
 
+use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +20,7 @@ use tokio::task::spawn_blocking;
 use tokio::time::{Instant, sleep};
 
 use super::task::Task;
-use crate::github::{Check, Error, GitHub, Merge, Pull, Repo};
+use crate::github::{Check, Error, GitHub, Merge, Pull, Repo, State};
 
 /// The branch feature `number` is built on.
 #[must_use]
@@ -45,6 +47,13 @@ pub struct CheckWait {
     pub every: Duration,
     /// How long the wait lasts before it fails.
     pub bound: Duration,
+    /// How many consecutive polls must read the same green list before
+    /// it is the verdict. GitHub creates a job's check run when the job
+    /// is queued, so a job waiting on another has no run while that one
+    /// goes: a single poll can land on a list that is green only because
+    /// it is still filling. Epik cannot know a repository's job names,
+    /// so it waits for the list to settle.
+    pub settles: NonZeroUsize,
 }
 
 /// What a wait that succeeded saw.
@@ -57,14 +66,17 @@ pub enum Verdict {
 }
 
 /// One poll's check runs, read together.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Reading {
     Empty,
     /// The names of the runs still going; none is red.
     Pending(String),
     /// The names of the runs that concluded red.
     Red(String),
-    Green,
+    /// The names of every run, sorted: the set two polls compare. A
+    /// green list that gained or lost a run between them has not
+    /// settled.
+    Green(BTreeSet<String>),
 }
 
 impl Reading {
@@ -85,7 +97,7 @@ impl Reading {
         } else if checks.is_empty() {
             Self::Empty
         } else {
-            Self::Green
+            Self::Green(checks.iter().map(|check| check.name.clone()).collect())
         }
     }
 }
@@ -145,17 +157,21 @@ impl Feature {
         .await
     }
 
-    /// Waits for the check runs on commit `sha` to conclude green,
-    /// polling: one read, then a sleep of `wait.every`. `sha` is the
-    /// commit Epik pushed, so a push racing the wait is never judged in
-    /// its place.
+    /// Waits for the check runs on commit `sha` to conclude green and to
+    /// stay that way for `wait.settles` consecutive polls: one read,
+    /// then a sleep of `wait.every`. `sha` is the commit Epik pushed, so
+    /// a push racing the wait is never judged in its place.
     ///
     /// # Errors
     ///
     /// A red check run, by name; the bound reached with runs still
-    /// going or, with checks expected, with none seen; GitHub's failure.
+    /// going, with a green list still moving, or, with checks expected,
+    /// with none seen; GitHub's failure.
     pub async fn await_checks(&self, sha: &str, wait: CheckWait) -> Result<Verdict> {
         let deadline = Instant::now() + wait.bound;
+        // A reading and how many consecutive polls have read it. Before
+        // the first poll that is the empty list, read zero times.
+        let mut held = (Reading::Empty, 0usize);
         loop {
             let polled = sha.to_owned();
             let checks = self
@@ -163,15 +179,27 @@ impl Feature {
                 .await?;
             let bound = wait.bound;
             let out_of_time = Instant::now() + wait.every > deadline;
-            match Reading::of(&checks) {
-                Reading::Green => return Ok(Verdict::Green),
+            let reading = Reading::of(&checks);
+            held = match held {
+                (same, times) if same == reading => (same, times + 1),
+                _ => (reading.clone(), 1),
+            };
+            let settled = held.1 >= wait.settles.get();
+            match reading {
+                Reading::Green(_) if settled => return Ok(Verdict::Green),
                 Reading::Empty if !wait.expected => return Ok(Verdict::Unclaimed),
                 Reading::Red(names) => bail!("checks failed on {sha}: {names}"),
                 Reading::Pending(names) if out_of_time => {
                     bail!("checks still running on {sha} after {bound:?}: {names}")
                 }
+                Reading::Green(names) if out_of_time => {
+                    let names = Vec::from_iter(names).join(", ");
+                    bail!("green on {sha} never settled within {bound:?}: {names}")
+                }
                 Reading::Empty if out_of_time => return Err(self.no_check_run(sha, bound).await),
-                Reading::Pending(_) | Reading::Empty => sleep(wait.every).await,
+                Reading::Green(_) | Reading::Pending(_) | Reading::Empty => {
+                    sleep(wait.every).await;
+                }
             }
         }
     }
@@ -196,14 +224,19 @@ impl Feature {
         }
     }
 
-    /// Merges pull request `pull`. A refusal — a conflict, a ruleset, a
-    /// red required check — is [`Error::Refused`] in GitHub's own words.
+    /// Merges pull request `pull`, whose head must still stand on
+    /// `judged` — the commit [`await_checks`](Self::await_checks) read.
+    /// A push that moved the branch in between is GitHub's 409, so only
+    /// the commit the checks judged is merged. A refusal — a conflict,
+    /// a ruleset, a red required check — is [`Error::Refused`] in
+    /// GitHub's own words.
     ///
     /// # Errors
     ///
     /// GitHub's failure.
-    pub async fn merge(&self, pull: u64, method: Merge) -> Result<()> {
-        self.ask(move |github, repo| Ok(github.merge_pull(repo, pull, method)?))
+    pub async fn merge(&self, pull: u64, judged: &str, method: Merge) -> Result<()> {
+        let judged = judged.to_owned();
+        self.ask(move |github, repo| Ok(github.merge_pull(repo, pull, Some(&judged), method)?))
             .await
     }
 
@@ -230,8 +263,15 @@ impl Feature {
 }
 
 /// A pull request titled as issue `number` is, its body the keyword
-/// that closes that issue: what fills GitHub's Development field.
+/// that closes that issue: what fills GitHub's Development field. An
+/// open pull request `head` already produced is adopted, the way a
+/// standing feature branch is; a closed one is history, and a fresh
+/// pull request is opened over it.
 fn closing_pull(github: &GitHub, repo: &Repo, number: u64, head: &str, base: &str) -> Result<Pull> {
+    let standing = github.pull_for(repo, head)?;
+    if let Some(pull) = standing.filter(|pull| pull.state == State::Open) {
+        return Ok(pull);
+    }
     let title = github.issue(repo, number)?.title;
     Ok(github.open_pull(repo, &title, head, base, &format!("Closes #{number}"))?)
 }
@@ -279,6 +319,7 @@ mod tests {
             expected,
             every: Duration::from_millis(5),
             bound: Duration::from_millis(40),
+            settles: NonZeroUsize::new(2).unwrap(),
         }
     }
 
@@ -303,6 +344,11 @@ mod tests {
 
     fn get(path: &str) -> Request {
         sent("GET", path, Value::Null)
+    }
+
+    /// The look for the pull request `head` already produced.
+    fn standing(head: &str) -> Request {
+        get(&format!("/pulls?state=all&per_page=1&head=fake:{head}"))
     }
 
     #[test]
@@ -359,6 +405,7 @@ mod tests {
         assert_eq!(
             fake.requests()[before..],
             [
+                standing("issue-3"),
                 get("/issues/3"),
                 sent(
                     "POST",
@@ -386,6 +433,7 @@ mod tests {
             fake.requests()[before..],
             [
                 get(""),
+                standing("feature-7"),
                 get("/issues/7"),
                 sent(
                     "POST",
@@ -402,21 +450,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_is_a_put_naming_its_method() {
+    async fn a_merge_is_a_put_naming_its_method_and_the_commit_judged() {
         let fake = FakeGitHub::spawn();
         let feature = feature(&fake);
         feature.create_branch().await.unwrap();
         let pull = feature.open_issue_pull(3, "issue-3").await.unwrap();
-        feature.merge(pull.number, Merge::Squash).await.unwrap();
+        feature
+            .merge(pull.number, PUSHED, Merge::Squash)
+            .await
+            .unwrap();
         assert_eq!(
             fake.requests().last(),
             Some(&sent(
                 "PUT",
                 "/pulls/1/merge",
-                json!({ "merge_method": "squash" })
+                json!({ "merge_method": "squash", "sha": PUSHED })
             ))
         );
         assert!(fake.world().pulls[0].merged);
+    }
+
+    #[tokio::test]
+    async fn a_merge_is_refused_when_the_head_has_moved_off_the_judged_commit() {
+        let fake = FakeGitHub::spawn();
+        let feature = feature(&fake);
+        feature.create_branch().await.unwrap();
+        let pull = feature.open_issue_pull(3, "issue-3").await.unwrap();
+        // A push lands between the wait and the merge.
+        let raced = "cccccccccccccccccccccccccccccccccccccccc";
+        {
+            let mut world = fake.world();
+            world
+                .branches
+                .insert("issue-3".to_owned(), raced.to_owned());
+            world.pulls[0].head.sha = raced.to_owned();
+        }
+        let error = feature
+            .merge(pull.number, PUSHED, Merge::Squash)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("Head branch was modified"),
+            "{error}"
+        );
+        assert!(!fake.world().pulls[0].merged, "the unjudged commit stands");
+    }
+
+    #[tokio::test]
+    async fn an_open_pull_request_for_the_head_is_adopted() {
+        let fake = FakeGitHub::spawn();
+        let feature = feature(&fake);
+        feature.create_branch().await.unwrap();
+        let first = feature.open_issue_pull(3, "issue-3").await.unwrap();
+        let before = fake.requests().len();
+        let again = feature.open_issue_pull(3, "issue-3").await.unwrap();
+        assert_eq!(again, first, "the standing pull request, as it is");
+        assert_eq!(fake.world().pulls.len(), 1, "nothing opened twice");
+        let posted = fake.requests()[before..]
+            .iter()
+            .any(|request| request.method == "POST");
+        assert!(!posted, "{:?}", &fake.requests()[before..]);
+    }
+
+    #[tokio::test]
+    async fn a_closed_pull_request_for_the_head_is_not_adopted() {
+        let fake = FakeGitHub::spawn();
+        let feature = feature(&fake);
+        feature.create_branch().await.unwrap();
+        let first = feature.open_issue_pull(3, "issue-3").await.unwrap();
+        fake.world().pulls[0].state = State::Closed;
+        let again = feature.open_issue_pull(3, "issue-3").await.unwrap();
+        assert_ne!(again.number, first.number, "a fresh pull request");
+        assert_eq!(fake.world().pulls.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_features_own_pull_request_is_adopted_too() {
+        let fake = FakeGitHub::spawn();
+        let feature = feature(&fake);
+        feature.create_branch().await.unwrap();
+        let first = feature.open_pull().await.unwrap();
+        let again = feature.open_pull().await.unwrap();
+        assert_eq!(again, first);
+        assert_eq!(fake.world().pulls.len(), 1);
     }
 
     #[tokio::test]
@@ -426,7 +542,10 @@ mod tests {
         feature.create_branch().await.unwrap();
         let pull = feature.open_issue_pull(3, "issue-3").await.unwrap();
         fake.world().merge_refusal = Some("Pull Request is not mergeable".to_owned());
-        let error = feature.merge(pull.number, Merge::Squash).await.unwrap_err();
+        let error = feature
+            .merge(pull.number, PUSHED, Merge::Squash)
+            .await
+            .unwrap_err();
         assert_eq!(
             error.downcast_ref(),
             Some(&Error::Refused {
@@ -447,7 +566,10 @@ mod tests {
         let feature = feature(&fake);
         feature.create_branch().await.unwrap();
         let pull = feature.open_issue_pull(3, "issue-3").await.unwrap();
-        feature.merge(pull.number, Merge::Squash).await.unwrap();
+        feature
+            .merge(pull.number, PUSHED, Merge::Squash)
+            .await
+            .unwrap();
         assert_eq!(
             feature.github.issue(&feature.repo, 3).unwrap().state,
             State::Open,
@@ -470,7 +592,7 @@ mod tests {
         assert_eq!(Reading::of(&[]), Reading::Empty);
         assert_eq!(
             Reading::of(&[green(), check("docs", Some(Conclusion::Skipped))]),
-            Reading::Green
+            Reading::Green(["build".to_owned(), "docs".to_owned()].into())
         );
         assert_eq!(
             Reading::of(&[green(), check("lint", None)]),
@@ -560,6 +682,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_that_appears_after_a_green_reading_is_still_judged() {
+        let fake = FakeGitHub::spawn();
+        {
+            // `test` needs `build`, so GitHub creates its run only once
+            // `build` has concluded.
+            let mut world = fake.world();
+            let built = vec![check("build", Some(Conclusion::Success))];
+            world.checks.insert(PUSHED.to_owned(), built);
+            let red = check("test", Some(Conclusion::Failure));
+            world.appearing.push((PUSHED.to_owned(), 1, red));
+        }
+        let patient = CheckWait {
+            bound: PATIENCE,
+            ..wait(true)
+        };
+        let error = feature(&fake)
+            .await_checks(PUSHED, patient)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed"), "{error}");
+        assert!(error.to_string().contains("test"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_green_reading_is_the_verdict_once_it_has_settled() {
+        let fake = FakeGitHub::spawn();
+        let green = vec![check("build", Some(Conclusion::Success))];
+        fake.world().checks.insert(PUSHED.to_owned(), green);
+        let settling = CheckWait {
+            settles: NonZeroUsize::new(3).unwrap(),
+            bound: PATIENCE,
+            ..wait(true)
+        };
+        let verdict = feature(&fake).await_checks(PUSHED, settling).await.unwrap();
+        assert_eq!(verdict, Verdict::Green);
+        assert_eq!(fake.requests().len(), 3, "green held across three reads");
+    }
+
+    #[tokio::test]
     async fn the_checks_read_are_those_of_the_pushed_sha() {
         let fake = FakeGitHub::spawn();
         let feature = feature(&fake);
@@ -575,9 +736,17 @@ mod tests {
             let green = vec![check("test", Some(Conclusion::Success))];
             world.checks.insert(PUSHED.to_owned(), green);
         }
-        let verdict = feature.await_checks(PUSHED, wait(true)).await.unwrap();
+        let patient = CheckWait {
+            bound: PATIENCE,
+            ..wait(true)
+        };
+        let verdict = feature.await_checks(PUSHED, patient).await.unwrap();
         assert_eq!(verdict, Verdict::Green);
-        assert_eq!(fake.requests(), [check_runs(PUSHED)]);
+        assert!(
+            fake.requests()
+                .iter()
+                .all(|poll| *poll == check_runs(PUSHED))
+        );
     }
 
     #[cfg(unix)]
