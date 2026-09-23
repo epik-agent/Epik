@@ -266,7 +266,7 @@ mod tests {
 /// Tests that run a real process. They depend on `sh` and the usual Unix
 /// utilities, so they are compiled only on Unix.
 #[cfg(all(test, unix))]
-mod unix_tests {
+mod unix {
     use std::process::Stdio;
 
     use super::*;
@@ -291,11 +291,11 @@ mod unix_tests {
     }
 
     /// Run `script` with `sh -c` and collect its output and exit.
-    fn run(script: &str) -> Collected {
+    fn collected(script: &str) -> Collected {
         let mut process = sh(script);
         let stdout = process.stdout().collect();
         let stderr = process.stderr().collect();
-        let exit = process.wait().expect("wait failed");
+        let exit = process.wait().unwrap();
         Collected {
             stdout,
             stderr,
@@ -304,23 +304,23 @@ mod unix_tests {
     }
 
     #[test]
-    fn stdout_is_delivered() {
-        let out = run("echo Hello");
+    fn what_a_process_prints_arrives_on_stdout() {
+        let out = collected("echo Hello");
         assert_eq!(out.stdout, ["Hello"]);
-        assert!(out.stderr.is_empty());
+        assert!(out.stderr.is_empty(), "nothing on stderr: {:?}", out.stderr);
         assert_eq!(out.exit, Exit::Code(0));
     }
 
     #[test]
-    fn stderr_is_delivered() {
-        let out = run("echo Oops >&2");
-        assert!(out.stdout.is_empty());
+    fn what_a_process_complains_arrives_on_stderr() {
+        let out = collected("echo Oops >&2");
+        assert!(out.stdout.is_empty(), "nothing on stdout: {:?}", out.stdout);
         assert_eq!(out.stderr, ["Oops"]);
     }
 
     #[test]
     fn streams_are_kept_separate() {
-        let out = run("echo out; echo err >&2; echo out again");
+        let out = collected("echo out; echo err >&2; echo out again");
         assert_eq!(out.stdout, ["out", "out again"]);
         assert_eq!(out.stderr, ["err"]);
     }
@@ -340,29 +340,32 @@ mod unix_tests {
 
     #[test]
     fn output_without_trailing_newline_is_delivered() {
-        let out = run("printf 'no newline'");
+        let out = collected("printf 'no newline'");
         assert_eq!(out.stdout, ["no newline"]);
     }
 
     #[test]
     fn carriage_returns_before_newlines_are_dropped() {
-        let out = run("printf 'a\\r\\n\\nb\\n'");
+        let out = collected("printf 'a\\r\\n\\nb\\n'");
         assert_eq!(out.stdout, ["a", "", "b"]);
     }
 
     #[test]
     fn bytes_that_are_not_utf8_are_replaced() {
-        let out = run("printf '\\377\\376\\000'");
+        let out = collected("printf '\\377\\376\\000'");
         assert_eq!(out.stdout, ["\u{fffd}\u{fffd}\0"]);
     }
 
     #[test]
     fn a_line_longer_than_any_buffer_arrives_whole() {
         // 100_000 bytes, no newline: one line, well over any read buffer.
-        let out = run("head -c 100000 /dev/zero");
+        let out = collected("head -c 100000 /dev/zero");
         assert_eq!(out.stdout.len(), 1);
         assert_eq!(out.stdout[0].len(), 100_000);
-        assert!(out.stdout[0].bytes().all(|b| b == 0));
+        assert!(
+            out.stdout[0].bytes().all(|b| b == 0),
+            "every byte of the line is a NUL"
+        );
     }
 
     #[test]
@@ -375,19 +378,20 @@ mod unix_tests {
 
     #[test]
     fn no_output_yields_no_lines() {
-        let out = run("true");
-        assert!(out.stdout.is_empty() && out.stderr.is_empty());
+        let out = collected("true");
+        assert!(out.stdout.is_empty(), "nothing on stdout: {:?}", out.stdout);
+        assert!(out.stderr.is_empty(), "nor on stderr: {:?}", out.stderr);
         assert_eq!(out.exit, Exit::Code(0));
     }
 
     #[test]
     fn exit_code_is_reported() {
-        assert_eq!(run("exit 3").exit, Exit::Code(3));
+        assert_eq!(collected("exit 3").exit, Exit::Code(3));
     }
 
     #[test]
     fn a_signal_is_reported_as_one() {
-        assert_eq!(run("kill -TERM $$").exit, Exit::Signal(15));
+        assert_eq!(collected("kill -TERM $$").exit, Exit::Signal(15));
     }
 
     #[test]
@@ -498,7 +502,11 @@ mod unix_tests {
         let pid = process.child.id();
         let started = Instant::now();
         let error = process.wait().expect_err("the deadline should kill it");
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline fired rather than the sleep finishing: {:?}",
+            started.elapsed()
+        );
         assert_eq!(
             error.to_string(),
             "sh was killed after 200ms without finishing"
@@ -521,12 +529,12 @@ mod unix_tests {
             .finish()
             .unwrap();
         assert_eq!(finished.exit, Exit::Code(3));
-        assert!(!finished.exit.success());
+        assert!(!finished.exit.success(), "exit 3 is a failure");
         assert_eq!(finished.stdout.as_deref(), Some("out\nout again"));
         assert_eq!(finished.stderr.as_deref(), Some("err"));
 
         let quiet = sh("true").finish().unwrap();
-        assert!(quiet.exit.success());
+        assert!(quiet.exit.success(), "true succeeds");
         assert_eq!(quiet.stdout, None);
         assert_eq!(quiet.stderr, None);
 

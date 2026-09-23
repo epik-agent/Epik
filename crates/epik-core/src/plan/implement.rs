@@ -77,12 +77,7 @@ mod tests {
     /// Long enough for anything here that makes progress at all.
     const PATIENCE: Duration = Duration::from_secs(30);
 
-    /// A complete captured session of Claude Code's, where it is on
-    /// disk.
-    const SESSION: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/agent/claude/fixtures/session.jsonl"
-    );
+    use crate::agent::claude::fixtures::SESSION_PATH as SESSION;
 
     /// The scripted engine: `sh -c` of an inline script, from `/`. A
     /// line that is Claude Code's protocol reads as it does there, and

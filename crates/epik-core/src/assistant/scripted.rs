@@ -5,7 +5,7 @@
 //! project ever depends on a real LLM. A test writes the script — text
 //! deltas, tool-call fragments cut exactly where the author says, an
 //! HTTP error, a malformed stream — points a real [`Client`] at
-//! [`Scripted::base_url`], and afterwards reads back every request body
+//! [`ScriptedModel::base_url`], and afterwards reads back every request body
 //! the fixture received, in order. A request arriving beyond the
 //! script's end answers with an error that names itself, so the test
 //! fails saying why.
@@ -76,12 +76,12 @@ impl Turn {
 }
 
 /// The scripted model, listening on loopback until the process ends.
-pub struct Scripted {
+pub struct ScriptedModel {
     base_url: String,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
-impl Scripted {
+impl ScriptedModel {
     /// Spawns the model on its own thread, playing `script` one turn per
     /// request.
     #[must_use]

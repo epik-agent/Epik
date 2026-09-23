@@ -360,6 +360,9 @@ mod tests {
 
     #[test]
     fn a_url_proper_the_url_crate_refuses_is_an_error() {
-        assert!("https://".parse::<Url>().is_err());
+        assert!(
+            "https://".parse::<Url>().is_err(),
+            "a URL with no host is refused"
+        );
     }
 }

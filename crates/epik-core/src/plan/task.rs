@@ -37,12 +37,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_succeeds() {
+    async fn a_task_that_finishes_its_work_is_ok() {
         Divisor(2.0).run().await.unwrap();
     }
 
     #[tokio::test]
-    async fn zero_fails() {
+    async fn a_failing_tasks_own_error_reaches_the_caller() {
         let error = Divisor(0.0).run().await.unwrap_err();
         assert!(error.is::<DivideByZero>(), "{error}");
     }

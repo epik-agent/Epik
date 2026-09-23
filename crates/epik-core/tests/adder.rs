@@ -22,7 +22,7 @@ use epik_core::worktrees::Worktrees;
 
 mod support;
 use support::json_tracker::JsonTracker;
-use support::scripted::{self, Scripted, assert_written};
+use support::scripted::{self, ScriptedAgent, assert_written};
 
 const TRACKER: &str = include_str!("fixtures/adder/issues.json");
 
@@ -32,9 +32,9 @@ fn slots(count: usize) -> AgentSlots {
 
 #[tokio::test]
 async fn a_scripted_agent_runs_as_a_task() {
-    let scratch = Scratch::new("implement");
+    let scratch = Scratch::new("adder-implement");
     let task = Implement {
-        agent: Scripted {
+        agent: ScriptedAgent {
             cwd: scratch.0.clone(),
             files: [("note.txt".into(), "noted\n".to_owned())].into(),
         },
@@ -53,7 +53,7 @@ async fn a_scripted_agent_runs_as_a_task() {
 /// gone with its drop, and the work back out by a fresh clone.
 #[test]
 fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
-    let scratch = Scratch::new("worktrees-adder");
+    let scratch = Scratch::new("adder-worktree");
     let (bare, _) = published(&scratch);
     let url = Url::Local(bare.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
@@ -64,7 +64,7 @@ fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
     let branch = branch_of(&repository);
 
     let files = scripted::adder();
-    let engine = Scripted {
+    let engine = ScriptedAgent {
         cwd: repository.path().to_owned(),
         files: files.clone(),
     }
@@ -88,9 +88,9 @@ fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
 
 #[tokio::test]
 async fn an_agent_that_exits_with_a_failure_is_the_tasks_error() {
-    let scratch = Scratch::new("implement-fails");
+    let scratch = Scratch::new("adder-implement-fails");
     let task = Implement {
-        agent: Scripted {
+        agent: ScriptedAgent {
             cwd: scratch.0.join("missing"),
             files: [].into(),
         },
@@ -102,7 +102,7 @@ async fn an_agent_that_exits_with_a_failure_is_the_tasks_error() {
 
 #[tokio::test]
 async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_branch() {
-    let scratch = Scratch::new("adder");
+    let scratch = Scratch::new("adder-plan");
     let (origin, _) = published(&scratch);
     let url = Url::Local(origin.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
@@ -123,14 +123,14 @@ async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_b
         let (sink, mut receiver) = Sink::channel();
         let issues = tracker.work(&root).unwrap();
         let ids: Vec<String> = issues.nodes().map(|node| node.value().clone()).collect();
-        let plan: Plan<Reported<Implement<Scripted>>> = issues.map(|id| {
+        let plan: Plan<Reported<Implement<ScriptedAgent>>> = issues.map(|id| {
             let files = tracker
                 .content(&id)
                 .unwrap()
                 .lines()
                 .map(|path| (PathBuf::from(path), source[Path::new(path)].clone()))
                 .collect();
-            let agent = Scripted {
+            let agent = ScriptedAgent {
                 cwd: repository.path().to_owned(),
                 files,
             };

@@ -392,7 +392,11 @@ mod tests {
         let wire = serde_json::to_value(registry.to_wire()).unwrap();
         assert_eq!(wire[0]["type"], "function");
         assert_eq!(wire[0]["function"]["name"], "echo");
-        assert!(wire[0]["function"]["parameters"].is_object());
+        assert!(
+            wire[0]["function"]["parameters"].is_object(),
+            "the schema is an object: {}",
+            wire[0]["function"]["parameters"]
+        );
     }
 
     #[cfg(feature = "native")]

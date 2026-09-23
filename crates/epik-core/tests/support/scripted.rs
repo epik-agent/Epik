@@ -2,7 +2,7 @@
 //! [`Process`] whose program is `sh`, writing the files it was given
 //! and saying so.
 //!
-//! [`Scripted`] is data — a working directory and the files to write
+//! [`ScriptedAgent`] is data — a working directory and the files to write
 //! there, each by its path relative to that directory — and
 //! [`start`] is where it becomes a shell script: each file's directory
 //! made, its content written whole, and a line said about it. What it
@@ -26,14 +26,14 @@ use protocol::Event;
 
 /// The files an engine would write, and where.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Scripted {
+pub struct ScriptedAgent {
     pub cwd: PathBuf,
     /// Each file's content by its path relative to `cwd`, written in
     /// this order.
     pub files: BTreeMap<PathBuf, String>,
 }
 
-impl Agent for Scripted {
+impl Agent for ScriptedAgent {
     /// `sh` in the working directory, running the script.
     ///
     /// # Errors
@@ -49,7 +49,7 @@ impl Agent for Scripted {
     }
 }
 
-impl Scripted {
+impl ScriptedAgent {
     /// The whole script: started, each file made and announced, and
     /// stopped — under `set -e`, so a write that fails ends the run
     /// there with a nonzero exit and no stopped line.
@@ -156,7 +156,7 @@ mod tests {
     fn the_files_are_written_and_every_word_arrives() {
         let scratch = Scratch::new("scripted-adder");
         let files = adder();
-        let mut process = Scripted {
+        let mut process = ScriptedAgent {
             cwd: scratch.0.clone(),
             files: files.clone(),
         }
@@ -195,7 +195,7 @@ mod tests {
 
         let updates: Vec<Update> = lines
             .iter()
-            .flat_map(|line| Scripted::interpret(line))
+            .flat_map(|line| ScriptedAgent::interpret(line))
             .collect();
         let mut expected = vec![Update::Session {
             id: session.clone(),
@@ -221,7 +221,7 @@ mod tests {
     fn content_with_quotes_and_percent_signs_is_written_whole() {
         let scratch = Scratch::new("scripted-quoting");
         let content = "it's 100% '$HOME' \"quoted\" \\ backslash\n\nno trailing newline";
-        let process = Scripted {
+        let process = ScriptedAgent {
             cwd: scratch.0.clone(),
             files: [("odd 'name'.txt".into(), content.to_owned())].into(),
         }
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn a_path_that_is_not_relative_is_refused_before_anything_runs() {
         let scratch = Scratch::new("scripted-absolute");
-        let error = Scripted {
+        let error = ScriptedAgent {
             cwd: scratch.0.clone(),
             files: [("/etc/motd".into(), "no".to_owned())].into(),
         }

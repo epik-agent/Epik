@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn open_takes_a_root_and_refuses_everything_else() {
-        let scratch = Scratch::new("open");
+        let scratch = Scratch::new("git-open");
         let origin = init(Init::new(scratch.join("origin.git").into()).unwrap()).unwrap();
         let work = clone(
             Clone::new(
@@ -483,7 +483,7 @@ mod tests {
     /// gets as far as waiting for a reply.
     #[test]
     fn the_deadline_kills_a_clone_that_will_not_finish() {
-        let scratch = Scratch::new("clone-deadline");
+        let scratch = Scratch::new("git-clone-deadline");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let from = format!("git://{}/hung", listener.local_addr().unwrap());
 

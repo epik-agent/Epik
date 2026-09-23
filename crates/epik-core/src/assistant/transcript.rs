@@ -440,7 +440,10 @@ mod tests {
             ],
             "the conversation never held the fragments, so the view doesn't either"
         );
-        assert!(matches!(change, Change::Replace { id, .. } if id == tail));
+        assert!(
+            matches!(&change, Change::Replace { id, .. } if *id == tail),
+            "{change:?}"
+        );
     }
 
     #[test]
@@ -461,7 +464,7 @@ mod tests {
             bodies(&transcript),
             [message(Role::User, "hi").into(), tool_call().into()]
         );
-        assert!(matches!(change, Change::Replace { .. }));
+        assert!(matches!(change, Change::Replace { .. }), "{change:?}");
     }
 
     #[test]
@@ -571,7 +574,9 @@ mod tests {
                 Change::Append(entry) | Change::Replace { with: entry, .. } => {
                     assert!(ids.insert(entry.id), "every new entry's id is new");
                 }
-                Change::Grow { id, .. } => assert!(ids.contains(&id)),
+                Change::Grow { id, .. } => {
+                    assert!(ids.contains(&id), "a growth names an entry already seen");
+                }
             }
         }
     }

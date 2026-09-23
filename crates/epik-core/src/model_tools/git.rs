@@ -568,7 +568,8 @@ mod tests {
     use crate::model_tools::Registry;
     use crate::temp::Scratch;
 
-    fn registry() -> Registry {
+    /// Every git tool, in a registry to dispatch through.
+    fn git_tools() -> Registry {
         let mut registry = Registry::default();
         registry.extend(all());
         registry
@@ -667,7 +668,7 @@ mod tests {
 
     #[test]
     fn every_command_has_a_tool_with_a_schema_and_a_sentence() {
-        let wire = serde_json::to_value(registry().to_wire()).unwrap();
+        let wire = serde_json::to_value(git_tools().to_wire()).unwrap();
         let names: Vec<&str> = wire
             .as_array()
             .unwrap()
@@ -726,7 +727,7 @@ mod tests {
     /// through nothing but tool calls.
     #[test]
     fn a_repository_is_made_worked_in_and_read_back_through_the_tools() {
-        let registry = registry();
+        let registry = git_tools();
         let scratch = Scratch::new("tools-read-back");
         let (_, work) = published(&registry, &scratch);
 
@@ -738,7 +739,10 @@ mod tests {
             "git_show",
             json!({ "repository": work, "revision": "HEAD" }),
         );
-        assert!(shown["output"].as_str().unwrap().contains("+hello"));
+        assert!(
+            shown["output"].as_str().unwrap().contains("+hello"),
+            "{shown}"
+        );
 
         std::fs::write(
             std::path::Path::new(&work).join("hello.txt"),
@@ -746,7 +750,10 @@ mod tests {
         )
         .unwrap();
         let patch = ok(&registry, "git_diff", json!({ "repository": work }));
-        assert!(patch["output"].as_str().unwrap().contains("+hello again"));
+        assert!(
+            patch["output"].as_str().unwrap().contains("+hello again"),
+            "{patch}"
+        );
         ok(
             &registry,
             "git_add",
@@ -771,20 +778,26 @@ mod tests {
         assert_eq!(log["entries"].as_array().unwrap().len(), 1);
         assert_eq!(log["entries"][0]["subject"], "the second commit");
         assert_eq!(log["entries"][0]["author"], "Ada");
-        assert!(log["entries"][0]["date"].as_str().unwrap().contains('T'));
+        assert!(
+            log["entries"][0]["date"].as_str().unwrap().contains('T'),
+            "an ISO date: {log}"
+        );
         let range = ok(
             &registry,
             "git_diff",
             json!({ "repository": work, "revisions": format!("{first}..HEAD"), "path": "hello.txt" }),
         );
-        assert!(range["output"].as_str().unwrap().contains("-hello\n"));
+        assert!(
+            range["output"].as_str().unwrap().contains("-hello\n"),
+            "{range}"
+        );
     }
 
     /// Branches made, switched to, merged, reset away, and deleted; a
     /// worktree added, listed, and removed.
     #[test]
     fn branches_and_worktrees_come_and_go_through_the_tools() {
-        let registry = registry();
+        let registry = git_tools();
         let scratch = Scratch::new("tools-branches");
         let (_, work) = published(&registry, &scratch);
         let first = head(&registry, &work);
@@ -830,7 +843,10 @@ mod tests {
             json!({ "repository": work, "to": first }),
         );
         assert_eq!(subjects(&registry, &work), ["the first commit"]);
-        assert!(!std::path::Path::new(&work).join("side.txt").exists());
+        assert!(
+            !std::path::Path::new(&work).join("side.txt").exists(),
+            "the other branch's file is not in this worktree"
+        );
 
         let linked = scratch.join("linked");
         let added = ok(
@@ -882,7 +898,7 @@ mod tests {
     /// pulling, and the remotes read back.
     #[test]
     fn remotes_are_pushed_to_fetched_from_pulled_from_and_listed_through_the_tools() {
-        let registry = registry();
+        let registry = git_tools();
         let scratch = Scratch::new("tools-remotes");
         let (origin, work) = published(&registry, &scratch);
         let other = ok(
@@ -927,7 +943,7 @@ mod tests {
     /// door into a repository, and git's own.
     #[test]
     fn refusals_come_back_as_words_for_the_model() {
-        let registry = registry();
+        let registry = git_tools();
         let scratch = Scratch::new("tools-refusals");
         let (_, work) = published(&registry, &scratch);
 

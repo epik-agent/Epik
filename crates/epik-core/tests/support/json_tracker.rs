@@ -120,7 +120,7 @@ impl IssueTracker<String, String> for JsonTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epik_core::dag::Dag;
+    use epik_core::dag::shape;
 
     const ADDER: &str = include_str!("../fixtures/adder/issues.json");
 
@@ -148,29 +148,23 @@ mod tests {
         );
     }
 
-    /// Each work node with the nodes directly before it.
-    fn shape(dag: &Dag<String>) -> Vec<(&str, Vec<&str>)> {
-        dag.nodes()
-            .map(|node| {
-                let before = node.predecessors().map(|before| before.value().as_str());
-                (node.value().as_str(), before.collect())
-            })
-            .collect()
-    }
-
     #[test]
     fn the_work_under_the_project_is_its_three_issues_in_order() {
         let dag = adder().work(&id("0")).unwrap();
         assert_eq!(
             shape(&dag),
-            [("1", vec![]), ("2", vec!["1"]), ("3", vec!["1"])],
+            [
+                (id("1"), vec![]),
+                (id("2"), vec![id("1")]),
+                (id("3"), vec![id("1")])
+            ],
             "2 and 3 wait on the scaffolding"
         );
     }
 
     #[test]
     fn a_leaf_is_its_own_work() {
-        assert_eq!(shape(&adder().work(&id("1")).unwrap()), [("1", vec![])]);
+        assert_eq!(shape(&adder().work(&id("1")).unwrap()), [(id("1"), vec![])]);
     }
 
     #[test]
@@ -187,7 +181,7 @@ mod tests {
         )
         .unwrap();
         let dag = tracker.work(&id("root")).unwrap();
-        assert_eq!(shape(&dag), [("a", vec![]), ("c", vec!["a"])]);
+        assert_eq!(shape(&dag), [(id("a"), vec![]), (id("c"), vec![id("a")])]);
     }
 
     #[test]
@@ -207,7 +201,10 @@ mod tests {
         );
         tracker.set_status(&id("x"), "closed".to_owned()).unwrap();
         tracker.set_status(&id("a"), "closed".to_owned()).unwrap();
-        assert_eq!(shape(&tracker.work(&id("root")).unwrap()), [("b", vec![])]);
+        assert_eq!(
+            shape(&tracker.work(&id("root")).unwrap()),
+            [(id("b"), vec![])]
+        );
     }
 
     #[test]

@@ -1219,8 +1219,14 @@ mod tests {
 
     #[test]
     fn a_bare_name_github_would_not_accept_is_refused_even_with_an_owner() {
-        assert!(Repo::settle("E pik", Some("epik-agent")).is_err());
-        assert!(Repo::settle("Epik.git", Some("epik-agent")).is_err());
+        assert!(
+            Repo::settle("E pik", Some("epik-agent")).is_err(),
+            "a space is not a name"
+        );
+        assert!(
+            Repo::settle("Epik.git", Some("epik-agent")).is_err(),
+            "nor is a name with the suffix on it"
+        );
         let error = Repo::settle("Epik", Some("epik agent")).unwrap_err();
         assert!(!error.contains("Settings"), "{error}");
     }
@@ -1252,7 +1258,10 @@ mod tests {
     #[test]
     fn login_refuses_without_a_token_before_asking() {
         let github = GitHub::at("http://127.0.0.1:9", None);
-        assert!(matches!(github.login(), Err(Error::TokenAbsent)));
+        assert!(
+            matches!(github.login(), Err(Error::TokenAbsent)),
+            "a tokenless login refuses before asking"
+        );
     }
 
     #[cfg(all(unix, feature = "native"))]
@@ -1264,15 +1273,22 @@ mod tests {
         assert_eq!(credentials.secret, "ghp_sesame".into());
 
         let tokenless = GitHub::at("http://127.0.0.1:9", None);
-        assert!(matches!(tokenless.credentials(), Err(Error::TokenAbsent)));
+        assert!(
+            matches!(tokenless.credentials(), Err(Error::TokenAbsent)),
+            "tokenless credentials refuse before asking"
+        );
     }
 
     #[test]
     fn a_captured_issue_decodes() {
         let issue: Issue = decode("an issue", value(ISSUE)).unwrap();
         assert_eq!(issue.number, 106);
-        assert!(issue.title.contains("typed REST + GraphQL client"));
-        assert!(issue.body.contains("hand-rolled client"));
+        assert!(
+            issue.title.contains("typed REST + GraphQL client"),
+            "{}",
+            issue.title
+        );
+        assert!(issue.body.contains("hand-rolled client"), "{}", issue.body);
         assert_eq!(issue.state, State::Open);
     }
 
@@ -1297,20 +1313,20 @@ mod tests {
     #[test]
     fn a_captured_repo_yields_its_default_branch() {
         #[derive(Deserialize)]
-        struct Wire {
+        struct RepoWire {
             default_branch: String,
         }
-        let wire: Wire = decode("a repo", value(REPO)).unwrap();
+        let wire: RepoWire = decode("a repo", value(REPO)).unwrap();
         assert_eq!(wire.default_branch, "main");
     }
 
     #[test]
     fn captured_check_runs_decode_with_their_conclusions() {
         #[derive(Deserialize)]
-        struct Wire {
+        struct CheckRunsWire {
             check_runs: Vec<Check>,
         }
-        let wire: Wire = decode("check runs", value(CHECK_RUNS)).unwrap();
+        let wire: CheckRunsWire = decode("check runs", value(CHECK_RUNS)).unwrap();
         assert_eq!(wire.check_runs.len(), 5);
         assert!(
             wire.check_runs
@@ -1384,7 +1400,8 @@ mod tests {
             name: "CI".to_owned(),
             conclusion: Some(Conclusion::Failure),
         };
-        assert!(!failed.pending() && failed.red());
+        assert!(!failed.pending(), "a concluded check is not pending");
+        assert!(failed.red(), "and a failure is red");
     }
 
     #[test]
@@ -1403,7 +1420,7 @@ mod tests {
         assert_eq!(graph.issue.state, State::Open);
         let numbers: Vec<u64> = graph.sub_issues.iter().map(|edge| edge.number).collect();
         assert_eq!(numbers, [105, 106]);
-        assert!(graph.blocked_by.is_empty());
+        assert!(graph.blocked_by.is_empty(), "absent from the capture");
         assert!(graph.blocking.is_empty(), "absent from the capture");
     }
 
@@ -1418,7 +1435,11 @@ mod tests {
             State::Open,
             "GraphQL's OPEN lands on the same State as REST's open"
         );
-        assert!(graph.sub_issues.is_empty());
+        assert!(
+            graph.sub_issues.is_empty(),
+            "a leaf contains nothing: {:?}",
+            graph.sub_issues
+        );
     }
 
     #[test]
@@ -1443,7 +1464,10 @@ mod tests {
     fn a_fixture_without_page_info_still_decodes_as_a_complete_page() {
         // The captured payloads were taken before the query asked for
         // `pageInfo`; absence means nothing overflowed.
-        assert!(graph(graphql_data(value(GRAPH_PARENT)).unwrap()).is_ok());
+        assert!(
+            graph(graphql_data(value(GRAPH_PARENT)).unwrap()).is_ok(),
+            "no pageInfo reads as one complete page"
+        );
     }
 
     #[test]
@@ -1463,10 +1487,8 @@ mod tests {
     #[test]
     fn a_secondary_rate_limit_names_itself_rather_than_exhausting_the_count() {
         let body = r#"{"message": "You have exceeded a secondary rate limit."}"#;
-        assert!(matches!(
-            refusal(403, Some("55"), body),
-            Error::RateLimited(_)
-        ));
+        let refused = refusal(403, Some("55"), body);
+        assert!(matches!(refused, Error::RateLimited(_)), "{refused:?}");
     }
 
     #[test]

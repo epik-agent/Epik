@@ -1249,7 +1249,7 @@ mod tests {
     fn a_hash_is_forty_or_sixty_four_hex_digits() {
         assert_eq!(hash().to_string(), SHA);
         assert_eq!(Hash::new(&format!(" {SHA}\n")).unwrap(), hash(), "trimmed");
-        assert!(Hash::new(&"a".repeat(64)).is_ok());
+        assert!(Hash::new(&"a".repeat(64)).is_ok(), "sixty-four digits too");
         for text in ["", "abc", &"g".repeat(40), &"A".repeat(40), &"a".repeat(41)] {
             assert_eq!(
                 Hash::new(text).unwrap_err().to_string(),
@@ -1420,7 +1420,10 @@ mod tests {
             Command::Switch(switch).argv(),
             ["-C", "/work/repo", "switch", "topic"]
         );
-        assert!(Switch::new(repository(), "-c".to_owned()).is_err());
+        assert!(
+            Switch::new(repository(), "-c".to_owned()).is_err(),
+            "a branch that reads as an option is refused"
+        );
     }
 
     #[test]
@@ -1438,8 +1441,14 @@ mod tests {
                 "topic"
             ]
         );
-        assert!(AddWorktree::new(repository(), "topic".into(), "topic".to_owned()).is_err());
-        assert!(AddWorktree::new(repository(), "/work/topic".into(), "-b".to_owned()).is_err());
+        assert!(
+            AddWorktree::new(repository(), "topic".into(), "topic".to_owned()).is_err(),
+            "a relative path is refused"
+        );
+        assert!(
+            AddWorktree::new(repository(), "/work/topic".into(), "-b".to_owned()).is_err(),
+            "a branch that reads as an option is refused"
+        );
 
         assert_eq!(
             Command::ListWorktrees(ListWorktrees::new(repository())).argv(),
@@ -1513,7 +1522,10 @@ mod tests {
             ]
         );
         assert_eq!(ListWorktrees::worktrees("").unwrap(), []);
-        assert!(ListWorktrees::worktrees("HEAD abc\n").is_err());
+        assert!(
+            ListWorktrees::worktrees("HEAD abc\n").is_err(),
+            "a record with no worktree line is refused"
+        );
     }
 
     #[test]
@@ -1587,7 +1599,10 @@ mod tests {
             Command::Diff(diff).argv(),
             ["-C", "/work/repo", "diff", "main..topic", "--", "src"]
         );
-        assert!(Diff::new(repository(), Some("--cached".to_owned()), None).is_err());
+        assert!(
+            Diff::new(repository(), Some("--cached".to_owned()), None).is_err(),
+            "a revision that reads as an option is refused"
+        );
     }
 
     #[test]
@@ -1617,7 +1632,10 @@ mod tests {
             Command::ShowPrefix(prefix).argv(),
             ["-C", "/work/repo/src", "rev-parse", "--show-prefix"]
         );
-        assert!(ShowPrefix::new(PathBuf::from("src")).is_err());
+        assert!(
+            ShowPrefix::new(PathBuf::from("src")).is_err(),
+            "a relative path is refused"
+        );
         assert_eq!(ShowPrefix::prefix("\n"), "");
         assert_eq!(ShowPrefix::prefix("src/\n"), "src/");
     }
@@ -1629,7 +1647,10 @@ mod tests {
             Command::RevParse(rev_parse).argv(),
             ["-C", "/work/repo", "rev-parse", "--verify", "main^{commit}"]
         );
-        assert!(RevParse::new(repository(), "--all".to_owned()).is_err());
+        assert!(
+            RevParse::new(repository(), "--all".to_owned()).is_err(),
+            "a revision that reads as an option is refused"
+        );
         assert_eq!(RevParse::hash(&format!("{SHA}\n")).unwrap(), hash());
     }
 
@@ -1701,7 +1722,10 @@ mod tests {
             Command::Show(show).argv(),
             ["-C", "/work/repo", "show", "HEAD~1"]
         );
-        assert!(Show::new(repository(), "--stat".to_owned()).is_err());
+        assert!(
+            Show::new(repository(), "--stat".to_owned()).is_err(),
+            "a revision that reads as an option is refused"
+        );
     }
 
     #[test]
@@ -1724,7 +1748,10 @@ mod tests {
             Command::Merge(merge).argv(),
             ["-C", "/work/repo", "merge", "--no-ff", "--no-edit", "topic"]
         );
-        assert!(Merge::new(repository(), "--squash".to_owned()).is_err());
+        assert!(
+            Merge::new(repository(), "--squash".to_owned()).is_err(),
+            "a branch that reads as an option is refused"
+        );
         assert_eq!(
             Command::AbortMerge(AbortMerge::new(repository())).argv(),
             ["-C", "/work/repo", "merge", "--abort"]
@@ -1760,7 +1787,8 @@ mod tests {
                 Remote::named("origin".to_owned()).unwrap(),
                 "-f".to_owned()
             )
-            .is_err()
+            .is_err(),
+            "a branch that reads as an option is refused"
         );
     }
 
@@ -1779,7 +1807,10 @@ mod tests {
                 "refs/heads/issue-1:refs/heads/issue-1"
             ]
         );
-        assert!(Push::over(repository(), "-f".to_owned()).is_err());
+        assert!(
+            Push::over(repository(), "-f".to_owned()).is_err(),
+            "a branch that reads as an option is refused"
+        );
     }
 
     #[test]
@@ -1827,14 +1858,19 @@ mod tests {
             Command::DeleteBranch(delete).argv(),
             ["-C", "/work/repo", "branch", "--delete", "--force", "topic"]
         );
-        assert!(DeleteBranch::new(repository(), "-r".to_owned()).is_err());
+        assert!(
+            DeleteBranch::new(repository(), "-r".to_owned()).is_err(),
+            "a branch that reads as an option is refused"
+        );
     }
 }
 
 /// These run the real `git` through the verbs in [`git`](super), so
-/// they are compiled only where the tests can count on one.
+/// they are compiled only where the tests can count on one. `real`, not
+/// `live`: the binary is here, where a live test reaches a service that
+/// is not.
 #[cfg(all(test, unix, feature = "native"))]
-mod live {
+mod real {
     use super::*;
     use crate::git::testing::{cloned, committed, head, identified, published};
     use crate::git::{
@@ -1862,7 +1898,7 @@ mod live {
     /// back.
     #[test]
     fn a_repository_is_made_cloned_written_to_committed_and_read_back() {
-        let scratch = Scratch::new("end-to-end");
+        let scratch = Scratch::new("commands-end-to-end");
 
         let origin = init(Init::new(scratch.join("origin.git").into()).unwrap()).unwrap();
         assert!(
@@ -1887,18 +1923,24 @@ mod live {
         assert_eq!(subjects, ["feat: say it to the world", "feat: say hello"]);
         assert_eq!(entries[0].hash, second);
         assert_eq!(entries[1].hash, first);
-        assert!(entries.iter().all(|entry| entry.author == "Ada"));
+        assert!(
+            entries.iter().all(|entry| entry.author == "Ada"),
+            "every commit is the configured identity's: {entries:?}"
+        );
         assert_eq!(std::fs::read_to_string(&hello).unwrap(), "hello, world\n");
     }
 
     #[test]
     fn a_clone_makes_a_repository_with_the_source_at_head() {
-        let scratch = Scratch::new("clone");
+        let scratch = Scratch::new("commands-clone");
         let (origin, _) = published(&scratch);
         let repository = cloned(&scratch, &origin, "clone", None);
 
         assert_eq!(repository.path(), Path::new(&scratch.join("clone")));
-        assert!(repository.path().join(".git").is_dir());
+        assert!(
+            repository.path().join(".git").is_dir(),
+            "a clone is a working repository"
+        );
         assert_eq!(
             std::fs::read_to_string(repository.path().join("hello.txt")).unwrap(),
             "hello\n"
@@ -1907,7 +1949,7 @@ mod live {
 
     #[test]
     fn a_clone_checks_out_the_branch_it_was_asked_for() {
-        let scratch = Scratch::new("clone-branch");
+        let scratch = Scratch::new("commands-clone-branch");
         let (origin, work) = published(&scratch);
         branch(Branch::new(work.clone(), "release".to_owned(), None).unwrap()).unwrap();
         push(Push::new(work, Remote::origin(), "release".to_owned()).unwrap()).unwrap();
@@ -1920,7 +1962,7 @@ mod live {
 
     #[test]
     fn a_clone_of_a_source_that_is_missing_fails_in_gits_own_words() {
-        let scratch = Scratch::new("clone-missing");
+        let scratch = Scratch::new("commands-clone-missing");
         let into = scratch.join("clone");
 
         let error =
@@ -1937,7 +1979,7 @@ mod live {
 
     #[test]
     fn a_branch_is_made_switched_to_worked_on_and_deleted() {
-        let scratch = Scratch::new("branch");
+        let scratch = Scratch::new("commands-branch");
         let (_, work) = published(&scratch);
         let main = head(&work);
 
@@ -1948,7 +1990,10 @@ mod live {
 
         switch(Switch::new(work.clone(), "main".to_owned()).unwrap()).unwrap();
         assert_eq!(head(&work), main, "main stayed where it was");
-        assert!(!work.path().join("topic.txt").exists());
+        assert!(
+            !work.path().join("topic.txt").exists(),
+            "and the topic's file went with the switch"
+        );
         assert_eq!(
             rev_parse(RevParse::new(work.clone(), "topic".to_owned()).unwrap()).unwrap(),
             topic
@@ -1963,7 +2008,7 @@ mod live {
 
     #[test]
     fn a_worktree_is_added_listed_worked_in_and_removed() {
-        let scratch = Scratch::new("worktree");
+        let scratch = Scratch::new("commands-worktree");
         let (_, work) = published(&scratch);
         branch(Branch::new(work.clone(), "topic".to_owned(), None).unwrap()).unwrap();
 
@@ -2002,13 +2047,16 @@ mod live {
             .to_string();
         assert!(error.contains("untracked"), "{error}");
         remove_worktree(RemoveWorktree::new(work.clone(), topic.clone(), true)).unwrap();
-        assert!(!topic.path().exists());
+        assert!(
+            !topic.path().exists(),
+            "a forced removal takes the directory"
+        );
         assert_eq!(list_worktrees(ListWorktrees::new(work)).unwrap().len(), 1);
     }
 
     #[test]
     fn status_reads_the_tree_as_it_stands() {
-        let scratch = Scratch::new("status");
+        let scratch = Scratch::new("commands-status");
         let (_, work) = published(&scratch);
         assert_eq!(
             status(Status::new(work.clone())).unwrap(),
@@ -2039,7 +2087,7 @@ mod live {
 
     #[test]
     fn diff_and_show_read_the_patch() {
-        let scratch = Scratch::new("diff");
+        let scratch = Scratch::new("commands-diff");
         let (_, work) = published(&scratch);
         std::fs::write(work.path().join("hello.txt"), "hello, world\n").unwrap();
 
@@ -2062,7 +2110,7 @@ mod live {
 
     #[test]
     fn a_commit_with_nothing_staged_fails_in_gits_own_words() {
-        let scratch = Scratch::new("commit-nothing");
+        let scratch = Scratch::new("commands-commit-nothing");
         let (_, work) = published(&scratch);
 
         let error = commit(Commit::new(work, "nothing".to_owned()).unwrap())
@@ -2074,7 +2122,7 @@ mod live {
 
     #[test]
     fn rev_parse_names_the_commit_and_refuses_what_is_none() {
-        let scratch = Scratch::new("rev-parse");
+        let scratch = Scratch::new("commands-rev-parse");
         let (_, work) = published(&scratch);
         let first = head(&work);
 
@@ -2098,7 +2146,7 @@ mod live {
 
     #[test]
     fn a_log_reads_the_history_newest_first() {
-        let scratch = Scratch::new("log");
+        let scratch = Scratch::new("commands-log");
         let (_, work) = published(&scratch);
         let later = committed(&work, "more.txt", "more\n", "feat: later");
 
@@ -2128,7 +2176,7 @@ mod live {
 
     #[test]
     fn push_fetch_and_pull_move_commits_between_clones() {
-        let scratch = Scratch::new("push-fetch-pull");
+        let scratch = Scratch::new("commands-push-fetch-pull");
         let (origin, ada) = published(&scratch);
         let bob = cloned(&scratch, &origin, "bob", None);
 
@@ -2150,7 +2198,10 @@ mod live {
 
         pull(Pull::new(bob.clone())).unwrap();
         assert_eq!(head(&bob), later, "pulled");
-        assert!(bob.path().join("more.txt").is_file());
+        assert!(
+            bob.path().join("more.txt").is_file(),
+            "the pulled commit's file is checked out"
+        );
 
         let remotes = list_remotes(ListRemotes::new(bob)).unwrap();
         assert_eq!(remotes.len(), 1);
@@ -2161,7 +2212,7 @@ mod live {
 
     #[test]
     fn a_merge_lands_as_a_merge_commit_and_a_conflict_is_abortable() {
-        let scratch = Scratch::new("merge");
+        let scratch = Scratch::new("commands-merge");
         let (_, work) = published(&scratch);
         let before = head(&work);
 
@@ -2176,7 +2227,10 @@ mod live {
             entries[0].subject, "Merge branch 'topic'",
             "a merge commit, no fast-forward"
         );
-        assert!(work.path().join("topic.txt").is_file());
+        assert!(
+            work.path().join("topic.txt").is_file(),
+            "the merged branch's file is in the tree"
+        );
         let merged = head(&work);
 
         // Both sides change hello.txt: a conflict.

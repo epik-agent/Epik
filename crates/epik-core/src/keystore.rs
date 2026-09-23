@@ -109,6 +109,9 @@ mod tests {
 
         assert!(wire.contains("sk-super-secret"), "the wire carries bytes");
         assert_eq!(received, sent);
-        assert!(!format!("{received:?}").contains("sk-super-secret"));
+        assert!(
+            !format!("{received:?}").contains("sk-super-secret"),
+            "the debug rendering keeps the secret out: {received:?}"
+        );
     }
 }
