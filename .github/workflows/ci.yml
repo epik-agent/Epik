@@ -94,8 +94,12 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+      # The crate builds for wasm by default, but its tests are plain
+      # `#[test]` and need a host that can run them. The triple is read
+      # with awk rather than sed: `host: ` carries a colon and a space,
+      # which YAML reads as a mapping unless the whole line is quoted.
       - name: test
-        run: cargo test
+        run: cargo test --target "$(rustc -vV | awk '/^host/ { print $2 }')"
 
   # The one check branch protection requires. Matrix legs and job names
   # can change without touching the ruleset; this name must not.
@@ -178,6 +182,16 @@ jobs:
       - name: Bundle
         run: cargo tauri build
         working-directory: crates/tauri/backend
+
+      # The monitor page is embedded at compile time by `include_dir!`,
+      # and an empty directory embeds as a valid empty bundle: nothing
+      # fails, the app just serves no page. Only an assertion on the
+      # artifact catches that, and only here, where Trunk has run.
+      - name: The monitor's page is embedded
+        run: |
+          test -s crates/tauri/frontend/dist/index.html
+          app=$(ls -d target/release/bundle/macos/*.app | head -1)
+          strings "$app/Contents/MacOS/Epik" | grep -q wasm_bindgen
 
       - name: Signature
         if: runner.os == 'macOS'

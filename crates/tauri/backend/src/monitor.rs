@@ -41,7 +41,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 /// The bundle Trunk emitted, as of this build. `build.rs` makes the
 /// directory exist before this is compiled, so a build that never ran
 /// Trunk embeds an empty bundle and serves 404s for the page.
-static BUNDLE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../epik-frontend/dist");
+static BUNDLE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../frontend/dist");
 
 /// The mark `trunk serve` leaves in a bundle it meant to serve itself:
 /// the address its autoreload client dials, a placeholder the dev
@@ -68,7 +68,7 @@ fn dev_bundle(index: &[u8]) -> bool {
 
 /// What the page says in place of a dev-server bundle.
 const DEV_REFUSAL: &str = "the embedded monitor page is a trunk serve bundle; run trunk build \
-in crates/epik-frontend and build the backend again\n";
+in crates/tauri/frontend and build the backend again\n";
 
 /// The event stream's path.
 pub const CHANGES: &str = "/monitor/changes";

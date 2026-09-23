@@ -1,0 +1,24 @@
+# What this repo asks of cargo, on anyone's machine.
+#
+# Deliberately no `[env]`. The live tiers decide whether to run by
+# whether EPIK_LIVE_* and EPIK_GITHUB_* are set, so naming them here
+# would arm them everywhere — including CI, which has no model server to
+# answer and would fail rather than skip. What a tier talks to belongs
+# to the machine that has one; the environment is where it says so.
+
+# An alias runs exactly one cargo subcommand, so the sweep `cargo clean`
+# cannot do — two workspaces' targets, Trunk's dist, the backend's
+# generated schemas — lives in the xtask crate, and this is its short
+# name. Nothing outside the repo has to be set up for it to work.
+[alias]
+clean-all = "run --quiet --package xtask -- clean-all"
+
+# Sign what cargo runs — the Tauri dev binary above all — with the same
+# identity `tauri build` uses, so the Keychain recognises the app across
+# rebuilds instead of prompting on every one. The identity itself is
+# deliberately not written down: it belongs to whoever is signing, and
+# CI holds it as a secret. Without APPLE_SIGNING_IDENTITY in the
+# environment the runner signs nothing and runs what it was given, which
+# is what a fresh checkout wants. See .cargo/sign-and-run.
+[target.'cfg(target_os = "macos")']
+runner = ".cargo/sign-and-run"
