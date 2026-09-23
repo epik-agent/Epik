@@ -1,0 +1,30 @@
+# What this repo asks of cargo, on anyone's machine.
+#
+# `[env]` here is a default, not an override: a real environment
+# variable of the same name wins, so a value that suits this repo can be
+# written down without taking the choice away from whoever checks it out.
+
+[env]
+# The live tier talks to an OpenAI-shaped endpoint. LM Studio's default
+# port is the value in the repo because the tests have to point
+# somewhere; export either name to aim them elsewhere, at Ollama's 11434
+# or anything else that speaks the same protocol.
+EPIK_LIVE_BASE_URL = "http://localhost:1234/v1"
+EPIK_LIVE_MODEL = "smollm2-135m-instruct"
+
+# An alias runs exactly one cargo subcommand, so the sweep `cargo clean`
+# cannot do — two workspaces' targets, Trunk's dist, the backend's
+# generated schemas — lives in the xtask crate, and this is its short
+# name. Nothing outside the repo has to be set up for it to work.
+[alias]
+clean-all = "run --quiet --package xtask -- clean-all"
+
+# Sign what cargo runs — the Tauri dev binary above all — with the same
+# identity `tauri build` uses, so the Keychain recognises the app across
+# rebuilds instead of prompting on every one. The identity itself is
+# deliberately not written down: it belongs to whoever is signing, and
+# CI holds it as a secret. Without APPLE_SIGNING_IDENTITY in the
+# environment the runner signs nothing and runs what it was given, which
+# is what a fresh checkout wants. See .cargo/sign-and-run.
+[target.'cfg(target_os = "macos")']
+runner = ".cargo/sign-and-run"
