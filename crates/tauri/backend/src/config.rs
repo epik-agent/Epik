@@ -191,7 +191,7 @@ mod tests {
     use epik_core::config::{GitHub, Monitor};
 
     use crate::testing::Broken;
-    use epik::testing::Scratch;
+    use epik_core::temp::Scratch;
 
     fn chosen() -> Config {
         Config {

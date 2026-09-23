@@ -529,7 +529,7 @@ mod tests {
         two_and_three_in_a_cycle, two_then_three,
     };
     use crate::monitor::{Entry, Stage, eventually_finished, folded};
-    use crate::testing::{Local, Scratch, seeded, tidy};
+    use crate::testing::{Local, Scratch, tidy, unpushed};
 
     /// A record for `plan` as run 1, on a log of its own.
     fn fresh(plan: Plan) -> Build {
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn a_scripted_agent_merges_every_leaf_and_the_log_is_the_record() {
         let scratch = Scratch::new("feature-build");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let log = Arc::new(Log::new());
         let record = launched(
             1,
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn a_finished_build_retires_its_workspace_and_the_feature_can_be_rebuilt() {
         let scratch = Scratch::new("retire");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let log = Arc::new(Log::new());
         let branch = Arc::new(
             Branch::establish(&work, "feature-1", "main", Local(remote.clone()), None).unwrap(),
@@ -1012,7 +1012,7 @@ mod tests {
     #[test]
     fn two_features_in_one_repository_build_at_once() {
         let scratch = Scratch::new("two-features");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         both_land([
             (1, two_then_three(), (&work, &remote), "feature-1", &[2, 3]),
             (4, five_then_six(), (&work, &remote), "feature-2", &[5, 6]),
@@ -1026,8 +1026,8 @@ mod tests {
     fn two_features_in_two_repositories_build_at_once() {
         let one = Scratch::new("repository-one");
         let two = Scratch::new("repository-two");
-        let (work_one, remote_one) = seeded(&one);
-        let (work_two, remote_two) = seeded(&two);
+        let (work_one, remote_one) = unpushed(&one);
+        let (work_two, remote_two) = unpushed(&two);
         both_land([
             (
                 1,

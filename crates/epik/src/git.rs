@@ -103,7 +103,7 @@ pub(crate) fn plumbing_with(args: &[&str], envs: &[(&str, &str)]) -> Result<Stri
 mod tests {
     use super::*;
 
-    use crate::testing::{Scratch, seeded};
+    use crate::testing::{Scratch, unpushed};
 
     /// The deadline, exercised on a short fuse rather than the real 60
     /// seconds: a fetch against a loopback listener that accepts and then
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn the_deadline_kills_a_git_that_will_not_finish() {
         let scratch = Scratch::new("deadline");
-        let (work, _) = seeded(&scratch);
+        let (work, _) = unpushed(&scratch);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("git://{}/hung", listener.local_addr().unwrap());
         // Accepts and then holds the socket, answering nothing, until the

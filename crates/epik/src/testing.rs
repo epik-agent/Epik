@@ -4,7 +4,7 @@
 //! this project ever depends on a real LLM: the scripted [`model`], a
 //! loopback provider. And the fixtures every git-adjacent test module
 //! used to carry a copy of: the [`Scratch`] directory, from epik-core,
-//! the seeded repository, and the forge that is only a path.
+//! the [`unpushed`] repository, and the forge that is only a path.
 //!
 //! Only shared things live here. A fixture that serves one subtree
 //! stays in that subtree, beside the tests it serves — the plan
@@ -18,9 +18,10 @@ pub use epik_core::temp::Scratch;
 
 use crate::git::plumbing;
 
-/// A working repository with one commit on main, and a bare remote
-/// beside it, under `scratch`: `(work, remote)`, both paths.
-pub fn seeded(scratch: &Scratch) -> (String, String) {
+/// A working repository with one commit on main, and an empty bare
+/// remote beside it, under `scratch`: `(work, remote)`, both paths.
+/// The commit is in `work` alone.
+pub fn unpushed(scratch: &Scratch) -> (String, String) {
     let git = |args: &[&str]| plumbing(args).unwrap();
     let work = scratch.join("work");
     let remote = scratch.join("remote.git");

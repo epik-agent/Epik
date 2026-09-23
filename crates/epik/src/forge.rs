@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
 
-    use crate::testing::{Local, Scratch, seeded};
+    use crate::testing::{Local, Scratch, unpushed};
 
     /// A forge whose remote is a loopback HTTP listener that demands
     /// authentication — how the askpass rails are proven without any
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn a_push_writes_the_branch_to_a_bare_remote() {
         let scratch = Scratch::new("push");
-        let (work, bare) = seeded(&scratch);
+        let (work, bare) = unpushed(&scratch);
 
         push(Path::new(&work), "main", &Local(bare.clone())).unwrap();
 
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn a_remote_that_is_not_there_fails_in_gits_own_words() {
         let scratch = Scratch::new("nowhere");
-        let (work, _) = seeded(&scratch);
+        let (work, _) = unpushed(&scratch);
         let gone = scratch.join("gone.git");
 
         let error = push(Path::new(&work), "main", &Local(gone)).unwrap_err();
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn a_credentialed_push_answers_the_challenge_with_the_token() {
         let scratch = Scratch::new("challenge");
-        let (work, _) = seeded(&scratch);
+        let (work, _) = unpushed(&scratch);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/repo.git", listener.local_addr().unwrap());

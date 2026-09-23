@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use epik_core::agent::{Agent, Update};
 use epik_core::git::testing::{
-    branch_of, cloned, committed_all, credentials, identified, pushed, seeded,
+    branch_of, cloned, committed_all, credentials, identified, published, pushed,
 };
 use epik_core::git::url::Url;
 use epik_core::plan::stream::received;
@@ -54,7 +54,7 @@ async fn a_scripted_agent_runs_as_a_task() {
 #[test]
 fn what_an_agent_commits_in_a_worktree_is_pushed_and_clones_back() {
     let scratch = Scratch::new("worktrees-adder");
-    let (bare, _) = seeded(&scratch);
+    let (bare, _) = published(&scratch);
     let url = Url::Local(bare.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
     let linked = worktrees
@@ -103,7 +103,7 @@ async fn an_agent_that_exits_with_a_failure_is_the_tasks_error() {
 #[tokio::test]
 async fn a_plan_of_scripted_agents_implements_the_tracked_issues_into_a_pushed_branch() {
     let scratch = Scratch::new("adder");
-    let (origin, _) = seeded(&scratch);
+    let (origin, _) = published(&scratch);
     let url = Url::Local(origin.path().to_owned());
     let worktrees = Worktrees::new(scratch.0.join("root"));
     let tracker = JsonTracker::read(TRACKER).unwrap();
