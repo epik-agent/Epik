@@ -357,12 +357,6 @@ impl Watch {
         states
     }
 
-    /// Whether checks were expected on each pull request.
-    #[must_use]
-    pub const fn checked(&self) -> bool {
-        self.checked
-    }
-
     #[must_use]
     pub const fn stage(&self) -> &Stage {
         &self.stage

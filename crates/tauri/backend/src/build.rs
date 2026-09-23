@@ -157,7 +157,7 @@ impl Drop for Claim {
 /// come from. Made in `setup`, after the log — there is no default,
 /// because nothing here can exist without somewhere to speak.
 pub struct FeatureState {
-    pub log: Arc<Log>,
+    log: Arc<Log>,
     slots: AgentSlots,
     worktrees: PathBuf,
     runtime: tokio::runtime::Runtime,
@@ -270,9 +270,11 @@ fn start_feature(
          request is opened at the end and left for you. Returns as soon as the build is \
          running; several features may build at once, and one feature builds once at a \
          time. The build then proceeds on its own for a long time, so tell the user the \
-         branch and end your turn. You cannot see how a build is going: the monitor \
-         window shows every build under way, each feature its own tab, so send the user \
-         there rather than promising to check.",
+         branch and end your turn. Reporting on a running build is the monitor window's \
+         work, not yours: it shows every build under way, each feature its own tab. Send \
+         the user there rather than promising to check, and do not read the build's \
+         progress off GitHub — the pushes, pull requests and merges you would find there \
+         are the build's own steps, mid-flight.",
         json!({
             "type": "object",
             "properties": {
