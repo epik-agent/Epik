@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn empty_containers_render_inline_and_never_fold() {
         let text = r#"{"a": {}, "b": []}"#;
-        assert!(is_tree(text));
+        assert!(is_tree(text), "{text} is JSON worth a tree");
         assert_eq!(initial_folds(text), none());
         assert_eq!(
             rows(text, &none()).unwrap(),
@@ -812,7 +812,10 @@ mod tests {
 
     #[test]
     fn a_whole_document_is_taken_only_as_written() {
-        assert!(Document::whole("{\"a\": 1}").is_some());
+        assert!(
+            Document::whole("{\"a\": 1}").is_some(),
+            "a complete object is taken"
+        );
         for text in [
             "{\"a\": 1, \"b\": \"cu",
             "{\"a\": 1, // note\n \"b\": 2}",
@@ -881,7 +884,9 @@ mod tests {
         assert!(
             shown[MAX_ROWS - 1].spans[0]
                 .text
-                .starts_with(&(MAX_ROWS - 2).to_string())
+                .starts_with(&(MAX_ROWS - 2).to_string()),
+            "{}",
+            shown[MAX_ROWS - 1].spans[0].text
         );
     }
 
@@ -896,7 +901,7 @@ mod tests {
         assert_eq!(shown[1].spans[2], span(Kind::String, "\"wümpus\""));
         let folded_value = &shown[2].spans[2].text;
         assert_eq!(folded_value.chars().count(), VALUE_CAP + 1);
-        assert!(folded_value.ends_with('…'));
+        assert!(folded_value.ends_with('…'), "{folded_value}");
 
         // A truncation cutting through a multibyte string.
         let cut = "{\"a\": 1, \"b\": \"日本語\n… (9 more characters elided)";

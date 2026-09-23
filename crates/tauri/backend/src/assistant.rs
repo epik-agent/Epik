@@ -543,9 +543,9 @@ mod tests {
     /// loop drives a real client, and the turn observes it into items.
     #[test]
     fn a_scripted_tool_turn_flows_through_the_turn_as_items() {
-        use epik_core::assistant::scripted::{Fragment, Scripted, Turn as Script};
+        use epik_core::assistant::scripted::{Fragment, ScriptedModel, Turn as Script};
 
-        let model = Scripted::spawn(vec![
+        let model = ScriptedModel::spawn(vec![
             Script::ToolCalls(vec![vec![Fragment::open(
                 0,
                 "call_1",
@@ -702,10 +702,10 @@ mod tests {
     /// where a turn is suspended on a question and resumed.
     #[test]
     fn a_scripted_choose_repository_turn_suspends_until_the_user_answers() {
-        use epik_core::assistant::scripted::{Fragment, Scripted, Turn as Script};
+        use epik_core::assistant::scripted::{Fragment, ScriptedModel, Turn as Script};
         use std::sync::Arc;
 
-        let model = Scripted::spawn(vec![
+        let model = ScriptedModel::spawn(vec![
             Script::ToolCalls(vec![vec![Fragment::open(
                 0,
                 "call_1",

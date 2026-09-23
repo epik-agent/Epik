@@ -328,6 +328,20 @@ fn topological_order<T>(nodes: &[Node<T>]) -> Result<Vec<usize>> {
     Ok(order)
 }
 
+/// Each node with the nodes directly before it: a graph's order, as a
+/// list a test can write out against literals. Exported to the crates
+/// that test against a `Dag` of their own, so there is one reading of
+/// "shape".
+#[cfg(any(test, feature = "testing"))]
+pub fn shape<T: Clone>(dag: &Dag<T>) -> Vec<(T, Vec<T>)> {
+    dag.nodes()
+        .map(|node| {
+            let before = node.predecessors().map(|before| before.value().clone());
+            (node.value().clone(), before.collect())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,9 +385,9 @@ mod tests {
         let lone = Dag::new(vec![Node::new(7, [])]).unwrap();
         let node = lone.find(|value| *value == 7).unwrap();
         assert_eq!(*node.value(), 7);
-        assert!(values(node.predecessors()).is_empty());
-        assert!(values(node.ancestors()).is_empty());
-        assert!(values(node.descendants()).is_empty());
+        assert_eq!(values(node.predecessors()), [7; 0], "nothing before it");
+        assert_eq!(values(node.ancestors()), [7; 0], "nothing above it");
+        assert_eq!(values(node.descendants()), [7; 0], "nothing after it");
     }
 
     #[test]
@@ -382,16 +396,16 @@ mod tests {
         let node = dag.find(|value| *value == 4).unwrap();
         assert_eq!(values(node.predecessors()), [2, 3]);
         assert_eq!(values(node.ancestors()), [1, 2, 3], "through 2 and 3 to 1");
-        assert!(values(node.descendants()).is_empty());
+        assert_eq!(values(node.descendants()), [4; 0], "4 is last");
 
         let node = dag.find(|value| *value == 1).unwrap();
-        assert!(values(node.predecessors()).is_empty());
+        assert_eq!(values(node.predecessors()), [1; 0], "1 is first");
         assert_eq!(values(node.descendants()), [2, 3, 4], "the diamond alone");
     }
 
     #[test]
     fn find_answers_none_when_every_value_fails_the_predicate() {
-        assert!(dag().find(|value| *value == 9).is_none());
+        assert!(dag().find(|value| *value == 9).is_none(), "9 is in no node");
     }
 
     #[test]
@@ -416,7 +430,7 @@ mod tests {
         assert_eq!(at, 1, "as given, the second node");
         *dag.get_mut(at).unwrap() = 20;
         assert_eq!(*dag.find(|value| *value == 20).unwrap().value(), 20);
-        assert!(dag.get_mut(5).is_none());
+        assert!(dag.get_mut(5).is_none(), "there is no node at 5");
     }
 
     #[test]

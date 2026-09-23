@@ -442,14 +442,14 @@ mod tests {
     }
 
     /// Everything that happened at `name`, in order.
-    fn happened(events: &[Event<Name>], name: Name) -> Vec<Happened> {
+    fn recorded(events: &[Event<Name>], name: Name) -> Vec<Happened> {
         let there = events.iter().filter(|event| event.node == name);
         there.map(|event| event.happened.clone()).collect()
     }
 
     /// The words `name` failed in.
     fn failure(events: &[Event<Name>], name: Name) -> String {
-        match happened(events, name).last() {
+        match recorded(events, name).last() {
             Some(Happened::Failed(words)) => words.clone(),
             other => panic!("{name:?} failed: {other:?}"),
         }
@@ -470,9 +470,15 @@ mod tests {
         let issue = |name| plan.find(|node| node.task.name() == name).unwrap();
         for name in issues {
             let mut before = issue(name).ancestors();
-            assert!(before.any(|node| node.value().task.name() == Name::Branch));
+            assert!(
+                before.any(|node| node.value().task.name() == Name::Branch),
+                "{name:?} comes after the branch"
+            );
             let mut after = issue(name).descendants();
-            assert!(after.any(|node| node.value().task.name() == Name::PullRequest));
+            assert!(
+                after.any(|node| node.value().task.name() == Name::PullRequest),
+                "{name:?} comes before the pull request"
+            );
         }
         let directly_before = |name| {
             let before = issue(name).predecessors();
@@ -511,7 +517,10 @@ mod tests {
             assert!(finished(Name::Branch) < started(name), "{events:?}");
             assert!(finished(name) < started(Name::PullRequest), "{events:?}");
             let said = Happened::Said(text(&format!("implementing {issue}")));
-            assert!(at(&events, Name::Step(issue, Step::Agent), &said).is_some());
+            assert!(
+                at(&events, Name::Step(issue, Step::Agent), &said).is_some(),
+                "{events:?}"
+            );
             let tip = hosted.tip(&issue_branch(issue)).expect("a pushed branch");
             assert!(
                 hosted.polled(&tip),
@@ -520,8 +529,14 @@ mod tests {
             assert_eq!(hosted.state(issue), State::Closed);
         }
         let [first, second, third, fourth] = [154, 155, 156, 157].map(Name::Issue);
-        assert!(finished(first) < started(third) && finished(second) < started(third));
-        assert!(finished(third) < started(fourth));
+        assert!(
+            finished(first) < started(third) && finished(second) < started(third),
+            "157 waits on both the issues before it: {events:?}"
+        );
+        assert!(
+            finished(third) < started(fourth),
+            "and 158 waits on 157: {events:?}"
+        );
 
         let mut pulls = hosted.pulls();
         assert_eq!(pulls.pop(), Some((feature_branch(FEATURE), false)));
@@ -555,7 +570,7 @@ mod tests {
         assert_eq!(hosted.state(154), State::Closed, "the independent issue");
         assert_eq!(hosted.pulls(), [(issue_branch(154), true)]);
         for unrun in [Name::Issue(156), Name::Issue(157), Name::PullRequest] {
-            assert_eq!(happened(&events, unrun), [], "{unrun:?} never ran");
+            assert_eq!(recorded(&events, unrun), [], "{unrun:?} never ran");
         }
         for open in [155, 156, 157] {
             assert_eq!(hosted.state(open), State::Open);
@@ -575,7 +590,7 @@ mod tests {
         let events = received(&mut receiver);
         let words = "the agent exited with code 7".to_owned();
         assert_eq!(
-            happened(&events, Name::Step(3, Step::Agent)),
+            recorded(&events, Name::Step(3, Step::Agent)),
             [
                 Happened::Started,
                 Happened::Stderr("no good".to_owned()),
@@ -583,7 +598,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            happened(&events, Name::Issue(3)),
+            recorded(&events, Name::Issue(3)),
             [Happened::Started, Happened::Failed(words)]
         );
         assert_eq!(hosted.tip("issue-3"), None, "nothing was pushed");
@@ -888,7 +903,7 @@ mod tests {
         let tip = hosted.tip(&issue_branch(3)).expect("a pushed branch");
         let events = received(&mut receiver);
         assert_eq!(
-            happened(&events, Name::Step(3, Step::Push)),
+            recorded(&events, Name::Step(3, Step::Push)),
             [
                 Happened::Started,
                 Happened::Pushed(tip.to_string()),
@@ -973,7 +988,7 @@ mod tests {
         }
         let counts = watch.counts();
         assert_eq!((counts.merged, counts.total), (issues.len(), issues.len()));
-        assert!(!watch.live());
+        assert!(!watch.live(), "the run is over");
     }
 
     #[test]

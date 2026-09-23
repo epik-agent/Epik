@@ -706,7 +706,8 @@ mod tests {
         }
     }
 
-    fn happened(run: u64, node: Name, happened: Happened) -> Change {
+    /// One `Change::Happened`: what happened at `node` in `run`.
+    fn change(run: u64, node: Name, happened: Happened) -> Change {
         Change::Happened {
             run: RunId(run),
             event: Event { node, happened },
@@ -716,7 +717,7 @@ mod tests {
     /// The whole of one issue's run, start to close, as its node and
     /// its steps say it.
     fn built(run: u64, issue: u64) -> Vec<Change> {
-        let mut changes = vec![happened(run, Name::Issue(issue), Happened::Started)];
+        let mut changes = vec![change(run, Name::Issue(issue), Happened::Started)];
         for step in [
             Step::Worktree,
             Step::Agent,
@@ -728,14 +729,14 @@ mod tests {
             Step::Close,
         ] {
             let node = Name::Step(issue, step);
-            changes.push(happened(run, node, Happened::Started));
+            changes.push(change(run, node, Happened::Started));
             if step == Step::Push {
                 let commit = format!("commit-{issue}");
-                changes.push(happened(run, node, Happened::Pushed(commit)));
+                changes.push(change(run, node, Happened::Pushed(commit)));
             }
-            changes.push(happened(run, node, Happened::Finished));
+            changes.push(change(run, node, Happened::Finished));
         }
-        changes.push(happened(run, Name::Issue(issue), Happened::Finished));
+        changes.push(change(run, Name::Issue(issue), Happened::Finished));
         changes
     }
 
@@ -756,13 +757,13 @@ mod tests {
     /// A whole build of #158's shape: every issue built, then finished.
     fn whole_build() -> Vec<Change> {
         let mut changes = vec![reserved(1), started(1, diamond())];
-        changes.push(happened(1, Name::Branch, Happened::Started));
-        changes.push(happened(1, Name::Branch, Happened::Finished));
+        changes.push(change(1, Name::Branch, Happened::Started));
+        changes.push(change(1, Name::Branch, Happened::Finished));
         for issue in [154, 155, 156, 157] {
             changes.extend(built(1, issue));
         }
-        changes.push(happened(1, Name::PullRequest, Happened::Started));
-        changes.push(happened(1, Name::PullRequest, Happened::Finished));
+        changes.push(change(1, Name::PullRequest, Happened::Started));
+        changes.push(change(1, Name::PullRequest, Happened::Finished));
         changes.push(Change::Finished { run: RunId(1) });
         changes
     }
@@ -800,11 +801,11 @@ mod tests {
     #[test]
     fn an_issue_waiting_on_github_is_merging_not_running() {
         let mut changes = vec![reserved(1), started(1, diamond())];
-        changes.push(happened(1, Name::Issue(154), Happened::Started));
+        changes.push(change(1, Name::Issue(154), Happened::Started));
         for step in [Step::Worktree, Step::Agent, Step::Commit, Step::Push] {
             let node = Name::Step(154, step);
-            changes.push(happened(1, node, Happened::Started));
-            changes.push(happened(1, node, Happened::Finished));
+            changes.push(change(1, node, Happened::Started));
+            changes.push(change(1, node, Happened::Finished));
         }
         let running = fold(&changes);
         assert_eq!(
@@ -812,10 +813,13 @@ mod tests {
             State::Running,
             "the push is still the agent's side of the work"
         );
-        assert!(running.watch(RunId(1)).unwrap().live());
+        assert!(
+            running.watch(RunId(1)).unwrap().live(),
+            "the run has not finished"
+        );
 
         let node = Name::Step(154, Step::PullRequest);
-        changes.push(happened(1, node, Happened::Started));
+        changes.push(change(1, node, Happened::Started));
         let merging = fold(&changes);
         let watch = merging.watch(RunId(1)).unwrap();
         assert_eq!(watch.states()[&154], State::Merging);
@@ -830,16 +834,16 @@ mod tests {
         let words = "the agent exited with code 3";
         let mut changes = vec![reserved(1), started(1, diamond())];
         changes.extend(built(1, 154));
-        changes.push(happened(1, Name::Issue(155), Happened::Started));
+        changes.push(change(1, Name::Issue(155), Happened::Started));
         for (step, ended) in [
             (Step::Worktree, Happened::Finished),
             (Step::Agent, Happened::Failed(words.to_owned())),
         ] {
             let node = Name::Step(155, step);
-            changes.push(happened(1, node, Happened::Started));
-            changes.push(happened(1, node, ended));
+            changes.push(change(1, node, Happened::Started));
+            changes.push(change(1, node, ended));
         }
-        changes.push(happened(
+        changes.push(change(
             1,
             Name::Issue(155),
             Happened::Failed(words.to_owned()),
@@ -849,7 +853,11 @@ mod tests {
         let progress = fold(&changes);
         let watch = progress.watch(RunId(1)).unwrap();
         let states = watch.states();
-        assert!(matches!(states[&154], State::Merged { .. }));
+        assert!(
+            matches!(states[&154], State::Merged { .. }),
+            "{:?}",
+            states[&154]
+        );
         assert_eq!(
             states[&155],
             State::Failed {
@@ -916,7 +924,10 @@ mod tests {
             at: 1_001,
             change: changes[1].clone(),
         };
-        assert!(!progress.absorb(&repeat));
+        assert!(
+            !progress.absorb(&repeat),
+            "a seq already applied changes nothing"
+        );
         assert_eq!(progress, once);
         assert_eq!(progress.applied(), Some(1));
     }
@@ -929,9 +940,15 @@ mod tests {
             at: 1_000,
             change: Change::Finished { run: RunId(9) },
         };
-        assert!(progress.absorb(&entry));
+        assert!(
+            progress.absorb(&entry),
+            "a finish for an unknown run still applies"
+        );
         assert_eq!(progress.applied(), Some(0), "the cursor still moved");
-        assert!(progress.watch(RunId(9)).is_none());
+        assert!(
+            progress.watch(RunId(9)).is_none(),
+            "run 9 was never started"
+        );
     }
 
     #[test]
@@ -942,10 +959,10 @@ mod tests {
         assert_eq!(watch.branch(), "feature-158");
         assert_eq!(watch.base(), Some("main"));
         assert_eq!(watch.repository(), "/r");
-        assert!(watch.work().is_none());
+        assert!(watch.work().is_none(), "a reservation has no graph yet");
         assert_eq!(watch.title(), None);
         assert_eq!(watch.layout(), None);
-        assert!(watch.states().is_empty());
+        assert!(watch.states().is_empty(), "and so no node has a state");
         assert_eq!(watch.counts(), Counts::default());
     }
 
@@ -1021,8 +1038,8 @@ mod tests {
 
     #[test]
     fn a_change_serializes_tagged_by_its_word_and_reads_back() {
-        let change = happened(1, Name::Step(154, Step::Push), Happened::Finished);
-        let wire = serde_json::to_value(&change).unwrap();
+        let pushed = change(1, Name::Step(154, Step::Push), Happened::Finished);
+        let wire = serde_json::to_value(&pushed).unwrap();
         assert_eq!(
             wire,
             serde_json::json!({
@@ -1031,7 +1048,7 @@ mod tests {
                 "event": { "node": { "Step": [154, "Push"] }, "happened": "Finished" },
             })
         );
-        assert_eq!(serde_json::from_value::<Change>(wire).unwrap(), change);
+        assert_eq!(serde_json::from_value::<Change>(wire).unwrap(), pushed);
 
         let entry = Entry {
             seq: 3,
@@ -1063,9 +1080,10 @@ mod tests {
 }
 
 /// The log, which only a host keeps: recorded from many threads and
-/// read by cursor, over the same changes the fold above takes in.
+/// read by cursor, over the same changes the fold above takes in. Named
+/// `native` for its gate, the feature the log lives behind.
 #[cfg(all(test, feature = "native"))]
-mod log_tests {
+mod native {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1088,8 +1106,8 @@ mod log_tests {
         assert_eq!((entries[0].seq, entries[0].at), (0, 5_000));
         assert_eq!((entries[1].seq, entries[1].at), (1, 5_250));
         assert_eq!(log.since(1), entries[1..]);
-        assert!(log.since(2).is_empty());
-        assert!(log.since(u64::MAX).is_empty());
+        assert!(log.since(2).is_empty(), "the cursor is past the last entry");
+        assert!(log.since(u64::MAX).is_empty(), "and far past it");
     }
 
     #[test]
@@ -1111,7 +1129,10 @@ mod log_tests {
 
         // Already satisfied: answers at once with everything from the cursor.
         assert_eq!(log.wait_after(0, Duration::from_secs(30)), heard);
-        assert!(log.wait_after(1, Duration::from_millis(20)).is_empty());
+        assert!(
+            log.wait_after(1, Duration::from_millis(20)).is_empty(),
+            "nothing arrives inside the wait"
+        );
     }
 
     /// Two runs recording at once, and one reader following by

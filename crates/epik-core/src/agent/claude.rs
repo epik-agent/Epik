@@ -21,6 +21,23 @@
 #[cfg(feature = "native")]
 mod protocol;
 
+/// The captured stream-json the tests read, and where it is on disk —
+/// one place, so a test outside this module reaches the fixtures here
+/// rather than by a path into `src/`. See `fixtures/README.md` for
+/// provenance.
+#[cfg(any(test, feature = "testing"))]
+pub mod fixtures {
+    /// One complete successful session, ten lines of stream-json.
+    pub const SESSION: &str = include_str!("claude/fixtures/session.jsonl");
+    /// The terminal result line of a session that ran out of turns.
+    pub const RESULT_ERROR: &str = include_str!("claude/fixtures/result_error.json");
+    /// [`SESSION`]'s own path, for a test that needs the file itself.
+    pub const SESSION_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/agent/claude/fixtures/session.jsonl"
+    );
+}
+
 #[cfg(feature = "native")]
 use super::{Agent, Update};
 #[cfg(feature = "native")]

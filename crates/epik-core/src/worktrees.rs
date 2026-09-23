@@ -314,37 +314,34 @@ mod tests {
         info(path, Some(linked.branch().to_owned()), head)
     }
 
-    #[test]
-    fn a_url_is_cloned_once_and_each_add_is_its_own_worktree_on_the_branch_named_until_dropped() {
-        let scratch = Scratch::new("worktrees");
-        let (origin, work) = published(&scratch);
+    /// A published origin under `scratch`, and an empty `Worktrees` root
+    /// beside it: the URL to add from, the commit `main` stands at, and
+    /// the root. Git lists paths as it resolved them, symlinks followed,
+    /// so the root is canonical and the comparisons are between resolved
+    /// paths. The URL's clone lands in `root.join(slug(&url))`.
+    fn published_with_a_root(scratch: &Scratch) -> (Url, Hash, PathBuf) {
+        let (origin, work) = published(scratch);
         let url = Url::Local(origin.path().to_owned());
         let head = head(&work);
-        // Git lists paths as it resolved them, symlinks followed.
         let root = scratch.0.canonicalize().unwrap().join("root");
-        let worktrees = Worktrees::new(root.clone());
+        (url, head, root)
+    }
+
+    #[test]
+    fn the_first_add_clones_the_url_and_the_next_one_reuses_the_clone() {
+        let scratch = Scratch::new("worktrees-clone-once");
+        let (url, _, root) = published_with_a_root(&scratch);
         let group = root.join(slug(&url));
+        let worktrees = Worktrees::new(root);
         let main = group.join("main");
-        let main_info = info(main.clone(), Some("main".to_owned()), &head);
 
         let first = worktrees
             .add(&url, "issue-1", "origin/main", &credentials())
             .unwrap();
         assert!(main.is_dir(), "the first add cloned");
-        assert_eq!(
-            first.branch(),
-            "issue-1",
-            "the branch is named for its issue"
-        );
-        assert_eq!(first.worktree().path(), group.join("issue-1"));
-        assert!(first.worktree().path().join("hello.txt").is_file());
-        assert_eq!(
-            listed(first.worktree()),
-            [main_info.clone(), linked(&first, &head)]
-        );
 
         let cloned_at = std::fs::metadata(&main).unwrap().modified().unwrap();
-        let second = worktrees
+        let _second = worktrees
             .add(&url, "issue-2", "origin/main", &credentials())
             .unwrap();
         assert_eq!(
@@ -352,20 +349,62 @@ mod tests {
             cloned_at,
             "the second add reused the clone"
         );
+        drop(first);
+    }
+
+    #[test]
+    fn each_add_is_its_own_worktree_on_the_branch_it_was_named_for() {
+        let scratch = Scratch::new("worktrees-own-branch");
+        let (url, head, root) = published_with_a_root(&scratch);
+        let group = root.join(slug(&url));
+        let worktrees = Worktrees::new(root);
+        let main_info = info(group.join("main"), Some("main".to_owned()), &head);
+
+        let first = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
         assert_eq!(
-            listed(first.worktree()),
-            [
-                main_info.clone(),
-                linked(&first, &head),
-                linked(&second, &head)
-            ],
-            "each add on its own branch"
+            first.branch(),
+            "issue-1",
+            "the branch is named for its issue"
+        );
+        assert_eq!(first.worktree().path(), group.join("issue-1"));
+        assert!(
+            first.worktree().path().join("hello.txt").is_file(),
+            "the origin's content is in the worktree"
         );
 
+        let second = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
+        assert_eq!(
+            listed(first.worktree()),
+            [main_info, linked(&first, &head), linked(&second, &head)],
+            "each add on its own branch"
+        );
+    }
+
+    #[test]
+    fn a_dropped_worktree_goes_and_the_last_drop_takes_the_clone_with_it() {
+        let scratch = Scratch::new("worktrees-dropped");
+        let (url, head, root) = published_with_a_root(&scratch);
+        let group = root.join(slug(&url));
+        let worktrees = Worktrees::new(root.clone());
+        let main = group.join("main");
+        let main_info = info(main.clone(), Some("main".to_owned()), &head);
+
+        let first = worktrees
+            .add(&url, "issue-1", "origin/main", &credentials())
+            .unwrap();
+        let second = worktrees
+            .add(&url, "issue-2", "origin/main", &credentials())
+            .unwrap();
+
+        // Loose: a drop takes the worktree whatever is left lying in it.
         std::fs::write(first.worktree().path().join("loose.txt"), "loose\n").unwrap();
         let first_path = first.worktree().path().to_owned();
         drop(first);
-        assert!(!first_path.exists());
+        assert!(!first_path.exists(), "the dropped worktree is gone");
         assert!(main.is_dir(), "the clone stays while a worktree is out");
         assert_eq!(
             listed(second.worktree()),
@@ -397,8 +436,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(head(late.worktree()), landed);
-        assert!(late.worktree().path().join("early.txt").is_file());
-        assert!(!early.worktree().path().join("early.txt").exists());
+        assert!(
+            late.worktree().path().join("early.txt").is_file(),
+            "the late worktree holds what landed"
+        );
+        assert!(
+            !early.worktree().path().join("early.txt").exists(),
+            "and the early one, cut before it, does not"
+        );
     }
 
     #[test]
@@ -416,7 +461,10 @@ mod tests {
                     let linked = worktrees
                         .add(url, name, "origin/main", &credentials())
                         .unwrap();
-                    assert!(linked.worktree().path().join("hello.txt").is_file());
+                    assert!(
+                        linked.worktree().path().join("hello.txt").is_file(),
+                        "{name}: the origin's content is in the worktree"
+                    );
                 }
             }
         };
@@ -526,7 +574,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(branch_of(reclaimed.worktree()), "issue-1");
-        assert!(!reclaimed.worktree().path().join("half.txt").exists());
+        assert!(
+            !reclaimed.worktree().path().join("half.txt").exists(),
+            "the leftover's half-written file went with it"
+        );
         assert!(held.worktree().path().is_dir(), "the holder stands");
     }
 
@@ -605,7 +656,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("nonexistent"), "{error}");
-        assert!(!Path::new(&scratch.join("root")).exists());
+        assert!(
+            !Path::new(&scratch.join("root")).exists(),
+            "a failed clone leaves no root behind"
+        );
     }
 
     #[test]

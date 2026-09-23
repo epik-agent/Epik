@@ -13,3 +13,7 @@ A desktop app: Tauri 2 shell, Leptos frontend, two crates.
   wasm32-unknown-unknown while the other crates build natively, and a shared
   workspace would entangle the two targets' features and lockfiles.
 
+The tests are written to one nomenclature, described in
+[`docs/testing.md`](docs/testing.md); `docs/design-history` holds the
+decisions that got us here.
+

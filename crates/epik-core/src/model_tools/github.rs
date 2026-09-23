@@ -404,7 +404,7 @@ mod tests {
 
     /// Port 1 is reserved; a handler that reached the wire would say
     /// so rather than answer.
-    fn registry(owner: Option<&str>) -> Registry {
+    fn github_tools(owner: Option<&str>) -> Registry {
         let mut registry = Registry::default();
         registry.extend(all(
             GitHub::at("http://127.0.0.1:1", None),
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn a_bad_repository_spelling_is_an_err_result_in_words() {
-        let error = registry(None)
+        let error = github_tools(None)
             .dispatch("github_issue", r#"{"repo":"not a repo","number":1}"#)
             .unwrap_err();
         assert!(error.contains("owner/name"), "{error}");
@@ -434,11 +434,11 @@ mod tests {
     #[test]
     fn a_bare_name_settles_against_the_configured_owner() {
         // Past the spelling check and onto the wire, where port 1 refuses.
-        let error = registry(Some("epik-agent"))
+        let error = github_tools(Some("epik-agent"))
             .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
             .unwrap_err();
         assert!(!error.contains("owner/name"), "{error}");
-        let error = registry(None)
+        let error = github_tools(None)
             .dispatch("github_issue", r#"{"repo":"Epik","number":1}"#)
             .unwrap_err();
         assert!(error.contains("Settings"), "{error}");
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn a_writing_verb_without_a_token_answers_with_the_settings_pointer() {
-        let error = registry(None)
+        let error = github_tools(None)
             .dispatch(
                 "github_create_issue",
                 r#"{"repo":"epik-agent/Epik","title":"t","body":""}"#,
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_missing_argument_is_an_err_result_in_words() {
-        let error = registry(None)
+        let error = github_tools(None)
             .dispatch("github_issue", r#"{"repo":"epik-agent/Epik"}"#)
             .unwrap_err();
         assert!(error.contains("number"), "{error}");
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_merge_method_outside_the_three_is_refused_in_words() {
-        let error = registry(None)
+        let error = github_tools(None)
             .dispatch(
                 "github_merge_pull",
                 r#"{"repo":"epik-agent/Epik","number":1,"method":"yolo"}"#,

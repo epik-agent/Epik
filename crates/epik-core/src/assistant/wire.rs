@@ -557,7 +557,11 @@ mod tests {
 
     #[test]
     fn gibberish_is_a_malformed_stream_not_a_panic() {
-        assert!(matches!(step("not json"), Err(Error::MalformedStream(_))));
+        let stepped = step("not json");
+        assert!(
+            matches!(stepped, Err(Error::MalformedStream(_))),
+            "{stepped:?}"
+        );
     }
 
     #[test]

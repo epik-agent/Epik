@@ -480,7 +480,8 @@ mod tests {
             slots
                 .run(|| -> Result<()> { panic!("oops") })
                 .await
-                .is_err()
+                .is_err(),
+            "the panic reaches the caller as an error"
         );
         slots.run(|| Ok(())).await.unwrap();
     }
@@ -555,7 +556,8 @@ mod tests {
                 .claim(|| -> Result<()> { panic!("oops") })
                 .await
                 .unwrap()
-                .is_err()
+                .is_err(),
+            "the panic reaches the caller as an error"
         );
         assert!(slots.claim(|| Ok(())).await.is_some(), "and after a panic");
     }

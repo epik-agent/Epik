@@ -338,8 +338,14 @@ mod tests {
     /// and documented rather than papered over with an `Unknown`.
     #[test]
     fn an_ask_kind_from_a_newer_build_fails_to_decode() {
-        assert!(serde_json::from_str::<Ask>(r#"{"kind":"color","prompt":"?"}"#).is_err());
-        assert!(serde_json::from_str::<Answer>(r#"{"kind":"color","value":"red"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Ask>(r#"{"kind":"color","prompt":"?"}"#).is_err(),
+            "an unknown ask kind decodes into nothing"
+        );
+        assert!(
+            serde_json::from_str::<Answer>(r#"{"kind":"color","value":"red"}"#).is_err(),
+            "an unknown answer kind decodes into nothing"
+        );
     }
 
     #[test]
@@ -366,10 +372,13 @@ mod tests {
     #[test]
     fn unparseable_arguments_reach_the_transcript_verbatim() {
         let item = TranscriptItem::tool_call("f", "{\"a\":");
-        assert!(matches!(
-            item,
-            TranscriptItem::ToolCall { arguments, .. } if arguments == "{\"a\":"
-        ));
+        assert!(
+            matches!(
+                &item,
+                TranscriptItem::ToolCall { arguments, .. } if arguments == "{\"a\":"
+            ),
+            "{item:?}"
+        );
     }
 
     #[test]
