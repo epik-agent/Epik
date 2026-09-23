@@ -1,0 +1,11 @@
+# This crate targets the browser, so a bare `cargo` here means wasm.
+# Trunk passes the target itself; this says the same to everything that
+# does not, rust-analyzer above all. Left to the host default, a check
+# here builds a second, native copy of the tree whose stale artifacts
+# report epik-core's modules as missing.
+#
+# The tests are the exception: they are plain `#[test]`, so they need a
+# host that can run them. `cargo test --target aarch64-apple-darwin`,
+# or whatever the host triple is, keeps that build honest.
+[build]
+target = "wasm32-unknown-unknown"
