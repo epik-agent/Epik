@@ -32,7 +32,9 @@ architecture.
 | `2026-08-18-json-in-tool-cards` | One structural JSON renderer for cards and messages | **Principle live, mechanism superseded** by `2026-09-19-the-assistant-window-is-rich-chat`: the JSON logic moves to `epik-core`, and syntect's pruned set gives way to `leptos-rich-chat`'s. Reconstructed 2026-08-19; the original was lost before check-in. |
 | `2026-08-19-a-feature-is-a-build-of-builds` | Features are built concurrently under a DAG | **Live and built.** `epik::feature`: the plan, the build, the merge, and the chat verbs. |
 | `2026-09-19-the-assistant-window-is-rich-chat` | The window is `leptos-rich-chat`; the assistant lives in `epik-core::assistant` | **Accepted.** |
+| `2026-09-20-epik-does-everything-around-the-code` | Deterministic code does everything an agent is not needed for | **Accepted.** |
 | `2026-09-23-where-a-feature-accumulates` | Whether a feature accumulates on GitHub or in the local clone | **Proposed, undecided.** States the question and the trade-offs; no decision taken. |
+| `2026-09-23-how-epiks-tests-are-written` | The conventions every Epik test follows | **Accepted.** Converted from `docs/testing.md`, which was a description; as a record it binds. |
 
 Three entries carry a reconstruction note in their headers:
 `2026-07-29-github-app-as-credential`, `2026-08-17-build-from-chat`, and
