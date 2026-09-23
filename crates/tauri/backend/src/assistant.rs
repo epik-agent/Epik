@@ -338,9 +338,9 @@ pub async fn send_message(
             GitHub::new(github_token.clone()),
             config.github.owner.clone(),
         ));
-        // The one question rail: whoever asks — the persona through
-        // choose_repository, or the feature build machinery raising its
-        // check card — blocks the turn's thread until the window answers.
+        // The one question rail: the persona asks through
+        // choose_repository, and the turn's thread blocks until the
+        // window answers.
         let asker = |app: AppHandle| {
             move |question| {
                 let state = app.state::<AssistantState>();
@@ -360,7 +360,6 @@ pub async fn send_message(
             config.model.agent,
             github_token,
             config.github.owner,
-            asker(app.clone()),
         ));
         registry.register(choose_repository(asker(app.clone())));
         let stop = AtomicBool::new(false);
