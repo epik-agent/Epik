@@ -401,16 +401,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "epik"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "epik-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "epik-core"
 version = "0.1.0"
 dependencies = [
@@ -428,7 +418,6 @@ name = "epik-frontend"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
- "epik",
  "epik-core",
  "js-sys",
  "leptos",

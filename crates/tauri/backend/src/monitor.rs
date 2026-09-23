@@ -13,10 +13,10 @@
 //! The surface is read-only — it serves the page and the changes, and
 //! can start nothing, stop nothing and answer nothing.
 //!
-//! `tiny_http`: blocking, a thread per connection, and off Tauri's async
-//! runtime — the `epik` library is synchronous throughout and the server
-//! keeps that discipline. A connection blocks in [`Log::wait_after`], so
-//! an idle monitor costs a sleeping thread and nothing else.
+//! `tiny_http`: blocking, a thread per connection, and off every async
+//! runtime in the process — Tauri's and the one a build's plan runs on.
+//! A connection blocks in [`Log::wait_after`], so an idle monitor costs
+//! a sleeping thread and nothing else.
 //!
 //! It binds loopback and refuses any other address, in words that say
 //! why: remote access is an ssh tunnel until there is an authentication
@@ -34,7 +34,7 @@ use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::Duration;
 
-use epik::monitor::{Entry, Log, now};
+use epik_core::monitor::{Entry, Log, now};
 use include_dir::{Dir, File, include_dir};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -307,15 +307,14 @@ mod tests {
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpStream;
 
-    use epik::feature::{IssueId, RunId};
-    use epik::monitor::Change;
+    use epik_core::monitor::{Change, RunId};
 
     use super::*;
 
     fn reserved(run: u64) -> Change {
         Change::Reserved {
             run: RunId(run),
-            feature: IssueId::from(1),
+            feature: 1,
             repository: "/r".to_owned(),
             branch: "feature-1".to_owned(),
             base: None,

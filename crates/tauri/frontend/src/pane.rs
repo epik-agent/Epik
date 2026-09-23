@@ -14,9 +14,8 @@
 //! Motion is the one `epik-pulse` keyframe, on a Running node and on
 //! the dot of a tab with one — and only while the feed is speaking.
 
-use epik::feature::IssueId;
-use epik::feature::RunId;
-use epik::feature::layout::{Form, Layout};
+use epik_core::monitor::RunId;
+use epik_core::monitor::layout::{Form, Layout};
 use leptos::prelude::*;
 
 use crate::monitor::{Dot, Pane, Tab, TabSpec, View};
@@ -33,7 +32,7 @@ const NEST: f64 = 12.0;
 /// One node, placed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Circle {
-    pub id: IssueId,
+    pub id: u64,
     pub cx: f64,
     pub cy: f64,
     pub r: f64,
@@ -87,7 +86,7 @@ pub fn geometry(layout: &Layout) -> Geometry {
         .map(|node| {
             let (cx, cy) = at(node.column, node.row);
             Circle {
-                id: node.id.clone(),
+                id: node.id,
                 cx,
                 cy,
                 r: match node.form {
@@ -97,13 +96,18 @@ pub fn geometry(layout: &Layout) -> Geometry {
             }
         })
         .collect();
-    let circle = |id: &IssueId| circles.iter().find(|circle| &circle.id == id);
+    let circle = |id: u64| circles.iter().find(|circle| circle.id == id);
 
     let rects = layout
         .containers
         .iter()
         .map(|container| {
-            let inside: Vec<&Circle> = container.leaves.iter().filter_map(circle).collect();
+            let inside: Vec<&Circle> = container
+                .leaves
+                .iter()
+                .copied()
+                .filter_map(circle)
+                .collect();
             let pad = NEST * container.height as f64;
             let x = inside.iter().map(|c| c.cx).fold(f64::MAX, f64::min) - R_ACTIVE - 10.0 - pad;
             let right =
@@ -124,7 +128,7 @@ pub fn geometry(layout: &Layout) -> Geometry {
     let arrows = layout
         .edges
         .iter()
-        .filter_map(|edge| Some((circle(&edge.blocker)?, circle(&edge.issue)?)))
+        .filter_map(|edge| Some((circle(edge.blocker)?, circle(edge.issue)?)))
         .map(|(from, to)| {
             let (x1, y1) = (from.cx + from.r, from.cy);
             let (x2, y2) = (to.cx - to.r - 4.0, to.cy);
@@ -289,7 +293,7 @@ pub fn FeaturePane(view: RwSignal<View>, pane: Pane) -> impl IntoView {
     let graph = pane
         .layout
         .as_ref()
-        .map(|layout| graph(view, run, layout, pane.selected.as_ref(), pane.pulse));
+        .map(|layout| graph(view, run, layout, pane.selected, pane.pulse));
     let detail = pane.detail.map(|detail| {
         let colour = form_class(detail.form, false);
         view! {
@@ -349,7 +353,7 @@ fn graph(
     view: RwSignal<View>,
     run: RunId,
     layout: &Layout,
-    selected: Option<&IssueId>,
+    selected: Option<u64>,
     pulse: bool,
 ) -> impl IntoView + use<> {
     let geometry = geometry(layout);
@@ -400,9 +404,9 @@ fn graph(
         .zip(&geometry.circles)
         .map(|(node, circle)| {
             let (cx, cy, r) = (circle.cx, circle.cy, circle.r);
-            let id = node.id.clone();
+            let id = node.id;
             let colour = form_class(node.form, pulse);
-            let ring = selected.is_some_and(|selected| selected == &node.id).then(|| {
+            let ring = selected.is_some_and(|selected| selected == node.id).then(|| {
                 view! {
                     <circle
                         cx=cx
@@ -446,7 +450,7 @@ fn graph(
             view! {
                 <g
                     class="cursor-pointer"
-                    on:click=move |_| view.update(|view| view.select(run, id.clone()))
+                    on:click=move |_| view.update(|view| view.select(run, id))
                 >
                     <title>{format!("#{} {}", node.id, node.title)}</title>
                     {ring}
@@ -492,14 +496,14 @@ fn graph(
 
 #[cfg(test)]
 mod tests {
-    use epik::feature::State;
-    use epik::feature::layout::{Container, Edge, Node};
+    use epik_core::monitor::State;
+    use epik_core::monitor::layout::{Container, Edge, Node};
 
     use super::*;
 
     fn node(id: u64, column: usize, row: usize, form: Form) -> Node {
         Node {
-            id: IssueId::from(id),
+            id,
             title: format!("issue {id}"),
             state: State::Waiting,
             form,
@@ -515,8 +519,8 @@ mod tests {
         let layout = Layout {
             nodes: vec![node(2, 0, 0, Form::Running), node(3, 1, 1, Form::Blocked)],
             edges: vec![Edge {
-                blocker: IssueId::from(2),
-                issue: IssueId::from(3),
+                blocker: 2,
+                issue: 3,
             }],
             containers: Vec::new(),
         };
@@ -538,11 +542,11 @@ mod tests {
             nodes: vec![node(3, 0, 0, Form::Ready), node(4, 0, 1, Form::Ready)],
             edges: Vec::new(),
             containers: vec![Container {
-                id: IssueId::from(7),
+                id: 7,
                 title: "the container".to_owned(),
                 depth: 1,
                 height: 0,
-                leaves: vec![IssueId::from(3), IssueId::from(4)],
+                leaves: vec![3, 4],
             }],
         };
         let geometry = geometry(&layout);

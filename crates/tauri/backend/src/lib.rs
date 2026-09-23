@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use epik::monitor::Log;
 use epik_core::config::Config;
+use epik_core::monitor::Log;
 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Builder, Manager, Theme, WebviewUrl, WebviewWindowBuilder, Wry};
 
@@ -111,7 +111,11 @@ pub fn run() {
             // The same log as a page a browser can open, when the file
             // asks for one.
             monitor::start(listen.as_deref(), &log);
-            app.manage(build::FeatureState::new(log));
+            // Where the builds' worktrees stand: one root under the
+            // app's data directory, shared by every build, so a clone
+            // made for one feature serves the next.
+            let worktrees = app.path().app_data_dir()?.join("worktrees");
+            app.manage(build::FeatureState::new(log, worktrees)?);
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.
             app.handle().set_theme(None);

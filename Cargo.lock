@@ -1083,6 +1083,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tiny_http",
+ "tokio",
  "toml 1.1.4+spec-1.1.0",
 ]
 
