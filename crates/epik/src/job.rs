@@ -203,8 +203,8 @@ fn holder(listed: &str, branch: &str) -> Option<PathBuf> {
 /// What both provisioners insist on before touching anything: an
 /// absolute path that is a git repository. Reads only; the answer is
 /// the repository's git dir, which the config work needs later. Shared
-/// with `feature::tools`, so `start_feature` refuses a relative path in
-/// exactly `start_build`'s words.
+/// with `feature::tools`, so every verb that provisions refuses a
+/// relative path in the same words.
 pub(crate) fn locate(repository: &str) -> Result<String, String> {
     if !Path::new(repository).is_absolute() {
         return Err(format!(
