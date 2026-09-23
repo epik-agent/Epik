@@ -230,7 +230,7 @@ mod tests {
             let Segment::Markdown(piece) = piece else {
                 continue;
             };
-            assert!(!piece.is_empty());
+            assert!(!piece.is_empty(), "no segment is empty");
             let at = rest.find(piece.as_str()).expect("in input order");
             rest = &rest[at + piece.len()..];
         }

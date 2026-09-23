@@ -126,10 +126,7 @@ struct Usage {
 mod tests {
     use super::*;
 
-    /// A complete captured session; see fixtures/README.md for
-    /// provenance.
-    const SESSION: &str = include_str!("fixtures/session.jsonl");
-    const RESULT_ERROR: &str = include_str!("fixtures/result_error.json");
+    use super::super::fixtures::{RESULT_ERROR, SESSION};
 
     fn updates(stream: &str) -> Vec<Update> {
         stream.lines().flat_map(interpret).collect()
@@ -178,9 +175,9 @@ mod tests {
         else {
             panic!("one result: {updates:?}");
         };
-        assert!(!ok);
+        assert!(!ok, "an error result is not ok");
         assert_eq!(text, "Reached maximum number of turns (1)");
-        assert!(cost_usd.is_some());
+        assert!(cost_usd.is_some(), "the bill came with it");
     }
 
     #[test]

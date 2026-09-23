@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// The look for the pull request `head` already produced.
-    fn standing(head: &str) -> Request {
+    fn pull_sought(head: &str) -> Request {
         get(&format!("/pulls?state=all&per_page=1&head=fake:{head}"))
     }
 
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(
             fake.requests()[before..],
             [
-                standing("issue-3"),
+                pull_sought("issue-3"),
                 get("/issues/3"),
                 sent(
                     "POST",
@@ -433,7 +433,7 @@ mod tests {
             fake.requests()[before..],
             [
                 get(""),
-                standing("feature-7"),
+                pull_sought("feature-7"),
                 get("/issues/7"),
                 sent(
                     "POST",
@@ -467,7 +467,7 @@ mod tests {
                 json!({ "merge_method": "squash", "sha": PUSHED })
             ))
         );
-        assert!(fake.world().pulls[0].merged);
+        assert!(fake.world().pulls[0].merged, "the pull request merged");
     }
 
     #[tokio::test]
@@ -557,7 +557,10 @@ mod tests {
             error.to_string().contains("Pull Request is not mergeable"),
             "{error}"
         );
-        assert!(!fake.world().pulls[0].merged);
+        assert!(
+            !fake.world().pulls[0].merged,
+            "the pull request stands open"
+        );
     }
 
     #[tokio::test]
@@ -620,7 +623,10 @@ mod tests {
         let requests = fake.requests();
         let (last, polls) = requests.split_last().unwrap();
         assert!(polls.len() > 1, "the wait continued: {polls:?}");
-        assert!(polls.iter().all(|poll| *poll == check_runs(PUSHED)));
+        assert!(
+            polls.iter().all(|poll| *poll == check_runs(PUSHED)),
+            "every poll is the pushed commit's: {polls:?}"
+        );
         assert_eq!(
             *last,
             get(&format!("/commits/{PUSHED}/status?per_page=1")),
@@ -677,7 +683,9 @@ mod tests {
         assert!(
             fake.requests()
                 .iter()
-                .all(|poll| *poll == check_runs(PUSHED))
+                .all(|poll| *poll == check_runs(PUSHED)),
+            "every poll is the pushed commit's: {:?}",
+            fake.requests()
         );
     }
 
@@ -745,7 +753,9 @@ mod tests {
         assert!(
             fake.requests()
                 .iter()
-                .all(|poll| *poll == check_runs(PUSHED))
+                .all(|poll| *poll == check_runs(PUSHED)),
+            "every poll is the pushed commit's: {:?}",
+            fake.requests()
         );
     }
 

@@ -105,7 +105,7 @@ mod tests {
     /// `main`: `issue-1` standing in the origin on a history of its
     /// own, as a run that failed after its push leaves it. The first
     /// call cuts the branch.
-    fn standing(work: &Repository, name: &str) -> Hash {
+    fn left_pushed(work: &Repository, name: &str) -> Hash {
         if rev(work, "issue-1").is_err() {
             branch(Branch::new(work.clone(), "issue-1".to_owned(), None).unwrap()).unwrap();
         }
@@ -132,7 +132,7 @@ mod tests {
     async fn a_rerun_pushes_over_the_branch_an_earlier_run_left_standing() {
         let scratch = Scratch::new("push-rerun");
         let (origin, work) = published(&scratch);
-        let earlier = standing(&work, "earlier.txt");
+        let earlier = left_pushed(&work, "earlier.txt");
         let linked = rerun(&scratch, &origin, "work.txt");
 
         push(&linked).run().await.unwrap();
@@ -168,11 +168,11 @@ mod tests {
     async fn a_branch_moved_by_someone_else_refuses_in_gits_own_words() {
         let scratch = Scratch::new("push-lease");
         let (origin, work) = published(&scratch);
-        standing(&work, "earlier.txt");
+        left_pushed(&work, "earlier.txt");
         let linked = rerun(&scratch, &origin, "work.txt");
         // Someone other than Epik moves the branch, after the fetch the
         // rerun's worktree was cut behind.
-        let theirs = standing(&work, "theirs.txt");
+        let theirs = left_pushed(&work, "theirs.txt");
 
         let error = push(&linked).run().await.unwrap_err().to_string();
 

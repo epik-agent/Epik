@@ -334,7 +334,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::assistant::Role;
-    use crate::assistant::scripted::{Fragment, Scripted, Turn, read_request};
+    use crate::assistant::scripted::{Fragment, ScriptedModel, Turn, read_request};
 
     /// One reply from the model at `base` to an empty conversation: the
     /// least a client can ask, for tests about the stream rather than
@@ -494,7 +494,7 @@ mod tests {
 
         #[test]
         fn interleaved_fragmented_tool_calls_come_back_whole_and_ordered() {
-            let model = Scripted::spawn(vec![Turn::ToolCalls(vec![
+            let model = ScriptedModel::spawn(vec![Turn::ToolCalls(vec![
                 vec![Fragment::open(0, "call_a", "alpha", "{\"a\"")],
                 vec![Fragment::open(1, "call_b", "beta", "")],
                 vec![Fragment::more(0, ":1}"), Fragment::more(1, "{}")],
@@ -521,7 +521,7 @@ mod tests {
 
         #[test]
         fn a_truncated_stream_still_yields_what_it_said() {
-            let model = Scripted::spawn(vec![Turn::Malformed(
+            let model = ScriptedModel::spawn(vec![Turn::Malformed(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n"
                     .to_owned(),
             )]);
@@ -533,7 +533,8 @@ mod tests {
 
         #[test]
         fn garbage_json_is_a_malformed_stream_error() {
-            let model = Scripted::spawn(vec![Turn::Malformed("data: {not json\n\n".to_owned())]);
+            let model =
+                ScriptedModel::spawn(vec![Turn::Malformed("data: {not json\n\n".to_owned())]);
 
             let error = reply_to_nothing(model.base_url()).unwrap_err();
 
@@ -542,7 +543,7 @@ mod tests {
 
         #[test]
         fn a_request_beyond_the_script_fails_with_a_useful_message() {
-            let model = Scripted::spawn(vec![]);
+            let model = ScriptedModel::spawn(vec![]);
 
             let error = reply_to_nothing(model.base_url()).unwrap_err();
 
@@ -577,7 +578,7 @@ mod tests {
                 std::env::var("EPIK_LIVE_BASE_URL"),
                 std::env::var("EPIK_LIVE_MODEL"),
             ) else {
-                eprintln!("live tier unset; skipping");
+                eprintln!("EPIK_LIVE_BASE_URL or EPIK_LIVE_MODEL is unset; skipping");
                 return;
             };
             let client = Client::new(base, model, None);
@@ -599,7 +600,7 @@ mod tests {
             let Reply::Text(reply) = reply else {
                 panic!("no tools were offered, so the reply is text");
             };
-            assert!(!reply.is_empty());
+            assert!(!reply.is_empty(), "the model answered with nothing");
             assert_eq!(streamed, reply, "the deltas are the reply");
         }
     }
@@ -618,7 +619,7 @@ mod tests {
         }
 
         fn run_against(
-            model: &Scripted,
+            model: &ScriptedModel,
             registry: &Registry,
             observer: impl FnMut(&ToolCall, &Result<serde_json::Value, String>),
         ) -> Result<String, Error> {
@@ -642,7 +643,7 @@ mod tests {
             calls: Vec<Vec<Fragment>>,
             mut note: impl FnMut(&ToolCall, &Result<serde_json::Value, String>) -> T,
         ) -> (Vec<T>, Vec<serde_json::Value>) {
-            let model = Scripted::spawn(vec![Turn::ToolCalls(calls), Turn::text(&["done"])]);
+            let model = ScriptedModel::spawn(vec![Turn::ToolCalls(calls), Turn::text(&["done"])]);
             let mut observed = Vec::new();
             let text = run_against(&model, &echoing(), |call, result| {
                 observed.push(note(call, result));
@@ -730,7 +731,7 @@ mod tests {
         /// up as a failure — the turn still ended in text.
         #[test]
         fn a_failed_dispatch_feeds_the_model_the_words() {
-            let model = Scripted::spawn(vec![
+            let model = ScriptedModel::spawn(vec![
                 Turn::ToolCalls(vec![vec![Fragment::open(0, "call_1", "nonesuch", "{}")]]),
                 Turn::text(&["ok"]),
             ]);
@@ -759,7 +760,7 @@ mod tests {
                 MAX_TOOL_ITERATIONS,
             )
             .collect();
-            let model = Scripted::spawn(script);
+            let model = ScriptedModel::spawn(script);
             let registry = echoing();
 
             let error = run_against(&model, &registry, |_, _| {}).unwrap_err();
@@ -776,7 +777,7 @@ mod tests {
 
         #[test]
         fn a_plain_text_turn_calls_no_tools_and_asks_once() {
-            let model = Scripted::spawn(vec![Turn::text(&["Hel", "lo"])]);
+            let model = ScriptedModel::spawn(vec![Turn::text(&["Hel", "lo"])]);
 
             let text = run_against(&model, &Registry::standard(), |_, _| {
                 panic!("no tool was called");

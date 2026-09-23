@@ -118,9 +118,9 @@ mod tests {
     fn the_script_is_on_disk_until_the_drop() {
         let askpass = Askpass::new().unwrap();
         let path = askpass.0.clone();
-        assert!(path.is_file());
+        assert!(path.is_file(), "the script is written: {}", path.display());
         drop(askpass);
-        assert!(!path.exists());
+        assert!(!path.exists(), "and the drop took it: {}", path.display());
     }
 
     /// The whole rail, with no GitHub: whichever command meets a remote

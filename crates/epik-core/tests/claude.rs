@@ -5,7 +5,7 @@
 //! binary: `sh -c` printf of captured fixture lines — inline only, never
 //! a written script file (the ETXTBSY lesson) — and it exercises the
 //! whole path: Process → stdout lines → interpret → typed Updates. Only
-//! the live tier, behind EPIK_CLAUDE_LIVE=1, touches a real model.
+//! the live tier, behind EPIK_LIVE_CLAUDE=1, touches a real model.
 
 #![cfg(all(feature = "testing", unix))]
 
@@ -13,12 +13,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use epik_core::agent::claude::ClaudeCode;
+use epik_core::agent::claude::fixtures::{RESULT_ERROR, SESSION};
 use epik_core::agent::{Agent, Update};
 use epik_core::process::{Exit, Process};
 use epik_core::temp::Scratch;
-
-const SESSION: &str = include_str!("../src/agent/claude/fixtures/session.jsonl");
-const RESULT_ERROR: &str = include_str!("../src/agent/claude/fixtures/result_error.json");
 
 /// The scripted engine: `sh -c`, from `/`, saying `lines` — one printf
 /// argument each, single-quoted for the shell — and then running
@@ -51,17 +49,33 @@ fn a_canned_session_yields_its_updates_through_a_real_process() {
     let (updates, exit) = updates_of(canned(&lines, "true"));
 
     assert_eq!(updates.len(), 4, "{updates:?}");
-    assert!(matches!(&updates[0], Update::Session { model, .. } if model == "claude-fable-5"));
-    assert!(matches!(&updates[1], Update::ToolUse { name } if name == "Write"));
-    assert!(matches!(&updates[2], Update::Text { .. }));
-    assert!(matches!(
-        &updates[3],
-        Update::Result {
-            ok: true,
-            cost_usd: Some(_),
-            ..
-        }
-    ));
+    assert!(
+        matches!(&updates[0], Update::Session { model, .. } if model == "claude-fable-5"),
+        "{:?}",
+        updates[0]
+    );
+    assert!(
+        matches!(&updates[1], Update::ToolUse { name } if name == "Write"),
+        "{:?}",
+        updates[1]
+    );
+    assert!(
+        matches!(&updates[2], Update::Text { .. }),
+        "{:?}",
+        updates[2]
+    );
+    assert!(
+        matches!(
+            &updates[3],
+            Update::Result {
+                ok: true,
+                cost_usd: Some(_),
+                ..
+            }
+        ),
+        "{:?}",
+        updates[3]
+    );
     assert_eq!(exit, Ok(Exit::Code(0)));
 }
 
@@ -72,7 +86,7 @@ fn a_canned_error_session_surfaces_the_error_result() {
     let [Update::Result { ok, text, .. }] = updates.as_slice() else {
         panic!("one result: {updates:?}");
     };
-    assert!(!ok);
+    assert!(!ok, "an error result is not ok");
     assert_eq!(text, "Reached maximum number of turns (1)");
     assert_eq!(exit, Ok(Exit::Code(1)));
 }
@@ -106,11 +120,14 @@ fn dropping_an_engine_mid_stream_takes_it_with_it() {
     // The stream is flowing — the session start has been interpreted —
     // and the engine now hangs.
     let mut lines = engine.stdout();
-    assert!(lines.any(|line| {
-        ClaudeCode::interpret(&line)
-            .iter()
-            .any(|update| matches!(update, Update::Session { .. }))
-    }));
+    assert!(
+        lines.any(|line| {
+            ClaudeCode::interpret(&line)
+                .iter()
+                .any(|update| matches!(update, Update::Session { .. }))
+        }),
+        "the session start reached the reader"
+    );
     drop(lines);
 
     drop(engine);
@@ -124,8 +141,8 @@ fn dropping_an_engine_mid_stream_takes_it_with_it() {
 /// LLM.
 #[test]
 fn a_live_claude_writes_the_file_it_was_asked_for() {
-    if std::env::var("EPIK_CLAUDE_LIVE").as_deref() != Ok("1") {
-        eprintln!("EPIK_CLAUDE_LIVE is unset; skipping");
+    if std::env::var("EPIK_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("EPIK_LIVE_CLAUDE is unset; skipping");
         return;
     }
     let binary = String::from_utf8(
@@ -146,7 +163,8 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
             .args(["-C", scratch.path(), "init", "--quiet"])
             .status()
             .expect("git runs")
-            .success()
+            .success(),
+        "the scratch repository was made"
     );
 
     let agent = ClaudeCode {

@@ -169,6 +169,7 @@ fn leaves<'a, I: Ord>(read: &'a BTreeMap<I, Member<I>>, id: &'a I) -> Vec<&'a I>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dag::shape;
     use anyhow::anyhow;
     use std::cell::RefCell;
 
@@ -225,16 +226,6 @@ mod tests {
             reads.sort_unstable();
             reads
         }
-    }
-
-    /// Each work node with the nodes directly before it.
-    fn shape(dag: &Dag<u64>) -> Vec<(u64, Vec<u64>)> {
-        dag.nodes()
-            .map(|node| {
-                let before = node.predecessors().map(|before| *before.value());
-                (*node.value(), before.collect())
-            })
-            .collect()
     }
 
     /// #158 as it was filed: four sub-issues, the order among them in
@@ -359,7 +350,10 @@ mod tests {
     #[test]
     fn a_closed_root_holding_no_sub_issues_is_no_work() {
         let issues = Issues::default().closed(7, &[]);
-        assert!(shape(&issues.work(7).unwrap()).is_empty());
+        assert!(
+            shape(&issues.work(7).unwrap()).is_empty(),
+            "nothing is left to do"
+        );
     }
 
     #[test]
