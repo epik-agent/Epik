@@ -19,7 +19,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
-epik = { path = "../../epik", features = ["native", "serde"] }
 epik-core = { path = "../../epik-core", features = ["native"] }
 keyring = { version = "3", features = [
     "apple-native",
@@ -29,6 +28,10 @@ keyring = { version = "3", features = [
 serde_json = "1"
 toml = "1"
 tauri = { version = "2", features = [] }
+# The runtime a feature build's plan runs on: its own, started by the
+# backend, so a build outlives the turn that asked for it and never
+# rides on Tauri's.
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 # The monitor's HTTP server: blocking, a thread per connection, pure
@@ -39,9 +42,8 @@ include_dir = "0.7"
 
 [dev-dependencies]
 # Test fixtures ride in for tests only; no shipping build sees them: the
-# scratch directory and the seeded repository from epik, the scripted
-# model from epik-core.
-epik = { path = "../../epik", features = ["testing"] }
+# scratch directory, the git repository fixtures, and the scripted model,
+# all from epik-core.
 epik-core = { path = "../../epik-core", features = ["testing"] }
 rust_decimal = "1"
 

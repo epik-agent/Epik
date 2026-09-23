@@ -21,7 +21,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use epik::monitor::Entry;
+use epik_core::monitor::Entry;
 use leptos::prelude::window;
 use wasm_bindgen::prelude::*;
 use web_sys::{EventSource, MessageEvent};

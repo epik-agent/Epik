@@ -5,10 +5,10 @@
 //! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
 //! — so nothing here re-declares what the library already says.
 
-use epik::monitor::{EVENT, Entry};
 use epik_core::assistant::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
 use epik_core::config::Config;
 use epik_core::keystore::{Resolved, Secret};
+use epik_core::monitor::{EVENT, Entry};
 use leptos::prelude::window;
 use leptos::task::spawn_local;
 use serde::de::DeserializeOwned;

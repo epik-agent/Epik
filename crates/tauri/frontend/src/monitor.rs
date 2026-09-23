@@ -29,9 +29,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use epik::feature::layout::{Form, Layout, Node};
-use epik::feature::{IssueId, RunId, State};
-use epik::monitor::{Counts, Entry, Progress, Stage, Watch};
+use epik_core::monitor::layout::{Form, Layout, Node};
+use epik_core::monitor::{Counts, Entry, Progress, RunId, Stage, State, Watch};
 
 /// Where entries come from: a channel that delivers each as it lands,
 /// and a replay of everything so far. The window's is Tauri's event
@@ -175,7 +174,7 @@ pub struct Pane {
     pub pulse: bool,
     /// The picture, once there is a plan.
     pub layout: Option<Layout>,
-    pub selected: Option<IssueId>,
+    pub selected: Option<u64>,
     pub detail: Option<Detail>,
 }
 
@@ -186,7 +185,7 @@ pub struct View {
     progress: Progress,
     link: Link,
     tab: Tab,
-    selected: BTreeMap<RunId, IssueId>,
+    selected: BTreeMap<RunId, u64>,
     closed: BTreeSet<RunId>,
 }
 
@@ -330,7 +329,7 @@ impl View {
     }
 
     /// Selects `issue` in `run`'s pane, remembered across tab switches.
-    pub fn select(&mut self, run: RunId, issue: IssueId) {
+    pub fn select(&mut self, run: RunId, issue: u64) {
         self.selected.insert(run, issue);
     }
 
@@ -346,7 +345,7 @@ impl View {
                     dot: dot(watch, counts),
                     pulse: self.connected() && watch.live(),
                     count: watch
-                        .plan()
+                        .work()
                         .map(|_| format!("{}/{}", counts.merged, counts.total)),
                     closable: closable(watch.stage()),
                     active: self.tab == Tab::Feature(watch.run()),
@@ -363,9 +362,8 @@ impl View {
         };
         let watch = self.progress.watch(run)?;
         let layout = watch.layout();
-        let selected = self.selected.get(&run).cloned();
+        let selected = self.selected.get(&run).copied();
         let detail = selected
-            .as_ref()
             .and_then(|id| layout.as_ref()?.node(id))
             .map(detail);
         let mut notices = Vec::new();
@@ -440,7 +438,7 @@ fn words(stage: &Stage, counts: Counts) -> String {
     }
 }
 
-fn names(ids: &[IssueId]) -> String {
+fn names(ids: &[u64]) -> String {
     if ids.is_empty() {
         return "nothing".to_owned();
     }
@@ -465,7 +463,7 @@ pub fn sentence(node: &Node) -> String {
             if *checked { "checked" } else { "unchecked" }
         ),
         (State::Failed { report }, _) => format!("failed: {report}"),
-        (State::Skipped { reason }, _) => format!("skipped: {reason}"),
+        (State::Skipped { blocker }, _) => format!("skipped: #{blocker} never settled"),
     }
 }
 
@@ -482,30 +480,15 @@ fn detail(node: &Node) -> Detail {
 mod tests {
     use std::cell::RefCell;
 
-    use epik::feature::Plan;
-    use epik::monitor::Change;
+    use epik_core::dag::{Dag, Node as After};
+    use epik_core::happening::{Happened, Name, Step as Phase};
+    use epik_core::monitor::{Change, Event};
 
     use super::*;
 
-    /// The wire form of feature 1 holding 2 and 3, with 3 waiting on 2
-    /// — the library's own `two_then_three`, as a window would read it.
-    fn two_then_three() -> Plan {
-        serde_json::from_value(serde_json::json!({
-            "tree": {
-                "value": { "id": "1", "title": "the feature", "closed": false },
-                "children": [
-                    { "value": { "id": "2", "title": "first", "closed": false }, "children": [] },
-                    { "value": { "id": "3", "title": "second", "closed": false }, "children": [] }
-                ]
-            },
-            "blocking": [{ "issue": "3", "blocker": "2" }],
-            "outside": []
-        }))
-        .unwrap()
-    }
-
-    fn id(number: u64) -> IssueId {
-        IssueId::from(number)
+    /// Feature 1 holding 2 and 3, with 3 waiting on 2.
+    fn two_then_three() -> Dag<u64> {
+        Dag::new(vec![After::new(2, []), After::new(3, [0])]).unwrap()
     }
 
     fn entry(seq: u64, change: Change) -> Entry {
@@ -519,7 +502,7 @@ mod tests {
     fn reserved(run: u64) -> Change {
         Change::Reserved {
             run: RunId(run),
-            feature: id(1),
+            feature: 1,
             repository: "/r".to_owned(),
             branch: "feature-1".to_owned(),
             base: None,
@@ -529,19 +512,48 @@ mod tests {
     fn started(run: u64) -> Change {
         Change::Started {
             run: RunId(run),
-            plan: two_then_three(),
+            work: two_then_three(),
+            title: "the feature".to_owned(),
+            titles: vec![(2, "first".to_owned()), (3, "second".to_owned())],
             problems: Vec::new(),
-            states: [(id(2), State::Waiting), (id(3), State::Waiting)].into(),
-            check: None,
+            checked: true,
         }
     }
 
-    fn moved(run: u64, issue: u64, state: State) -> Change {
-        Change::Moved {
+    fn happening(run: u64, node: Name, happened: Happened) -> Change {
+        Change::Happened {
             run: RunId(run),
-            issue: id(issue),
-            state,
+            event: Event { node, happened },
         }
+    }
+
+    /// The one event that puts `issue` in `state`: the step whose start
+    /// or end the fold reads as that state, since a state is derived
+    /// from the stream and never spoken into it.
+    ///
+    /// Merged takes the commit with it, which the push threaded, so the
+    /// pair arrives as the two events it really is.
+    fn moved(run: u64, issue: u64, state: State) -> Change {
+        let (step, happened) = match state {
+            State::Running => (Phase::Agent, Happened::Started),
+            State::Merging => (Phase::PullRequest, Happened::Started),
+            State::Merged { .. } => (Phase::Close, Happened::Finished),
+            State::Failed { ref report } => (Phase::Agent, Happened::Failed(report.clone())),
+            // Waiting is where an issue starts, and Skipped is the
+            // fold's own judgement over a failure upstream: each is
+            // derived, and the stream says neither.
+            State::Waiting | State::Skipped { .. } => {
+                unreachable!("{state:?} is derived, never spoken")
+            }
+        };
+        happening(run, Name::Step(issue, step), happened)
+    }
+
+    /// The push of `issue`, threading the commit a merge is remembered
+    /// by: what precedes a Merged for the fold to name it.
+    fn pushed(run: u64, issue: u64, commit: &str) -> Change {
+        let happened = Happened::Pushed(commit.to_owned());
+        happening(run, Name::Step(issue, Phase::Push), happened)
     }
 
     fn merged() -> State {
@@ -883,12 +895,12 @@ mod tests {
         let mut view = attached(&opening());
         view.open(Tab::Feature(RunId(1)));
         assert!(view.pane().unwrap().detail.is_none());
-        view.select(RunId(1), id(3));
+        view.select(RunId(1), 3);
         view.open(Tab::Assistant);
         assert!(view.pane().is_none());
         view.open(Tab::Feature(RunId(1)));
         let pane = view.pane().unwrap();
-        assert_eq!(pane.selected, Some(id(3)));
+        assert_eq!(pane.selected, Some(3));
         assert_eq!(
             pane.detail,
             Some(Detail {
@@ -946,37 +958,35 @@ mod tests {
         let mut view = attached(&opening());
         view.open(Tab::Feature(RunId(1)));
         let says = |view: &mut View, issue: u64| {
-            view.select(RunId(1), id(issue));
+            view.select(RunId(1), issue);
             view.pane().unwrap().detail.unwrap().sentence
         };
         assert_eq!(says(&mut view, 2), "running");
         view.step(Step::Heard(entry(3, moved(1, 2, State::Merging))));
         assert_eq!(says(&mut view, 2), "merging");
-        view.step(Step::Heard(entry(4, moved(1, 2, merged()))));
+        view.step(Step::Heard(entry(4, pushed(1, 2, "abc1234def"))));
+        view.step(Step::Heard(entry(5, moved(1, 2, merged()))));
         assert_eq!(says(&mut view, 2), "merged at abc1234 (checked)");
         assert_eq!(says(&mut view, 3), "waiting — ready, out of slots");
-        view.step(Step::Heard(entry(
-            5,
-            moved(
-                1,
-                3,
-                State::Failed {
-                    report: "the check went red".to_owned(),
-                },
-            ),
-        )));
-        assert_eq!(says(&mut view, 3), "failed: the check went red");
-        view.step(Step::Heard(entry(
-            6,
-            moved(
-                1,
-                3,
-                State::Skipped {
-                    reason: "#2 failed".to_owned(),
-                },
-            ),
-        )));
-        assert_eq!(says(&mut view, 3), "skipped: #2 failed");
-        assert_eq!(view.pane().unwrap().counts, "1 merged · 1 skipped");
+        assert_eq!(view.pane().unwrap().counts, "1 merged · 1 ready");
+    }
+
+    /// A failure is spoken; what it held back is not. 2 failing makes 3
+    /// Skipped in the fold's own words, naming the blocker.
+    #[test]
+    fn a_failure_upstream_skips_what_waited_on_it() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        let says = |view: &mut View, issue: u64| {
+            view.select(RunId(1), issue);
+            view.pane().unwrap().detail.unwrap().sentence
+        };
+        let failed = State::Failed {
+            report: "the check went red".to_owned(),
+        };
+        view.step(Step::Heard(entry(3, moved(1, 2, failed))));
+        assert_eq!(says(&mut view, 2), "failed: the check went red");
+        assert_eq!(says(&mut view, 3), "skipped: #2 never settled");
+        assert_eq!(view.pane().unwrap().counts, "1 failed · 1 skipped");
     }
 }

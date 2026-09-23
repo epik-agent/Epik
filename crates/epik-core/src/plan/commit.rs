@@ -109,15 +109,15 @@ impl Task for Commit {
 mod tests {
     use super::*;
     use crate::git::commands::{Branch, Show, Switch};
-    use crate::git::testing::{committed, credentials, head, seeded};
+    use crate::git::testing::{committed, credentials, head, published};
     use crate::git::url::Url;
     use crate::temp::Scratch;
     use crate::worktrees::{LinkedWorktree, Worktrees};
 
-    /// A worktree on `issue-1` of a seeded origin, provisioned as an
+    /// A worktree on `issue-1` of a published origin, provisioned as an
     /// issue's is.
     fn provisioned(scratch: &Scratch) -> LinkedWorktree {
-        let (origin, _) = seeded(scratch);
+        let (origin, _) = published(scratch);
         let url = Url::Local(origin.path().to_owned());
         Worktrees::new(scratch.join("root").into())
             .add(&url, "issue-1", "origin/main", &credentials())

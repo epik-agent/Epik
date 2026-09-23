@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use crate::git::commands::{Clone, Command, Fetch, Push, Remote};
     use crate::git::testing::{
-        INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, credentials, guarded, seeded,
+        INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, credentials, guarded, published,
     };
     use crate::git::url::Url;
     use crate::git::{TIMEOUT, run_as, run_within};
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn a_clone_a_fetch_and_a_push_each_answer_the_challenge_with_the_credentials() {
         let scratch = Scratch::new("askpass-challenge");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         let into = PathBuf::from(scratch.join("clone"));
         // Each command of the remote at the URL, which is where the
         // origin of `work` is aimed as it is made.
