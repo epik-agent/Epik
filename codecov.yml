@@ -28,3 +28,12 @@ ignore:
   - "crates/tauri/backend/gen/**"
   # The chores, which have no tests and want none.
   - "xtask/**"
+  # The frontend's edges: the `window.__TAURI__` and `EventSource`
+  # bindings and the mount. Off the browser every path through them is
+  # the error path, so a test means mocking the barrier to watch a
+  # wrapper pass a string across it. Whatever decides something belongs
+  # in `monitor.rs` instead, where it is measured.
+  - "crates/tauri/frontend/src/ipc.rs"
+  - "crates/tauri/frontend/src/http.rs"
+  - "crates/tauri/frontend/src/app.rs"
+  - "crates/tauri/frontend/src/main.rs"

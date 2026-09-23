@@ -10,6 +10,8 @@
 //! `leptos_rich_chat`'s highlight classes, so a tree is colored like the
 //! code blocks around it.
 
+use std::collections::HashSet;
+
 use epik_core::assistant::json::{Document, Fold, Kind, Row};
 use leptos::prelude::*;
 
@@ -41,11 +43,7 @@ pub fn JsonTree(document: Document) -> impl IntoView {
         let Some(pointer) = clicked_pointer(&event) else {
             return;
         };
-        folded.update(|folds| {
-            if !folds.remove(&pointer) {
-                folds.insert(pointer);
-            }
-        });
+        folded.update(|folds| toggle(folds, pointer));
     };
     view! {
         <div class="overflow-x-auto" on:click=toggle>
@@ -61,6 +59,14 @@ pub fn JsonTree(document: Document) -> impl IntoView {
     }
 }
 
+/// Folds what is open and opens what is folded — one node, by pointer.
+/// The set holds what is folded, so membership is the whole state.
+fn toggle(folds: &mut HashSet<String>, pointer: String) {
+    if !folds.remove(&pointer) {
+        folds.insert(pointer);
+    }
+}
+
 /// The pointer of the disclosure control a click landed on, if it did.
 fn clicked_pointer(event: &leptos::ev::MouseEvent) -> Option<String> {
     use wasm_bindgen::JsCast;
@@ -73,19 +79,33 @@ fn clicked_pointer(event: &leptos::ev::MouseEvent) -> Option<String> {
 /// The disclosure control's and its spacer's shared width class.
 const GUTTER: &str = "inline-block w-4 shrink-0 text-center";
 
+/// What a disclosure control reads as, to an eye and to a screen
+/// reader: the triangle points the way the fold would go, and
+/// `aria-expanded` says where it stands now.
+const fn disclosure(folded: bool) -> (&'static str, &'static str) {
+    if folded {
+        ("▸", "false")
+    } else {
+        ("▾", "true")
+    }
+}
+
 fn row_view(row: Row) -> AnyView {
     let control = match row.fold {
-        Some(Fold { pointer, folded }) => view! {
-            <button
-                type="button"
-                class=format!("{GUTTER} cursor-pointer opacity-70 hover:opacity-100")
-                aria-expanded=if folded { "false" } else { "true" }
-                data-pointer=pointer
-            >
-                {if folded { "▸" } else { "▾" }}
-            </button>
+        Some(Fold { pointer, folded }) => {
+            let (glyph, expanded) = disclosure(folded);
+            view! {
+                <button
+                    type="button"
+                    class=format!("{GUTTER} cursor-pointer opacity-70 hover:opacity-100")
+                    aria-expanded=expanded
+                    data-pointer=pointer
+                >
+                    {glyph}
+                </button>
+            }
+            .into_any()
         }
-        .into_any(),
         None => view! { <span class=GUTTER></span> }.into_any(),
     };
     let spans = row
@@ -118,5 +138,50 @@ mod tests {
     #[test]
     fn punctuation_wears_no_class() {
         assert_eq!(class(Kind::Plain), "");
+    }
+
+    #[test]
+    fn a_control_reads_the_same_way_to_an_eye_and_to_a_screen_reader() {
+        let (folded_glyph, folded_aria) = disclosure(true);
+        let (open_glyph, open_aria) = disclosure(false);
+        assert_eq!(folded_aria, "false");
+        assert_eq!(open_aria, "true");
+        assert_ne!(
+            folded_glyph, open_glyph,
+            "the two states are told apart by sight too"
+        );
+    }
+
+    #[test]
+    fn a_click_folds_what_is_open_and_opens_what_is_folded() {
+        let mut folds = HashSet::new();
+        toggle(&mut folds, "/a".to_owned());
+        assert!(folds.contains("/a"));
+        toggle(&mut folds, "/a".to_owned());
+        assert!(folds.is_empty());
+    }
+
+    #[test]
+    fn one_click_moves_one_node() {
+        let mut folds = HashSet::from(["/a".to_owned(), "/b".to_owned()]);
+        toggle(&mut folds, "/a".to_owned());
+        assert_eq!(folds, HashSet::from(["/b".to_owned()]));
+        toggle(&mut folds, "/c".to_owned());
+        assert_eq!(folds, HashSet::from(["/b".to_owned(), "/c".to_owned()]));
+    }
+
+    /// What the tree renders is whatever the document lays out under
+    /// the set a click leaves behind — the component holds the set and
+    /// nothing else, so a round trip through `toggle` is the whole of
+    /// its state.
+    #[test]
+    fn a_click_and_a_click_back_leave_the_same_rows() {
+        let document = Document::repaired(r#"{"outer": {"inner": 1}}"#).expect("a document");
+        let mut folds = document.initial_folds();
+        let shown = document.rows(&folds);
+        toggle(&mut folds, "/outer".to_owned());
+        assert_ne!(document.rows(&folds), shown, "the click moved something");
+        toggle(&mut folds, "/outer".to_owned());
+        assert_eq!(document.rows(&folds), shown);
     }
 }
