@@ -1,6 +1,10 @@
 # Epik
 _You say it. We make it._
 
+[![CI](https://github.com/epik-agent/Epik/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/epik-agent/Epik/actions/workflows/ci.yml)
+[![native coverage](https://img.shields.io/codecov/c/github/epik-agent/Epik/main?flag=native&label=native&logo=codecov)](https://app.codecov.io/gh/epik-agent/Epik/flags)
+[![frontend coverage](https://img.shields.io/codecov/c/github/epik-agent/Epik/main?flag=frontend&label=frontend&logo=codecov)](https://app.codecov.io/gh/epik-agent/Epik/flags)
+
 A desktop app: Tauri 2 shell, Leptos frontend, two crates.
 
 - **`crates/epik-core`** — the library, where the logic lives.
