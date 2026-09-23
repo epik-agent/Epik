@@ -95,9 +95,11 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
       # The crate builds for wasm by default, but its tests are plain
-      # `#[test]` and need a host that can run them.
+      # `#[test]` and need a host that can run them. The triple is read
+      # with awk rather than sed: `host: ` carries a colon and a space,
+      # which YAML reads as a mapping unless the whole line is quoted.
       - name: test
-        run: cargo test --target "$(rustc -vV | sed -n 's/^host: //p')"
+        run: cargo test --target "$(rustc -vV | awk '/^host/ { print $2 }')"
 
   # The one check branch protection requires. Matrix legs and job names
   # can change without touching the ruleset; this name must not.
