@@ -1,6 +1,5 @@
-//! Building from the assistant, host side: the two chat verbs through
-//! which the persona starts a feature build and asks after it, and the
-//! host state they draw on.
+//! Building from the assistant, host side: the chat verb through which
+//! the persona starts a feature build, and the host state it draws on.
 //!
 //! A build is [`epik_core::plan::feature::Build`] — the feature's
 //! branch, its issues in the tracker's order, its pull request — run
@@ -18,10 +17,10 @@
 //! that names which features are building — the one place a second
 //! build of a feature already building is refused.
 //!
-//! The log is the only record. `feature_status` folds it into an
-//! [`epik_core::monitor::Progress`] and reads the run's [`Watch`],
-//! which is the same fold and the same vocabulary the window draws
-//! from: where the two could disagree, there is only one.
+//! The log is the only record, and the monitor window is who reads it:
+//! it folds the log into an [`epik_core::monitor::Progress`] of its own
+//! and draws every build at once. The host speaks into the log and
+//! relays it; nothing here folds it back.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -36,7 +35,7 @@ use epik_core::git::url::Url;
 use epik_core::github::{GitHub, Merge, Repo};
 use epik_core::keystore::Secret;
 use epik_core::model_tools::{Tool, arg};
-use epik_core::monitor::{Change, EVENT, Entry, Log, Progress, RunId, Stage, Watch};
+use epik_core::monitor::{Change, EVENT, Entry, Log, RunId};
 use epik_core::plan::AgentSlots;
 use epik_core::plan::feature::{Build, Name, issue_branch};
 use epik_core::plan::github::{CheckWait, Feature, feature_branch};
@@ -44,7 +43,7 @@ use epik_core::plan::stream::{Event, Sink};
 use epik_core::tracker::IssueTracker;
 use epik_core::tracker::github::GitHubIssues;
 use epik_core::worktrees::Worktrees;
-use serde_json::{Value, json};
+use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// How many agents the whole app runs at once.
@@ -135,7 +134,7 @@ impl Running {
         if !self.held().insert(key.clone()) {
             return Err(format!(
                 "feature {number} of {repo} is already building; one build of a feature \
-                 runs at a time — ask feature_status how the one under way is going"
+                 runs at a time — the monitor window shows how the one under way is going"
             ));
         }
         Ok(Claim {
@@ -220,8 +219,8 @@ pub fn monitor_log(state: State<'_, FeatureState>) -> Vec<Entry> {
     state.log.since(0)
 }
 
-/// The feature tools as the app registers them each turn: the two chat
-/// verbs wired to GitHub as the tracker and the forge and to Claude
+/// The feature tools as the app registers them each turn: the one chat
+/// verb wired to GitHub as the tracker and the forge and to Claude
 /// Code as the agent. `github_token` reads the plan, pushes the
 /// branches and merges the pull requests; the build refuses in words
 /// without it. `model` is the configured agent model, `api_key` the
@@ -234,18 +233,18 @@ pub fn feature_tools(
     github_token: Option<Secret>,
     owner: Option<String>,
 ) -> Vec<Tool> {
-    let state = app.state::<FeatureState>();
-    let log = Arc::clone(&state.log);
-    vec![
-        start_feature(app.clone(), api_key, model, github_token, owner),
-        feature_status(log),
-    ]
+    vec![start_feature(
+        app.clone(),
+        api_key,
+        model,
+        github_token,
+        owner,
+    )]
 }
 
 /// What `start_feature` answers with once the build is running, and
 /// what its handler assembles on the way.
 struct Launched {
-    run: RunId,
     branch: String,
     issues: usize,
 }
@@ -253,8 +252,8 @@ struct Launched {
 /// The `start_feature` tool: reads the feature's work out of the
 /// tracker, records the plan, and puts it on the runtime. It answers
 /// when the build is running, not when it finishes — the turn that
-/// called it ends while the build proceeds, and `feature_status` is
-/// the door back in.
+/// called it ends while the build proceeds, and the monitor window is
+/// where the build is watched from there on.
 fn start_feature(
     app: AppHandle,
     api_key: Option<Secret>,
@@ -269,11 +268,11 @@ fn start_feature(
          and each finished issue is pushed, opened as a pull request into one feature \
          branch, merged once GitHub's checks pass, and closed. The feature's own pull \
          request is opened at the end and left for you. Returns as soon as the build is \
-         running, with the run id that names this build; several features may build at \
-         once, each with its own run id, and one feature builds once at a time. The build \
-         then proceeds on its own for a long time, so tell the user the branch and run id \
-         and end your turn — the user will ask how it is going, and feature_status answers \
-         for the run.",
+         running; several features may build at once, and one feature builds once at a \
+         time. The build then proceeds on its own for a long time, so tell the user the \
+         branch and end your turn. You cannot see how a build is going: the monitor \
+         window shows every build under way, each feature its own tab, so send the user \
+         there rather than promising to check.",
         json!({
             "type": "object",
             "properties": {
@@ -293,11 +292,7 @@ fn start_feature(
             let number = arg::number(arguments, "feature")?;
             let repo = Repo::settle(spec, owner.as_deref())?;
             let state = app.state::<FeatureState>();
-            let Launched {
-                run,
-                branch,
-                issues,
-            } = launch(
+            let Launched { branch, issues } = launch(
                 &state,
                 repo.clone(),
                 number,
@@ -307,7 +302,6 @@ fn start_feature(
             )?;
             Ok(json!({
                 "started": true,
-                "run": run.0,
                 "feature": number,
                 "repository": repo.to_string(),
                 "branch": branch,
@@ -422,7 +416,6 @@ fn launch(
         drop(claim);
     });
     Ok(Launched {
-        run,
         branch,
         issues: count,
     })
@@ -467,167 +460,12 @@ fn read_work(issues: &GitHubIssues, number: u64) -> Result<Work, String> {
     })
 }
 
-/// The `feature_status` tool over the log: the fold, and the run's
-/// watch read out of it. The log is the record — there is no second
-/// one — so what a model reads here and what the window draws are the
-/// same picture.
-fn feature_status(log: Arc<Log>) -> Tool {
-    Tool::new(
-        "feature_status",
-        "How a feature build started by start_feature is going — or went: each issue's \
-         title and state (waiting, running, merging, merged with the commit, failed with \
-         its report, skipped naming the blocker whose failure stopped it), how many stand \
-         where, and whether the build has finished. Several feature builds may run at \
-         once: pass run — the run id start_feature answered with — to read a particular \
-         build; with run omitted, the most recently started build answers, whichever \
-         feature it is. Call it once when the user asks and report what it says; never \
-         poll it in a loop — the build runs on its own.",
-        json!({
-            "type": "object",
-            "properties": {
-                "run": {
-                    "type": "integer",
-                    "description": "The run id start_feature answered with, selecting that build; the most recently started build when omitted.",
-                },
-            },
-        }),
-        Box::new(move |arguments| {
-            let mut progress = Progress::default();
-            for entry in log.since(0) {
-                progress.absorb(&entry);
-            }
-            let watch = match arguments["run"].as_u64() {
-                Some(asked) => progress
-                    .watch(RunId(asked))
-                    .ok_or_else(|| format!("no feature build has run id {asked}"))?,
-                None => match progress.watches().last() {
-                    Some(latest) => latest,
-                    // A host that has started nothing has nothing to
-                    // report, which is an answer rather than a refusal.
-                    None => {
-                        return Ok(json!({
-                            "run": Value::Null,
-                            "note": "no feature build has been started",
-                        }));
-                    }
-                },
-            };
-            Ok(status(watch))
-        }),
-    )
-}
-
-/// One build as the model reads it, folded from the log and from
-/// nothing else.
-fn status(watch: &Watch) -> Value {
-    let layout = watch.layout();
-    let titles: BTreeMap<u64, &str> = layout
-        .iter()
-        .flat_map(|layout| &layout.nodes)
-        .map(|node| (node.id, node.title.as_str()))
-        .collect();
-    let issues: Vec<Value> = watch
-        .states()
-        .iter()
-        .map(|(id, state)| {
-            let mut entry = serde_json::to_value(state).expect("a state serializes to an object");
-            if let Value::Object(entry) = &mut entry {
-                entry.insert("issue".to_owned(), json!(id));
-                entry.insert("title".to_owned(), json!(titles.get(id)));
-            }
-            entry
-        })
-        .collect();
-    let counts = watch.counts();
-    json!({
-        "run": watch.run().0,
-        "feature": watch.feature(),
-        "title": watch.title(),
-        "repository": watch.repository(),
-        "branch": watch.branch(),
-        "stage": match watch.stage() {
-            Stage::Starting => "starting".to_owned(),
-            Stage::Building => "building".to_owned(),
-            Stage::Finished => "finished".to_owned(),
-            Stage::Abandoned { reason } => format!("abandoned: {reason}"),
-        },
-        "finished": matches!(watch.stage(), Stage::Finished | Stage::Abandoned { .. }),
-        "checked": watch.checked(),
-        "problems": watch.problems(),
-        "counts": {
-            "merged": counts.merged,
-            "running": counts.running,
-            "merging": counts.merging,
-            "failed": counts.failed,
-            "skipped": counts.skipped,
-            "ready": counts.ready,
-            "blocked": counts.blocked,
-            "total": counts.total,
-        },
-        "issues": issues,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use epik_core::happening::{Happened, Name, Step};
-    use epik_core::monitor::Event;
-
     use super::*;
 
     fn repo() -> Repo {
         Repo::new("o", "r")
-    }
-
-    /// The run of `tool` on `arguments`, or its refusal in words.
-    fn ask(tool: &Tool, arguments: Value) -> Result<Value, String> {
-        tool.call(&arguments)
-    }
-
-    /// Feature 1 holding 2 and 3, with 3 waiting on 2 — the shape a
-    /// tracker gives and Started carries.
-    fn two_then_three() -> Dag<u64> {
-        use epik_core::dag::Node;
-        Dag::new(vec![Node::new(2, []), Node::new(3, [0])]).unwrap()
-    }
-
-    /// A log holding one reserved, started build of feature 1.
-    fn building() -> Arc<Log> {
-        let log = Arc::new(Log::new());
-        log.record(Change::Reserved {
-            run: RunId(1),
-            feature: 1,
-            repository: repo().to_string(),
-            branch: feature_branch(1),
-            base: None,
-        });
-        log.record(Change::Started {
-            run: RunId(1),
-            work: two_then_three(),
-            title: "the feature".to_owned(),
-            titles: vec![(2, "first".to_owned()), (3, "second".to_owned())],
-            problems: Vec::new(),
-            checked: true,
-        });
-        log
-    }
-
-    /// One event of run 1's stream, recorded.
-    fn happened(log: &Log, node: Name, happened: Happened) {
-        log.record(Change::Happened {
-            run: RunId(1),
-            event: Event { node, happened },
-        });
-    }
-
-    /// Issue `issue`'s state in a status answer.
-    fn state(status: &Value, issue: u64) -> &Value {
-        status["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry["issue"] == json!(issue))
-            .unwrap_or_else(|| panic!("no issue {issue} in {status}"))
     }
 
     #[test]
@@ -641,7 +479,7 @@ mod tests {
             refused.contains("feature 1 of o/r is already building"),
             "{refused}"
         );
-        assert!(refused.contains("feature_status"), "{refused}");
+        assert!(refused.contains("the monitor window shows"), "{refused}");
     }
 
     #[test]
@@ -662,122 +500,6 @@ mod tests {
         let held = running.claim(&repo(), 1).unwrap();
         drop(held);
         running.claim(&repo(), 1).expect("the first build is done");
-    }
-
-    #[test]
-    fn status_with_no_build_says_so() {
-        let answer = ask(&feature_status(Arc::new(Log::new())), json!({})).unwrap();
-        assert_eq!(answer["run"], Value::Null);
-        assert_eq!(answer["note"], "no feature build has been started");
-    }
-
-    #[test]
-    fn status_for_an_unknown_run_is_refused_by_its_number() {
-        let refused = ask(&feature_status(building()), json!({ "run": 9 })).unwrap_err();
-        assert_eq!(refused, "no feature build has run id 9");
-    }
-
-    /// Every word of the answer comes from the log's own entries: the
-    /// states are derived from the stream, and nothing else is kept.
-    #[test]
-    fn status_reads_each_issues_state_out_of_the_stream() {
-        let log = building();
-        let status = feature_status(Arc::clone(&log));
-
-        let answer = ask(&status, json!({})).unwrap();
-        assert_eq!(answer["run"], json!(1));
-        assert_eq!(answer["feature"], json!(1));
-        assert_eq!(answer["title"], "the feature");
-        assert_eq!(answer["repository"], "o/r");
-        assert_eq!(answer["branch"], "feature-1");
-        assert_eq!(answer["stage"], "building");
-        assert_eq!(answer["finished"], json!(false));
-        assert_eq!(answer["checked"], json!(true));
-        assert_eq!(state(&answer, 2)["state"], "waiting");
-        assert_eq!(state(&answer, 2)["title"], "first");
-        assert_eq!(answer["counts"]["ready"], json!(1));
-        assert_eq!(answer["counts"]["blocked"], json!(1));
-
-        happened(&log, Name::Step(2, Step::Agent), Happened::Started);
-        let answer = ask(&status, json!({ "run": 1 })).unwrap();
-        assert_eq!(state(&answer, 2)["state"], "running");
-        assert_eq!(answer["counts"]["running"], json!(1));
-
-        happened(
-            &log,
-            Name::Step(2, Step::Push),
-            Happened::Pushed("abc1234def".to_owned()),
-        );
-        happened(&log, Name::Step(2, Step::Close), Happened::Finished);
-        let answer = ask(&status, json!({})).unwrap();
-        assert_eq!(state(&answer, 2)["state"], "merged");
-        assert_eq!(state(&answer, 2)["commit"], "abc1234def");
-        assert_eq!(state(&answer, 3)["state"], "waiting", "ready now");
-    }
-
-    /// A failure is the issue's, in the words of the step that failed,
-    /// and what waited on it is skipped naming the blocker — both the
-    /// fold's reading of the stream, neither spoken into it.
-    #[test]
-    fn a_failure_upstream_skips_what_waited_on_it() {
-        let log = building();
-        happened(
-            &log,
-            Name::Step(2, Step::Checks),
-            Happened::Failed("checks failed on abc1234: test".to_owned()),
-        );
-        let answer = ask(&feature_status(log), json!({})).unwrap();
-        assert_eq!(state(&answer, 2)["state"], "failed");
-        assert_eq!(
-            state(&answer, 2)["report"],
-            "checks failed on abc1234: test"
-        );
-        assert_eq!(state(&answer, 3)["state"], "skipped");
-        assert_eq!(state(&answer, 3)["blocker"], json!(2));
-        assert_eq!(answer["counts"]["failed"], json!(1));
-        assert_eq!(answer["counts"]["skipped"], json!(1));
-    }
-
-    #[test]
-    fn a_finished_build_says_it_is_finished_and_an_abandoned_one_says_why() {
-        let log = building();
-        log.record(Change::Finished { run: RunId(1) });
-        let answer = ask(&feature_status(Arc::clone(&log)), json!({})).unwrap();
-        assert_eq!(answer["stage"], "finished");
-        assert_eq!(answer["finished"], json!(true));
-
-        let log = Arc::new(Log::new());
-        log.record(Change::Reserved {
-            run: RunId(1),
-            feature: 1,
-            repository: repo().to_string(),
-            branch: feature_branch(1),
-            base: None,
-        });
-        log.record(Change::Abandoned {
-            run: RunId(1),
-            reason: "the claude CLI was not found".to_owned(),
-        });
-        let answer = ask(&feature_status(log), json!({})).unwrap();
-        assert_eq!(answer["stage"], "abandoned: the claude CLI was not found");
-        assert_eq!(answer["finished"], json!(true));
-    }
-
-    /// With no run named, the most recently started build answers.
-    #[test]
-    fn status_without_a_run_reads_the_latest_build() {
-        let log = building();
-        log.record(Change::Reserved {
-            run: RunId(2),
-            feature: 4,
-            repository: repo().to_string(),
-            branch: feature_branch(4),
-            base: None,
-        });
-        let answer = ask(&feature_status(log), json!({})).unwrap();
-        assert_eq!(answer["run"], json!(2));
-        assert_eq!(answer["feature"], json!(4));
-        assert_eq!(answer["stage"], "starting");
     }
 
     #[test]
