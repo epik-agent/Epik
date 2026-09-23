@@ -64,6 +64,18 @@ pub enum Step {
     Regained,
 }
 
+/// The boot half of an event id, `<boot>.<seq>`.
+///
+/// A backend relaunched behind a page that stayed open is a new log:
+/// its `seq` restarts at 0, so nothing it says could pass the fold,
+/// which drops by `seq` whatever is not past the highest applied. So a
+/// feed that carries ids watches this half, and a change of it is a
+/// reload rather than a step — the fold cannot absorb it.
+#[must_use]
+pub fn boot_of(id: &str) -> &str {
+    id.split('.').next().unwrap_or(id)
+}
+
 /// Listen, then replay. `apply` takes each [`Step`] to the view; the
 /// replay is requested once, when the listener first says where it
 /// stands — up or not — so nothing recorded between the two can be
@@ -988,5 +1000,22 @@ mod tests {
         assert_eq!(says(&mut view, 2), "failed: the check went red");
         assert_eq!(says(&mut view, 3), "skipped: #2 never settled");
         assert_eq!(view.pane().unwrap().counts, "1 failed · 1 skipped");
+    }
+
+    #[test]
+    fn the_boot_is_the_id_before_the_dot() {
+        assert_eq!(boot_of("1725900000000.41"), "1725900000000");
+        assert_eq!(boot_of("41"), "41", "an id with no boot is its own");
+        assert_eq!(boot_of(""), "");
+    }
+
+    #[test]
+    fn a_relaunched_backend_is_a_different_boot() {
+        assert_ne!(boot_of("1725900000000.0"), boot_of("1725900009999.0"));
+        assert_eq!(
+            boot_of("1725900000000.0"),
+            boot_of("1725900000000.41"),
+            "the same process, however far its log has got"
+        );
     }
 }

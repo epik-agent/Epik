@@ -532,4 +532,35 @@ mod tests {
     fn images_are_never_fetched() {
         assert!(!options().images);
     }
+
+    #[test]
+    fn speech_hugs_its_speakers_side_and_a_card_spans_the_transcript() {
+        let names = names();
+        assert_eq!(names.get("user").expect("user").position, Position::Right);
+        assert_eq!(
+            names.get("assistant").expect("assistant").position,
+            Position::Left
+        );
+        assert_eq!(
+            names.get("card").expect("card").background.as_deref(),
+            Some("transparent"),
+            "an observation is not a bubble"
+        );
+    }
+
+    #[test]
+    fn every_name_a_message_wears_has_a_look() {
+        let names = names();
+        let window = window();
+        window.fold(said(Role::User, "hi"));
+        window.fold(said(Role::Assistant, "hello"));
+        window.fold(delta("still "));
+        window.fold(TranscriptItem::Question {
+            id: "1".to_owned(),
+            ask: where_to(),
+        });
+        for (name, _, _) in shown(window) {
+            assert!(names.get(&name).is_some(), "{name} has no look");
+        }
+    }
 }

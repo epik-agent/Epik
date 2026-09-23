@@ -634,6 +634,11 @@ mod tests {
         current.agent = "claude-agent".to_owned();
         assert_eq!(dirty(Tab::GitHub, &loaded(), &current), [Field::Owner]);
         assert_eq!(dirty(Tab::Models, &loaded(), &current), [Field::Agent]);
+
+        let mut current = loaded();
+        current.token = Secret::from("ghp-new");
+        assert_eq!(dirty(Tab::GitHub, &loaded(), &current), [Field::Token]);
+        assert_eq!(dirty(Tab::Models, &loaded(), &current), []);
     }
 
     #[test]
@@ -755,15 +760,14 @@ mod tests {
     }
 
     #[test]
-    fn fields_and_config_agree_both_ways() {
-        let config = loaded().config();
-        assert_eq!(config.model.agent, None);
-        let back = Fields::from_config(&config);
+    fn a_configuration_leaves_the_secrets_behind_when_it_comes_back() {
+        let back = Fields::from_config(&loaded().config());
         assert_eq!(back.token, Secret::default());
         assert_eq!(back.key, Secret::default());
         assert_eq!(
             (back.owner, back.assistant, back.agent),
-            (loaded().owner, loaded().assistant, String::new())
+            (loaded().owner, loaded().assistant, String::new()),
+            "the keyring's, not the file's"
         );
     }
 
@@ -832,5 +836,139 @@ mod tests {
             choices("claude-mine", &fetched(), true)[..2],
             [choice("", "Default"), choice("claude-mine", "claude-mine")]
         );
+    }
+
+    #[test]
+    fn a_configured_model_is_offered_once_however_the_list_names_it() {
+        let offered = choices("claude-new", &fetched(), true);
+        assert_eq!(
+            offered.iter().filter(|c| c.value == "claude-new").count(),
+            1,
+            "the list already has it, so it is not repeated: {offered:?}"
+        );
+        assert_eq!(offered[0], choice("", "Default"));
+    }
+
+    #[test]
+    fn every_tab_and_field_is_labelled() {
+        for tab in Tab::ALL {
+            assert!(!tab.label().is_empty());
+            for &field in tab.fields() {
+                assert!(!field.label().is_empty(), "{field:?}");
+            }
+        }
+        assert_ne!(Tab::GitHub.label(), Tab::Models.label());
+    }
+
+    #[test]
+    fn every_field_reads_back_what_was_written_to_it() {
+        for field in [
+            Field::Token,
+            Field::Owner,
+            Field::Key,
+            Field::Assistant,
+            Field::Agent,
+        ] {
+            let mut fields = Fields::default();
+            field.set(&mut fields, "written".to_owned());
+            assert_eq!(field.of(&fields), "written", "{field:?}");
+        }
+    }
+
+    #[test]
+    fn a_secrets_keystore_name_is_the_environment_variable_it_stands_for() {
+        assert_eq!(Field::Token.keystore_name(), "GITHUB_TOKEN");
+        assert_eq!(Field::Key.keystore_name(), "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    #[should_panic(expected = "not a secret")]
+    fn a_configuration_entry_has_no_keystore_name() {
+        let _ = Field::Owner.keystore_name();
+    }
+
+    #[test]
+    fn a_tab_dirty_in_both_its_boxes_writes_to_both_stores() {
+        let mut current = loaded();
+        current.key = Secret::from("sk-new");
+        current.agent = "claude-agent".to_owned();
+        let due = writes(Tab::Models, &loaded(), &current);
+        assert_eq!(due.secret, Some(Secret::from("sk-new")));
+        assert_eq!(
+            due.config.unwrap().model.agent.as_deref(),
+            Some("claude-agent")
+        );
+    }
+
+    #[test]
+    fn a_configuration_survives_a_round_trip_through_the_boxes() {
+        let config = Config {
+            model: config::Model {
+                chat: Some("claude-assistant".to_owned()),
+                agent: Some("claude-agent".to_owned()),
+            },
+            github: config::GitHub {
+                owner: Some("octo".to_owned()),
+            },
+            monitor: Some(config::Monitor {
+                listen: Some("127.0.0.1:7878".to_owned()),
+            }),
+        };
+        assert_eq!(Fields::from_config(&config).config(), config);
+    }
+
+    fn panel() -> Panel {
+        Panel {
+            loaded: RwSignal::new(Fields::default()),
+            current: RwSignal::new(Fields::default()),
+            tab: RwSignal::new(Tab::GitHub),
+            models: RwSignal::new(Models::Loading),
+            note: RwSignal::new(None),
+        }
+    }
+
+    #[test]
+    fn a_field_filled_from_a_store_lands_clean_in_both_tabs() {
+        let panel = panel();
+        panel.set_both(Field::Owner, "octo");
+        assert_eq!(panel.current.get_untracked().owner, "octo");
+        for tab in Tab::ALL {
+            assert_eq!(
+                dirty(
+                    tab,
+                    &panel.loaded.get_untracked(),
+                    &panel.current.get_untracked()
+                ),
+                [],
+                "what a store says is not an edit"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_over_a_loaded_field_is_dirt() {
+        let panel = panel();
+        panel.set_both(Field::Owner, "octo");
+        panel
+            .current
+            .update(|f| Field::Owner.set(f, "other".to_owned()));
+        assert_eq!(
+            dirty(
+                Tab::GitHub,
+                &panel.loaded.get_untracked(),
+                &panel.current.get_untracked()
+            ),
+            [Field::Owner]
+        );
+    }
+
+    #[test]
+    fn an_absent_entry_is_the_empty_box_and_the_empty_box_is_absent() {
+        let fields = Fields::from_config(&Config::default());
+        assert_eq!(fields.owner, "");
+        assert_eq!(fields.agent, "");
+        let config = fields.config();
+        assert_eq!(config.github.owner, None);
+        assert_eq!(config.model.agent, None);
     }
 }

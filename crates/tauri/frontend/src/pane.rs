@@ -175,6 +175,20 @@ const fn dot_class(dot: Dot) -> &'static str {
     }
 }
 
+/// The dot itself, wherever one is drawn: a tab's, and the one beside
+/// the selected issue's sentence. Stated once, so the two agree.
+const DOT: &str = "inline-block h-[7px] w-[7px] shrink-0 rounded-full";
+
+/// What a tab's dot wears altogether: its size, its colour, and its
+/// motion when there is an Agent working and the feed is speaking.
+fn dot_classes(dot: Dot, pulse: bool) -> String {
+    format!(
+        "{DOT} {}{}",
+        dot_class(dot),
+        if pulse { " epik-pulse" } else { "" }
+    )
+}
+
 /// The class a form wears: its colour, and its motion when the feed is
 /// speaking.
 const fn form_class(form: Form, pulse: bool) -> &'static str {
@@ -222,11 +236,7 @@ pub fn TabStrip(view: RwSignal<View>) -> impl IntoView {
 
 fn feature_tab(view: RwSignal<View>, tab: TabSpec) -> impl IntoView {
     let run = tab.run;
-    let dot = format!(
-        "inline-block h-[7px] w-[7px] shrink-0 rounded-full {}{}",
-        dot_class(tab.dot),
-        if tab.pulse { " epik-pulse" } else { "" }
-    );
+    let dot = dot_classes(tab.dot, tab.pulse);
     let close = tab.closable.then(|| {
         view! {
             <button
@@ -301,7 +311,7 @@ pub fn FeaturePane(view: RwSignal<View>, pane: Pane) -> impl IntoView {
                 {detail.heading}
             </div>
             <div class=format!("flex items-start gap-2 text-[13px] {colour}")>
-                <span class="mt-[6px] inline-block h-[7px] w-[7px] shrink-0 rounded-full bg-current"></span>
+                <span class=format!("mt-[6px] {DOT} bg-current")></span>
                 <span class="break-words">{detail.sentence}</span>
             </div>
             <div class=format!("{LABEL} mt-2 border-t border-neutral-200 pt-2.5 dark:border-neutral-800")>"Blocks"</div>
@@ -567,5 +577,106 @@ mod tests {
     fn an_empty_layout_still_has_a_view_box() {
         let geometry = geometry(&Layout::default());
         assert!(geometry.width > 0.0 && geometry.height > 0.0);
+    }
+
+    /// The palette class and the fill: a muted dot is hollow, and the
+    /// three that stand for a state are filled.
+    #[test]
+    fn a_dot_carries_its_colour_from_the_graph_palette() {
+        assert_eq!(dot_class(Dot::Error), "graph-error bg-current");
+        assert_eq!(dot_class(Dot::Open), "graph-open bg-current");
+        assert_eq!(dot_class(Dot::Closed), "graph-closed bg-current");
+        assert_eq!(
+            dot_class(Dot::Muted),
+            "graph-strong border-2 border-current"
+        );
+    }
+
+    #[test]
+    fn every_dot_is_the_one_dot_wearing_its_own_colour_and_pulsing_on_request() {
+        for dot in [Dot::Error, Dot::Open, Dot::Closed, Dot::Muted] {
+            let still = dot_classes(dot, false);
+            assert!(still.contains(DOT), "the shared geometry: {still}");
+            assert!(still.contains(dot_class(dot)), "and its own: {still}");
+            assert!(!still.contains("epik-pulse"), "{dot:?}");
+            assert!(dot_classes(dot, true).contains("epik-pulse"), "{dot:?}");
+        }
+    }
+
+    /// Every form at both flags: the colour it wears, and the one that
+    /// moves. Running is the only row whose two entries differ, so the
+    /// table says what pulses by showing what does not.
+    #[test]
+    fn a_form_wears_the_colour_its_state_calls_for_and_only_running_moves() {
+        let table = [
+            (Form::Blocked, "graph-strong", "graph-strong"),
+            (Form::Ready, "graph-open", "graph-open"),
+            (Form::Skipped, "graph-strong", "graph-strong"),
+            (Form::Running, "graph-open", "graph-open epik-pulse"),
+            (Form::Merging, "graph-open", "graph-open"),
+            (Form::Merged, "graph-closed", "graph-closed"),
+            (Form::Failed, "graph-error", "graph-error"),
+        ];
+        for (form, still, speaking) in table {
+            assert_eq!(form_class(form, false), still, "{form:?}");
+            assert_eq!(form_class(form, true), speaking, "{form:?}");
+        }
+    }
+
+    #[test]
+    fn an_edge_naming_a_node_the_layout_lacks_draws_nothing() {
+        let layout = Layout {
+            nodes: vec![node(1, 0, 0, Form::Ready)],
+            edges: vec![
+                Edge {
+                    blocker: 1,
+                    issue: 9,
+                },
+                Edge {
+                    blocker: 9,
+                    issue: 1,
+                },
+            ],
+            containers: Vec::new(),
+        };
+        assert_eq!(geometry(&layout).arrows, []);
+    }
+
+    #[test]
+    fn a_nested_box_stands_further_off_than_the_one_inside_it() {
+        let inner = |height| Layout {
+            nodes: vec![node(3, 0, 0, Form::Ready), node(4, 1, 0, Form::Ready)],
+            edges: Vec::new(),
+            containers: vec![Container {
+                id: 7,
+                title: "the container".to_owned(),
+                depth: 1,
+                height,
+                leaves: vec![3, 4],
+            }],
+        };
+        let flat = geometry(&inner(0));
+        let nested = geometry(&inner(1));
+        assert!(nested.rects[0].width > flat.rects[0].width);
+        assert!(
+            nested.width > flat.width && nested.height > flat.height,
+            "the margins make room for the deeper nesting"
+        );
+    }
+
+    /// The layout gives every node its own row, so a chain down the
+    /// diagonal is the shape a real one has.
+    #[test]
+    fn the_view_box_grows_by_a_stride_per_node() {
+        let chain = |length: usize| Layout {
+            nodes: (0..length)
+                .map(|step| node(step as u64, step, step, Form::Ready))
+                .collect(),
+            edges: Vec::new(),
+            containers: Vec::new(),
+        };
+        let (one, three) = (geometry(&chain(1)), geometry(&chain(3)));
+        assert_eq!(three.width - one.width, 2.0 * COLUMN);
+        assert_eq!(three.height - one.height, 2.0 * ROW);
     }
 }
