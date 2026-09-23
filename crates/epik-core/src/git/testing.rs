@@ -90,13 +90,22 @@ pub fn cloned(
     .unwrap()
 }
 
-/// A bare origin under `scratch`, and a clone of it with one commit
-/// of `hello.txt` on `main`, pushed.
-pub fn seeded(scratch: &Scratch) -> (Repository, Repository) {
+/// A bare origin under `scratch`, and a clone of it holding one commit
+/// of `hello.txt` on `main`: `(origin, work)`. The commit is in `work`
+/// alone, and `origin` is empty with `work` pointed at it, so a push
+/// names [`Remote::origin`].
+pub fn unpushed(scratch: &Scratch) -> (Repository, Repository) {
     let origin = init(Init::new(scratch.join("origin.git").into()).unwrap()).unwrap();
     let work = cloned(scratch, &origin, "work", None);
     identified(&work);
     committed(&work, "hello.txt", "hello\n", "the first commit");
+    (origin, work)
+}
+
+/// [`unpushed`] with `main` pushed: the commit is on the origin, and
+/// `work` is a clone carrying it.
+pub fn published(scratch: &Scratch) -> (Repository, Repository) {
+    let (origin, work) = unpushed(scratch);
     push(Push::new(work.clone(), Remote::origin(), "main".to_owned()).unwrap()).unwrap();
     (origin, work)
 }

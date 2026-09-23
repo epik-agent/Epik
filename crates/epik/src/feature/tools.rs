@@ -547,7 +547,7 @@ mod tests {
     use super::super::fixtures::{committing, id, node, plan, seven_holding_eight};
     use super::*;
     use crate::monitor::{Stage, eventually_finished, folded};
-    use crate::testing::{Local, Scratch, seeded, tidy};
+    use crate::testing::{Local, Scratch, tidy, unpushed};
     use crate::tools::Registry;
 
     /// An empty record on a fresh log.
@@ -807,7 +807,7 @@ mod tests {
     #[test]
     fn a_launch_that_fails_after_reserving_is_abandoned_with_its_words() {
         let scratch = Scratch::new("abandoned");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let builds = builds();
         let mut registry = Registry::default();
         registry.register(start_feature(
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn the_unnamed_branch_is_feature_n_and_the_unnamed_base_is_the_default_branch() {
         let scratch = Scratch::new("defaults");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let main_tip = git(&["-C", &work, "rev-parse", "refs/heads/main"])
             .trim()
             .to_owned();
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn the_check_card_is_prefilled_from_detection_and_the_answer_is_in_force() {
         let scratch = Scratch::new("prefill");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         cargo_crate(&work);
         let asked = Arc::new(Mutex::new(None::<Ask>));
         let builds = builds();
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn a_decline_skips_the_check_and_the_record_says_unchecked() {
         let scratch = Scratch::new("decline");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         cargo_crate(&work);
         let builds = builds();
         let registry = declining(&builds, remote);
@@ -1028,7 +1028,7 @@ mod tests {
     #[test]
     fn two_features_start_and_finish_side_by_side() {
         let scratch = Scratch::new("side-by-side");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let gate = Path::new(scratch.path()).join("release");
         let builds = builds();
         let registry = registry(
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn a_second_start_of_a_held_feature_branch_is_refused_before_anyone_is_asked() {
         let scratch = Scratch::new("twice");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let gate = Path::new(scratch.path()).join("release");
         let builds = builds();
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn status_reads_states_titles_the_tip_and_the_failure_reports() {
         let scratch = Scratch::new("status");
-        let (work, _) = seeded(&scratch);
+        let (work, _) = unpushed(&scratch);
         git(&["-C", &work, "branch", "feature-100", "main"]);
         let tip = git(&["-C", &work, "rev-parse", "refs/heads/feature-100"])
             .trim()

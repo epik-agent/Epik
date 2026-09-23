@@ -266,7 +266,7 @@ mod tests {
     use crate::dag::Node as After;
     use crate::git::Repository;
     use crate::git::commands::{Branch, RevParse};
-    use crate::git::testing::{guarded, pushed, seeded};
+    use crate::git::testing::{guarded, published, pushed};
     use crate::git::{self};
     use crate::github::fake::{self, FakeGitHub};
     use crate::github::{Conclusion, Error, State};
@@ -345,7 +345,7 @@ mod tests {
     impl Hosted {
         fn new(name: &str, issues: &[u64]) -> Self {
             let scratch = Scratch::new(name);
-            let (origin, work) = seeded(&scratch);
+            let (origin, work) = published(&scratch);
             let branch = feature_branch(FEATURE);
             git::branch(Branch::new(work.clone(), branch.clone(), None).unwrap()).unwrap();
             pushed(&work, &branch);

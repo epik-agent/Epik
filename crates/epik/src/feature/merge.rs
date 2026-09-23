@@ -293,17 +293,17 @@ mod tests {
     use super::*;
     use crate::job::{Order, provision};
 
-    use crate::testing::{Local, Scratch, seeded};
+    use crate::testing::{Local, Scratch, unpushed};
 
     fn git(args: &[&str]) -> String {
         plumbing(args).unwrap()
     }
 
-    /// A seeded repository with the feature branch established over it,
+    /// A unpushed repository with the feature branch established over it,
     /// `check` in force: the work and remote paths, and the branch. How
     /// most merge tests open.
     fn established(scratch: &Scratch, check: Option<Check>) -> (String, String, Branch<Local>) {
-        let (work, remote) = seeded(scratch);
+        let (work, remote) = unpushed(scratch);
         let forge = Local(remote.clone());
         let branch = Branch::establish(&work, "feature/wumpus", "main", forge, check).unwrap();
         (work, remote, branch)
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn a_branch_already_standing_is_used_as_it_stands() {
         let scratch = Scratch::new("standing");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         // The branch predates the build, one commit behind main.
         let old = git(&["-C", &work, "rev-parse", "HEAD"]).trim().to_owned();
         std::fs::write(Path::new(&work).join("later.txt"), "later\n").unwrap();
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn a_failed_push_unwinds_the_created_branch_so_a_retry_reaches_the_remote() {
         let scratch = Scratch::new("unwind");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
 
         let gone = Local(scratch.join("gone.git"));
         let error = Branch::establish(&work, "feature/wumpus", "main", gone, None).unwrap_err();
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn a_failed_push_unwinds_the_merge_so_a_retry_can_land_it() {
         let scratch = Scratch::new("pushless");
-        let (work, _) = seeded(&scratch);
+        let (work, _) = unpushed(&scratch);
         // A standing branch, so establishing pushes nothing; the forge
         // does not exist yet.
         git(&["-C", &work, "branch", "feature/wumpus", "HEAD"]);
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn two_establishes_of_one_new_branch_yield_one_winner_and_a_pushed_branch() {
         let scratch = Scratch::new("establish-twice");
-        let (work, remote) = seeded(&scratch);
+        let (work, remote) = unpushed(&scratch);
         let (first, second) = std::thread::scope(|scope| {
             let establish =
                 || Branch::establish(&work, "feature/wumpus", "main", Local(remote.clone()), None);

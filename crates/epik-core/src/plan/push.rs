@@ -41,7 +41,7 @@ mod tests {
     use super::*;
     use crate::git::commands::{Branch, Hash, RevParse, Switch};
     use crate::git::testing::{
-        OFFERED, PATIENCE, aimed, committed, credentials, guarded, pushed, seeded,
+        OFFERED, PATIENCE, aimed, committed, credentials, guarded, published, pushed,
     };
     use crate::git::url::Url;
     use crate::git::{branch, switch};
@@ -53,10 +53,10 @@ mod tests {
         git::rev_parse(RevParse::new(repository.clone(), revision.to_owned())?)
     }
 
-    /// A seeded origin, and a worktree of it on `issue-1` with a
+    /// A published origin, and a worktree of it on `issue-1` with a
     /// commit of its own.
     fn worked(scratch: &Scratch) -> (Repository, LinkedWorktree) {
-        let (origin, _) = seeded(scratch);
+        let (origin, _) = published(scratch);
         let url = Url::Local(origin.path().to_owned());
         let linked = Worktrees::new(scratch.join("root").into())
             .add(&url, "issue-1", "origin/main", &credentials())
@@ -131,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn a_rerun_pushes_over_the_branch_an_earlier_run_left_standing() {
         let scratch = Scratch::new("push-rerun");
-        let (origin, work) = seeded(&scratch);
+        let (origin, work) = published(&scratch);
         let earlier = standing(&work, "earlier.txt");
         let linked = rerun(&scratch, &origin, "work.txt");
 
@@ -149,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_after_a_run_that_pushed_and_failed_pushes_over_it() {
         let scratch = Scratch::new("push-again");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let first = rerun(&scratch, &origin, "first.txt");
         push(&first).run().await.unwrap();
         // The run failed past its push; its worktree goes back.
@@ -167,7 +167,7 @@ mod tests {
     #[tokio::test]
     async fn a_branch_moved_by_someone_else_refuses_in_gits_own_words() {
         let scratch = Scratch::new("push-lease");
-        let (origin, work) = seeded(&scratch);
+        let (origin, work) = published(&scratch);
         standing(&work, "earlier.txt");
         let linked = rerun(&scratch, &origin, "work.txt");
         // Someone other than Epik moves the branch, after the fetch the

@@ -589,7 +589,7 @@ mod tests {
     /// A bare origin under `scratch` and a clone of it, `work`, with an
     /// identity set and one commit of `hello.txt` on `main`, pushed —
     /// all through the tools. The two repositories' paths.
-    fn seeded(registry: &Registry, scratch: &Scratch) -> (String, String) {
+    fn published(registry: &Registry, scratch: &Scratch) -> (String, String) {
         let origin = ok(
             registry,
             "git_init",
@@ -728,7 +728,7 @@ mod tests {
     fn a_repository_is_made_worked_in_and_read_back_through_the_tools() {
         let registry = registry();
         let scratch = Scratch::new("tools-read-back");
-        let (_, work) = seeded(&registry, &scratch);
+        let (_, work) = published(&registry, &scratch);
 
         assert_eq!(subjects(&registry, &work), ["the first commit"]);
         let first = head(&registry, &work);
@@ -786,7 +786,7 @@ mod tests {
     fn branches_and_worktrees_come_and_go_through_the_tools() {
         let registry = registry();
         let scratch = Scratch::new("tools-branches");
-        let (_, work) = seeded(&registry, &scratch);
+        let (_, work) = published(&registry, &scratch);
         let first = head(&registry, &work);
 
         ok(
@@ -884,7 +884,7 @@ mod tests {
     fn remotes_are_pushed_to_fetched_from_pulled_from_and_listed_through_the_tools() {
         let registry = registry();
         let scratch = Scratch::new("tools-remotes");
-        let (origin, work) = seeded(&registry, &scratch);
+        let (origin, work) = published(&registry, &scratch);
         let other = ok(
             &registry,
             "git_clone",
@@ -929,7 +929,7 @@ mod tests {
     fn refusals_come_back_as_words_for_the_model() {
         let registry = registry();
         let scratch = Scratch::new("tools-refusals");
-        let (_, work) = seeded(&registry, &scratch);
+        let (_, work) = published(&registry, &scratch);
 
         let relative = refused(&registry, "git_status", json!({ "repository": "work" }));
         assert_eq!(relative, "the repository must be an absolute path: work");

@@ -437,7 +437,7 @@ mod tests {
     /// A repository with one committed file, made entirely through the
     /// tools under test — plus the identity config the tools deliberately
     /// do not manage.
-    fn seeded(name: &str) -> Scratch {
+    fn committed(name: &str) -> Scratch {
         let scratch = Scratch::new(name);
         let dir = scratch.path();
         assert!(
@@ -465,8 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn status_log_show_and_branches_read_a_seeded_repository() {
-        let repo = seeded("read");
+    fn status_log_show_and_branches_read_a_committed_repository() {
+        let repo = committed("read");
         let dir = repo.path();
 
         let status = ok("git_status", json!({ "directory": dir }));
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn add_commit_and_diff_advance_the_repository() {
-        let repo = seeded("write");
+        let repo = committed("write");
         let dir = repo.path();
         std::fs::write(repo.0.join("hello.txt"), "hello again\n").unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn checkout_with_create_makes_and_switches_to_the_branch() {
-        let repo = seeded("branch");
+        let repo = committed("branch");
         let dir = repo.path();
 
         ok(
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn clone_push_fetch_and_pull_speak_to_a_local_bare_remote() {
-        let source = seeded("source");
+        let source = committed("source");
         let bare = Scratch::new("bare");
         assert!(
             execute(&["init", "--bare", "--initial-branch=main", bare.path()]).unwrap()["ok"]
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn init_refuses_a_directory_that_already_holds_a_repository() {
-        let repo = seeded("reinit");
+        let repo = committed("reinit");
         let (ok, output) = call("git_init", json!({ "directory": repo.path() }));
         assert!(!ok);
         assert!(output.contains("already holds"), "{output}");
@@ -699,7 +699,7 @@ mod tests {
     /// argument values.
     #[test]
     fn a_positional_that_smuggles_a_flag_is_refused() {
-        let repo = seeded("flags");
+        let repo = committed("flags");
         let error = registry()
             .dispatch(
                 "git_checkout",
@@ -718,7 +718,7 @@ mod tests {
         use crate::chat::{Client, Role, TranscriptItem, run};
         use crate::testing::model::{Fragment, Scripted, Turn};
 
-        let repo = seeded("loop");
+        let repo = committed("loop");
         let arguments = json!({ "directory": repo.path() }).to_string();
         let model = Scripted::spawn(vec![
             Turn::ToolCalls(vec![vec![Fragment::open(

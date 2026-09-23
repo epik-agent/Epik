@@ -1836,7 +1836,7 @@ mod tests {
 #[cfg(all(test, unix, feature = "native"))]
 mod live {
     use super::*;
-    use crate::git::testing::{cloned, committed, head, identified, seeded};
+    use crate::git::testing::{cloned, committed, head, identified, published};
     use crate::git::{
         abort_merge, add, add_worktree, branch, clone, commit, delete_branch, diff, fetch, init,
         list_remotes, list_worktrees, log, merge, pull, push, remove_worktree, reset, rev_parse,
@@ -1894,7 +1894,7 @@ mod live {
     #[test]
     fn a_clone_makes_a_repository_with_the_source_at_head() {
         let scratch = Scratch::new("clone");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let repository = cloned(&scratch, &origin, "clone", None);
 
         assert_eq!(repository.path(), Path::new(&scratch.join("clone")));
@@ -1908,7 +1908,7 @@ mod live {
     #[test]
     fn a_clone_checks_out_the_branch_it_was_asked_for() {
         let scratch = Scratch::new("clone-branch");
-        let (origin, work) = seeded(&scratch);
+        let (origin, work) = published(&scratch);
         branch(Branch::new(work.clone(), "release".to_owned(), None).unwrap()).unwrap();
         push(Push::new(work, Remote::origin(), "release".to_owned()).unwrap()).unwrap();
 
@@ -1938,7 +1938,7 @@ mod live {
     #[test]
     fn a_branch_is_made_switched_to_worked_on_and_deleted() {
         let scratch = Scratch::new("branch");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         let main = head(&work);
 
         branch(Branch::new(work.clone(), "topic".to_owned(), Some(main.clone())).unwrap()).unwrap();
@@ -1964,7 +1964,7 @@ mod live {
     #[test]
     fn a_worktree_is_added_listed_worked_in_and_removed() {
         let scratch = Scratch::new("worktree");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         branch(Branch::new(work.clone(), "topic".to_owned(), None).unwrap()).unwrap();
 
         let topic = add_worktree(
@@ -2009,7 +2009,7 @@ mod live {
     #[test]
     fn status_reads_the_tree_as_it_stands() {
         let scratch = Scratch::new("status");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         assert_eq!(
             status(Status::new(work.clone())).unwrap(),
             [],
@@ -2040,7 +2040,7 @@ mod live {
     #[test]
     fn diff_and_show_read_the_patch() {
         let scratch = Scratch::new("diff");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         std::fs::write(work.path().join("hello.txt"), "hello, world\n").unwrap();
 
         let patch = diff(Diff::new(work.clone(), None, None).unwrap()).unwrap();
@@ -2063,7 +2063,7 @@ mod live {
     #[test]
     fn a_commit_with_nothing_staged_fails_in_gits_own_words() {
         let scratch = Scratch::new("commit-nothing");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
 
         let error = commit(Commit::new(work, "nothing".to_owned()).unwrap())
             .unwrap_err()
@@ -2075,7 +2075,7 @@ mod live {
     #[test]
     fn rev_parse_names_the_commit_and_refuses_what_is_none() {
         let scratch = Scratch::new("rev-parse");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         let first = head(&work);
 
         let entries = log(Log::new(work.clone(), None, None).unwrap()).unwrap();
@@ -2099,7 +2099,7 @@ mod live {
     #[test]
     fn a_log_reads_the_history_newest_first() {
         let scratch = Scratch::new("log");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         let later = committed(&work, "more.txt", "more\n", "feat: later");
 
         let entries = log(Log::new(work.clone(), None, None).unwrap()).unwrap();
@@ -2129,7 +2129,7 @@ mod live {
     #[test]
     fn push_fetch_and_pull_move_commits_between_clones() {
         let scratch = Scratch::new("push-fetch-pull");
-        let (origin, ada) = seeded(&scratch);
+        let (origin, ada) = published(&scratch);
         let bob = cloned(&scratch, &origin, "bob", None);
 
         let later = committed(&ada, "more.txt", "more\n", "feat: later");
@@ -2162,7 +2162,7 @@ mod live {
     #[test]
     fn a_merge_lands_as_a_merge_commit_and_a_conflict_is_abortable() {
         let scratch = Scratch::new("merge");
-        let (_, work) = seeded(&scratch);
+        let (_, work) = published(&scratch);
         let before = head(&work);
 
         branch(Branch::new(work.clone(), "topic".to_owned(), None).unwrap()).unwrap();

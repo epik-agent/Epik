@@ -39,9 +39,8 @@ include_dir = "0.7"
 
 [dev-dependencies]
 # Test fixtures ride in for tests only; no shipping build sees them: the
-# scratch directory and the seeded repository from epik, the scripted
-# model from epik-core.
-epik = { path = "../../epik", features = ["testing"] }
+# scratch directory, the git repository fixtures, and the scripted model,
+# all from epik-core.
 epik-core = { path = "../../epik-core", features = ["testing"] }
 rust_decimal = "1"
 

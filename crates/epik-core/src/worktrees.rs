@@ -289,7 +289,7 @@ mod tests {
     use crate::git::commands::{Hash, Show, Switch, WorktreeInfo};
     use crate::git::testing::{
         INTRUDED, INTRUDER, OFFERED, PATIENCE, aimed, branch_of, committed, credentials, guarded,
-        head, identified, pushed, seeded,
+        head, identified, published, pushed,
     };
     use crate::git::{fetch, show, switch};
     use crate::temp::Scratch;
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn a_url_is_cloned_once_and_each_add_is_its_own_worktree_on_the_branch_named_until_dropped() {
         let scratch = Scratch::new("worktrees");
-        let (origin, work) = seeded(&scratch);
+        let (origin, work) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let head = head(&work);
         // Git lists paths as it resolved them, symlinks followed.
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn a_worktree_cut_after_a_merge_landed_on_the_feature_branch_contains_it() {
         let scratch = Scratch::new("worktrees-late");
-        let (origin, work) = seeded(&scratch);
+        let (origin, work) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         branch(Branch::new(work.clone(), "feature".to_owned(), None).unwrap()).unwrap();
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn adds_and_drops_of_one_url_from_two_threads_at_once_each_succeed() {
         let scratch = Scratch::new("worktrees-at-once");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         // Each round starts with the URL never cloned, or with its
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn a_commit_in_any_worktree_is_epiks_by_the_clones_own_config() {
         let scratch = Scratch::new("worktrees-identity");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         let first = worktrees
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn a_branch_is_one_worktrees_until_the_drop_frees_its_name() {
         let scratch = Scratch::new("worktrees-taken");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         let _other = worktrees
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn an_add_that_cannot_make_its_worktree_leaves_the_name_free() {
         let scratch = Scratch::new("worktrees-interrupted");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let root = PathBuf::from(scratch.join("root"));
         let worktrees = Worktrees::new(root.clone());
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn an_add_reclaims_a_worktree_a_dead_epik_left_behind() {
         let scratch = Scratch::new("worktrees-leftover");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let root = PathBuf::from(scratch.join("root"));
         let worktrees = Worktrees::new(root.clone());
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn a_commit_is_epiks_though_the_clone_lost_the_identity() {
         let scratch = Scratch::new("worktrees-reidentified");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let root = PathBuf::from(scratch.join("root"));
         let worktrees = Worktrees::new(root.clone());
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn add_needs_a_commit_to_cut_the_branch_at() {
         let scratch = Scratch::new("worktrees-nowhere");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let worktrees = Worktrees::new(scratch.join("root").into());
         let error = worktrees
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn a_branch_with_a_slash_in_it_is_one_directory_beside_the_clone() {
         let scratch = Scratch::new("worktrees-slash");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let root = scratch.0.canonicalize().unwrap().join("root");
         let linked = Worktrees::new(root.clone())
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn a_fetch_answers_with_the_credentials_ahead_of_a_helper_that_would() {
         let scratch = Scratch::new("worktrees-guarded-fetch");
-        let (origin, _) = seeded(&scratch);
+        let (origin, _) = published(&scratch);
         let url = Url::Local(origin.path().to_owned());
         let root = PathBuf::from(scratch.join("root"));
         let worktrees = Worktrees::new(root.clone());
