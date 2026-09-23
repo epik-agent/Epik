@@ -181,6 +181,16 @@ jobs:
         run: cargo tauri build
         working-directory: crates/tauri/backend
 
+      # The monitor page is embedded at compile time by `include_dir!`,
+      # and an empty directory embeds as a valid empty bundle: nothing
+      # fails, the app just serves no page. Only an assertion on the
+      # artifact catches that, and only here, where Trunk has run.
+      - name: The monitor's page is embedded
+        run: |
+          test -s crates/tauri/frontend/dist/index.html
+          app=$(ls -d target/release/bundle/macos/*.app | head -1)
+          strings "$app/Contents/MacOS/Epik" | grep -q wasm_bindgen
+
       - name: Signature
         if: runner.os == 'macOS'
         run: |
