@@ -55,19 +55,32 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The same hermetic suite as before, instrumented: the live tiers
+      # (EPIK_LIVE_*) skip themselves when their environment is unset.
+      # `cargo llvm-cov` runs the tests, so this is the test step.
       - name: test
-        # The live tiers (EPIK_LIVE_*, EPIK_GITHUB_*) skip themselves when
-        # their environment is unset, so this is the hermetic suite.
-        run: cargo test --workspace
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      # Coverage is a reading, never a gate: an upload that cannot happen
+      # leaves the build green. The token is absent on a fork's pull
+      # request and until the secret is set, and neither is a failure.
+      - name: Coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: native
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+        continue-on-error: true
 
   frontend:
     name: frontend fmt, clippy, test (${{ matrix.os }})
@@ -83,12 +96,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/tauri/frontend -> target
           save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: fmt
         run: cargo fmt --all --check
@@ -99,7 +113,18 @@ jobs:
       # with awk rather than sed: `host: ` carries a colon and a space,
       # which YAML reads as a mapping unless the whole line is quoted.
       - name: test
-        run: cargo test --target "$(rustc -vV | awk '/^host/ { print $2 }')"
+        run: cargo llvm-cov --lcov --output-path lcov.info --target "$(rustc -vV | awk '/^host/ { print $2 }')"
+      # Its own flag: this crate is a separate workspace built for a
+      # different target, and one number over both would average a
+      # library against a browser page.
+      - name: Coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: crates/tauri/frontend/lcov.info
+          flags: frontend
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+        continue-on-error: true
 
   # The one check branch protection requires. Matrix legs and job names
   # can change without touching the ruleset; this name must not.

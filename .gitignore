@@ -7,3 +7,5 @@
 /crates/tauri/backend/gen/schemas
 # Claude Code's session-local state: commands, worktrees, never the repo's.
 /.claude
+# What `cargo llvm-cov` leaves where it is run; CI uploads it and forgets it.
+lcov.info

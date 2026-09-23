@@ -17,3 +17,8 @@ The tests are written to one nomenclature, decided in
 [`docs/design-history/2026-09-23-how-epiks-tests-are-written.md`](docs/design-history/2026-09-23-how-epiks-tests-are-written.md),
 alongside the rest of the decisions that got us here.
 
+CI reports their coverage to Codecov, the two workspaces under separate
+flags — `native` and `frontend` — because they build for different
+targets. It is a reading and never a gate: a number that blocks a merge
+gets gamed with tests written for the number.
+
