@@ -32,13 +32,14 @@ use std::time::Duration;
 use epik_core::agent::claude::ClaudeCode;
 use epik_core::dag::Dag;
 use epik_core::git::url::Url;
-use epik_core::github::{GitHub, Merge, Repo};
+use epik_core::github::{GitHub, Repo};
 use epik_core::keystore::Secret;
 use epik_core::model_tools::{Tool, arg};
 use epik_core::monitor::{Change, EVENT, Entry, Log, RunId};
 use epik_core::plan::AgentSlots;
 use epik_core::plan::feature::{Build, Name, issue_branch};
 use epik_core::plan::github::{CheckWait, Feature, feature_branch};
+use epik_core::plan::policy::{Policy, Reading};
 use epik_core::plan::stream::{Event, Sink};
 use epik_core::prompt::issue_brief;
 use epik_core::tracker::IssueTracker;
@@ -336,6 +337,11 @@ fn launch(
         repo: repo.clone(),
     };
     let read = read_work(&issues, number).map_err(abandon)?;
+    // Before the build creates anything: what the repository's rulesets
+    // let it do, and the refusal when they forbid what it would do.
+    let Reading { settled, said } = Policy::read(&github, &repo, number, &read.work)
+        .map_err(|error| abandon(format!("the repository's rules could not be read: {error}")))?;
+    let policy = settled.map_err(abandon)?;
     let url = Url::Scheme(
         format!("https://github.com/{repo}.git")
             .parse()
@@ -362,7 +368,7 @@ fn launch(
         url,
         worktrees: Worktrees::new(state.worktrees.clone()),
         checks: CHECKS,
-        merge: Merge::Squash,
+        merge: policy.merge,
         slots: state.slots.clone(),
         sink,
         agent: Box::new(move |issue, cwd| ClaudeCode {
@@ -381,10 +387,11 @@ fn launch(
     // A feature with no issues under it runs its branch and its pull
     // request and nothing between: the one thing the old plan's
     // `doomed` named that the shape of a `Dag` cannot say for itself.
-    let problems = match count {
+    let mut problems = match count {
         0 => vec![format!("feature {number} has no issues under it")],
         _ => Vec::new(),
     };
+    problems.extend(said);
     log.record(Change::Started {
         run,
         work: work.clone(),
