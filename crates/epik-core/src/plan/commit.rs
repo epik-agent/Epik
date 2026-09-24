@@ -2,8 +2,6 @@
 //! any work is read from git, and the commit that carries the work is
 //! Epik's to make.
 
-use std::fmt::{self, Display, Formatter};
-
 use anyhow::{Result, bail};
 
 use super::briefly;
@@ -28,28 +26,25 @@ pub struct Commit {
     pub message: String,
 }
 
-/// A worktree that is as its branch's tip left it: the fact, for
-/// whoever asked for a commit to tell from a failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NothingToCommit;
-
-impl Display for NothingToCommit {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("the worktree holds nothing to commit")
-    }
+/// What asking a worktree for a commit came to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Committed {
+    /// The commit that was made, by its hash.
+    Made(Hash),
+    /// A worktree that is as its branch's tip left it: the fact, for
+    /// whoever asked for a commit to read.
+    Nothing,
 }
 
-impl std::error::Error for NothingToCommit {}
-
 impl Commit {
-    /// The commit, made: its hash, as git reads the branch's new tip
-    /// back.
+    /// Everything the worktree holds, committed — or the fact that it
+    /// holds nothing.
     ///
     /// # Errors
     ///
-    /// A worktree standing off `branch`, [`NothingToCommit`] for a
-    /// clean worktree, a message git would refuse, and git's own words.
-    pub async fn commit(&self) -> Result<Hash> {
+    /// A worktree standing off `branch`, a message git would refuse,
+    /// and git's own words.
+    pub async fn commit(&self) -> Result<Committed> {
         let worktree = &self.worktree;
         let status = Status::new(worktree.clone());
         let add = Add::new(worktree.clone(), vec![".".into()])?;
@@ -57,11 +52,11 @@ impl Commit {
 
         self.on_branch().await?;
         if briefly(|| git::status(status)).await?.is_empty() {
-            return Err(NothingToCommit.into());
+            return Ok(Committed::Nothing);
         }
         briefly(|| git::add(add)).await?;
         briefly(|| git::commit(commit)).await?;
-        self.tip().await
+        self.tip().await.map(Committed::Made)
     }
 
     /// The commit `branch` stands on, whatever `HEAD` is.
@@ -151,7 +146,7 @@ mod tests {
 
         let made = commit(&linked).commit().await.unwrap();
 
-        assert_eq!(made, head(linked.worktree()));
+        assert_eq!(made, Committed::Made(head(linked.worktree())));
         let status = git::status(Status::new(linked.worktree().clone())).unwrap();
         assert_eq!(status, [], "the commit carries everything");
         let shown =
@@ -172,10 +167,9 @@ mod tests {
         let linked = provisioned(&scratch);
         let before = head(linked.worktree());
 
-        let error = commit(&linked).run().await.unwrap_err();
+        let committed = commit(&linked).commit().await.unwrap();
 
-        assert!(error.is::<NothingToCommit>(), "{error}");
-        assert_eq!(error.to_string(), "the worktree holds nothing to commit");
+        assert_eq!(committed, Committed::Nothing);
         assert_eq!(head(linked.worktree()), before);
     }
 
