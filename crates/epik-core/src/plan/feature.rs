@@ -373,6 +373,16 @@ fn commit(held: &Held) -> String {
         .map_or_else(|| "a branch yet to be pushed".to_owned(), Hash::to_string)
 }
 
+/// The commit a state names to GitHub. Every state that asks is reached
+/// through a push, so the commit is there; a state reached another way
+/// says so rather than handing GitHub a sentence where a sha belongs.
+fn pushed(held: &Held, step: Step) -> Result<String> {
+    held.pushed
+        .as_ref()
+        .map(Hash::to_string)
+        .ok_or_else(|| astray(step))
+}
+
 /// The failure of a step handed the outcome of another step: the states
 /// and the outcomes are two vocabularies, and this is what a pairing of
 /// them the table has no edge for says.
@@ -429,7 +439,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
                 Ok(Acted::Opened(pull.number))
             }
             Step::Checks => {
-                let judged = commit(held);
+                let judged = pushed(held, step)?;
                 let said = self.sink(step);
                 let verdict = feature
                     .await_checks(&judged, required, *checks, &said)
@@ -438,7 +448,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             }
             Step::Merge => {
                 let pull = held.pull.ok_or_else(|| astray(step))?;
-                let merged = feature.merge(pull, &commit(held), *merge).await?;
+                let merged = feature.merge(pull, &pushed(held, step)?, *merge).await?;
                 Ok(Acted::Merged(merged))
             }
             Step::Close => feature.close(self.number).await.map(|()| Acted::Closed),

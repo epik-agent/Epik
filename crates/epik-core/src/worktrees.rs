@@ -253,8 +253,13 @@ impl LinkedWorktree {
 
     /// A worktree at `path`, on `branch`, cut at `at`, standing in no
     /// clone: the shape of one, for a test about what holds a worktree
-    /// rather than about the git under it. Removing it finds nothing to
-    /// remove, which [`Drop`] passes over as it does any other failure.
+    /// rather than about the git under it.
+    ///
+    /// `path` names a place that holds no worktree, so that removing
+    /// this one finds nothing to remove — which [`Drop`] passes over as
+    /// it does any other failure. A path that does hold one is removed
+    /// for real when this is dropped, git being asked the same way
+    /// either way.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn shaped(path: PathBuf, branch: &str, at: Hash) -> Self {
