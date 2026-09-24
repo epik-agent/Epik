@@ -2,7 +2,8 @@
 //! [`Task`] is the work, [`Implement`] is an agent's run as one,
 //! [`Machine`] is a state machine of tasks as one, [`Plan::execute`]
 //! runs them all at once, [`AgentSlots`] bounds the agents they
-//! launch, [`stream`] is where they say what they are doing, and
+//! launch, [`stream`] is where they say what they are doing,
+//! [`policy`] is what the repository's rulesets let a build do, and
 //! [`feature`] is a feature build as one.
 
 pub mod commit;
@@ -11,6 +12,8 @@ pub mod feature;
 pub mod github;
 pub mod implement;
 pub mod machine;
+#[cfg(unix)]
+pub mod policy;
 #[cfg(unix)]
 pub mod push;
 pub mod stream;

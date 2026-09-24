@@ -193,8 +193,8 @@ pub enum Merge {
 }
 
 impl Merge {
-    // Driven by merge_pull under `native`; compiled everywhere serde is.
-    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    /// GitHub's own word for the method: what a merge asks for, and what a
+    /// ruleset's `allowed_merge_methods` lists.
     const fn wire(self) -> &'static str {
         match self {
             Self::Commit => "merge",
@@ -204,12 +204,43 @@ impl Merge {
     }
 }
 
-/// One check run's verdict on a commit.
+/// One check run's verdict on a commit, and the app that reported it.
+///
+/// Two apps may report a check of the same name, and a ruleset's required
+/// check may name the one it means, so a run carries the app's id beside
+/// its own.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Check {
     pub name: String,
     /// `None` while the check is still running.
     pub conclusion: Option<Conclusion>,
+    /// The GitHub App whose run this is, as a ruleset's `integration_id`
+    /// spells it. A run reported outside any app carries none.
+    #[serde(default, with = "app_id")]
+    pub app: Option<u64>,
+}
+
+/// A check run's `app`, which GitHub sends as a whole object and this
+/// client keeps only the id of — the field a ruleset names an app by.
+/// Read and written the same way, so a [`Check`] survives a round trip
+/// through JSON.
+mod app_id {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Deserialize, Serialize)]
+    struct App {
+        id: u64,
+    }
+
+    pub fn serialize<S: Serializer>(app: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
+        app.map(|id| App { id }).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<u64>, D::Error> {
+        Ok(Option::<App>::deserialize(deserializer)?.map(|app| app.id))
+    }
 }
 
 /// How a finished check run ended. `Other` absorbs conclusions GitHub
@@ -255,6 +286,159 @@ impl Check {
         self.conclusion
             .is_some_and(|conclusion| !conclusion.green())
     }
+}
+
+/// One rule in force on a branch, and where it comes from.
+///
+/// GitHub's branch-rules endpoint flattens every active ruleset — the
+/// repository's and the organization's alike — into a list of rules, each
+/// stamped with the ruleset it came from. A build reads that list as its
+/// policy, so a rule it cannot satisfy can be named along with the ruleset
+/// to relax.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(from = "RuleWire")]
+pub struct Rule {
+    /// What the rule requires.
+    pub kind: Kind,
+    /// The repository or organization the ruleset belongs to, as
+    /// `ruleset_source` spells it.
+    pub source: String,
+    /// The ruleset's id, which is how a user finds it in the settings: an
+    /// id names a ruleset where reading its name would need a wider
+    /// permission than a build asks for.
+    pub ruleset: u64,
+}
+
+impl Rule {
+    /// Where the rule comes from, in words that lead a user to the
+    /// setting: the account holding the ruleset, and the ruleset's id.
+    #[must_use]
+    pub fn whence(&self) -> String {
+        format!("{}, ruleset {}", self.source, self.ruleset)
+    }
+}
+
+impl Kind {
+    /// GitHub's own word for the rule type, which is what the settings
+    /// and the API both call it.
+    #[must_use]
+    pub fn spelled(&self) -> &str {
+        match self {
+            Self::RequiredStatusChecks { .. } => "required_status_checks",
+            Self::PullRequest { .. } => "pull_request",
+            Self::RequiredLinearHistory => "required_linear_history",
+            Self::RequiredSignatures => "required_signatures",
+            Self::MergeQueue => "merge_queue",
+            Self::Creation => "creation",
+            Self::Update => "update",
+            Self::Other(word) => word,
+        }
+    }
+}
+
+/// What one rule requires, for the rule types a policy reads. Everything
+/// else arrives as [`Other`](Kind::Other) under GitHub's own word for it:
+/// GitHub enforces a rule whether or not this enum has heard of it, so an
+/// unmodelled type must decode rather than break the read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Kind {
+    /// The checks that must pass, and whether each must have run on a
+    /// commit current with the base branch.
+    RequiredStatusChecks { checks: Vec<Required>, strict: bool },
+    /// A pull request is required, with this many approving reviews and
+    /// these merge methods allowed — in the order a policy prefers them.
+    PullRequest { approvals: u64, methods: Vec<Merge> },
+    /// The base branch takes no merge commits.
+    RequiredLinearHistory,
+    /// Every commit must be signed.
+    RequiredSignatures,
+    /// Merging goes through a queue.
+    MergeQueue,
+    /// Only named actors may create the branch.
+    Creation,
+    /// Only named actors may push to the branch.
+    Update,
+    /// A rule type this enum does not model, under GitHub's word for it.
+    Other(String),
+}
+
+/// One check a ruleset requires: its name, and the app that must report
+/// it when the rule names one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct Required {
+    pub context: String,
+    /// The [`Check::app`] whose run counts, when the rule names one. A rule
+    /// silent on the app is answered by a run of that name from anywhere.
+    #[serde(rename = "integration_id")]
+    pub app: Option<u64>,
+}
+
+/// A rule as the endpoint sends it: a type word beside the parameters that
+/// type gives the word meaning. The two are read together into a
+/// [`Kind`], which is where the meaning lands.
+#[derive(Deserialize)]
+struct RuleWire {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    parameters: Parameters,
+    #[serde(default)]
+    ruleset_source: String,
+    #[serde(default)]
+    ruleset_id: u64,
+}
+
+/// Every parameter any modelled rule type carries, in one shape. A rule
+/// type's own parameters are the fields it fills; the rest stay at their
+/// defaults, which is what a rule silent on them means.
+#[derive(Default, Deserialize)]
+struct Parameters {
+    #[serde(default)]
+    required_status_checks: Vec<Required>,
+    #[serde(default)]
+    strict_required_status_checks_policy: bool,
+    #[serde(default)]
+    required_approving_review_count: u64,
+    allowed_merge_methods: Option<Vec<String>>,
+}
+
+impl From<RuleWire> for Rule {
+    fn from(wire: RuleWire) -> Self {
+        let parameters = wire.parameters;
+        let kind = match wire.kind.as_str() {
+            "required_status_checks" => Kind::RequiredStatusChecks {
+                checks: parameters.required_status_checks,
+                strict: parameters.strict_required_status_checks_policy,
+            },
+            "pull_request" => Kind::PullRequest {
+                approvals: parameters.required_approving_review_count,
+                methods: merge_methods(parameters.allowed_merge_methods.as_deref()),
+            },
+            "required_linear_history" => Kind::RequiredLinearHistory,
+            "required_signatures" => Kind::RequiredSignatures,
+            "merge_queue" => Kind::MergeQueue,
+            "creation" => Kind::Creation,
+            "update" => Kind::Update,
+            _ => Kind::Other(wire.kind),
+        };
+        Self {
+            kind,
+            source: wire.ruleset_source,
+            ruleset: wire.ruleset_id,
+        }
+    }
+}
+
+/// The merge methods a `pull_request` rule allows, in the order a policy
+/// prefers them. A rule silent on the methods allows all three; GitHub
+/// spells a merge commit `merge`, which is [`Merge::Commit`] here.
+fn merge_methods(allowed: Option<&[String]>) -> Vec<Merge> {
+    [Merge::Squash, Merge::Commit, Merge::Rebase]
+        .into_iter()
+        .filter(|method| {
+            allowed.is_none_or(|allowed| allowed.iter().any(|word| word == method.wire()))
+        })
+        .collect()
 }
 
 /// An issue as it appears at the far end of an edge: enough to schedule
@@ -729,6 +913,26 @@ impl GitHub {
         Ok(wire.check_runs)
     }
 
+    /// Every rule in force on `branch`, flattened out of the active
+    /// rulesets — the repository's and the organization's — that name it.
+    /// Rulesets merely evaluating, or disabled, are left out, as are the
+    /// classic branch protections, which this client does not read.
+    ///
+    /// The question is about a name rather than a ref, so it answers for a
+    /// branch that does not exist yet: what a build's branches will be held
+    /// to, before there are any. Metadata read is the whole permission it
+    /// needs — but a permission it is, and the endpoint answers 404
+    /// unauthenticated whether or not the repository is public. A build
+    /// carries a token to push and merge with, so the one that reads a
+    /// policy has one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when GitHub cannot be asked or answers no.
+    pub fn branch_rules(&self, repo: &Repo, branch: &str) -> Result<Vec<Rule>, Error> {
+        self.get(&format!("repos/{repo}/rules/branches/{}", encoded(branch)))
+    }
+
     /// How many commit statuses `git_ref` carries: the older Status API's
     /// side of a commit, which [`check_conclusions`](Self::check_conclusions)
     /// never reads. Its one use is telling a repository whose CI posts
@@ -1188,6 +1392,7 @@ mod tests {
     const PULL: &str = include_str!("github/fixtures/pull.json");
     const REPO: &str = include_str!("github/fixtures/repo.json");
     const CHECK_RUNS: &str = include_str!("github/fixtures/check_runs.json");
+    const BRANCH_RULES: &str = include_str!("github/fixtures/branch_rules.json");
     const GRAPH_PARENT: &str = include_str!("github/fixtures/graph_parent.json");
     const GRAPH_BLOCKED: &str = include_str!("github/fixtures/graph_blocked.json");
 
@@ -1391,6 +1596,7 @@ mod tests {
         let running = Check {
             name: "CI".to_owned(),
             conclusion: None,
+            app: None,
         };
         assert!(
             running.pending() && !running.red(),
@@ -1399,9 +1605,108 @@ mod tests {
         let failed = Check {
             name: "CI".to_owned(),
             conclusion: Some(Conclusion::Failure),
+            app: None,
         };
         assert!(!failed.pending(), "a concluded check is not pending");
         assert!(failed.red(), "and a failure is red");
+    }
+
+    #[test]
+    fn a_check_names_the_app_that_reported_it() {
+        #[derive(Deserialize)]
+        struct CheckRunsWire {
+            check_runs: Vec<Check>,
+        }
+        let wire: CheckRunsWire = decode("check runs", value(CHECK_RUNS)).unwrap();
+        assert!(
+            wire.check_runs.iter().all(|check| check.app == Some(15368)),
+            "the captured commit's runs all came from GitHub Actions: {:?}",
+            wire.check_runs
+        );
+    }
+
+    #[test]
+    fn a_check_from_outside_any_app_decodes_without_one() {
+        let payload = r#"{"name": "CI", "conclusion": "success", "app": null}"#;
+        let check: Check = decode("a check", value(payload)).unwrap();
+        assert_eq!(check.app, None);
+    }
+
+    #[test]
+    fn captured_branch_rules_decode_with_their_rulesets() {
+        let rules: Vec<Rule> = decode("branch rules", value(BRANCH_RULES)).unwrap();
+        assert!(
+            rules
+                .iter()
+                .all(|rule| rule.ruleset == 19_588_013 && rule.source == "epik-agent/Epik"),
+            "one repository ruleset produced them all: {rules:?}"
+        );
+        let checks = rules.iter().find_map(|rule| match &rule.kind {
+            Kind::RequiredStatusChecks { checks, strict } => Some((checks, *strict)),
+            _ => None,
+        });
+        let (checks, strict) = checks.expect("the capture requires status checks");
+        assert!(!strict, "the captured ruleset is not strict");
+        assert_eq!(
+            checks.first(),
+            Some(&Required {
+                context: "fmt, clippy, test (macos-latest)".to_owned(),
+                app: Some(15368),
+            })
+        );
+        let merge_methods = rules.iter().find_map(|rule| match &rule.kind {
+            Kind::PullRequest { approvals, methods } => Some((*approvals, methods.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            merge_methods,
+            Some((0, vec![Merge::Squash, Merge::Rebase])),
+            "the capture asks for no reviews and allows two methods, \
+             kept in the order a policy prefers them"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.kind == Kind::RequiredLinearHistory),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_type_from_next_year_decodes_under_its_own_name() {
+        let payload = r#"[{
+            "type": "quantum_entanglement",
+            "parameters": {"spooky": true},
+            "ruleset_source_type": "Organization",
+            "ruleset_source": "epik-agent",
+            "ruleset_id": 42
+        }]"#;
+        let rules: Vec<Rule> = decode("branch rules", value(payload)).unwrap();
+        assert_eq!(rules[0].source, "epik-agent");
+        assert_eq!(rules[0].ruleset, 42);
+        assert_eq!(
+            rules[0].kind,
+            Kind::Other("quantum_entanglement".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_pull_request_rule_without_allowed_methods_allows_all_three() {
+        let payload = r#"[{
+            "type": "pull_request",
+            "parameters": {"required_approving_review_count": 1},
+            "ruleset_source": "o/r",
+            "ruleset_id": 1
+        }]"#;
+        let rules: Vec<Rule> = decode("branch rules", value(payload)).unwrap();
+        assert_eq!(
+            rules[0].kind,
+            Kind::PullRequest {
+                approvals: 1,
+                methods: vec![Merge::Squash, Merge::Commit, Merge::Rebase],
+            },
+            "a ruleset silent on methods forbids none of them"
+        );
     }
 
     #[test]

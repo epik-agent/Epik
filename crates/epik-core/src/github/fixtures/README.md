@@ -2,16 +2,19 @@
 
 Real answers from the real API about this very repository, captured
 2026-08-05 and decoded by the unit tier without a network. The REST ones were
-read unauthenticated — exactly what the CI smoke sees — and the GraphQL ones
-through a locally authenticated `gh`, because GraphQL answers nothing without
-a token.
+read unauthenticated — exactly what the CI smoke sees — with the exception of
+`branch_rules.json`, and the GraphQL ones through a locally authenticated
+`gh`, because GraphQL answers nothing without a token. A branch's rules also
+need a token: the endpoint answers 404 unauthenticated, public repository or
+not, so a build that reads its policy is a build with a token.
 
 | File | Provenance |
 | --- | --- |
 | `repo.json` | `GET /repos/epik-agent/Epik` — the default branch lives here |
 | `issue.json` | `GET /repos/epik-agent/Epik/issues/106` — the issue that specified this module |
 | `pull.json` | `GET /repos/epik-agent/Epik/pulls/91` — a merged PR, so `merged`, `head`, and `base` are all exercised |
-| `check_runs.json` | `GET /repos/epik-agent/Epik/commits/main/check-runs` — five completed runs, all `success` |
+| `check_runs.json` | `GET /repos/epik-agent/Epik/commits/main/check-runs` — five completed runs, all `success`, all from GitHub Actions |
+| `branch_rules.json` | `GET /repos/epik-agent/Epik/rules/branches/main` — this repository's own ruleset, flattened |
 | `graph_parent.json` | GraphQL: the graph query over #102, whose `subIssues` were #105 and #106 |
 | `graph_blocked.json` | GraphQL: the same query over #106, then blocked by #105 |
 
@@ -23,6 +26,9 @@ What the captures are here to catch:
   both spellings decoding into the same `State`.
 - Every payload carries dozens of fields the client never modelled
   (`node_id`, `_links`, reactions, the works). None of it may break decoding.
+- A rule's `integration_id` and a check run's `app.id` are the same
+  number — 15368, GitHub Actions — in the two captures taken together, which
+  is what matching a required check to the app reporting it rests on.
 - The graph captures predate `pageInfo` and `blocking` in the query:
   their absence decodes as a complete page with nothing blocked, and the
   overflow refusal is covered by an inline payload in the tests.
@@ -34,6 +40,7 @@ curl -s https://api.github.com/repos/epik-agent/Epik > repo.json
 curl -s https://api.github.com/repos/epik-agent/Epik/issues/106 > issue.json
 curl -s https://api.github.com/repos/epik-agent/Epik/pulls/91 > pull.json
 curl -s https://api.github.com/repos/epik-agent/Epik/commits/main/check-runs > check_runs.json
+gh api repos/epik-agent/Epik/rules/branches/main > branch_rules.json  # needs a token
 ```
 
 And the GraphQL ones (`-F number=102` for the parent, `106` for the blocked):
