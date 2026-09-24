@@ -110,7 +110,7 @@ impl Gathering {
     fn over_feature(&mut self, branch: &str, rules: &[Rule], parallel: bool) -> Policy {
         let mut policy = Policy::default();
         let mut linear = false;
-        let mut methods = vec![Merge::Squash, Merge::Commit, Merge::Rebase];
+        let mut methods = Merge::PREFERRED.to_vec();
         for rule in rules {
             match &rule.kind {
                 Kind::RequiredStatusChecks { checks, strict } => {

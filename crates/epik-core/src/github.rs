@@ -193,6 +193,11 @@ pub enum Merge {
 }
 
 impl Merge {
+    /// The methods in the order a policy prefers them: a squash where the
+    /// rules allow it, else a merge commit, else a rebase. The one place
+    /// that order is written.
+    pub const PREFERRED: [Self; 3] = [Self::Squash, Self::Commit, Self::Rebase];
+
     /// GitHub's own word for the method: what a merge asks for, and what a
     /// ruleset's `allowed_merge_methods` lists.
     const fn wire(self) -> &'static str {
@@ -429,11 +434,12 @@ impl From<RuleWire> for Rule {
     }
 }
 
-/// The merge methods a `pull_request` rule allows, in the order a policy
-/// prefers them. A rule silent on the methods allows all three; GitHub
-/// spells a merge commit `merge`, which is [`Merge::Commit`] here.
+/// The merge methods a `pull_request` rule allows, in
+/// [the order a policy prefers them](Merge::PREFERRED). A rule silent on
+/// the methods allows all three; GitHub spells a merge commit `merge`,
+/// which is [`Merge::Commit`] here.
 fn merge_methods(allowed: Option<&[String]>) -> Vec<Merge> {
-    [Merge::Squash, Merge::Commit, Merge::Rebase]
+    Merge::PREFERRED
         .into_iter()
         .filter(|method| {
             allowed.is_none_or(|allowed| allowed.iter().any(|word| word == method.wire()))

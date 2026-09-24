@@ -564,7 +564,7 @@ mod tests {
     use crate::git::commands::{Branch, RevParse};
     use crate::git::testing::{guarded, published, pushed};
     use crate::git::{self};
-    use crate::github::fake::{self, FakeGitHub};
+    use crate::github::fake::{self, FakeGitHub, required};
     use crate::github::{Conclusion, Error, State};
     use crate::plan::github::feature_branch;
     use crate::plan::stream::received;
@@ -582,14 +582,6 @@ mod tests {
 
     /// The feature under construction, in these tests.
     const FEATURE: u64 = 7;
-
-    /// The rule requiring a check named `context`, from any app.
-    fn requires(context: &str) -> Required {
-        Required {
-            context: context.to_owned(),
-            app: None,
-        }
-    }
 
     /// The scripted engine: `sh -c` of a script, in the worktree. A
     /// line beginning [`OPENS`] is the session it opened, and every
@@ -1043,7 +1035,7 @@ mod tests {
     async fn a_green_required_check_merges_the_issue_though_an_unrequired_run_still_goes() {
         let hosted = Hosted::new("feature-green", &[3]);
         let (mut build, mut receiver) = hosted.build(1, edits);
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         timeout(PATIENCE, async {
@@ -1089,7 +1081,7 @@ mod tests {
     async fn checks_red_after_every_run_fail_the_issue_once_the_budget_is_spent() {
         let hosted = Hosted::new("feature-red", &[3]);
         let (mut build, mut receiver) = hosted.briefed(1, implements_then_fixes());
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         let error = timeout(PATIENCE, async {
@@ -1188,7 +1180,7 @@ mod tests {
     async fn checks_red_then_green_merge_the_issue_after_a_fix_that_resumed_the_session() {
         let hosted = Hosted::new("feature-fixed", &[3]);
         let (mut build, mut receiver) = hosted.briefed(1, loops());
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         // The first commit pushed goes red, and the fix's goes green.
@@ -1261,7 +1253,7 @@ mod tests {
                 fixes(issue, 2)
             ),
         });
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         timeout(
@@ -1302,7 +1294,7 @@ mod tests {
             Errand::Resume { .. } => "echo 'No conversation found' >&2; exit 1".to_owned(),
             Errand::Fresh { .. } => fixes(issue, 2),
         });
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         timeout(
@@ -1363,7 +1355,7 @@ mod tests {
         // until the agent of 3 has come and gone in the one slot.
         let hosted = Hosted::new("feature-one-slot", &[1, 2, 3]);
         let (mut build, mut receiver) = hosted.build(1, edits);
-        build.required = vec![requires("test")];
+        build.required = vec![required("test")];
         let work = vec![After::new(1, []), After::new(2, []), After::new(3, [1])];
         let run = tokio::spawn(build.plan(Dag::new(work).unwrap()).execute());
 

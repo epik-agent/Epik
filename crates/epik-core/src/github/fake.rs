@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
 
-use super::{Branch, Check, Conclusion, GitHub, Issue, Pull, Repo, State};
+use super::{Branch, Check, Conclusion, GitHub, Issue, Pull, Repo, Required, State};
 
 /// The default branch.
 pub const DEFAULT_BRANCH: &str = "main";
@@ -121,6 +121,22 @@ pub fn check_by(name: &str, conclusion: Option<Conclusion>, app: u64) -> Check {
     Check {
         app: Some(app),
         ..check(name, conclusion)
+    }
+}
+
+/// The rule requiring a check named `context`, from any app.
+pub fn required(context: &str) -> Required {
+    Required {
+        context: context.to_owned(),
+        app: None,
+    }
+}
+
+/// A [`required`] check the rule asks the app numbered `app` to report.
+pub fn required_by(context: &str, app: u64) -> Required {
+    Required {
+        app: Some(app),
+        ..required(context)
     }
 }
 

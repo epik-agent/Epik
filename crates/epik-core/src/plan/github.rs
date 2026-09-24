@@ -374,7 +374,8 @@ mod tests {
     use super::*;
     use crate::dag::{Dag, Node};
     use crate::github::fake::{
-        DEFAULT_BRANCH, FakeGitHub, Request, TIP, check, check_by, check_runs,
+        DEFAULT_BRANCH, FakeGitHub, Request, TIP, check, check_by, check_runs, required,
+        required_by,
     };
     use crate::github::{Conclusion, State};
     use crate::plan::AgentSlots;
@@ -408,22 +409,6 @@ mod tests {
         CheckWait {
             bound: PATIENCE,
             ..wait()
-        }
-    }
-
-    /// The rule requiring a check named `context`, from anywhere.
-    fn required(context: &str) -> Required {
-        Required {
-            context: context.to_owned(),
-            app: None,
-        }
-    }
-
-    /// The rule requiring a check named `context` from the app `app`.
-    fn required_of(context: &str, app: u64) -> Required {
-        Required {
-            app: Some(app),
-            ..required(context)
         }
     }
 
@@ -725,7 +710,7 @@ mod tests {
 
     #[test]
     fn a_rule_naming_an_app_is_answered_by_that_apps_run_alone() {
-        let rules = [required_of("CI", NAMED)];
+        let rules = [required_by("CI", NAMED)];
         assert_eq!(
             Reading::of(&rules, &[check_by("CI", Some(Conclusion::Success), NAMED)]),
             Reading::Green
@@ -834,7 +819,7 @@ mod tests {
         fake.world().checks.insert(PUSHED.to_owned(), runs);
         let (sink, mut heard) = said();
         let error = feature(&fake)
-            .await_checks(PUSHED, &[required_of("CI", NAMED)], wait(), &sink)
+            .await_checks(PUSHED, &[required_by("CI", NAMED)], wait(), &sink)
             .await
             .unwrap_err();
         assert!(error.to_string().contains("had not concluded"), "{error}");
