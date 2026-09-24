@@ -460,10 +460,12 @@ fn names(ids: &[u64]) -> String {
         .join(", ")
 }
 
-/// Where a node stands, as a sentence.
+/// Where a node stands, as a sentence, with the attempts behind it
+/// where there has been more than one: an issue whose checks went red
+/// went back to the agent, and the count is what says so.
 #[must_use]
 pub fn sentence(node: &Node) -> String {
-    match (&node.state, node.form) {
+    let stands = match (&node.state, node.form) {
         (State::Waiting, Form::Ready) => "waiting — ready, out of slots".to_owned(),
         (State::Waiting, _) if node.blocked_by.is_empty() => "waiting — blocked".to_owned(),
         (State::Waiting, _) => format!("waiting — blocked by {}", names(&node.blocked_by)),
@@ -476,6 +478,10 @@ pub fn sentence(node: &Node) -> String {
         ),
         (State::Failed { report }, _) => format!("failed: {report}"),
         (State::Skipped { blocker }, _) => format!("skipped: #{blocker} never settled"),
+    };
+    match node.attempts {
+        0 | 1 => stands,
+        attempts => format!("{stands} — attempt {attempts}"),
     }
 }
 
@@ -493,7 +499,7 @@ mod tests {
     use std::cell::RefCell;
 
     use epik_core::dag::{Dag, Node as After};
-    use epik_core::happening::{Happened, Name, Step as Phase};
+    use epik_core::happening::{Happened, Name, Step as Phase, Verdict};
     use epik_core::monitor::{Change, Event};
 
     use super::*;
@@ -528,7 +534,6 @@ mod tests {
             title: "the feature".to_owned(),
             titles: vec![(2, "first".to_owned()), (3, "second".to_owned())],
             problems: Vec::new(),
-            checked: true,
         }
     }
 
@@ -539,18 +544,19 @@ mod tests {
         }
     }
 
-    /// The one event that puts `issue` in `state`: the step whose start
+    /// The one event that puts `issue` in `state`: the node whose start
     /// or end the fold reads as that state, since a state is derived
     /// from the stream and never spoken into it.
     ///
-    /// Merged takes the commit with it, which the push threaded, so the
-    /// pair arrives as the two events it really is.
+    /// A failure is the issue's own node's, a step's being the attempt's
+    /// alone; the commit a merge is remembered by and the verdict it was
+    /// made on each precede the close, as the facts they are.
     fn moved(run: u64, issue: u64, state: State) -> Change {
-        let (step, happened) = match state {
-            State::Running => (Phase::Agent, Happened::Started),
-            State::Merging => (Phase::PullRequest, Happened::Started),
-            State::Merged { .. } => (Phase::Close, Happened::Finished),
-            State::Failed { ref report } => (Phase::Agent, Happened::Failed(report.clone())),
+        let (node, happened) = match state {
+            State::Running => (Name::Step(issue, Phase::Agent), Happened::Started),
+            State::Merging => (Name::Step(issue, Phase::PullRequest), Happened::Started),
+            State::Merged { .. } => (Name::Step(issue, Phase::Close), Happened::Finished),
+            State::Failed { ref report } => (Name::Issue(issue), Happened::Failed(report.clone())),
             // Waiting is where an issue starts, and Skipped is the
             // fold's own judgement over a failure upstream: each is
             // derived, and the stream says neither.
@@ -558,7 +564,7 @@ mod tests {
                 unreachable!("{state:?} is derived, never spoken")
             }
         };
-        happening(run, Name::Step(issue, step), happened)
+        happening(run, node, happened)
     }
 
     /// The push of `issue`, threading the commit a merge is remembered
@@ -568,10 +574,19 @@ mod tests {
         happening(run, Name::Step(issue, Phase::Push), happened)
     }
 
+    /// What the wait for `issue`'s checks came to: the fact its merge
+    /// being checked is read from.
+    fn checked(run: u64, issue: u64, verdict: Verdict) -> Change {
+        let happened = Happened::Checked(verdict);
+        happening(run, Name::Step(issue, Phase::Checks), happened)
+    }
+
+    /// Merged with nothing claimed on it, which a close alone reads as:
+    /// the verdict a checked merge stands on is spoken separately.
     fn merged() -> State {
         State::Merged {
             commit: "abc1234def".to_owned(),
-            checked: true,
+            checked: false,
         }
     }
 
@@ -977,10 +992,78 @@ mod tests {
         view.step(Step::Heard(entry(3, moved(1, 2, State::Merging))));
         assert_eq!(says(&mut view, 2), "merging");
         view.step(Step::Heard(entry(4, pushed(1, 2, "abc1234def"))));
-        view.step(Step::Heard(entry(5, moved(1, 2, merged()))));
+        view.step(Step::Heard(entry(5, checked(1, 2, Verdict::Green))));
+        view.step(Step::Heard(entry(6, moved(1, 2, merged()))));
         assert_eq!(says(&mut view, 2), "merged at abc1234 (checked)");
         assert_eq!(says(&mut view, 3), "waiting — ready, out of slots");
         assert_eq!(view.pane().unwrap().counts, "1 merged · 1 ready");
+    }
+
+    /// Whether a merge was checked is each issue's own, so two issues
+    /// of one build read differently: the one whose policy required a
+    /// check and the one whose required none.
+    #[test]
+    fn one_builds_issues_read_checked_and_unchecked_by_their_own_verdicts() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        let says = |view: &mut View, issue: u64| {
+            view.select(RunId(1), issue);
+            view.pane().unwrap().detail.unwrap().sentence
+        };
+        view.step(Step::Heard(entry(3, pushed(1, 2, "abc1234def"))));
+        view.step(Step::Heard(entry(4, checked(1, 2, Verdict::Green))));
+        view.step(Step::Heard(entry(5, moved(1, 2, merged()))));
+        view.step(Step::Heard(entry(6, pushed(1, 3, "beef567aaa"))));
+        view.step(Step::Heard(entry(7, checked(1, 3, Verdict::Unclaimed))));
+        view.step(Step::Heard(entry(8, moved(1, 3, merged()))));
+        assert_eq!(says(&mut view, 2), "merged at abc1234 (checked)");
+        assert_eq!(says(&mut view, 3), "merged at beef567 (unchecked)");
+    }
+
+    /// An issue that went back to the agent says which attempt it is
+    /// on; the first attempt, which every issue makes, goes unsaid.
+    #[test]
+    fn a_second_attempt_is_said_and_the_first_is_not() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        let says = |view: &mut View, issue: u64| {
+            view.select(RunId(1), issue);
+            view.pane().unwrap().detail.unwrap().sentence
+        };
+        assert_eq!(says(&mut view, 2), "running", "the first attempt is silent");
+        let red = Verdict::Red("test".to_owned());
+        view.step(Step::Heard(entry(3, checked(1, 2, red))));
+        view.step(Step::Heard(entry(4, moved(1, 2, State::Running))));
+        assert_eq!(says(&mut view, 2), "running — attempt 2");
+    }
+
+    /// A step's failure is that attempt's, and leaves the issue where
+    /// it stands; the issue's own node failing is what fails it.
+    #[test]
+    fn a_steps_failure_leaves_the_issue_running_and_its_nodes_fails_it() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        let says = |view: &mut View, issue: u64| {
+            view.select(RunId(1), issue);
+            view.pane().unwrap().detail.unwrap().sentence
+        };
+        let attempt = Happened::Failed("checks failed on abc1234: test".to_owned());
+        let step = happening(1, Name::Step(2, Phase::Checks), attempt);
+        view.step(Step::Heard(entry(3, step)));
+        assert_eq!(
+            says(&mut view, 2),
+            "running",
+            "one attempt's, not the issue's"
+        );
+
+        let spent = State::Failed {
+            report: "checks failed on abc1234: test, after 3 agent runs".to_owned(),
+        };
+        view.step(Step::Heard(entry(4, moved(1, 2, spent))));
+        assert_eq!(
+            says(&mut view, 2),
+            "failed: checks failed on abc1234: test, after 3 agent runs"
+        );
     }
 
     /// A failure is spoken; what it held back is not. 2 failing makes 3

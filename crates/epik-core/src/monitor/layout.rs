@@ -8,7 +8,8 @@
 //! rows settles, every predecessor being an earlier row. The states
 //! decide what each node reads as: [`Form`] is the state with Waiting
 //! split into ready and blocked, ready being every predecessor
-//! merged.
+//! merged. A node carries its attempts beside its state, an issue
+//! going round its loop more than once being something a pane says.
 //!
 //! A [`Container`] is a box around a sub-feature's nodes. The work a
 //! build runs is a flat [`Dag`] of issue numbers, which carries no
@@ -43,6 +44,9 @@ pub struct Node {
     pub title: String,
     pub state: State,
     pub form: Form,
+    /// The times an agent has run on it: one attempt each, counting
+    /// the first, so a second says the issue went back for a fix.
+    pub attempts: usize,
     /// The longest path over the blocking edges into this node.
     pub column: usize,
     /// Its place in the graph's order, among the drawn.
@@ -109,13 +113,14 @@ impl Layout {
 }
 
 /// The picture of `work` with every issue drawn where `states` has it
-/// standing, titled as `titles` names it. Pure: the same arguments
-/// give the same picture.
+/// standing, titled as `titles` names it and carrying the `attempts`
+/// its agent has made. Pure: the same arguments give the same picture.
 #[must_use]
 pub fn layout(
     work: &Dag<u64>,
     titles: &BTreeMap<u64, String>,
     states: &BTreeMap<u64, State>,
+    attempts: &BTreeMap<u64, usize>,
 ) -> Layout {
     // The rows: every issue of the work, in the graph's own order.
     let drawn: Vec<u64> = work.nodes().map(|node| *node.value()).collect();
@@ -171,6 +176,7 @@ pub fn layout(
                 title: titles.get(&id).cloned().unwrap_or_default(),
                 form: form(&state, blocked_by.is_empty()),
                 state,
+                attempts: attempts.get(&id).copied().unwrap_or(0),
                 column: column[row],
                 row,
                 blocked_by,
