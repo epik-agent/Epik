@@ -1,13 +1,15 @@
 //! An agent's run as a task: the issue it implements is in the agent
 //! already, the run holds an agent slot from start to exit, and what
-//! the agent says leaves on the stream as it arrives.
+//! the agent says leaves on the stream as it arrives. The run keeps
+//! back one thing it heard — the session the agent opened — for the
+//! step that ran it, so a later run can resume that session.
 
 use anyhow::{Result, bail};
 
 use super::AgentSlots;
 use super::stream::{Happened, Sink};
 use super::task::Task;
-use crate::agent::Agent;
+use crate::agent::{Agent, Update};
 use crate::process::Exit;
 
 /// One [`Agent`], run to its exit in one of the `slots` when the task
@@ -22,38 +24,56 @@ pub struct Implement<A> {
     pub sink: Sink<Happened>,
 }
 
-impl<A: Agent + Clone + Send + Sync + 'static> Task for Implement<A> {
+impl<A: Agent + Clone + Send + Sync + 'static> Implement<A> {
     /// The agent started, heard out, and its exit waited for, all
-    /// within a slot: an exit other than success is the error.
+    /// within a slot: an exit other than success is the error, and the
+    /// session the agent opened is what the run yields. A run that
+    /// opened none yields nothing, and an engine that says so twice is
+    /// taken at its first word, which is the session the whole run was.
     ///
     /// Each line of stdout is emitted as the updates it carries, and
     /// each line of stderr as itself, the two streams followed at once
     /// on a thread apiece. Both are drained to their ends before the
     /// exit is waited for, so the slot is held until the process and
     /// anything holding its pipes open are gone.
-    async fn run(&self) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// The spawn failing, and an exit other than success.
+    pub async fn implemented(&self) -> Result<Option<String>> {
         let agent = self.agent.clone();
         let sink = self.sink.clone();
         self.slots
             .run(move || {
                 let mut process = agent.start()?;
-                std::thread::scope(|scope| {
+                let session = std::thread::scope(|scope| {
                     scope.spawn(|| {
                         for line in process.stderr() {
                             sink.emit(Happened::Stderr(line));
                         }
                     });
+                    let mut session = None;
                     for update in process.stdout().flat_map(|line| A::interpret(&line)) {
+                        if let Update::Session { id, .. } = &update {
+                            session.get_or_insert_with(|| id.clone());
+                        }
                         sink.emit(Happened::Said(update));
                     }
+                    session
                 });
                 match process.wait()? {
-                    Exit::Code(0) => Ok(()),
+                    Exit::Code(0) => Ok(session),
                     Exit::Code(code) => bail!("the agent exited with code {code}"),
                     Exit::Signal(signal) => bail!("the agent was killed by signal {signal}"),
                 }
             })
             .await
+    }
+}
+
+impl<A: Agent + Clone + Send + Sync + 'static> Task for Implement<A> {
+    async fn run(&self) -> Result<()> {
+        self.implemented().await.map(drop)
     }
 }
 
@@ -220,6 +240,7 @@ mod tests {
             prompt: String::new(),
             model: None,
             api_key: None,
+            resume: None,
         };
         let task = Reported::with(sink, |sink| Implement {
             agent,
@@ -235,6 +256,30 @@ mod tests {
             words.contains("could not start /nonexistent/claude"),
             "{words}"
         );
+    }
+
+    /// The one session the captured fixture opens, as its every line
+    /// names it.
+    const SESSION_ID: &str = "ed2b50bb-bb39-4b32-9326-2102013dbdd1";
+
+    #[tokio::test]
+    async fn a_run_yields_the_session_it_opened() {
+        let (sink, _receiver) = Sink::channel();
+        let session = implement(&format!("cat '{SESSION}'"), &slots(1), sink)
+            .implemented()
+            .await
+            .unwrap();
+        assert_eq!(session.as_deref(), Some(SESSION_ID));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_opened_no_session_yields_none() {
+        let (sink, _receiver) = Sink::channel();
+        let session = implement("echo 'no session here'", &slots(1), sink)
+            .implemented()
+            .await
+            .unwrap();
+        assert_eq!(session, None);
     }
 
     #[tokio::test]

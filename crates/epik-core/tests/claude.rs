@@ -173,6 +173,7 @@ fn a_live_claude_writes_the_file_it_was_asked_for() {
         prompt: "create a file named hello.txt containing 'hello' and nothing else".to_owned(),
         model: None,
         api_key: None,
+        resume: None,
     }
     .start()
     .expect("claude starts");

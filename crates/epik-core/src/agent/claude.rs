@@ -2,9 +2,9 @@
 //! `claude` CLI in headless print mode.
 //!
 //! [`ClaudeCode`] is data — a binary path, a working directory, a
-//! prompt, and optionally a model and an API key — and [`start`] is the
-//! one place it becomes a command line. That line pins Epik's settled
-//! isolation posture: the agent runs with Epik's configuration
+//! prompt, and optionally a model, an API key and a session to
+//! resume — and [`start`] is the one place it becomes a command line.
+//! That line pins Epik's settled isolation posture: the agent runs with Epik's configuration
 //! (`--settings '{}'`, `--strict-mcp-config`), never the machine-wide
 //! Claude Code setup, and with `--dangerously-skip-permissions` —
 //! deliberate autonomy, because output only flows *out* of an agent;
@@ -59,6 +59,10 @@ pub struct ClaudeCode {
     pub prompt: String,
     pub model: Option<String>,
     pub api_key: Option<Secret>,
+    /// The session this run continues, when it continues one: the id
+    /// an earlier run opened. The agent comes back holding what it
+    /// built and why.
+    pub resume: Option<String>,
 }
 
 #[cfg(feature = "native")]
@@ -81,7 +85,8 @@ impl Agent for ClaudeCode {
 #[cfg(feature = "native")]
 impl ClaudeCode {
     /// The arguments after the binary: the settled posture, the model
-    /// when one is named, and the prompt last.
+    /// when one is named, the session when one is resumed, and the
+    /// prompt last.
     fn arguments(&self) -> Vec<String> {
         let mut argv = vec![
             "-p".to_owned(),
@@ -107,6 +112,10 @@ impl ClaudeCode {
             ]
             .map(str::to_owned),
         );
+        if let Some(session) = &self.resume {
+            argv.push("--resume".to_owned());
+            argv.push(session.clone());
+        }
         // The prompt is positional, and last: any length, any number
         // of lines, and never mistaken for a flag.
         argv.push(self.prompt.clone());
@@ -119,6 +128,7 @@ mod tests {
     use super::*;
 
     const ANTHROPIC_MODEL: &str = "claude-sonnet-5";
+    const SESSION_ID: &str = "ed2b50bb-bb39-4b32-9326-2102013dbdd1";
 
     fn agent() -> ClaudeCode {
         ClaudeCode {
@@ -127,6 +137,7 @@ mod tests {
             prompt: "create a file\nnamed hello.txt".to_owned(),
             model: Some(ANTHROPIC_MODEL.to_owned()),
             api_key: Some(Secret::from("sk-ant-hush-hush")),
+            resume: None,
         }
     }
 
@@ -165,6 +176,32 @@ mod tests {
                 "{}",
                 "--strict-mcp-config",
                 "--dangerously-skip-permissions",
+                "create a file\nnamed hello.txt",
+            ]
+        );
+    }
+
+    /// A session to resume joins the same pinned list: the posture is
+    /// what it always was, and the prompt is still last.
+    #[test]
+    fn a_session_to_resume_joins_the_settled_posture() {
+        let mut resuming = agent();
+        resuming.resume = Some(SESSION_ID.to_owned());
+        assert_eq!(
+            resuming.arguments(),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--model",
+                ANTHROPIC_MODEL,
+                "--settings",
+                "{}",
+                "--strict-mcp-config",
+                "--dangerously-skip-permissions",
+                "--resume",
+                SESSION_ID,
                 "create a file\nnamed hello.txt",
             ]
         );

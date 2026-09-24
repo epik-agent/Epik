@@ -374,6 +374,7 @@ fn launch(
             ),
             model: model.clone(),
             api_key: api_key.clone(),
+            resume: None,
         }),
     };
     let count = work.nodes().len();
