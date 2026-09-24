@@ -40,6 +40,7 @@ use epik_core::plan::AgentSlots;
 use epik_core::plan::feature::{Build, Name, issue_branch};
 use epik_core::plan::github::{CheckWait, Feature, feature_branch};
 use epik_core::plan::stream::{Event, Sink};
+use epik_core::prompt::issue_brief;
 use epik_core::tracker::IssueTracker;
 use epik_core::tracker::github::GitHubIssues;
 use epik_core::worktrees::Worktrees;
@@ -87,24 +88,6 @@ fn claude() -> Result<PathBuf, String> {
                     .join(", ")
             )
         })
-}
-
-/// The standing preface every issue's agent opens with: where it is,
-/// what it must not do, and what implementing an issue means here. The
-/// branch is already checked out in the worktree it runs in, and the
-/// commit and the push are the build's own steps, after the agent has
-/// exited.
-const PREAMBLE: &str = "You are working in a git worktree that has been prepared for you, \
-on the branch named below, which is already checked out. Implement the issue that follows. \
-Commit your work as you go, with clear commit messages, so that the branch tells the story \
-of what you built. Write tests covering the work, and make them pass. Do not push, do not \
-create or switch branches, and do not touch git configuration — the identity and branch are \
-set for you.";
-
-/// What one issue's agent is told: the preamble, the branch it is on,
-/// then the issue as the tracker holds it.
-fn brief(branch: &str, issue: &str) -> String {
-    format!("{PREAMBLE}\n\nBranch: {branch}\n\n{issue}")
 }
 
 /// Which features are building right now, as `repository#feature`. A
@@ -385,7 +368,7 @@ fn launch(
         agent: Box::new(move |issue, cwd| ClaudeCode {
             binary: claude.clone(),
             cwd: cwd.to_owned(),
-            prompt: brief(
+            prompt: issue_brief(
                 &issue_branch(issue),
                 briefs.get(&issue).map_or("", String::as_str),
             ),
@@ -502,13 +485,5 @@ mod tests {
         let held = running.claim(&repo(), 1).unwrap();
         drop(held);
         running.claim(&repo(), 1).expect("the first build is done");
-    }
-
-    #[test]
-    fn the_brief_leads_with_the_preamble_and_names_the_branch_and_the_issue() {
-        let brief = brief(&issue_branch(7), "# Lay the stone\n\nAnd square it.");
-        assert!(brief.starts_with(PREAMBLE), "{brief}");
-        assert!(brief.contains("Branch: issue-7"), "{brief}");
-        assert!(brief.contains("# Lay the stone"), "{brief}");
     }
 }

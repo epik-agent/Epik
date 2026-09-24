@@ -13,6 +13,8 @@ pub mod plan;
 #[cfg(feature = "native")]
 pub mod process;
 #[cfg(feature = "native")]
+pub mod prompt;
+#[cfg(feature = "native")]
 pub mod temp;
 pub mod tracker;
 #[cfg(all(unix, feature = "native"))]
