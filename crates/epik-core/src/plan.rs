@@ -1,14 +1,16 @@
 //! A plan: tasks and the order among them, run as the order allows.
 //! [`Task`] is the work, [`Implement`] is an agent's run as one,
-//! [`Plan::execute`] runs them all at once, [`AgentSlots`] bounds the
-//! agents they launch, [`stream`] is where they say what they are
-//! doing, and [`feature`] is a feature build as one.
+//! [`Machine`] is a state machine of tasks as one, [`Plan::execute`]
+//! runs them all at once, [`AgentSlots`] bounds the agents they
+//! launch, [`stream`] is where they say what they are doing, and
+//! [`feature`] is a feature build as one.
 
 pub mod commit;
 #[cfg(unix)]
 pub mod feature;
 pub mod github;
 pub mod implement;
+pub mod machine;
 #[cfg(unix)]
 pub mod push;
 pub mod stream;
@@ -25,6 +27,7 @@ use tokio::task::{JoinSet, spawn_blocking};
 
 use crate::dag::Dag;
 pub use implement::Implement;
+pub use machine::{Machine, Next, TaskMachine};
 pub use stream::{Event, Happened, Reported, Sink};
 pub use task::Task;
 
