@@ -51,14 +51,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// How many agents the whole app runs at once.
 const SLOTS: usize = 4;
 
-/// How a build waits on GitHub's checks: polled every fifteen seconds
-/// for up to an hour, and a green list read the same way twice before
-/// it is the verdict.
+/// How a build waits on the checks its policy requires: polled every
+/// fifteen seconds for up to an hour. Which checks those are is the
+/// repository's to say, read at launch.
 const CHECKS: CheckWait = CheckWait {
-    expected: true,
     every: Duration::from_secs(15),
     bound: Duration::from_secs(60 * 60),
-    settles: NonZeroUsize::new(2).unwrap(),
 };
 
 /// The `claude` CLI. A GUI app on macOS gets a minimal PATH, so the
@@ -367,6 +365,7 @@ fn launch(
         feature,
         url,
         worktrees: Worktrees::new(state.worktrees.clone()),
+        required: policy.checks.clone(),
         checks: CHECKS,
         merge: policy.merge,
         slots: state.slots.clone(),
@@ -398,7 +397,7 @@ fn launch(
         title,
         titles,
         problems,
-        checked: CHECKS.expected,
+        checked: !policy.checks.is_empty(),
     });
     let plan = build.plan(work);
     state.runtime.spawn(async move {

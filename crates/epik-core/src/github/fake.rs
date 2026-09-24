@@ -116,6 +116,14 @@ pub fn check(name: &str, conclusion: Option<Conclusion>) -> Check {
     }
 }
 
+/// A [`check`] the app numbered `app` reported.
+pub fn check_by(name: &str, conclusion: Option<Conclusion>, app: u64) -> Check {
+    Check {
+        app: Some(app),
+        ..check(name, conclusion)
+    }
+}
+
 /// The read of commit `sha`'s check runs, as the fake receives it.
 pub fn check_runs(sha: &str) -> Request {
     let path = format!("/repos/fake/repo/commits/{sha}/check-runs?per_page=100");
