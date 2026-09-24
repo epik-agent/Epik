@@ -233,15 +233,13 @@ impl Feature {
             let checks = self
                 .ask(move |github, repo| Ok(github.check_conclusions(repo, &polled)?))
                 .await?;
-            let bound = wait.bound;
             let out_of_time = Instant::now() + wait.every > deadline;
-            let spare = unrequired(required, &checks);
             let verdict = match Reading::of(required, &checks) {
                 Reading::Green => Verdict::Green,
                 Reading::Red(names) => Verdict::Red(names),
                 Reading::Waiting(names) if out_of_time => {
                     return Err(self
-                        .still_waiting(sha, bound, &names, checks.is_empty())
+                        .still_waiting(sha, wait.bound, &names, checks.is_empty())
                         .await);
                 }
                 Reading::Waiting(_) => {
@@ -249,6 +247,9 @@ impl Feature {
                     continue;
                 }
             };
+            // The runs no rule asked for, named once the wait is over
+            // rather than on every poll that read them.
+            let spare = unrequired(required, &checks);
             if !spare.is_empty() {
                 said.emit(Happened::Ran(spare));
             }

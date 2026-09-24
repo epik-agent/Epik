@@ -28,12 +28,23 @@ static RESUMED: include_crypt::EncryptedFile = include_crypt::include_crypt!("fi
 static FRESH: include_crypt::EncryptedFile = include_crypt::include_crypt!("fix-fresh.md");
 
 /// A compiled-in prompt as the words it was written as, without the
-/// newline a text file ends with.
+/// newline a text file ends with. Decrypted once, on the first brief
+/// that needs it, as [the system prompt](crate::assistant::SYSTEM_PROMPT)
+/// is.
 fn text(file: &include_crypt::EncryptedFile) -> String {
     let mut decrypted = file.decrypt_str().expect("a prompt decrypts to utf-8");
     decrypted.truncate(decrypted.trim_end().len());
     decrypted
 }
+
+/// The words of `ISSUE`, read once.
+static ISSUE_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| text(&ISSUE));
+
+/// The words of `RESUMED`, read once.
+static RESUMED_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| text(&RESUMED));
+
+/// The words of `FRESH`, read once.
+static FRESH_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| text(&FRESH));
 
 /// What one issue's agent is told: the preamble, the branch it is on,
 /// then the issue as the tracker holds it. The branch is already
@@ -41,7 +52,7 @@ fn text(file: &include_crypt::EncryptedFile) -> String {
 /// the push are the build's own steps, after the agent has exited.
 #[must_use]
 pub fn issue_brief(branch: &str, issue: &str) -> String {
-    format!("{}\n\nBranch: {branch}\n\n{issue}", text(&ISSUE))
+    format!("{}\n\nBranch: {branch}\n\n{issue}", *ISSUE_TEXT)
 }
 
 /// What the agent that wrote the branch is told when it is resumed to
@@ -50,7 +61,7 @@ pub fn issue_brief(branch: &str, issue: &str) -> String {
 /// and why, so neither is repeated here.
 #[must_use]
 pub fn resumed_fix_brief(checks: &str) -> String {
-    format!("{}\n\nRed checks: {checks}", text(&RESUMED))
+    format!("{}\n\nRed checks: {checks}", *RESUMED_TEXT)
 }
 
 /// What a fresh agent is told to fix a branch whose session is gone:
@@ -62,13 +73,33 @@ pub fn fresh_fix_brief(branch: &str, issue: &str, diff: &str, checks: &str) -> S
     format!(
         "{}\n\nBranch: {branch}\n\nRed checks: {checks}\n\n{issue}\n\n## The branch so far\n\n\
          ```diff\n{diff}\n```",
-        text(&FRESH)
+        *FRESH_TEXT
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every prompt this module compiles in is named in `build.rs`, so
+    /// editing one rebuilds the crate. A prompt added here and forgotten
+    /// there would ship the words it was compiled from last, and nothing
+    /// else would say so.
+    #[test]
+    fn every_prompt_is_watched_by_the_build_script() {
+        let build = include_str!("../build.rs");
+        let source = include_str!("prompt.rs");
+        let compiled = source
+            .split("include_crypt!(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"').map(|(name, _)| name));
+        for name in compiled {
+            assert!(
+                build.contains(&format!("cargo:rerun-if-changed={name}")),
+                "build.rs does not watch {name}"
+            );
+        }
+    }
 
     /// The obfuscation round-trips: what ships encrypted decrypts to
     /// exactly the file Bill writes.

@@ -103,10 +103,10 @@ struct Progressed {
     /// The times the agent has started: one attempt each, the first
     /// among them.
     attempts: usize,
-    /// What the last wait for the checks came to, once one has come to
-    /// anything. A verdict claimed either way is a checked merge; a
-    /// policy requiring no check claims nothing.
-    checked: Option<bool>,
+    /// Whether the last wait for the checks claimed a verdict. A
+    /// verdict claimed either way is a checked merge; a policy
+    /// requiring no check claims nothing.
+    checked: bool,
     /// Whether the close finished: the issue is landed.
     closed: bool,
 }
@@ -124,7 +124,7 @@ impl Progressed {
         if self.closed {
             return State::Merged {
                 commit: self.commit.clone().unwrap_or_default(),
-                checked: self.checked.unwrap_or(false),
+                checked: self.checked,
             };
         }
         // The steps are declared in the order they run, so one
@@ -323,8 +323,8 @@ impl Watch {
         self.work.as_ref().map(|work| {
             let attempts = self
                 .progressed
-                .iter()
-                .map(|(&issue, progressed)| (issue, progressed.attempts))
+                .keys()
+                .map(|&issue| (issue, self.attempts(issue)))
                 .collect();
             layout::layout(work, &self.titles, &self.states(), &attempts)
         })
@@ -495,7 +495,7 @@ impl Watch {
             // the machine goes back on is overwritten by the green one
             // the merge is made on.
             (Happened::Checked(verdict), Some(Step::Checks)) => {
-                progressed.checked = Some(!matches!(verdict, Verdict::Unclaimed));
+                progressed.checked = !matches!(verdict, Verdict::Unclaimed);
             }
             // The issue's own node: its start puts it Running before
             // its first step speaks, and its end is already told by
