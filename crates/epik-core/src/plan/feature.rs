@@ -19,10 +19,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
-use super::commit::{Commit, NothingToCommit};
-use super::github::{CheckWait, CreateBranch, Feature, OpenPull};
+use super::commit::{Commit, Committed};
+use super::github::{CheckWait, CreateBranch, Feature, Merged, OpenPull, Verdict};
 use super::push::Push;
 use super::stream::{Event, Happened, Reported, Sink, reported};
 use super::task::Task;
@@ -32,7 +32,7 @@ use crate::dag::Dag;
 use crate::git::askpass::Credentials;
 use crate::git::commands::Hash;
 use crate::git::url::Url;
-use crate::github::Merge;
+use crate::github::{Error, Merge};
 pub use crate::happening::{Name, Step};
 use crate::worktrees::{LinkedWorktree, Worktrees};
 
@@ -129,9 +129,26 @@ pub struct Issue<A> {
     build: Arc<Build<A>>,
 }
 
+/// What the issue's commit step came to: whether an agent's run left
+/// the branch anywhere, read from git.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Worked {
+    /// The commit the branch now stands on, whether the agent made it
+    /// or Epik did.
+    At(Hash),
+    /// A clean worktree on a branch still at its
+    /// [cut](LinkedWorktree::cut): the agent left the issue as it
+    /// found it.
+    Nothing,
+}
+
 impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
     /// The steps in order, to the first that fails, whose failure is
     /// the issue's.
+    ///
+    /// A step whose outcome a machine would branch on — a red verdict,
+    /// a refused merge, a worktree holding nothing — is a step that
+    /// fails here, because a sequence has one way onward.
     async fn run(&self) -> Result<()> {
         let Build {
             feature,
@@ -143,9 +160,25 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
         let pushed = self.pushed().await?.to_string();
         let opened = feature.open_issue_pull(number, &branch);
         let pull = self.step(Step::PullRequest, opened).await?;
-        let verdict = feature.await_checks(&pushed, *checks);
-        self.step(Step::Checks, verdict).await?;
-        let merged = feature.merge(pull.number, &pushed, *merge);
+        let judged = async {
+            match feature.await_checks(&pushed, *checks).await? {
+                Verdict::Red(names) => bail!("checks failed on {pushed}: {names}"),
+                settled => Ok(settled),
+            }
+        };
+        self.step(Step::Checks, judged).await?;
+        let merged = async {
+            match feature.merge(pull.number, &pushed, *merge).await? {
+                // The refusal as GitHub gave it, since that is the
+                // failure a refused merge has always been here.
+                Merged::Refused(words) => Err(Error::Refused {
+                    status: 405,
+                    message: words,
+                }
+                .into()),
+                Merged::Done => Ok(()),
+            }
+        };
         self.step(Step::Merge, merged).await?;
         self.step(Step::Close, feature.close(number)).await
     }
@@ -195,7 +228,13 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
             sink: self.sink(Step::Agent),
         };
         self.step(Step::Agent, implement.run()).await?;
-        let pushed = self.step(Step::Commit, self.committed(linked)).await?;
+        let committed = async {
+            match self.committed(linked).await? {
+                Worked::Nothing => bail!("the worktree holds nothing to commit"),
+                Worked::At(hash) => Ok(hash),
+            }
+        };
+        let pushed = self.step(Step::Commit, committed).await?;
         let push = Push {
             worktree: worktree.clone(),
             branch: linked.branch().to_owned(),
@@ -228,24 +267,23 @@ impl<A: Agent + Clone + Send + Sync + 'static> Issue<A> {
     ///
     /// # Errors
     ///
-    /// A worktree off the issue's branch, and [`NothingToCommit`] for a
-    /// clean worktree still at its cut.
-    async fn committed(&self, linked: &LinkedWorktree) -> Result<Hash> {
+    /// A worktree off the issue's branch.
+    async fn committed(&self, linked: &LinkedWorktree) -> Result<Worked> {
         let commit = Commit {
             worktree: linked.worktree().clone(),
             branch: linked.branch().to_owned(),
             message: format!("Implement #{}", self.number),
         };
-        match commit.commit().await {
-            Err(error) if error.is::<NothingToCommit>() => {
+        match commit.commit().await? {
+            Committed::Made(hash) => Ok(Worked::At(hash)),
+            Committed::Nothing => {
                 let tip = commit.tip().await?;
                 if tip == *linked.cut() {
-                    Err(error)
+                    Ok(Worked::Nothing)
                 } else {
-                    Ok(tip)
+                    Ok(Worked::At(tip))
                 }
             }
-            made => made,
         }
     }
 
@@ -417,6 +455,14 @@ mod tests {
         fn green(&self, sha: &Hash) {
             let green = vec![fake::check("test", Some(Conclusion::Success))];
             self.fake.world().checks.insert(sha.to_string(), green);
+        }
+
+        fn red(&self, sha: &Hash) {
+            let red = vec![
+                fake::check("build", Some(Conclusion::Success)),
+                fake::check("test", Some(Conclusion::Failure)),
+            ];
+            self.fake.world().checks.insert(sha.to_string(), red);
         }
 
         fn state(&self, issue: u64) -> State {
@@ -640,6 +686,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_red_check_fails_the_issue_at_its_checks_naming_the_runs_that_went_red() {
+        let hosted = Hosted::new("feature-red", &[3]);
+        let (mut build, mut receiver) = hosted.build(1, edits);
+        build.checks.expected = true;
+        let run = tokio::spawn(build.plan(alone(3)).execute());
+        let branch = issue_branch(3);
+        let error = timeout(PATIENCE, async {
+            while !run.is_finished() {
+                sleep(Duration::from_millis(5)).await;
+                if let Some(tip) = hosted.tip(&branch) {
+                    hosted.red(&tip);
+                }
+            }
+            run.await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+        let pushed = hosted.tip(&branch).expect("the commit the checks judged");
+        assert_eq!(
+            error.to_string(),
+            format!("checks failed on {pushed}: test")
+        );
+
+        let events = received(&mut receiver);
+        let words = failure(&events, Name::Step(3, Step::Checks));
+        assert_eq!(words, error.to_string());
+        assert_eq!(failure(&events, Name::Issue(3)), words);
+        assert_eq!(hosted.state(3), State::Open, "and no merge, and no close");
+    }
+
+    #[tokio::test]
     async fn with_one_slot_an_agent_runs_while_another_issue_waits_on_its_checks() {
         // 1 and 2 start together and 3 follows 2. The checks of 2 turn
         // green once 1 is seen waiting on its own, which stay pending
@@ -832,7 +911,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(error.is::<NothingToCommit>(), "{error}");
+        assert_eq!(error.to_string(), "the worktree holds nothing to commit");
 
         let events = received(&mut receiver);
         let words = failure(&events, Name::Step(3, Step::Commit));
