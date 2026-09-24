@@ -37,11 +37,11 @@ use epik_core::keystore::Secret;
 use epik_core::model_tools::{Tool, arg};
 use epik_core::monitor::{Change, EVENT, Entry, Log, RunId};
 use epik_core::plan::AgentSlots;
-use epik_core::plan::feature::{Build, Name, issue_branch};
+use epik_core::plan::feature::{Build, Errand, Name, issue_branch};
 use epik_core::plan::github::{CheckWait, Feature, feature_branch};
 use epik_core::plan::policy::{Policy, Reading};
 use epik_core::plan::stream::{Event, Sink};
-use epik_core::prompt::issue_brief;
+use epik_core::prompt::{fresh_fix_brief, issue_brief, resumed_fix_brief};
 use epik_core::tracker::IssueTracker;
 use epik_core::tracker::github::GitHubIssues;
 use epik_core::worktrees::Worktrees;
@@ -370,16 +370,26 @@ fn launch(
         merge: policy.merge,
         slots: state.slots.clone(),
         sink,
-        agent: Box::new(move |issue, cwd| ClaudeCode {
-            binary: claude.clone(),
-            cwd: cwd.to_owned(),
-            prompt: issue_brief(
-                &issue_branch(issue),
-                briefs.get(&issue).map_or("", String::as_str),
-            ),
-            model: model.clone(),
-            api_key: api_key.clone(),
-            resume: None,
+        agent: Box::new(move |issue, cwd, errand| {
+            let branch = issue_branch(issue);
+            let text = briefs.get(&issue).map_or("", String::as_str);
+            let (prompt, resume) = match errand {
+                Errand::Implement => (issue_brief(&branch, text), None),
+                Errand::Resume { session, checks } => {
+                    (resumed_fix_brief(checks), Some(session.clone()))
+                }
+                Errand::Fresh { diff, checks } => {
+                    (fresh_fix_brief(&branch, text, diff, checks), None)
+                }
+            };
+            ClaudeCode {
+                binary: claude.clone(),
+                cwd: cwd.to_owned(),
+                prompt,
+                model: model.clone(),
+                api_key: api_key.clone(),
+                resume,
+            }
         }),
     };
     let count = work.nodes().len();

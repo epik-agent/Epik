@@ -242,13 +242,22 @@ impl World {
             ("PUT", ["pulls", number, "merge"]) => {
                 let refusal = self.merge_refusal.clone();
                 let asked = request.body["sha"].as_str().map(str::to_owned);
+                // The head is where the branch now stands, as GitHub's
+                // own is: a push onto an open pull request moves it.
+                let opened = self
+                    .pull(number)
+                    .map(|pull| (pull.head.name.clone(), pull.head.sha.clone()));
+                let head = opened.map(|(branch, at_open)| self.sha_of(&branch).unwrap_or(at_open));
                 self.pull(number).map(|pull| match (refusal, asked) {
                     (Some(words), _) => refused(405, &words),
-                    (None, Some(sha)) if sha != pull.head.sha => refused(
+                    (None, Some(sha)) if Some(&sha) != head.as_ref() => refused(
                         409,
                         "Head branch was modified. Review and try the merge again.",
                     ),
                     (None, _) => {
+                        if let Some(head) = head {
+                            pull.head.sha = head;
+                        }
                         pull.merged = true;
                         pull.state = State::Closed;
                         (200, json!({ "merged": true }))
