@@ -517,6 +517,7 @@ mod tests {
             title: format!("issue {id}"),
             state: State::Waiting,
             form,
+            attempts: 0,
             column,
             row,
             blocked_by: Vec::new(),

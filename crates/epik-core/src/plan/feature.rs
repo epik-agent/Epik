@@ -1669,7 +1669,6 @@ mod tests {
                 title: "Build the thing".to_owned(),
                 titles,
                 problems: Vec::new(),
-                checked: false,
             },
         ];
         let heard = received(&mut receiver);
@@ -1699,6 +1698,8 @@ mod tests {
                 states[&issue],
                 State::Merged {
                     commit: tip.to_string(),
+                    // The fake repository's rules require no check, so
+                    // every issue's wait claimed nothing.
                     checked: false,
                 },
                 "#{issue} merged at the commit it pushed"

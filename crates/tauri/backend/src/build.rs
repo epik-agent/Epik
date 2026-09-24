@@ -407,7 +407,6 @@ fn launch(
         title,
         titles,
         problems,
-        checked: !policy.checks.is_empty(),
     });
     let plan = build.plan(work);
     state.runtime.spawn(async move {
