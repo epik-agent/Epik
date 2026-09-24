@@ -226,8 +226,9 @@ impl Gathering {
     }
 }
 
-/// Whether two of `work`'s issues can run at once: some issue with
-/// neither an issue before it nor one after it among the rest.
+/// Whether two of `work`'s issues can run at once: some issue that has
+/// another neither before nor after it, which is to say the work is
+/// something other than a single chain.
 fn parallel(work: &Dag<u64>) -> bool {
     let total = work.nodes().len();
     work.nodes()
@@ -276,7 +277,7 @@ mod tests {
     }
 
     /// Feature 274 with issues 1 and 2, neither waiting on the other.
-    fn parallel() -> Dag<u64> {
+    fn parallel_work() -> Dag<u64> {
         Dag::new(vec![Node::new(1, []), Node::new(2, [])]).unwrap()
     }
 
@@ -351,11 +352,29 @@ mod tests {
             "feature-*",
             vec![checks(&[("CI", None)], true)],
         ));
-        let reading = read(&fake, &parallel());
+        let reading = read(&fake, &parallel_work());
         assert!(reading.settled.is_ok(), "a strict policy still builds");
         let said = reading.said.join("\n");
         assert!(said.contains("strict"), "{said}");
         assert!(said.contains("ruleset 9"), "{said}");
+    }
+
+    /// What makes a strict rule worth saying is work that is anything
+    /// other than a single chain.
+    #[test]
+    fn issues_run_at_once_where_the_work_is_more_than_one_chain() {
+        assert!(!parallel(&Dag::new(vec![]).unwrap()), "no issues at all");
+        assert!(!parallel(&Dag::new(vec![Node::new(1, [])]).unwrap()), "one");
+        assert!(!parallel(&serial()), "a chain of two");
+        assert!(parallel(&parallel_work()), "two with nothing between them");
+        let diamond = Dag::new(vec![
+            Node::new(1, []),
+            Node::new(2, [0]),
+            Node::new(3, [0]),
+            Node::new(4, [1, 2]),
+        ])
+        .unwrap();
+        assert!(parallel(&diamond), "2 and 3 run at once");
     }
 
     #[test]
