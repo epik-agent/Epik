@@ -4,10 +4,25 @@
 use anyhow::Result;
 
 use super::briefly;
+use super::github::CLASSIC;
 use super::task::Task;
 use crate::git::askpass::Credentials;
 use crate::git::commands::{self, Command};
 use crate::git::{self, Repository};
+
+/// What GitHub says of a push its rules turn away, whether the rule is
+/// a ruleset's or classic branch protection's. Said in either case
+/// where GitHub happens to capitalize it.
+const PROTECTED: &str = "protected branch";
+
+/// `refused`, git's own words on a push that failed, with [`CLASSIC`]
+/// over it when GitHub turned the push away for a protected branch.
+fn whence(refused: anyhow::Error) -> anyhow::Error {
+    match refused.to_string().to_lowercase().contains(PROTECTED) {
+        true => refused.context(CLASSIC),
+        false => refused,
+    }
+}
 
 /// `branch` of `worktree` pushed to its origin when the task runs,
 /// [as](git::run_as) the holder of `credentials`. The push is one git,
@@ -21,6 +36,10 @@ use crate::git::{self, Repository};
 /// on the origin's `branch` as the clone's own fetch last saw it: a
 /// rerun replaces what it left behind, and a branch someone else moved
 /// since is refused as `stale info` rather than overwritten.
+///
+/// A push GitHub turns away for a protected branch carries [`CLASSIC`]:
+/// the launch reads rulesets, and a classic rule it never saw is
+/// enforced here.
 #[derive(Clone, Debug)]
 pub struct Push {
     pub worktree: Repository,
@@ -32,7 +51,9 @@ impl Task for Push {
     async fn run(&self) -> Result<()> {
         let push = commands::Push::over(self.worktree.clone(), self.branch.clone())?;
         let (push, credentials) = (Command::Push(push), self.credentials.clone());
-        briefly(move || git::run_as(&push, &credentials).map(drop)).await
+        briefly(move || git::run_as(&push, &credentials).map(drop))
+            .await
+            .map_err(whence)
     }
 }
 
@@ -182,6 +203,24 @@ mod tests {
             theirs,
             "the branch stands where they left it"
         );
+    }
+
+    #[test]
+    fn a_push_refused_for_a_protected_branch_says_a_classic_rule_may_be_the_cause() {
+        let refused = anyhow::anyhow!(
+            "remote: error: GH006: Protected branch update failed for refs/heads/issue-1.\n\
+             ! [remote rejected] issue-1 -> issue-1 (protected branch hook declined)"
+        );
+        let words = format!("{:#}", whence(refused));
+        assert!(words.contains("classic branch protection"), "{words}");
+        assert!(words.contains("GH006"), "and git's own words: {words}");
+    }
+
+    #[test]
+    fn a_push_refused_for_anything_else_is_gits_own_words_alone() {
+        let refused = anyhow::anyhow!("! [rejected] issue-1 -> issue-1 (stale info)");
+        let words = format!("{:#}", whence(refused));
+        assert_eq!(words, "! [rejected] issue-1 -> issue-1 (stale info)");
     }
 
     #[tokio::test]

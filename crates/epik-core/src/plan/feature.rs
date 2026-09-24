@@ -32,7 +32,7 @@ use crate::dag::Dag;
 use crate::git::askpass::Credentials;
 use crate::git::commands::Hash;
 use crate::git::url::Url;
-use crate::github::{Error, Merge};
+use crate::github::{Error, Merge, Required};
 pub use crate::happening::{Name, Step};
 use crate::worktrees::{LinkedWorktree, Worktrees};
 
@@ -51,6 +51,11 @@ pub struct Build<A> {
     /// Where the repository is cloned from and pushed to.
     pub url: Url,
     pub worktrees: Worktrees,
+    /// What the rules on the feature branch require to pass before it
+    /// takes a merge, and how the wait for those is paced and bounded.
+    /// An empty [`Policy::checks`](crate::plan::policy::Policy::checks)
+    /// is a repository requiring none, whose issues merge unchecked.
+    pub required: Vec<Required>,
     pub checks: CheckWait,
     /// How an issue's pull request merges into the feature branch.
     pub merge: Merge,
@@ -152,6 +157,7 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
     async fn run(&self) -> Result<()> {
         let Build {
             feature,
+            required,
             checks,
             merge,
             ..
@@ -160,13 +166,19 @@ impl<A: Agent + Clone + Send + Sync + 'static> Task for Issue<A> {
         let pushed = self.pushed().await?.to_string();
         let opened = feature.open_issue_pull(number, &branch);
         let pull = self.step(Step::PullRequest, opened).await?;
+        // The verdict is said within the step, before its end, so
+        // nothing arrives under a step that has already finished.
+        let sink = self.sink(Step::Checks);
         let judged = async {
-            match feature.await_checks(&pushed, *checks).await? {
+            match feature
+                .await_checks(&pushed, required, *checks, &sink)
+                .await?
+            {
                 Verdict::Red(names) => bail!("checks failed on {pushed}: {names}"),
                 settled => Ok(settled),
             }
         };
-        self.step(Step::Checks, judged).await?;
+        reported(&sink, judged).await?;
         let merged = async {
             match feature.merge(pull.number, &pushed, *merge).await? {
                 // The refusal as GitHub gave it, since that is the
@@ -324,6 +336,14 @@ mod tests {
     /// The feature under construction, in these tests.
     const FEATURE: u64 = 7;
 
+    /// The rule requiring a check named `context`, from any app.
+    fn requires(context: &str) -> Required {
+        Required {
+            context: context.to_owned(),
+            app: None,
+        }
+    }
+
     /// The scripted engine: `sh -c` of a script, in the worktree. Each
     /// line it says is its text.
     #[derive(Clone)]
@@ -408,8 +428,8 @@ mod tests {
         }
 
         /// A build of the feature in `slots` slots, each issue's agent
-        /// running the script `scripts` gives it, with no checks
-        /// expected; and everything the build emits.
+        /// running the script `scripts` gives it, with no check
+        /// required; and everything the build emits.
         fn build(
             &self,
             slots: usize,
@@ -424,11 +444,10 @@ mod tests {
                 },
                 url: Url::Local(self.origin.path().to_owned()),
                 worktrees: Worktrees::new(self.scratch.join("root").into()),
+                required: Vec::new(),
                 checks: CheckWait {
-                    expected: false,
                     every: Duration::from_millis(5),
                     bound: PATIENCE,
-                    settles: NonZeroUsize::MIN,
                 },
                 merge: Merge::Squash,
                 slots: AgentSlots::new(NonZeroUsize::new(slots).unwrap()),
@@ -567,11 +586,7 @@ mod tests {
                 at(&events, Name::Step(issue, Step::Agent), &said).is_some(),
                 "{events:?}"
             );
-            let tip = hosted.tip(&issue_branch(issue)).expect("a pushed branch");
-            assert!(
-                hosted.polled(&tip),
-                "the checks read are the pushed commit's"
-            );
+            hosted.tip(&issue_branch(issue)).expect("a pushed branch");
             assert_eq!(hosted.state(issue), State::Closed);
         }
         let [first, second, third, fourth] = [154, 155, 156, 157].map(Name::Issue);
@@ -685,11 +700,85 @@ mod tests {
         assert_eq!(hosted.state(3), State::Open);
     }
 
+    /// A build whose policy requires nothing, on a repository with no
+    /// CI: nothing is polled, nothing is waited out, and the bound is
+    /// long enough that a wait would show as a hang rather than a pass.
+    #[tokio::test]
+    async fn a_policy_requiring_no_check_merges_the_issue_claiming_no_verdict() {
+        let hosted = Hosted::new("feature-unclaimed", &[3]);
+        let (build, mut receiver) = hosted.build(1, edits);
+        timeout(PATIENCE, build.plan(alone(3)).execute())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let events = received(&mut receiver);
+        let tip = hosted.tip("issue-3").expect("a pushed branch");
+        assert!(!hosted.polled(&tip), "there was nothing to wait for");
+        assert_eq!(
+            recorded(&events, Name::Step(3, Step::Checks)),
+            [
+                Happened::Started,
+                Happened::Checked(Verdict::Unclaimed),
+                Happened::Finished,
+            ]
+        );
+        let merged = (issue_branch(3), true);
+        assert!(hosted.pulls().contains(&merged), "{:?}", hosted.pulls());
+        assert_eq!(hosted.state(3), State::Closed);
+    }
+
+    /// A build whose policy requires `test`, with a `coverage` run that
+    /// never concludes: the verdict is the required check's, and the
+    /// merge does not wait on the other.
+    #[tokio::test]
+    async fn a_green_required_check_merges_the_issue_though_an_unrequired_run_still_goes() {
+        let hosted = Hosted::new("feature-green", &[3]);
+        let (mut build, mut receiver) = hosted.build(1, edits);
+        build.required = vec![requires("test")];
+        let run = tokio::spawn(build.plan(alone(3)).execute());
+        let branch = issue_branch(3);
+        timeout(PATIENCE, async {
+            while !run.is_finished() {
+                sleep(Duration::from_millis(5)).await;
+                if let Some(tip) = hosted.tip(&branch) {
+                    let runs = vec![
+                        fake::check("test", Some(Conclusion::Success)),
+                        fake::check("coverage", None),
+                    ];
+                    hosted.fake.world().checks.insert(tip.to_string(), runs);
+                }
+            }
+            run.await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+        let events = received(&mut receiver);
+        assert_eq!(
+            recorded(&events, Name::Step(3, Step::Checks)),
+            [
+                Happened::Started,
+                Happened::Ran("coverage (running)".to_owned()),
+                Happened::Checked(Verdict::Green),
+                Happened::Finished,
+            ]
+        );
+        assert!(
+            hosted.pulls().contains(&(branch, true)),
+            "{:?}",
+            hosted.pulls()
+        );
+        assert_eq!(hosted.state(3), State::Closed);
+    }
+
     #[tokio::test]
     async fn a_red_check_fails_the_issue_at_its_checks_naming_the_runs_that_went_red() {
         let hosted = Hosted::new("feature-red", &[3]);
         let (mut build, mut receiver) = hosted.build(1, edits);
-        build.checks.expected = true;
+        build.required = vec![requires("test")];
         let run = tokio::spawn(build.plan(alone(3)).execute());
         let branch = issue_branch(3);
         let error = timeout(PATIENCE, async {
@@ -725,7 +814,7 @@ mod tests {
         // until the agent of 3 has come and gone in the one slot.
         let hosted = Hosted::new("feature-one-slot", &[1, 2, 3]);
         let (mut build, mut receiver) = hosted.build(1, edits);
-        build.checks.expected = true;
+        build.required = vec![requires("test")];
         let work = vec![After::new(1, []), After::new(2, []), After::new(3, [1])];
         let run = tokio::spawn(build.plan(Dag::new(work).unwrap()).execute());
 
@@ -898,8 +987,7 @@ mod tests {
         let plan = build.plan(alone(3));
         timeout(PATIENCE, plan.execute()).await.unwrap().unwrap();
 
-        let tip = hosted.tip("issue-3").expect("the agent's commit, pushed");
-        assert!(hosted.polled(&tip), "and its checks were the ones read");
+        hosted.tip("issue-3").expect("the agent's commit, pushed");
         assert_eq!(hosted.state(3), State::Closed);
     }
 

@@ -462,6 +462,10 @@ impl Watch {
             // its first step speaks, and its end is already told by
             // the close finishing.
             (Happened::Started, None) => {}
+            // Whether the merge was checked is the build's here, from
+            // its `Started`; the step's own verdict is on the stream
+            // for the fold that comes to read it.
+            (Happened::Checked(_) | Happened::Ran(_), _) => {}
             (Happened::Finished | Happened::Pushed(_), _) => {}
             (Happened::Said(_) | Happened::Stderr(_), _) => unreachable!("turned away above"),
         }
