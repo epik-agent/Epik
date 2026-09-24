@@ -352,7 +352,14 @@ pub enum Kind {
     RequiredStatusChecks { checks: Vec<Required>, strict: bool },
     /// A pull request is required, with this many approving reviews and
     /// these merge methods allowed — in the order a policy prefers them.
-    PullRequest { approvals: u64, methods: Vec<Merge> },
+    /// `gates` are the rule's other conditions on a merge, each named as
+    /// GitHub spells it, which an author cannot meet for their own pull
+    /// request.
+    PullRequest {
+        approvals: u64,
+        methods: Vec<Merge>,
+        gates: Vec<&'static str>,
+    },
     /// The base branch takes no merge commits.
     RequiredLinearHistory,
     /// Every commit must be signed.
@@ -405,6 +412,18 @@ struct Parameters {
     #[serde(default)]
     required_approving_review_count: u64,
     allowed_merge_methods: Option<Vec<String>>,
+    /// Every thread on the pull request must be resolved before it
+    /// merges.
+    #[serde(default)]
+    required_review_thread_resolution: bool,
+    /// The last push must itself be approved, which its pusher cannot
+    /// do.
+    #[serde(default)]
+    require_last_push_approval: bool,
+    /// A commit not attributed to the pull request's author needs an
+    /// approval of its own.
+    #[serde(default)]
+    require_extra_approval_for_unattributed_changes: bool,
 }
 
 impl From<RuleWire> for Rule {
@@ -418,6 +437,23 @@ impl From<RuleWire> for Rule {
             "pull_request" => Kind::PullRequest {
                 approvals: parameters.required_approving_review_count,
                 methods: merge_methods(parameters.allowed_merge_methods.as_deref()),
+                gates: [
+                    (
+                        parameters.required_review_thread_resolution,
+                        "required_review_thread_resolution",
+                    ),
+                    (
+                        parameters.require_last_push_approval,
+                        "require_last_push_approval",
+                    ),
+                    (
+                        parameters.require_extra_approval_for_unattributed_changes,
+                        "require_extra_approval_for_unattributed_changes",
+                    ),
+                ]
+                .into_iter()
+                .filter_map(|(set, name)| set.then_some(name))
+                .collect(),
             },
             "required_linear_history" => Kind::RequiredLinearHistory,
             "required_signatures" => Kind::RequiredSignatures,
@@ -1660,13 +1696,21 @@ mod tests {
                 app: Some(15368),
             })
         );
-        let merge_methods = rules.iter().find_map(|rule| match &rule.kind {
-            Kind::PullRequest { approvals, methods } => Some((*approvals, methods.clone())),
+        let pull_request = rules.iter().find_map(|rule| match &rule.kind {
+            Kind::PullRequest {
+                approvals,
+                methods,
+                gates,
+            } => Some((*approvals, methods.clone(), gates.clone())),
             _ => None,
         });
         assert_eq!(
-            merge_methods,
-            Some((0, vec![Merge::Squash, Merge::Rebase])),
+            pull_request,
+            Some((
+                0,
+                vec![Merge::Squash, Merge::Rebase],
+                vec!["require_extra_approval_for_unattributed_changes"],
+            )),
             "the capture asks for no reviews and allows two methods, \
              kept in the order a policy prefers them"
         );
@@ -1710,6 +1754,7 @@ mod tests {
             Kind::PullRequest {
                 approvals: 1,
                 methods: vec![Merge::Squash, Merge::Commit, Merge::Rebase],
+                gates: Vec::new(),
             },
             "a ruleset silent on methods forbids none of them"
         );

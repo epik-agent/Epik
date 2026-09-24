@@ -70,16 +70,52 @@ pub fn resumed_fix_brief(checks: &str) -> String {
 /// agent would have remembered is written out.
 #[must_use]
 pub fn fresh_fix_brief(branch: &str, issue: &str, diff: &str, checks: &str) -> String {
+    let fence = fence(diff);
     format!(
         "{}\n\nBranch: {branch}\n\nRed checks: {checks}\n\n{issue}\n\n## The branch so far\n\n\
-         ```diff\n{diff}\n```",
+         {fence}diff\n{diff}\n{fence}",
         *FRESH_TEXT
     )
+}
+
+/// The fence that holds `content` whole: longer than the longest run of
+/// backticks in it, since a diff of a Markdown file carries fences of
+/// its own, and a fence the content repeats would close early and leave
+/// the rest of the diff reading as prose.
+fn fence(content: &str) -> String {
+    let longest = content
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    "`".repeat(longest.max(2) + 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A diff of a Markdown file carries fences of its own, and the
+    /// brief holds the whole diff regardless: the fence around it is
+    /// longer than any run of backticks inside it, so it closes where
+    /// the diff ends and nowhere earlier.
+    #[test]
+    fn a_diff_of_its_own_fences_is_held_whole() {
+        let diff = "+```rust\n+let x = 1;\n+```";
+        let brief = fresh_fix_brief("issue-1", "# Do it", diff, "test");
+        let (_, fenced) = brief.split_once("## The branch so far\n\n").unwrap();
+        let fence = fenced.split_once("diff\n").unwrap().0;
+        assert!(
+            fence.len() > 3,
+            "the fence outruns the diff's own: {fence:?}"
+        );
+        assert!(fenced.ends_with(&format!("{diff}\n{fence}")), "{fenced}");
+        assert_eq!(
+            fenced.matches(fence).count(),
+            2,
+            "the fence opens and closes once: {fenced}"
+        );
+    }
 
     /// Every prompt this module compiles in is named in `build.rs`, so
     /// editing one rebuilds the crate. A prompt added here and forgotten

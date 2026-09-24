@@ -114,8 +114,15 @@ impl Gathering {
         for rule in rules {
             match &rule.kind {
                 Kind::RequiredStatusChecks { checks, strict } => {
-                    policy.checks.clone_from(checks);
-                    policy.strict = *strict;
+                    // Every rule's checks must pass, so the policy waits
+                    // for all of them; a check two rulesets both require
+                    // is one check. Strictness is either one's to ask.
+                    for required in checks {
+                        if !policy.checks.contains(required) {
+                            policy.checks.push(required.clone());
+                        }
+                    }
+                    policy.strict |= *strict;
                     if *strict && parallel {
                         self.said.push(format!(
                             "the rules on {branch} are strict ({}): an issue's branch must \
@@ -129,14 +136,29 @@ impl Gathering {
                 Kind::PullRequest {
                     approvals,
                     methods: allowed,
-                } if *approvals == 0 => {
-                    methods.clone_from(allowed);
+                    gates,
+                } if *approvals == 0 && gates.is_empty() => {
+                    // Each rule bounds the merge, so what the build may
+                    // ask for is what every rule allows.
+                    methods.retain(|method| allowed.contains(method));
                 }
-                Kind::PullRequest { .. } => self.refuse(
+                // An approval Epik would have to give its own pull
+                // request, asked for either by a count of reviews or by
+                // one of the rule's other conditions on a merge.
+                Kind::PullRequest { gates, .. } if gates.is_empty() => self.refuse(
                     rule,
                     branch,
                     "an approving review is required, and Epik cannot approve its own \
                      pull requests",
+                ),
+                Kind::PullRequest { gates, .. } => self.refuse(
+                    rule,
+                    branch,
+                    &format!(
+                        "the pull request rule asks for {}, which the one who opened it \
+                         cannot give",
+                        gates.join(" and ")
+                    ),
                 ),
                 Kind::RequiredLinearHistory => linear = true,
                 Kind::MergeQueue => self.refuse(
@@ -329,6 +351,140 @@ mod tests {
             ]
         );
         assert!(!policy.strict);
+    }
+
+    /// A pull-request rule asking for `approvals` reviews, allowing
+    /// `methods`, and setting the gate named.
+    fn gated(gate: &str) -> serde_json::Value {
+        json!({
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "allowed_merge_methods": ["squash"],
+                gate: true,
+            },
+        })
+    }
+
+    /// A merge condition the one who opened the pull request cannot meet
+    /// refuses the build, as a required review does: Epik opens every
+    /// pull request it merges.
+    #[test]
+    fn a_pull_request_gate_epik_cannot_meet_refuses_the_build() {
+        for gate in [
+            "required_review_thread_resolution",
+            "require_last_push_approval",
+            "require_extra_approval_for_unattributed_changes",
+        ] {
+            let fake = FakeGitHub::spawn();
+            fake.world()
+                .rulesets
+                .push(Ruleset::new(9, "feature-*", vec![gated(gate)]));
+            let words = read(&fake, &serial()).settled.unwrap_err();
+            assert!(words.contains(gate), "{words}");
+            assert!(words.contains("feature-274"), "{words}");
+        }
+    }
+
+    /// GitHub flattens every active ruleset, org and repository alike,
+    /// into one list of rules, so two rulesets over the same branch send
+    /// two rules of a type. Every check either of them requires must
+    /// pass before the branch takes a merge, so the policy waits for all
+    /// of them.
+    #[test]
+    fn two_rulesets_requiring_checks_are_waited_for_together() {
+        let fake = FakeGitHub::spawn();
+        fake.world().rulesets.push(Ruleset::new(
+            9,
+            "feature-*",
+            vec![checks(&[("org-CI", None)], false)],
+        ));
+        fake.world().rulesets.push(Ruleset::new(
+            10,
+            "feature-*",
+            vec![checks(&[("repo-CI", None)], false)],
+        ));
+        let policy = read(&fake, &serial()).settled.unwrap();
+        let waited: Vec<_> = policy
+            .checks
+            .iter()
+            .map(|required| required.context.as_str())
+            .collect();
+        assert_eq!(waited, ["org-CI", "repo-CI"]);
+    }
+
+    /// A check two rulesets both require is one check to wait for.
+    #[test]
+    fn a_check_two_rulesets_both_require_is_waited_for_once() {
+        let fake = FakeGitHub::spawn();
+        for id in [9, 10] {
+            fake.world().rulesets.push(Ruleset::new(
+                id,
+                "feature-*",
+                vec![checks(&[("CI", None)], false)],
+            ));
+        }
+        let policy = read(&fake, &serial()).settled.unwrap();
+        assert_eq!(policy.checks.len(), 1, "{:?}", policy.checks);
+    }
+
+    /// Strictness is either ruleset's to ask for: GitHub holds the merge
+    /// to the stricter of the two.
+    #[test]
+    fn strictness_asked_by_either_ruleset_is_the_policys() {
+        let fake = FakeGitHub::spawn();
+        fake.world().rulesets.push(Ruleset::new(
+            9,
+            "feature-*",
+            vec![checks(&[("lax", None)], false)],
+        ));
+        fake.world().rulesets.push(Ruleset::new(
+            10,
+            "feature-*",
+            vec![checks(&[("strict", None)], true)],
+        ));
+        assert!(read(&fake, &serial()).settled.unwrap().strict);
+    }
+
+    /// Each ruleset's allowed methods bound the merge, so what the build
+    /// may ask for is what all of them allow. Two rulesets whose allowed
+    /// methods do not meet leave nothing Epik could ask for, which is a
+    /// refusal at launch rather than a merge GitHub answers 405 to.
+    #[test]
+    fn two_rulesets_allowing_different_methods_leave_only_what_both_allow() {
+        let fake = FakeGitHub::spawn();
+        fake.world().rulesets.push(Ruleset::new(
+            9,
+            "feature-*",
+            vec![pull_request(0, &["squash", "rebase"])],
+        ));
+        fake.world().rulesets.push(Ruleset::new(
+            10,
+            "feature-*",
+            vec![pull_request(0, &["rebase"])],
+        ));
+        let policy = read(&fake, &serial()).settled.unwrap();
+        assert_eq!(policy.merge, Merge::Rebase);
+    }
+
+    #[test]
+    fn two_rulesets_whose_methods_do_not_meet_refuse_the_build() {
+        let fake = FakeGitHub::spawn();
+        fake.world().rulesets.push(Ruleset::new(
+            9,
+            "feature-*",
+            vec![pull_request(0, &["squash"])],
+        ));
+        fake.world().rulesets.push(Ruleset::new(
+            10,
+            "feature-*",
+            vec![pull_request(0, &["rebase"])],
+        ));
+        let words = read(&fake, &serial()).settled.unwrap_err();
+        assert!(
+            words.contains("leave no merge method Epik could use"),
+            "{words}"
+        );
     }
 
     #[test]
