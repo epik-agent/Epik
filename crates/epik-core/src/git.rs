@@ -55,6 +55,16 @@ impl Repository {
     pub fn path(&self) -> &Path {
         &self.0
     }
+
+    /// The directory `path` taken for a repository on its word, for a
+    /// test about what holds one rather than about the git in it. Every
+    /// other way to one — [`open`](Self::open), an init, a clone, a
+    /// worktree add — asks git first.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub const fn at(path: PathBuf) -> Self {
+        Self(path)
+    }
 }
 
 #[cfg(feature = "native")]

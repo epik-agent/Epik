@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
 
-use super::{Branch, Check, Conclusion, GitHub, Issue, Pull, Repo, State};
+use super::{Branch, Check, Conclusion, GitHub, Issue, Pull, Repo, Required, State};
 
 /// The default branch.
 pub const DEFAULT_BRANCH: &str = "main";
@@ -67,20 +67,88 @@ pub struct World {
     pub statuses: BTreeMap<String, usize>,
     /// GitHub's words for refusing every merge, when it refuses.
     pub merge_refusal: Option<String>,
+    /// The rulesets the repository holds, each over the branches its
+    /// pattern names.
+    pub rulesets: Vec<Ruleset>,
     pub requests: Vec<Request>,
 }
 
-/// A check run named `name`, still running when `conclusion` is `None`.
+/// One ruleset the fake serves: an id, the account it belongs to, the
+/// branch names it covers, and its rules as GitHub sends them.
+pub struct Ruleset {
+    pub id: u64,
+    pub source: String,
+    /// The branch names the ruleset covers. A trailing `*` stands for any
+    /// ending, which is the whole of GitHub's `fnmatch` a build's branches
+    /// are ever matched by.
+    pub pattern: String,
+    pub rules: Vec<Value>,
+}
+
+impl Ruleset {
+    /// A ruleset numbered `id` over the branches `pattern` names, holding
+    /// `rules`, belonging to the repository the fake serves.
+    pub fn new(id: u64, pattern: &str, rules: Vec<Value>) -> Self {
+        Self {
+            id,
+            source: "fake/repo".to_owned(),
+            pattern: pattern.to_owned(),
+            rules,
+        }
+    }
+
+    /// Whether the ruleset covers `branch`.
+    fn covers(&self, branch: &str) -> bool {
+        match self.pattern.strip_suffix('*') {
+            Some(stem) => branch.starts_with(stem),
+            None => branch == self.pattern,
+        }
+    }
+}
+
+/// A check run named `name`, still running when `conclusion` is `None`,
+/// reported by no app.
 pub fn check(name: &str, conclusion: Option<Conclusion>) -> Check {
     Check {
         name: name.to_owned(),
         conclusion,
+        app: None,
+    }
+}
+
+/// A [`check`] the app numbered `app` reported.
+pub fn check_by(name: &str, conclusion: Option<Conclusion>, app: u64) -> Check {
+    Check {
+        app: Some(app),
+        ..check(name, conclusion)
+    }
+}
+
+/// The rule requiring a check named `context`, from any app.
+pub fn required(context: &str) -> Required {
+    Required {
+        context: context.to_owned(),
+        app: None,
+    }
+}
+
+/// A [`required`] check the rule asks the app numbered `app` to report.
+pub fn required_by(context: &str, app: u64) -> Required {
+    Required {
+        app: Some(app),
+        ..required(context)
     }
 }
 
 /// The read of commit `sha`'s check runs, as the fake receives it.
 pub fn check_runs(sha: &str) -> Request {
     let path = format!("/repos/fake/repo/commits/{sha}/check-runs?per_page=100");
+    Request::new("GET", &path, Value::Null)
+}
+
+/// The read of `branch`'s rules, as the fake receives it.
+pub fn branch_rules(branch: &str) -> Request {
+    let path = format!("/repos/fake/repo/rules/branches/{branch}");
     Request::new("GET", &path, Value::Null)
 }
 
@@ -190,13 +258,22 @@ impl World {
             ("PUT", ["pulls", number, "merge"]) => {
                 let refusal = self.merge_refusal.clone();
                 let asked = request.body["sha"].as_str().map(str::to_owned);
+                // The head is where the branch now stands, as GitHub's
+                // own is: a push onto an open pull request moves it.
+                let opened = self
+                    .pull(number)
+                    .map(|pull| (pull.head.name.clone(), pull.head.sha.clone()));
+                let head = opened.map(|(branch, at_open)| self.sha_of(&branch).unwrap_or(at_open));
                 self.pull(number).map(|pull| match (refusal, asked) {
                     (Some(words), _) => refused(405, &words),
-                    (None, Some(sha)) if sha != pull.head.sha => refused(
+                    (None, Some(sha)) if Some(&sha) != head.as_ref() => refused(
                         409,
                         "Head branch was modified. Review and try the merge again.",
                     ),
                     (None, _) => {
+                        if let Some(head) = head {
+                            pull.head.sha = head;
+                        }
                         pull.merged = true;
                         pull.state = State::Closed;
                         (200, json!({ "merged": true }))
@@ -219,6 +296,7 @@ impl World {
                     json!({ "total_count": runs.len(), "check_runs": runs }),
                 ))
             }
+            ("GET", ["rules", "branches", branch]) => Some((200, self.rules_for(branch))),
             ("GET", ["commits", sha, "status"]) => {
                 let count = self.statuses.get(*sha).copied().unwrap_or(0);
                 Some((200, json!({ "state": "pending", "total_count": count })))
@@ -226,6 +304,28 @@ impl World {
             _ => None,
         };
         answer.unwrap_or_else(|| refused(404, "Not Found"))
+    }
+
+    /// The rules in force on `branch`: every covering ruleset's rules,
+    /// each stamped with the ruleset it came from, as GitHub flattens
+    /// them. A branch no ruleset covers has an empty list, whether or not
+    /// the branch exists.
+    fn rules_for(&self, branch: &str) -> Value {
+        let flattened: Vec<Value> = self
+            .rulesets
+            .iter()
+            .filter(|ruleset| ruleset.covers(branch))
+            .flat_map(|ruleset| {
+                ruleset.rules.iter().map(|rule| {
+                    let mut rule = rule.clone();
+                    rule["ruleset_source_type"] = json!("Repository");
+                    rule["ruleset_source"] = json!(ruleset.source);
+                    rule["ruleset_id"] = json!(ruleset.id);
+                    rule
+                })
+            })
+            .collect();
+        json!(flattened)
     }
 
     /// The commit `branch` stands on: what the world holds, or, for a

@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::dag::Dag;
-use crate::happening::{Happened, Name, Step};
+use crate::happening::{Happened, Name, Step, Verdict};
 use layout::Layout;
 
 /// The event channel entries arrive on, backend to window.
@@ -58,7 +58,10 @@ impl std::fmt::Display for RunId {
 /// blocker failed and nothing this build can do would make it ready.
 ///
 /// Derived from the stream, never spoken into it: the step an issue's
-/// node is in says which of these it is.
+/// node is in says which of these it is. An issue goes round more than
+/// once — a red verdict sends it back from the checks to the agent — so
+/// Running and Merging each come as often as the loop does, and only
+/// the issue's own node failing is an end.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum State {
@@ -72,10 +75,11 @@ pub enum State {
     /// close.
     Merging,
     /// Merged onto the feature branch and closed. `commit` is the hash
-    /// the push threaded; `checked` is whether checks were expected on
-    /// the pull request, GitHub being what runs them.
+    /// the push threaded; `checked` is whether the wait claimed a
+    /// verdict on it, which the issue's own policy decides.
     Merged { commit: String, checked: bool },
-    /// Failed, in the words of the step that failed.
+    /// Failed, in the words its own node failed in: what the machine
+    /// made of the attempt that stopped it.
     Failed { report: String },
     /// Never started, and never will be: the issue whose failure
     /// stopped it, which this build can never settle. The number, not
@@ -92,8 +96,17 @@ struct Progressed {
     step: Option<Step>,
     /// The commit the push threaded, once it has.
     commit: Option<String>,
-    /// The words of the step that failed, once one has.
+    /// The words the issue's own node failed in, once it has. A step's
+    /// failure is the attempt's, and the machine goes round again or
+    /// fails the issue in words of its own.
     failed: Option<String>,
+    /// The times the agent has started: one attempt each, the first
+    /// among them.
+    attempts: usize,
+    /// Whether the last wait for the checks claimed a verdict. A
+    /// verdict claimed either way is a checked merge; a policy
+    /// requiring no check claims nothing.
+    checked: bool,
     /// Whether the close finished: the issue is landed.
     closed: bool,
 }
@@ -102,7 +115,7 @@ impl Progressed {
     /// Where the issue stands: the step it is in, read as a state.
     /// Failure wins over everything, the close finishing is the end,
     /// and otherwise the step says whether an agent holds a slot.
-    fn state(&self, checked: bool) -> State {
+    fn state(&self) -> State {
         if let Some(report) = &self.failed {
             return State::Failed {
                 report: report.clone(),
@@ -111,7 +124,7 @@ impl Progressed {
         if self.closed {
             return State::Merged {
                 commit: self.commit.clone().unwrap_or_default(),
-                checked,
+                checked: self.checked,
             };
         }
         // The steps are declared in the order they run, so one
@@ -141,9 +154,8 @@ pub enum Change {
         base: Option<String>,
     },
     /// The build is running: the work it runs and the order among it,
-    /// the feature's title and its issues', what is wrong with the
-    /// plan's shape in words, and whether checks are expected on each
-    /// pull request.
+    /// the feature's title and its issues', and what is wrong with the
+    /// plan's shape in words.
     ///
     /// The issues' titles cross as pairs rather than a map, because a
     /// JSON object's keys are strings and this enum is tagged — which
@@ -155,7 +167,6 @@ pub enum Change {
         title: String,
         titles: Vec<(u64, String)>,
         problems: Vec<String>,
-        checked: bool,
     },
     /// The build's own stream, one event of it.
     Happened { run: RunId, event: Event },
@@ -240,7 +251,6 @@ pub struct Watch {
     title: Option<String>,
     titles: BTreeMap<u64, String>,
     problems: Vec<String>,
-    checked: bool,
     /// How far each issue has got, by the stream's account.
     progressed: BTreeMap<u64, Progressed>,
     stage: Stage,
@@ -264,7 +274,6 @@ impl Watch {
             title: None,
             titles: BTreeMap::new(),
             problems: Vec::new(),
-            checked: false,
             progressed: BTreeMap::new(),
             stage: Stage::Starting,
         }
@@ -311,9 +320,14 @@ impl Watch {
     /// nothing, before there is any.
     #[must_use]
     pub fn layout(&self) -> Option<Layout> {
-        self.work
-            .as_ref()
-            .map(|work| layout::layout(work, &self.titles, &self.states()))
+        self.work.as_ref().map(|work| {
+            let attempts = self
+                .progressed
+                .keys()
+                .map(|&issue| (issue, self.attempts(issue)))
+                .collect();
+            layout::layout(work, &self.titles, &self.states(), &attempts)
+        })
     }
 
     /// What is wrong with the plan's shape, in words.
@@ -338,7 +352,7 @@ impl Watch {
         for node in work.nodes() {
             let id = *node.value();
             let state = match self.progressed.get(&id) {
-                Some(progressed) => progressed.state(self.checked),
+                Some(progressed) => progressed.state(),
                 // A node the stream has not reached, held back by a
                 // blocker that will never settle, is skipped in the
                 // name of the failure that stopped it: the plan runs
@@ -372,7 +386,17 @@ impl Watch {
         // this asks what it has said and never walks the graph.
         self.progressed
             .values()
-            .any(|progressed| matches!(progressed.state(self.checked), State::Running))
+            .any(|progressed| matches!(progressed.state(), State::Running))
+    }
+
+    /// How many times an agent has run on `issue`: one attempt each,
+    /// counting the first. An issue whose agent has yet to start has
+    /// had none.
+    #[must_use]
+    pub fn attempts(&self, issue: u64) -> usize {
+        self.progressed
+            .get(&issue)
+            .map_or(0, |progressed| progressed.attempts)
     }
 
     /// How many issues stand where: the picture's nodes tallied by
@@ -408,14 +432,12 @@ impl Watch {
                 title,
                 titles,
                 problems,
-                checked,
                 ..
             } => {
                 self.work = Some(work.clone());
                 self.title = Some(title.clone());
                 self.titles = titles.iter().cloned().collect();
                 self.problems = problems.clone();
-                self.checked = *checked;
                 self.stage = Stage::Building;
             }
             Change::Happened { event, .. } => self.heard(event),
@@ -431,6 +453,12 @@ impl Watch {
     /// One event of the build's stream, taken in. Only what an issue's
     /// node and its steps say moves a state; the branch's and the pull
     /// request's nodes are the build's own doing, not any issue's.
+    ///
+    /// A step spoken a second time is the same issue round its loop
+    /// again, so what a step says stands for the attempt it is in, and
+    /// the last word wins. What the issue itself accumulates over the
+    /// attempts is the count of them and, at the end, the words its own
+    /// node failed in.
     fn heard(&mut self, event: &Event) {
         let (issue, step) = match event.node {
             Name::Issue(issue) => (issue, None),
@@ -445,12 +473,16 @@ impl Watch {
         }
         let progressed = self.progressed.entry(issue).or_default();
         match (&event.happened, step) {
-            // A failure is the issue's, in the words of whichever step
-            // failed: the first to fail is the one that stopped it.
-            (Happened::Failed(report), _) => {
-                progressed.failed.get_or_insert_with(|| report.clone());
+            // The issue's own node failing is the issue failing: a step
+            // that failed inside it failed one attempt, which the
+            // machine may answer by going round again.
+            (Happened::Failed(report), None) => progressed.failed = Some(report.clone()),
+            (Happened::Started, Some(step)) => {
+                progressed.step = Some(step);
+                if step == Step::Agent {
+                    progressed.attempts += 1;
+                }
             }
-            (Happened::Started, Some(step)) => progressed.step = Some(step),
             (Happened::Finished, Some(step)) => {
                 progressed.step = Some(step);
                 progressed.closed = step == Step::Close;
@@ -458,11 +490,27 @@ impl Watch {
             (Happened::Pushed(commit), Some(Step::Push)) => {
                 progressed.commit = Some(commit.clone());
             }
+            // The issue's own fact: the wait claimed a verdict, or the
+            // policy required no check and claimed none. A red verdict
+            // the machine goes back on is overwritten by the green one
+            // the merge is made on.
+            (Happened::Checked(verdict), Some(Step::Checks)) => {
+                progressed.checked = !matches!(verdict, Verdict::Unclaimed);
+            }
             // The issue's own node: its start puts it Running before
             // its first step speaks, and its end is already told by
             // the close finishing.
             (Happened::Started, None) => {}
-            (Happened::Finished | Happened::Pushed(_), _) => {}
+            // The conclusions of the checks no policy required decide
+            // nothing; they are the transcript's.
+            (Happened::Ran(_), _) => {}
+            (
+                Happened::Checked(_)
+                | Happened::Failed(_)
+                | Happened::Finished
+                | Happened::Pushed(_),
+                _,
+            ) => {}
             (Happened::Said(_) | Happened::Stderr(_), _) => unreachable!("turned away above"),
         }
     }
@@ -696,7 +744,6 @@ mod tests {
             title: "Build the thing".to_owned(),
             titles,
             problems: Vec::new(),
-            checked: false,
         }
     }
 
@@ -709,8 +756,8 @@ mod tests {
     }
 
     /// The whole of one issue's run, start to close, as its node and
-    /// its steps say it.
-    fn built(run: u64, issue: u64) -> Vec<Change> {
+    /// its steps say it, its checks coming to `verdict`.
+    fn built_on(run: u64, issue: u64, verdict: Verdict) -> Vec<Change> {
         let mut changes = vec![change(run, Name::Issue(issue), Happened::Started)];
         for step in [
             Step::Worktree,
@@ -728,10 +775,19 @@ mod tests {
                 let commit = format!("commit-{issue}");
                 changes.push(change(run, node, Happened::Pushed(commit)));
             }
+            if step == Step::Checks {
+                changes.push(change(run, node, Happened::Checked(verdict.clone())));
+            }
             changes.push(change(run, node, Happened::Finished));
         }
         changes.push(change(run, Name::Issue(issue), Happened::Finished));
         changes
+    }
+
+    /// The whole of one issue's run, its checks coming to a policy that
+    /// requires none: what a repository with no ruleset does.
+    fn built(run: u64, issue: u64) -> Vec<Change> {
+        built_on(run, issue, Verdict::Unclaimed)
     }
 
     /// The changes folded, in order, from seq 0.
@@ -821,10 +877,11 @@ mod tests {
         assert_eq!(watch.counts().merging, 1);
     }
 
-    /// A failed step fails its issue in that step's words, and the
-    /// nodes it held back read Skipped naming the blocker.
+    /// A failed issue fails in its own node's words, which are the
+    /// step's where the step is what stopped it, and the nodes it held
+    /// back read Skipped naming the blocker.
     #[test]
-    fn a_failed_step_fails_its_issue_and_skips_what_it_held_back() {
+    fn a_failed_issue_reads_its_own_words_and_skips_what_it_held_back() {
         let words = "the agent exited with code 3";
         let mut changes = vec![reserved(1), started(1, diamond())];
         changes.extend(built(1, 154));
@@ -1053,23 +1110,147 @@ mod tests {
         assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), entry);
     }
 
-    /// Checks expected on the pull request is what `checked` says now,
-    /// GitHub being what runs them.
+    /// Whether a merge was checked is the issue's own: two issues of
+    /// one build read differently, each by the verdict its own Checks
+    /// step came to.
     #[test]
-    fn checked_says_whether_checks_were_expected() {
+    fn checked_is_read_from_each_issues_own_verdict() {
         let mut changes = vec![reserved(1), started(1, diamond())];
-        if let Change::Started { checked, .. } = &mut changes[1] {
-            *checked = true;
-        }
-        changes.extend(built(1, 154));
-        let progress = fold(&changes);
+        changes.extend(built_on(1, 154, Verdict::Green));
+        changes.extend(built_on(1, 155, Verdict::Unclaimed));
+        let states = fold(&changes).watch(RunId(1)).unwrap().states();
         assert_eq!(
-            progress.watch(RunId(1)).unwrap().states()[&154],
+            states[&154],
             State::Merged {
                 commit: "commit-154".to_owned(),
                 checked: true,
-            }
+            },
+            "a green verdict is a checked merge"
         );
+        assert_eq!(
+            states[&155],
+            State::Merged {
+                commit: "commit-155".to_owned(),
+                checked: false,
+            },
+            "a policy requiring no check claims nothing"
+        );
+    }
+
+    /// An issue that goes back from Checks to Agent holds a slot again,
+    /// and comes round to a merge: a step's failure is that attempt's,
+    /// and the issue never reads Failed.
+    #[test]
+    fn an_issue_whose_checks_go_red_and_then_green_merges() {
+        let mut changes = vec![reserved(1), started(1, diamond())];
+        changes.push(change(1, Name::Issue(154), Happened::Started));
+        let mut read = Vec::new();
+        // Every state the fold reads as the stream grows, the repeats
+        // dropped: the loop's shape rather than its every entry.
+        let walk = |changes: &[Change], read: &mut Vec<State>| {
+            let state = fold(changes).watch(RunId(1)).unwrap().states()[&154].clone();
+            if read.last() != Some(&state) {
+                read.push(state);
+            }
+        };
+        let red = Verdict::Red("test".to_owned());
+        for (round, verdict) in [(0, &red), (1, &Verdict::Green)] {
+            for step in [
+                Step::Worktree,
+                Step::Agent,
+                Step::Commit,
+                Step::Push,
+                Step::PullRequest,
+                Step::Checks,
+            ] {
+                // The worktree is cut once, and the pull request opened
+                // once: the second round re-enters the four steps
+                // between them.
+                if round == 1 && matches!(step, Step::Worktree | Step::PullRequest) {
+                    continue;
+                }
+                let node = Name::Step(154, step);
+                changes.push(change(1, node, Happened::Started));
+                walk(&changes, &mut read);
+                if step == Step::Push {
+                    let pushed = Happened::Pushed(format!("commit-{round}"));
+                    changes.push(change(1, node, pushed));
+                }
+                if step == Step::Checks {
+                    changes.push(change(1, node, Happened::Checked(verdict.clone())));
+                }
+                changes.push(change(1, node, Happened::Finished));
+                walk(&changes, &mut read);
+            }
+        }
+        for step in [Step::Merge, Step::Close] {
+            let node = Name::Step(154, step);
+            changes.push(change(1, node, Happened::Started));
+            changes.push(change(1, node, Happened::Finished));
+            walk(&changes, &mut read);
+        }
+        changes.push(change(1, Name::Issue(154), Happened::Finished));
+
+        assert_eq!(
+            read,
+            [
+                State::Running,
+                State::Merging,
+                State::Running,
+                State::Merging,
+                State::Merged {
+                    commit: "commit-1".to_owned(),
+                    checked: true,
+                },
+            ],
+            "round the loop and out of it"
+        );
+        let watch = fold(&changes).watch(RunId(1)).unwrap().clone();
+        assert_eq!(watch.attempts(154), 2, "two agent runs");
+        assert_eq!(
+            watch.layout().unwrap().node(154).unwrap().attempts,
+            2,
+            "which the picture carries for the window to show"
+        );
+    }
+
+    /// An issue that spends its agent runs fails in the words of its
+    /// own node, not in a step's: a red verdict on the way round is an
+    /// attempt's, and the machine says what the budget came to.
+    #[test]
+    fn an_issue_out_of_agent_runs_fails_in_its_own_nodes_words() {
+        let attempt = "checks failed on abc1234: test";
+        let spent = "checks failed on abc1234: test, after 3 agent runs";
+        let mut changes = vec![reserved(1), started(1, diamond())];
+        changes.extend(built(1, 154));
+        changes.push(change(1, Name::Issue(155), Happened::Started));
+        let node = Name::Step(155, Step::Checks);
+        changes.push(change(1, node, Happened::Started));
+        let red = Verdict::Red("test".to_owned());
+        changes.push(change(1, node, Happened::Checked(red)));
+        changes.push(change(1, node, Happened::Failed(attempt.to_owned())));
+        assert_eq!(
+            fold(&changes).watch(RunId(1)).unwrap().states()[&155],
+            State::Merging,
+            "a step's failure leaves the issue where it stands"
+        );
+
+        changes.push(change(
+            1,
+            Name::Issue(155),
+            Happened::Failed(spent.to_owned()),
+        ));
+        let states = fold(&changes).watch(RunId(1)).unwrap().states();
+        assert_eq!(
+            states[&155],
+            State::Failed {
+                report: spent.to_owned()
+            },
+            "the issue's own words"
+        );
+        for held in [156, 157] {
+            assert_eq!(states[&held], State::Skipped { blocker: 155 }, "#{held}");
+        }
     }
 }
 

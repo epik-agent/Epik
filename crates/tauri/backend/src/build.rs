@@ -32,14 +32,16 @@ use std::time::Duration;
 use epik_core::agent::claude::ClaudeCode;
 use epik_core::dag::Dag;
 use epik_core::git::url::Url;
-use epik_core::github::{GitHub, Merge, Repo};
+use epik_core::github::{GitHub, Repo};
 use epik_core::keystore::Secret;
 use epik_core::model_tools::{Tool, arg};
 use epik_core::monitor::{Change, EVENT, Entry, Log, RunId};
 use epik_core::plan::AgentSlots;
-use epik_core::plan::feature::{Build, Name, issue_branch};
+use epik_core::plan::feature::{Build, Errand, Name, issue_branch};
 use epik_core::plan::github::{CheckWait, Feature, feature_branch};
+use epik_core::plan::policy::{Policy, Reading};
 use epik_core::plan::stream::{Event, Sink};
+use epik_core::prompt::{fresh_fix_brief, issue_brief, resumed_fix_brief};
 use epik_core::tracker::IssueTracker;
 use epik_core::tracker::github::GitHubIssues;
 use epik_core::worktrees::Worktrees;
@@ -49,14 +51,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// How many agents the whole app runs at once.
 const SLOTS: usize = 4;
 
-/// How a build waits on GitHub's checks: polled every fifteen seconds
-/// for up to an hour, and a green list read the same way twice before
-/// it is the verdict.
+/// How a build waits on the checks its policy requires: polled every
+/// fifteen seconds for up to an hour. Which checks those are is the
+/// repository's to say, read at launch.
 const CHECKS: CheckWait = CheckWait {
-    expected: true,
     every: Duration::from_secs(15),
     bound: Duration::from_secs(60 * 60),
-    settles: NonZeroUsize::new(2).unwrap(),
 };
 
 /// The `claude` CLI. A GUI app on macOS gets a minimal PATH, so the
@@ -87,24 +87,6 @@ fn claude() -> Result<PathBuf, String> {
                     .join(", ")
             )
         })
-}
-
-/// The standing preface every issue's agent opens with: where it is,
-/// what it must not do, and what implementing an issue means here. The
-/// branch is already checked out in the worktree it runs in, and the
-/// commit and the push are the build's own steps, after the agent has
-/// exited.
-const PREAMBLE: &str = "You are working in a git worktree that has been prepared for you, \
-on the branch named below, which is already checked out. Implement the issue that follows. \
-Commit your work as you go, with clear commit messages, so that the branch tells the story \
-of what you built. Write tests covering the work, and make them pass. Do not push, do not \
-create or switch branches, and do not touch git configuration — the identity and branch are \
-set for you.";
-
-/// What one issue's agent is told: the preamble, the branch it is on,
-/// then the issue as the tracker holds it.
-fn brief(branch: &str, issue: &str) -> String {
-    format!("{PREAMBLE}\n\nBranch: {branch}\n\n{issue}")
 }
 
 /// Which features are building right now, as `repository#feature`. A
@@ -353,6 +335,11 @@ fn launch(
         repo: repo.clone(),
     };
     let read = read_work(&issues, number).map_err(abandon)?;
+    // Before the build creates anything: what the repository's rulesets
+    // let it do, and the refusal when they forbid what it would do.
+    let Reading { settled, said } = Policy::read(&github, &repo, number, &read.work)
+        .map_err(|error| abandon(format!("the repository's rules could not be read: {error}")))?;
+    let policy = settled.map_err(abandon)?;
     let url = Url::Scheme(
         format!("https://github.com/{repo}.git")
             .parse()
@@ -378,36 +365,48 @@ fn launch(
         feature,
         url,
         worktrees: Worktrees::new(state.worktrees.clone()),
+        required: policy.checks.clone(),
         checks: CHECKS,
-        merge: Merge::Squash,
+        merge: policy.merge,
         slots: state.slots.clone(),
         sink,
-        agent: Box::new(move |issue, cwd| ClaudeCode {
-            binary: claude.clone(),
-            cwd: cwd.to_owned(),
-            prompt: brief(
-                &issue_branch(issue),
-                briefs.get(&issue).map_or("", String::as_str),
-            ),
-            model: model.clone(),
-            api_key: api_key.clone(),
+        agent: Box::new(move |issue, cwd, errand| {
+            let branch = issue_branch(issue);
+            let text = briefs.get(&issue).map_or("", String::as_str);
+            let (prompt, resume) = match errand {
+                Errand::Implement => (issue_brief(&branch, text), None),
+                Errand::Resume { session, checks } => {
+                    (resumed_fix_brief(checks), Some(session.clone()))
+                }
+                Errand::Fresh { diff, checks } => {
+                    (fresh_fix_brief(&branch, text, diff, checks), None)
+                }
+            };
+            ClaudeCode {
+                binary: claude.clone(),
+                cwd: cwd.to_owned(),
+                prompt,
+                model: model.clone(),
+                api_key: api_key.clone(),
+                resume,
+            }
         }),
     };
     let count = work.nodes().len();
     // A feature with no issues under it runs its branch and its pull
     // request and nothing between: the one thing the old plan's
     // `doomed` named that the shape of a `Dag` cannot say for itself.
-    let problems = match count {
+    let mut problems = match count {
         0 => vec![format!("feature {number} has no issues under it")],
         _ => Vec::new(),
     };
+    problems.extend(said);
     log.record(Change::Started {
         run,
         work: work.clone(),
         title,
         titles,
         problems,
-        checked: CHECKS.expected,
     });
     let plan = build.plan(work);
     state.runtime.spawn(async move {
@@ -502,13 +501,5 @@ mod tests {
         let held = running.claim(&repo(), 1).unwrap();
         drop(held);
         running.claim(&repo(), 1).expect("the first build is done");
-    }
-
-    #[test]
-    fn the_brief_leads_with_the_preamble_and_names_the_branch_and_the_issue() {
-        let brief = brief(&issue_branch(7), "# Lay the stone\n\nAnd square it.");
-        assert!(brief.starts_with(PREAMBLE), "{brief}");
-        assert!(brief.contains("Branch: issue-7"), "{brief}");
-        assert!(brief.contains("# Lay the stone"), "{brief}");
     }
 }

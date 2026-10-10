@@ -39,10 +39,30 @@ pub enum Happened {
     /// subject, the merge's argument — and the one a merged issue is
     /// remembered by.
     Pushed(String),
+    /// What the wait for the required checks came to. The verdict is
+    /// the issue's own fact, so whether its merge was checked is read
+    /// here rather than inferred from the build it belongs to.
+    Checked(Verdict),
+    /// The conclusions of the check runs the policy leaves out, named
+    /// and read together. They decide nothing, and a build that waited
+    /// on the required checks alone still says what the rest came to.
+    Ran(String),
     /// The task succeeded.
     Finished,
     /// The task failed, in the error's own words, causes and all.
     Failed(String),
+}
+
+/// What a wait saw the required checks come to.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Verdict {
+    /// Every required check concluded green.
+    Green,
+    /// A required check concluded red: the names of those that did.
+    Red(String),
+    /// A policy requiring no check: the merge proceeds and claims
+    /// nothing.
+    Unclaimed,
 }
 
 /// What a feature build's events are filed under: a node of its plan,
