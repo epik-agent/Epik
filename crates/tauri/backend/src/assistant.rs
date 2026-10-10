@@ -105,16 +105,22 @@ impl AssistantState {
     }
 
     /// Sends `item` out, stamped with its place on the channel. An item
-    /// that is conversation is kept in the snapshot, and the item that
-    /// ends the turn returns the claim — all under the one lock, held
-    /// for the send and released before anything else, so a snapshot
-    /// taken between two events is exact.
+    /// that is conversation is kept in the snapshot — a resolution in
+    /// the place of the question it settles — and the item that ends
+    /// the turn returns the claim — all under the one lock, held for
+    /// the send and released before anything else, so a snapshot taken
+    /// between two events is exact.
     fn emit(&self, item: TranscriptItem) {
         Self::send(&mut self.channel(), &self.send, item);
     }
 
     /// [`emit`](Self::emit) on a channel already held.
     fn send(channel: &mut Snapshot, send: &dyn Fn(Event), item: TranscriptItem) {
+        if let TranscriptItem::QuestionResolved { id, .. } = &item {
+            channel.items.retain(
+                |kept| !matches!(kept, TranscriptItem::Question { id: asked, .. } if asked == id),
+            );
+        }
         if item.is_conversation() {
             channel.items.push(item.clone());
         }
@@ -177,6 +183,21 @@ fn ask(state: &AssistantState, ask: Ask) -> Answer {
         answer: answer.clone(),
     });
     answer
+}
+
+/// The turn thread's hold on the channel's claim. A thread that unwinds
+/// before its turn ends gives the floor back as a failure, so a send
+/// after a panic is answered instead of refused forever.
+struct Claim<'a>(&'a AssistantState);
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.emit(TranscriptItem::TurnFailed {
+                reason: "The turn's thread panicked; see the log.".to_owned(),
+            });
+        }
+    }
 }
 
 /// Delivers `answer` to the handler waiting on question `id`. An id with
@@ -360,6 +381,7 @@ pub async fn send_message(
         registry.register(choose_repository(asker(app.clone())));
         let stop = AtomicBool::new(false);
         let state = app.state::<AssistantState>();
+        let _claim = Claim(&state);
         turn(
             replying_with(&client, &SYSTEM_PROMPT, &transcript, &registry, &stop),
             |item| state.emit(item),
@@ -689,9 +711,13 @@ mod tests {
             panic!("the first event is the question");
         };
         assert_eq!(asked, where_to());
-        assert!(
-            state.snapshot().items.is_empty(),
-            "a pending question stays on the channel"
+        assert_eq!(
+            state.snapshot().items,
+            [TranscriptItem::Question {
+                id: id.clone(),
+                ask: where_to()
+            }],
+            "a pending question is in the snapshot, for a window that mounts mid-ask"
         );
 
         answer(
@@ -720,8 +746,34 @@ mod tests {
             resolved,
             "the resolution is emitted"
         );
-        assert_eq!(state.snapshot().items, [resolved], "and kept");
+        assert_eq!(
+            state.snapshot().items,
+            [resolved],
+            "and kept, in the question's place"
+        );
         assert!(state.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_turn_thread_that_panics_returns_its_claim_as_a_failure() {
+        let (state, events) = state();
+        assert!(state.post("hello".to_owned()).is_some());
+        let turn = std::thread::spawn({
+            let state = Arc::clone(&state);
+            move || {
+                let _claim = Claim(&state);
+                panic!("a tool blew up");
+            }
+        });
+        assert!(turn.join().is_err());
+
+        let last = events.try_iter().last().unwrap().item;
+        assert!(
+            matches!(last, TranscriptItem::TurnFailed { .. }),
+            "{last:?}"
+        );
+        assert!(!state.snapshot().turning, "the floor is free again");
+        assert!(state.post("again".to_owned()).is_some());
     }
 
     #[test]

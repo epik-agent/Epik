@@ -187,10 +187,10 @@ impl From<TranscriptItem> for Body {
 
 impl TranscriptItem {
     /// Whether this item is conversation: something said, an observed
-    /// act, or a question settled — what a
-    /// [`Snapshot`](super::Snapshot) keeps and replays. A delta, a
-    /// pending question and a failure are news of the moment: they
-    /// exist on the channel alone.
+    /// act, or a question — pending, so a window that mounts mid-ask
+    /// can answer it, or settled — what a [`Snapshot`](super::Snapshot)
+    /// keeps and replays. A delta and a failure are news of the moment:
+    /// they exist on the channel alone.
     #[must_use]
     pub const fn is_conversation(&self) -> bool {
         matches!(
@@ -198,6 +198,7 @@ impl TranscriptItem {
             Self::Message { .. }
                 | Self::ToolCall { .. }
                 | Self::ToolResult { .. }
+                | Self::Question { .. }
                 | Self::QuestionResolved { .. }
         )
     }
@@ -628,9 +629,9 @@ mod tests {
             (tool_call(), true),
             (tool_result(true), true),
             (tool_result(false), true),
+            (question("1"), true),
             (resolved("1"), true),
             (delta("Hel"), false),
-            (question("1"), false),
             (failed("no key"), false),
         ] {
             assert_eq!(item.is_conversation(), kept, "{item:?}");

@@ -113,12 +113,19 @@ async fn ask<T: DeserializeOwned>(command: &str) -> Result<T, String> {
 /// A command that answers with nothing: `args` encoded, sent, and the
 /// Err is the channel's refusal.
 async fn tell(command: &str, args: &impl Serialize) -> Result<(), String> {
+    tell_or(command, args, |error| error_text(&error)).await
+}
+
+/// [`tell`] with the refusal read by `refused`, in its own type. A
+/// request that cannot be encoded is refused in words.
+async fn tell_or<E: From<String>>(
+    command: &str,
+    args: &impl Serialize,
+    refused: impl FnOnce(JsValue) -> E,
+) -> Result<(), E> {
     let args = serde_wasm_bindgen::to_value(args)
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke(command, args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+        .map_err(|_| E::from("the request could not be encoded".to_owned()))?;
+    invoke(command, args).await.map(|_| ()).map_err(refused)
 }
 
 /// Where the secret filed under `name` stands, by asking the backend.
@@ -182,6 +189,13 @@ impl From<Refusal> for Refused {
     }
 }
 
+/// A reason in words is a send the backend never heard.
+impl From<String> for Refused {
+    fn from(reason: String) -> Self {
+        Self::Unreachable(reason)
+    }
+}
+
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -194,15 +208,11 @@ impl fmt::Display for Refused {
 /// Posts the user's message. The message becomes visible when it comes
 /// back around as a transcript event.
 pub async fn send_message(text: String) -> Result<(), Refused> {
-    let args = serde_wasm_bindgen::to_value(&SendArgs { text: &text })
-        .map_err(|_| Refused::Unreachable("the request could not be encoded".to_owned()))?;
-    invoke("send_message", args)
-        .await
-        .map(|_| ())
-        .map_err(|error| {
-            serde_wasm_bindgen::from_value::<Refusal>(error.clone())
-                .map_or_else(|_| Refused::Unreachable(error_text(&error)), Refused::from)
-        })
+    tell_or("send_message", &SendArgs { text: &text }, |error| {
+        serde_wasm_bindgen::from_value::<Refusal>(error.clone())
+            .map_or_else(|_| Refused::from(error_text(&error)), Refused::from)
+    })
+    .await
 }
 
 /// Answers the pending question `id`. The card that asked shows nothing

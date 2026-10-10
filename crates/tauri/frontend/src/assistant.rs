@@ -73,12 +73,16 @@ enum Link {
 
 /// The tab's state: the transcript, the messages drawn from it, the text
 /// of the reply still arriving, whether a turn is in flight, why the
-/// last send went nowhere, and where the window stands with the channel.
+/// last send went nowhere, the composer's draft, and where the window
+/// stands with the channel.
 #[derive(Clone, Copy)]
 struct Window {
     transcript: StoredValue<Transcript>,
     link: StoredValue<Link>,
     messages: RwSignal<Vec<Message>>,
+    /// What the composer holds: the text the user is writing, and a
+    /// refused send's text handed back to them.
+    draft: RwSignal<String>,
     /// The one live reply's text. A transcript has one live entry at a
     /// time, its tail, so one signal serves them all.
     live: RwSignal<String>,
@@ -98,6 +102,7 @@ impl Window {
             transcript: StoredValue::new(Transcript::default()),
             link: StoredValue::new(Link::Mounting(Vec::new())),
             messages: RwSignal::new(Vec::new()),
+            draft: RwSignal::new(String::new()),
             live: RwSignal::new(String::new()),
             busy: RwSignal::new(false),
             refusal: RwSignal::new(None),
@@ -121,11 +126,12 @@ impl Window {
         }
     }
 
-    /// The snapshot: `busy` as the turn stands, the history folded, and
-    /// then whatever was heard meanwhile, each event counting by its
-    /// place against the snapshot's.
+    /// The snapshot: `busy` when a turn is in flight — the snapshot's,
+    /// or one a send started while the snapshot was on its way — the
+    /// history folded, and then whatever was heard meanwhile, each
+    /// event counting by its place against the snapshot's.
     fn mount(self, snapshot: Snapshot) {
-        self.busy.set(snapshot.turning);
+        self.busy.update(|busy| *busy |= snapshot.turning);
         for item in snapshot.items {
             self.fold(item);
         }
@@ -156,14 +162,21 @@ impl Window {
         self.refusal.set(None);
     }
 
-    /// The send went nowhere. A turn in flight is someone else's and
-    /// carries on, so `busy` stays as it is; a send the backend never
-    /// heard started nothing, so the composer is free.
-    fn refused(self, refused: Refused) {
+    /// The send of `text` went nowhere. A turn in flight is someone
+    /// else's and carries on, so `busy` stays as it is; a send the
+    /// backend never heard started nothing, so the composer is free.
+    /// Either way the text goes back to the composer, when nothing new
+    /// is written there yet.
+    fn refused(self, refused: Refused, text: String) {
         if let Refused::Unreachable(_) = refused {
             self.busy.set(false);
         }
         self.refusal.set(Some(refused.to_string()));
+        self.draft.update(|draft| {
+            if draft.trim().is_empty() {
+                *draft = text;
+            }
+        });
     }
 
     /// Folds one item, history or live, into the transcript and applies
@@ -301,8 +314,8 @@ pub fn Assistant() -> impl IntoView {
     let send = move |text: String| {
         tab.sending();
         spawn_local(async move {
-            if let Err(refused) = ipc::send_message(text).await {
-                tab.refused(refused);
+            if let Err(refused) = ipc::send_message(text.clone()).await {
+                tab.refused(refused, text);
             }
         });
     };
@@ -345,6 +358,7 @@ pub fn Assistant() -> impl IntoView {
                 <Chat
                     messages=tab.messages
                     on_send=send
+                    draft=tab.draft
                     busy=tab.busy
                     busy_label="Waiting for a reply"
                     placeholder="Message"
@@ -681,11 +695,16 @@ mod tests {
         let streaming = window.messages.get_untracked()[1].id.clone();
 
         window.sending();
-        window.refused(Refused::TurnInFlight);
+        window.refused(Refused::TurnInFlight, "and another thing".to_owned());
         assert_eq!(
             shown(window),
             [text("user", false, "hi"), text("assistant", true, "Hel")],
             "the streamed text is still there"
+        );
+        assert_eq!(
+            window.draft.get_untracked(),
+            "and another thing",
+            "the refused text is back in the composer"
         );
         assert!(
             window.busy.get_untracked(),
@@ -718,7 +737,7 @@ mod tests {
         window.hear(delta("Hel"));
         window.sending();
         window.hear(said(Role::Assistant, "Hello"));
-        window.refused(Refused::TurnInFlight);
+        window.refused(Refused::TurnInFlight, "hi".to_owned());
         assert!(
             !window.busy.get_untracked(),
             "nothing is in flight to wait for"
@@ -734,9 +753,10 @@ mod tests {
     fn a_send_the_backend_never_heard_frees_the_composer() {
         let window = window();
         window.sending();
-        window.refused(Refused::Unreachable(
-            "the backend would not answer".to_owned(),
-        ));
+        window.refused(
+            Refused::Unreachable("the backend would not answer".to_owned()),
+            "hi".to_owned(),
+        );
         assert!(!window.busy.get_untracked(), "no turn started");
         assert_eq!(
             window.refusal.get_untracked().as_deref(),
@@ -747,10 +767,33 @@ mod tests {
     #[test]
     fn the_next_send_spends_the_refusal() {
         let window = window();
-        window.refused(Refused::TurnInFlight);
+        window.refused(Refused::TurnInFlight, "hi".to_owned());
         window.sending();
         assert!(window.busy.get_untracked());
         assert_eq!(window.refusal.get_untracked(), None);
+    }
+
+    #[test]
+    fn a_refusal_leaves_a_draft_already_begun_alone() {
+        let window = window();
+        window.draft.set("something newer".to_owned());
+        window.refused(Refused::TurnInFlight, "hi".to_owned());
+        assert_eq!(window.draft.get_untracked(), "something newer");
+    }
+
+    /// A send made while the snapshot was on its way: the snapshot,
+    /// taken before the message landed, says nothing is in flight, and
+    /// the composer goes on waiting for the turn the send started.
+    #[test]
+    fn a_send_before_the_snapshot_lands_keeps_the_composer_waiting() {
+        let window = window();
+        window.sending();
+        window.mount(Snapshot::default());
+        assert!(window.busy.get_untracked());
+
+        window.receive(event(0, said(Role::User, "hi")));
+        window.receive(event(1, said(Role::Assistant, "Hello.")));
+        assert!(!window.busy.get_untracked(), "and its end frees it");
     }
 
     #[test]
