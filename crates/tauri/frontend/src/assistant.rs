@@ -22,7 +22,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::card::{Card, QuestionCard, tone_class};
-use crate::ipc;
+use crate::ipc::{self, Refused};
 use crate::json::JsonTree;
 
 /// Whose messages sit where, in what colors: the user against the right
@@ -105,10 +105,14 @@ impl Window {
         self.refusal.set(None);
     }
 
-    /// The backend refused the send. The turn in flight is someone
-    /// else's and carries on; only the reason changes hands.
-    fn refused(self, reason: String) {
-        self.refusal.set(Some(reason));
+    /// The send went nowhere. A turn in flight is someone else's and
+    /// carries on, so `busy` stays as it is; a send the backend never
+    /// heard started nothing, so the composer is free.
+    fn refused(self, refused: Refused) {
+        if let Refused::Unreachable(_) = refused {
+            self.busy.set(false);
+        }
+        self.refusal.set(Some(refused.to_string()));
     }
 
     /// Folds one item, history or live, into the transcript and applies
@@ -248,8 +252,8 @@ pub fn Assistant() -> impl IntoView {
     let send = move |text: String| {
         tab.sending();
         spawn_local(async move {
-            if let Err(reason) = ipc::send_message(text).await {
-                tab.refused(reason);
+            if let Err(refused) = ipc::send_message(text).await {
+                tab.refused(refused);
             }
         });
     };
@@ -314,7 +318,7 @@ pub fn Assistant() -> impl IntoView {
                     options=options()
                 />
             </div>
-            <Show when=move || tab.refusal.get().is_some()>
+            <Show when=move || tab.refusal.with(Option::is_some)>
                 <p
                     role="alert"
                     class=format!("shrink-0 border-t px-3 py-1.5 text-sm {}", tone_class(Tone::Error))
@@ -521,7 +525,7 @@ mod tests {
         let streaming = window.messages.get_untracked()[1].id.clone();
 
         window.sending();
-        window.refused("a turn is already in flight".to_owned());
+        window.refused(Refused::TurnInFlight);
         assert_eq!(
             shown(window),
             [text("user", false, "hi"), text("assistant", true, "Hel")],
@@ -553,9 +557,41 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_after_the_turn_ended_leaves_the_composer_free() {
+        let window = window();
+        window.hear(delta("Hel"));
+        window.sending();
+        window.hear(said(Role::Assistant, "Hello"));
+        window.refused(Refused::TurnInFlight);
+        assert!(
+            !window.busy.get_untracked(),
+            "nothing is in flight to wait for"
+        );
+        assert_eq!(
+            window.refusal.get_untracked().as_deref(),
+            Some("a turn is already in flight"),
+            "the message still went nowhere"
+        );
+    }
+
+    #[test]
+    fn a_send_the_backend_never_heard_frees_the_composer() {
+        let window = window();
+        window.sending();
+        window.refused(Refused::Unreachable(
+            "the backend would not answer".to_owned(),
+        ));
+        assert!(!window.busy.get_untracked(), "no turn started");
+        assert_eq!(
+            window.refusal.get_untracked().as_deref(),
+            Some("the backend would not answer")
+        );
+    }
+
+    #[test]
     fn the_next_send_spends_the_refusal() {
         let window = window();
-        window.refused("a turn is already in flight".to_owned());
+        window.refused(Refused::TurnInFlight);
         window.sending();
         assert!(window.busy.get_untracked());
         assert_eq!(window.refusal.get_untracked(), None);

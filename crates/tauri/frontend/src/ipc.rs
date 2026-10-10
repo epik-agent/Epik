@@ -5,7 +5,9 @@
 //! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
 //! — so nothing here re-declares what the library already says.
 
-use epik_core::assistant::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
+use std::fmt;
+
+use epik_core::assistant::{Answer, ModelInfo, Refusal, TRANSCRIPT_EVENT, TranscriptItem};
 use epik_core::config::Config;
 use epik_core::keystore::{Resolved, Secret};
 use epik_core::monitor::{EVENT, Entry};
@@ -161,11 +163,46 @@ pub async fn github_login() -> Result<String, String> {
     ask("github_login").await
 }
 
+/// Why a send went nowhere, distinct from a turn that fails: the
+/// backend's own refusal, or a command that never reached it.
+#[derive(Debug)]
+pub enum Refused {
+    /// The backend holds a turn in flight, which the composer waits for.
+    TurnInFlight,
+    /// The command channel failed, so no turn started. The reason, for
+    /// the notice by the composer.
+    Unreachable(String),
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::TurnInFlight => Self::TurnInFlight,
+        }
+    }
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TurnInFlight => f.write_str("a turn is already in flight"),
+            Self::Unreachable(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Posts the user's message. The message becomes visible when it comes
-/// back around as a transcript event; the Err is the command channel's
-/// refusal, distinct from a turn that fails.
-pub async fn send_message(text: String) -> Result<(), String> {
-    tell("send_message", &SendArgs { text: &text }).await
+/// back around as a transcript event.
+pub async fn send_message(text: String) -> Result<(), Refused> {
+    let args = serde_wasm_bindgen::to_value(&SendArgs { text: &text })
+        .map_err(|_| Refused::Unreachable("the request could not be encoded".to_owned()))?;
+    invoke("send_message", args)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            serde_wasm_bindgen::from_value::<Refusal>(error.clone())
+                .map_or_else(|_| Refused::Unreachable(error_text(&error)), Refused::from)
+        })
 }
 
 /// Answers the pending question `id`. The card that asked shows nothing

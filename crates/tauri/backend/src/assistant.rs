@@ -27,7 +27,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
 
 use epik_core::assistant::{
-    Answer, Ask, Client, Conversation, Error, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
+    Answer, Ask, Client, Conversation, Error, Refusal, Role, SYSTEM_PROMPT, TRANSCRIPT_EVENT,
     TranscriptItem, run,
 };
 use epik_core::config::Config;
@@ -262,9 +262,9 @@ pub async fn send_message(
     app: AppHandle,
     state: State<'_, AssistantState>,
     text: String,
-) -> Result<(), String> {
+) -> Result<(), Refusal> {
     if !state.begin_turn() {
-        return Err("a turn is already in flight".to_owned());
+        return Err(Refusal::TurnInFlight);
     }
 
     // Append and snapshot under one brief lock; the turn itself runs

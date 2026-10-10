@@ -77,6 +77,15 @@ pub enum TranscriptItem {
     },
 }
 
+/// Why the backend turned a send away. Its serde form is tagged like a
+/// [`TranscriptItem`], and crosses the IPC barrier as the command's Err.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Refusal {
+    /// A turn is already in flight, and it keeps the floor.
+    TurnInFlight,
+}
+
 /// What the persona needs from the user, in modality-free terms: the
 /// backend says *what* it wants, never how to collect it — every input
 /// modality is the frontend's. Tagged like [`TranscriptItem`], so a new
@@ -300,6 +309,16 @@ mod tests {
             let received: TranscriptItem = serde_json::from_str(&wire).unwrap();
             assert_eq!(received, item);
         }
+    }
+
+    #[test]
+    fn a_refusal_is_tagged_like_an_item() {
+        let wire = serde_json::to_string(&Refusal::TurnInFlight).unwrap();
+        assert_eq!(wire, r#"{"kind":"turn_in_flight"}"#);
+        assert_eq!(
+            serde_json::from_str::<Refusal>(&wire).unwrap(),
+            Refusal::TurnInFlight
+        );
     }
 
     /// Asks and answers are tagged inside the item, one tag each.
