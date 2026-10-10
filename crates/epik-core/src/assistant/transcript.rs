@@ -186,6 +186,22 @@ impl From<TranscriptItem> for Body {
 }
 
 impl TranscriptItem {
+    /// Whether this item is conversation: something said, an observed
+    /// act, or a question settled — what a
+    /// [`Snapshot`](super::Snapshot) keeps and replays. A delta, a
+    /// pending question and a failure are news of the moment: they
+    /// exist on the channel alone.
+    #[must_use]
+    pub const fn is_conversation(&self) -> bool {
+        matches!(
+            self,
+            Self::Message { .. }
+                | Self::ToolCall { .. }
+                | Self::ToolResult { .. }
+                | Self::QuestionResolved { .. }
+        )
+    }
+
     /// Whether this item is the last of its turn: the assistant's
     /// completed reply, or the failure that came instead. The rule a
     /// window uses to clear its busy state.
@@ -602,6 +618,23 @@ mod tests {
         }
         let watched = folded(history.into_iter().chain(live));
         assert_eq!(mounted.entries(), watched.entries());
+    }
+
+    #[test]
+    fn what_was_said_and_done_is_conversation_and_news_of_the_moment_stays_on_the_channel() {
+        for (item, kept) in [
+            (message(Role::User, "hi"), true),
+            (message(Role::Assistant, "Hello"), true),
+            (tool_call(), true),
+            (tool_result(true), true),
+            (tool_result(false), true),
+            (resolved("1"), true),
+            (delta("Hel"), false),
+            (question("1"), false),
+            (failed("no key"), false),
+        ] {
+            assert_eq!(item.is_conversation(), kept, "{item:?}");
+        }
     }
 
     #[test]
