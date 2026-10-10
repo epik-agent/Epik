@@ -3,12 +3,12 @@
 //!
 //! Every item goes out through [`AssistantState::emit`], which is the
 //! whole channel in one place: under one lock it keeps the item in the
-//! canonical [`Conversation`] when the item is conversation, returns the
+//! canonical [`Snapshot`] when the item is conversation, returns the
 //! turn when the item is the one that ends it, stamps the item with its
-//! place as an [`Event`] and sends it. [`get_transcript`] takes its
-//! [`Snapshot`] under the same lock, so the snapshot's position and the
-//! events' places agree exactly: a window compares the two and counts
-//! each event once or not at all.
+//! place as an [`Event`] and sends it. [`get_transcript`] hands out that
+//! snapshot under the same lock, so its position and the events' places
+//! agree exactly: a window compares the two and counts each event once
+//! or not at all.
 //!
 //! [`send_message`] emits the user's message and runs the library's
 //! tool loop on its own thread — deltas stream out as `AssistantDelta`
@@ -34,8 +34,8 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
 
 use epik_core::assistant::{
-    Answer, Ask, Client, Conversation, Error, Event, Refusal, Role, SYSTEM_PROMPT, Snapshot,
-    TRANSCRIPT_EVENT, TranscriptItem, run,
+    Answer, Ask, Client, Error, Event, Refusal, Role, SYSTEM_PROMPT, Snapshot, TRANSCRIPT_EVENT,
+    TranscriptItem, run,
 };
 use epik_core::config::Config;
 use epik_core::github::GitHub;
@@ -55,32 +55,23 @@ pub(crate) const GITHUB_TOKEN_NAME: &str = "GITHUB_TOKEN";
 /// Where to send someone whose turn failed for want of a key.
 const SET_KEY_HINT: &str = "Set the Anthropic key in Settings (Cmd+,).";
 
-/// The assistant's whole state: the channel, the way out of it, and the
-/// questions a turn is waiting on.
+/// The assistant's whole state: the channel as it stands, the way out
+/// of it, and the questions a turn is waiting on.
 pub struct AssistantState {
-    channel: Mutex<Channel>,
+    /// Under the one lock that keeps its position and the events' places
+    /// in step.
+    channel: Mutex<Snapshot>,
     /// Where every event goes: the window, or a test's receiver.
-    send: Box<dyn Fn(&Event) + Send + Sync>,
+    send: Box<dyn Fn(Event) + Send + Sync>,
     /// Question id to the sender the blocked handler is waiting on.
     pending: Mutex<BTreeMap<String, Sender<Answer>>>,
     /// The monotonic source of question ids.
     next_question: AtomicU64,
 }
 
-/// What the channel has carried, under the one lock that keeps a
-/// snapshot and the events' places in step: the canonical transcript,
-/// the place the next event takes, and whether a turn is in flight.
-#[derive(Default)]
-struct Channel {
-    conversation: Conversation,
-    /// The `seq` of the next event: how many have gone out so far.
-    next: u64,
-    turning: bool,
-}
-
 impl AssistantState {
     /// A state whose events go out through `send`.
-    pub fn new(send: impl Fn(&Event) + Send + Sync + 'static) -> Self {
+    pub fn new(send: impl Fn(Event) + Send + Sync + 'static) -> Self {
         Self {
             channel: Mutex::default(),
             send: Box::new(send),
@@ -89,50 +80,58 @@ impl AssistantState {
         }
     }
 
-    fn channel(&self) -> std::sync::MutexGuard<'_, Channel> {
+    fn channel(&self) -> std::sync::MutexGuard<'_, Snapshot> {
         self.channel.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Claims the turn: true when it is now this caller's, false when it
-    /// already belongs to a turn in flight, which keeps it until the
-    /// item that ends it is emitted.
-    fn begin_turn(&self) -> bool {
+    /// Claims the turn and posts the user's message, in one: the
+    /// transcript the turn runs over, or `None` when the turn already
+    /// belongs to one in flight, which keeps it until the item that ends
+    /// it goes out.
+    fn post(&self, text: String) -> Option<Vec<TranscriptItem>> {
         let mut channel = self.channel();
-        let free = !channel.turning;
-        channel.turning = true;
-        free
+        if std::mem::replace(&mut channel.turning, true) {
+            return None;
+        }
+        Self::send(
+            &mut channel,
+            &self.send,
+            TranscriptItem::Message {
+                role: Role::User,
+                text,
+            },
+        );
+        Some(channel.items.clone())
     }
 
     /// Sends `item` out, stamped with its place on the channel. An item
-    /// that is conversation is kept in the canonical transcript, and the
-    /// item that ends the turn returns the claim — all under the one
-    /// lock, held for the send and released before anything else, so a
-    /// snapshot taken between two events is exact.
+    /// that is conversation is kept in the snapshot, and the item that
+    /// ends the turn returns the claim — all under the one lock, held
+    /// for the send and released before anything else, so a snapshot
+    /// taken between two events is exact.
     fn emit(&self, item: TranscriptItem) {
-        let mut channel = self.channel();
+        Self::send(&mut self.channel(), &self.send, item);
+    }
+
+    /// [`emit`](Self::emit) on a channel already held.
+    fn send(channel: &mut Snapshot, send: &dyn Fn(Event), item: TranscriptItem) {
         if item.is_conversation() {
-            channel.conversation.push(item.clone());
+            channel.items.push(item.clone());
         }
         if item.ends_turn() {
             channel.turning = false;
         }
         let event = Event {
-            seq: channel.next,
+            seq: channel.seq,
             item,
         };
-        channel.next += 1;
-        (self.send)(&event);
+        channel.seq += 1;
+        send(event);
     }
 
-    /// The channel as it stands: the conversation so far, the place the
-    /// next event takes, and whether a turn is in flight.
+    /// The channel as it stands.
     fn snapshot(&self) -> Snapshot {
-        let channel = self.channel();
-        Snapshot {
-            items: channel.conversation.items().cloned().collect(),
-            seq: channel.next,
-            turning: channel.turning,
-        }
+        self.channel().clone()
     }
 
     /// Registers a fresh pending question and returns its id with the
@@ -293,17 +292,9 @@ pub async fn send_message(
     state: State<'_, AssistantState>,
     text: String,
 ) -> Result<(), Refusal> {
-    if !state.begin_turn() {
+    let Some(transcript) = state.post(text) else {
         return Err(Refusal::TurnInFlight);
-    }
-
-    // The message goes out, and the turn runs over what the channel
-    // holds now; the turn's own claim is what keeps that current.
-    state.emit(TranscriptItem::Message {
-        role: Role::User,
-        text,
-    });
-    let transcript = state.snapshot().items;
+    };
 
     let key = match OsKeyring.resolve(API_KEY_NAME) {
         Resolved::Found(key) => key,
@@ -411,9 +402,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
 
-    fn user(text: &str) -> TranscriptItem {
+    fn said(role: Role, text: &str) -> TranscriptItem {
         TranscriptItem::Message {
-            role: Role::User,
+            role,
             text: text.to_owned(),
         }
     }
@@ -427,20 +418,13 @@ mod tests {
     fn state() -> (Arc<AssistantState>, Receiver<Event>) {
         let (events_in, events) = channel();
         let state = AssistantState::new(move |event| {
-            let _ = events_in.send(event.clone());
+            let _ = events_in.send(event);
         });
         (Arc::new(state), events)
     }
 
     fn delta(text: &str) -> TranscriptItem {
         TranscriptItem::AssistantDelta {
-            text: text.to_owned(),
-        }
-    }
-
-    fn reply(text: &str) -> TranscriptItem {
-        TranscriptItem::Message {
-            role: Role::Assistant,
             text: text.to_owned(),
         }
     }
@@ -465,16 +449,16 @@ mod tests {
     #[test]
     fn every_event_goes_out_stamped_with_its_place_from_zero() {
         let (state, events) = state();
-        state.emit(user("hello"));
+        state.emit(said(Role::User, "hello"));
         state.emit(delta("Hel"));
-        state.emit(reply("Hello"));
+        state.emit(said(Role::Assistant, "Hello"));
         let stamped: Vec<_> = events.try_iter().collect();
         assert_eq!(
             stamped,
             [
                 Event {
                     seq: 0,
-                    item: user("hello")
+                    item: said(Role::User, "hello")
                 },
                 Event {
                     seq: 1,
@@ -482,7 +466,7 @@ mod tests {
                 },
                 Event {
                     seq: 2,
-                    item: reply("Hello")
+                    item: said(Role::Assistant, "Hello")
                 },
             ]
         );
@@ -498,14 +482,22 @@ mod tests {
         let failed = TranscriptItem::TurnFailed {
             reason: "no key".to_owned(),
         };
-        state.emit(user("hello"));
+        state.emit(said(Role::User, "hello"));
         state.emit(delta("Hel"));
         state.emit(call.clone());
         state.emit(failed.clone());
 
         let sent: Vec<_> = events.try_iter().map(|event| event.item).collect();
-        assert_eq!(sent, [user("hello"), delta("Hel"), call.clone(), failed]);
-        assert_eq!(state.snapshot().items, [user("hello"), call]);
+        assert_eq!(
+            sent,
+            [
+                said(Role::User, "hello"),
+                delta("Hel"),
+                call.clone(),
+                failed
+            ]
+        );
+        assert_eq!(state.snapshot().items, [said(Role::User, "hello"), call]);
     }
 
     /// The snapshot stands between two events: everything before its
@@ -515,30 +507,49 @@ mod tests {
     fn a_snapshot_is_positioned_at_the_next_event() {
         let (state, events) = state();
         assert_eq!(state.snapshot(), Snapshot::default());
-        state.emit(user("hello"));
+        state.emit(said(Role::User, "hello"));
         state.emit(delta("Hel"));
 
         let snapshot = state.snapshot();
-        assert_eq!(snapshot.items, [user("hello")]);
+        assert_eq!(snapshot.items, [said(Role::User, "hello")]);
         assert_eq!(snapshot.seq, 2);
 
-        state.emit(reply("Hello"));
+        state.emit(said(Role::Assistant, "Hello"));
         assert_eq!(events.try_iter().last().unwrap().seq, snapshot.seq);
     }
 
     #[test]
-    fn the_turn_belongs_to_one_caller_until_the_item_that_ends_it_goes_out() {
-        let (state, _events) = state();
-        assert!(state.begin_turn());
-        assert!(!state.begin_turn(), "a second claim is refused");
+    fn a_post_claims_the_turn_until_the_item_that_ends_it_goes_out() {
+        let (state, events) = state();
+        state.emit(said(Role::Assistant, "earlier"));
+        assert_eq!(
+            state.post("hello".to_owned()),
+            Some(vec![
+                said(Role::Assistant, "earlier"),
+                said(Role::User, "hello")
+            ]),
+            "the transcript the turn runs over"
+        );
+        assert_eq!(
+            events.try_iter().last().unwrap().item,
+            said(Role::User, "hello"),
+            "the message went out"
+        );
+        assert_eq!(
+            state.post("again".to_owned()),
+            None,
+            "a second claim is refused"
+        );
         assert!(state.snapshot().turning);
 
-        state.emit(user("hello"));
         state.emit(delta("Hel"));
         assert!(state.snapshot().turning, "a turn in progress");
-        state.emit(reply("Hello"));
+        state.emit(said(Role::Assistant, "Hello"));
         assert!(!state.snapshot().turning);
-        assert!(state.begin_turn(), "a returned claim can be taken again");
+        assert!(
+            state.post("again".to_owned()).is_some(),
+            "a returned claim can be taken again"
+        );
 
         state.emit(TranscriptItem::TurnFailed {
             reason: "no key".to_owned(),
@@ -561,7 +572,7 @@ mod tests {
 
         assert_eq!(
             *emitted.borrow(),
-            [delta("Hel"), delta("lo"), reply("Hello")]
+            [delta("Hel"), delta("lo"), said(Role::Assistant, "Hello")]
         );
     }
 
@@ -604,7 +615,10 @@ mod tests {
             into(&emitted),
         );
 
-        assert_eq!(*emitted.borrow(), [call, result, reply("It's noon.")]);
+        assert_eq!(
+            *emitted.borrow(),
+            [call, result, said(Role::Assistant, "It's noon.")]
+        );
     }
 
     /// The whole backend wiring against the scripted model: the library
@@ -631,7 +645,7 @@ mod tests {
             replying_with(
                 &client,
                 "system",
-                &[user("what time is it?")],
+                &[said(Role::User, "what time is it?")],
                 &registry,
                 &stop,
             ),
@@ -768,7 +782,7 @@ mod tests {
                     replying_with(
                         &client,
                         "system",
-                        &[user("write me hunt the wumpus")],
+                        &[said(Role::User, "write me hunt the wumpus")],
                         &registry,
                         &AtomicBool::new(false),
                     ),

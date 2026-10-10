@@ -188,9 +188,9 @@ impl From<TranscriptItem> for Body {
 impl TranscriptItem {
     /// Whether this item is conversation: something said, an observed
     /// act, or a question settled — what a
-    /// [`Conversation`](super::Conversation) keeps and a snapshot
-    /// replays. A delta, a pending question and a failure are news of
-    /// the moment: they exist on the channel and nowhere else.
+    /// [`Snapshot`](super::Snapshot) keeps and replays. A delta, a
+    /// pending question and a failure are news of the moment: they
+    /// exist on the channel alone.
     #[must_use]
     pub const fn is_conversation(&self) -> bool {
         matches!(

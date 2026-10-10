@@ -241,8 +241,8 @@ pub async fn get_transcript() -> Snapshot {
 
 /// Hands every arriving transcript event to `hear`, for the lifetime of
 /// the window — which is why the closure is forgotten rather than
-/// dropped. Resolves once the listener is up, so a request made after
-/// it is answered by nothing the listener misses.
+/// dropped. Resolves once the listener is up, so every event emitted
+/// after a request made then is heard.
 pub async fn listen_transcript(hear: impl Fn(Event) + 'static) {
     let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
         if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {

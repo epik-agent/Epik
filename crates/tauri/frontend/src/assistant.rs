@@ -11,9 +11,9 @@
 //! so nothing emitted between the two is missed, and what it hears
 //! while the snapshot is on its way is held and folded after it, each
 //! event counting by its `seq` once or not at all. Speech is a bubble
-//! of Markdown; everything
-//! that wasn't said — tool calls, tool results, failures, questions — is
-//! a [`Card`] or a [`QuestionCard`] drawn as a [`leptos_rich_chat::Body::View`].
+//! of Markdown; everything that wasn't said — tool calls, tool results,
+//! failures, questions — is a [`Card`] or a [`QuestionCard`] drawn as a
+//! [`leptos_rich_chat::Body::View`].
 
 use epik_core::assistant::{
     Body, Change, Entry, Event, Role, Segment, Snapshot, Tone, Transcript, TranscriptItem, segments,
@@ -380,7 +380,7 @@ pub fn Assistant() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use epik_core::assistant::{Answer, Ask, Event, Snapshot};
+    use epik_core::assistant::{Answer, Ask};
     use leptos_rich_chat::Body as Drawn;
 
     use super::*;
