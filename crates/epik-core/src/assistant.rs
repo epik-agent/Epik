@@ -43,8 +43,7 @@ pub enum Role {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptItem {
-    /// A complete utterance, said by `role`. The only variant a
-    /// [`Conversation`] holds.
+    /// A complete utterance, said by `role`.
     Message { role: Role, text: String },
     /// A streaming fragment of the assistant's reply in progress.
     /// Ephemeral: it exists on the event channel and nowhere else.
@@ -123,11 +122,31 @@ pub enum Answer {
 /// The event channel transcript items arrive on, backend to window.
 pub const TRANSCRIPT_EVENT: &str = "transcript";
 
-/// The canonical transcript: what was actually said, in order. One holder
-/// per conversation — in the app, the backend. Completed [`Message`]s
-/// only; deltas and failures never land here.
-///
-/// [`Message`]: TranscriptItem::Message
+/// One item as the channel carries it: stamped with its place. `seq`
+/// counts from 0 over everything the channel has carried, so a window
+/// that holds a [`Snapshot`] can tell by comparison whether an event
+/// it hears is already in the snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: u64,
+    pub item: TranscriptItem,
+}
+
+/// What a window that has just mounted asks for: the conversation so
+/// far, the channel's position — the `seq` the next event carries, so
+/// every event below it was emitted before this snapshot was taken —
+/// and whether a turn is in flight.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Snapshot {
+    pub items: Vec<TranscriptItem>,
+    pub seq: u64,
+    pub turning: bool,
+}
+
+/// The canonical transcript: what was actually said and done, in order.
+/// One holder per conversation — in the app, the backend. It holds the
+/// items that are conversation, by [`TranscriptItem::is_conversation`];
+/// deltas, pending questions and failures live on the channel alone.
 #[derive(Debug, Default)]
 pub struct Conversation(Vec<TranscriptItem>);
 

@@ -2,12 +2,12 @@
 //! bindings, the command names, and typed calls over them.
 //!
 //! The types on the wire are the library's own — [`Resolved`],
-//! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
-//! — so nothing here re-declares what the library already says.
+//! [`Secret`], [`Config`], [`ModelInfo`], [`Event`], [`Snapshot`],
+//! [`Entry`] — so nothing here re-declares what the library already says.
 
 use std::fmt;
 
-use epik_core::assistant::{Answer, ModelInfo, Refusal, TRANSCRIPT_EVENT, TranscriptItem};
+use epik_core::assistant::{Answer, Event, ModelInfo, Refusal, Snapshot, TRANSCRIPT_EVENT};
 use epik_core::config::Config;
 use epik_core::keystore::{Resolved, Secret};
 use epik_core::monitor::{EVENT, Entry};
@@ -79,10 +79,10 @@ struct SaveDialogOptions<'a> {
     can_create_directories: bool,
 }
 
-/// What the event binding hands the callback; the item rides in `payload`.
+/// What the event binding hands the callback; the event rides in `payload`.
 #[derive(Deserialize)]
 struct TranscriptEnvelope {
-    payload: TranscriptItem,
+    payload: Event,
 }
 
 /// The same envelope on the monitor's channel; the entry rides in
@@ -231,26 +231,26 @@ pub async fn browse_repository() -> Option<String> {
     invoke("plugin:dialog|save", args).await.ok()?.as_string()
 }
 
-/// The whole transcript so far, for a window that has just mounted.
-pub async fn get_transcript() -> Vec<TranscriptItem> {
-    match invoke("get_transcript", JsValue::UNDEFINED).await {
-        Ok(items) => serde_wasm_bindgen::from_value(items).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+/// The transcript so far, for a window that has just mounted: the
+/// conversation, where the channel stands, and whether a turn is in
+/// flight. A channel that would not answer gives an empty snapshot at
+/// position 0, so everything heard from then on counts.
+pub async fn get_transcript() -> Snapshot {
+    ask("get_transcript").await.unwrap_or_default()
 }
 
-/// Hands every arriving transcript item to `fold`, for the lifetime of the
-/// window — which is why the closure is forgotten rather than dropped.
-pub fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
-    spawn_local(async move {
-        let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-            if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {
-                fold(envelope.payload);
-            }
-        });
-        let _ = listen(TRANSCRIPT_EVENT, handler.as_ref()).await;
-        handler.forget();
+/// Hands every arriving transcript event to `hear`, for the lifetime of
+/// the window — which is why the closure is forgotten rather than
+/// dropped. Resolves once the listener is up, so a request made after
+/// it is answered by nothing the listener misses.
+pub async fn listen_transcript(hear: impl Fn(Event) + 'static) {
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {
+            hear(envelope.payload);
+        }
     });
+    let _ = listen(TRANSCRIPT_EVENT, handler.as_ref()).await;
+    handler.forget();
 }
 
 /// The window's feed of feature-build entries: each one as an event on

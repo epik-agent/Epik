@@ -4,14 +4,19 @@
 //! its tail, the Markdown, math and highlighted code, the composer and
 //! its preview — and [`epik_core::assistant`] decides what is in it. The
 //! transcript the user sees is [`Transcript::fold`] over
-//! [`TranscriptItem`]s — history from `get_transcript` first, then live
-//! events on top — and each fold's [`Change`] is applied to the
-//! [`Message`]s `Chat` shows. Speech is a bubble of Markdown; everything
+//! [`TranscriptItem`]s — the [`Snapshot`] from `get_transcript` first,
+//! then live [`Event`]s on top — and each fold's [`Change`] is applied
+//! to the [`Message`]s `Chat` shows. The order on the wire is listen,
+//! then snapshot: the listener is up before the snapshot is asked for,
+//! so nothing emitted between the two is missed, and what it hears
+//! while the snapshot is on its way is held and folded after it, each
+//! event counting by its `seq` once or not at all. Speech is a bubble
+//! of Markdown; everything
 //! that wasn't said — tool calls, tool results, failures, questions — is
 //! a [`Card`] or a [`QuestionCard`] drawn as a [`leptos_rich_chat::Body::View`].
 
 use epik_core::assistant::{
-    Body, Change, Entry, Role, Segment, Tone, Transcript, TranscriptItem, segments,
+    Body, Change, Entry, Event, Role, Segment, Snapshot, Tone, Transcript, TranscriptItem, segments,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -58,12 +63,21 @@ fn is_web(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Where the window stands with the channel: mounting — holding what
+/// the listener hears until the snapshot is folded — or mounted, past
+/// the snapshot's position, from which live events count.
+enum Link {
+    Mounting(Vec<Event>),
+    Mounted { seq: u64 },
+}
+
 /// The tab's state: the transcript, the messages drawn from it, the text
-/// of the reply still arriving, whether a turn is in flight, and why the
-/// last send went nowhere.
+/// of the reply still arriving, whether a turn is in flight, why the
+/// last send went nowhere, and where the window stands with the channel.
 #[derive(Clone, Copy)]
 struct Window {
     transcript: StoredValue<Transcript>,
+    link: StoredValue<Link>,
     messages: RwSignal<Vec<Message>>,
     /// The one live reply's text. A transcript has one live entry at a
     /// time, its tail, so one signal serves them all.
@@ -81,11 +95,47 @@ impl Window {
     fn new(on_link: Callback<String>) -> Self {
         Self {
             transcript: StoredValue::new(Transcript::default()),
+            link: StoredValue::new(Link::Mounting(Vec::new())),
             messages: RwSignal::new(Vec::new()),
             live: RwSignal::new(String::new()),
             busy: RwSignal::new(false),
             refusal: RwSignal::new(None),
             on_link,
+        }
+    }
+
+    /// An event off the channel. While the snapshot is on its way it is
+    /// held; once the snapshot is in, it is heard when its place is at
+    /// or past the snapshot's, and covered by the snapshot before that.
+    fn receive(self, event: Event) {
+        let heard = self.link.try_update_value(|link| match link {
+            Link::Mounting(held) => {
+                held.push(event);
+                None
+            }
+            Link::Mounted { seq } => (event.seq >= *seq).then_some(event.item),
+        });
+        if let Some(item) = heard.flatten() {
+            self.hear(item);
+        }
+    }
+
+    /// The snapshot: `busy` as the turn stands, the history folded, and
+    /// then whatever was heard meanwhile, each event counting by its
+    /// place against the snapshot's.
+    fn mount(self, snapshot: Snapshot) {
+        self.busy.set(snapshot.turning);
+        for item in snapshot.items {
+            self.fold(item);
+        }
+        let held = self.link.try_update_value(|link| {
+            match std::mem::replace(link, Link::Mounted { seq: snapshot.seq }) {
+                Link::Mounting(held) => held,
+                Link::Mounted { .. } => Vec::new(),
+            }
+        });
+        for event in held.unwrap_or_default() {
+            self.receive(event);
         }
     }
 
@@ -219,13 +269,11 @@ pub fn Assistant() -> impl IntoView {
     });
     let tab = Window::new(on_link);
 
-    // History first, then live items, through the same fold.
+    // Listen, then the snapshot, through the same fold.
     spawn_local(async move {
-        for item in ipc::get_transcript().await {
-            tab.fold(item);
-        }
+        ipc::listen_transcript(move |event| tab.receive(event)).await;
+        tab.mount(ipc::get_transcript().await);
     });
-    ipc::listen_transcript(move |item| tab.hear(item));
 
     // Whether the app is currently dark. The media query is the source of
     // truth: it follows the system until the first click pins a theme, and
@@ -332,13 +380,25 @@ pub fn Assistant() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use epik_core::assistant::{Answer, Ask};
+    use epik_core::assistant::{Answer, Ask, Event, Snapshot};
     use leptos_rich_chat::Body as Drawn;
 
     use super::*;
 
     fn window() -> Window {
         Window::new(Callback::new(|_| {}))
+    }
+
+    /// A window whose snapshot — empty, with nothing in flight — has
+    /// landed, so what it hears counts at once.
+    fn mounted() -> Window {
+        let window = window();
+        window.mount(Snapshot::default());
+        window
+    }
+
+    fn event(seq: u64, item: TranscriptItem) -> Event {
+        Event { seq, item }
     }
 
     fn said(role: Role, text: &str) -> TranscriptItem {
@@ -502,11 +562,11 @@ mod tests {
 
     #[test]
     fn the_item_that_ends_a_turn_clears_busy() {
-        let window = window();
+        let window = mounted();
         window.busy.set(true);
-        window.hear(delta("Hel"));
+        window.receive(event(0, delta("Hel")));
         assert!(window.busy.get_untracked(), "a reply in progress");
-        window.hear(said(Role::Assistant, "Hello"));
+        window.receive(event(1, said(Role::Assistant, "Hello")));
         assert!(!window.busy.get_untracked());
 
         window.busy.set(true);
@@ -514,6 +574,101 @@ mod tests {
             reason: "the wire went quiet".to_owned(),
         });
         assert!(!window.busy.get_untracked());
+    }
+
+    /// A window that mounts mid-turn: the user's message and the call
+    /// that preceded the mount are in the snapshot; the result and the
+    /// deltas arrive while the snapshot is on its way. The transcript
+    /// comes out in order, each item once.
+    #[test]
+    fn what_is_heard_before_the_snapshot_lands_is_folded_after_it_in_order() {
+        let window = window();
+        window.receive(event(
+            2,
+            TranscriptItem::ToolResult {
+                name: "current_time".to_owned(),
+                ok: true,
+                content: "noon".to_owned(),
+            },
+        ));
+        window.receive(event(3, delta("It's ")));
+        window.receive(event(4, delta("noon.")));
+        assert!(shown(window).is_empty(), "held until the snapshot lands");
+
+        window.mount(Snapshot {
+            items: vec![
+                said(Role::User, "what time is it?"),
+                TranscriptItem::ToolCall {
+                    name: "current_time".to_owned(),
+                    arguments: "{}".to_owned(),
+                },
+            ],
+            seq: 2,
+            turning: true,
+        });
+        assert_eq!(
+            shown(window),
+            [
+                text("user", false, "what time is it?"),
+                drawn("card"),
+                drawn("card"),
+                text("assistant", true, "It's noon."),
+            ]
+        );
+        assert!(window.busy.get_untracked(), "the reply is still streaming");
+
+        window.receive(event(5, said(Role::Assistant, "It's noon.")));
+        assert_eq!(
+            shown(window)[3],
+            text("assistant", false, "It's noon."),
+            "and goes on streaming into the same place"
+        );
+        assert!(!window.busy.get_untracked());
+    }
+
+    #[test]
+    fn an_item_in_both_the_snapshot_and_the_live_stream_is_shown_once() {
+        let window = window();
+        window.receive(event(0, said(Role::User, "hi")));
+        window.receive(event(1, said(Role::Assistant, "Hello.")));
+        window.mount(Snapshot {
+            items: vec![said(Role::User, "hi"), said(Role::Assistant, "Hello.")],
+            seq: 2,
+            turning: false,
+        });
+        assert_eq!(
+            shown(window),
+            [
+                text("user", false, "hi"),
+                text("assistant", false, "Hello.")
+            ]
+        );
+        assert!(!window.busy.get_untracked());
+
+        // An event from before the snapshot that arrives after it is
+        // covered the same way.
+        window.receive(event(1, said(Role::Assistant, "Hello.")));
+        assert_eq!(shown(window).len(), 2);
+    }
+
+    #[test]
+    fn a_window_mounted_mid_turn_starts_busy() {
+        let window = window();
+        assert!(!window.busy.get_untracked(), "nothing known yet");
+        window.mount(Snapshot {
+            items: vec![said(Role::User, "hi")],
+            seq: 1,
+            turning: true,
+        });
+        assert!(window.busy.get_untracked());
+
+        let settled = self::window();
+        settled.mount(Snapshot {
+            items: vec![said(Role::User, "hi"), said(Role::Assistant, "Hello.")],
+            seq: 2,
+            turning: false,
+        });
+        assert!(!settled.busy.get_untracked());
     }
 
     #[test]

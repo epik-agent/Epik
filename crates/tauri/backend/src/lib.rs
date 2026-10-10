@@ -116,12 +116,12 @@ pub fn run() {
             // made for one feature serves the next.
             let worktrees = app.path().app_data_dir()?.join("worktrees");
             app.manage(build::FeatureState::new(log, worktrees)?);
+            app.manage(assistant::state(app.handle().clone()));
             // Follow the system at startup. When persistence arrives, a
             // remembered choice will override this initialization here.
             app.handle().set_theme(None);
             Ok(())
         })
-        .manage(assistant::AssistantState::default())
         .menu(|handle| {
             let menu = Menu::default(handle)?;
             // The default About, wherever this platform put it, gives way

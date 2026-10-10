@@ -13,8 +13,8 @@
 //! listener is up and holds them until the replay has been folded, then
 //! folds what it held — [`Progress::absorb`] drops by `seq` whatever the
 //! replay already covered — so an entry recorded between the two is
-//! applied exactly once. (`Assistant` does history-then-listen without that
-//! protection; this fold does not copy it.) A blink is a claim about the
+//! applied exactly once. (The assistant tab mounts the same way, with
+//! its own hold in [`crate::assistant`].) A blink is a claim about the
 //! present, so the feed's health is view state: while it is not
 //! speaking, nothing pulses — and a transport that makes a loss good on
 //! its own, as a browser's event stream does, says so and the pulse
