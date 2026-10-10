@@ -82,7 +82,8 @@ struct Window {
     /// The one live reply's text. A transcript has one live entry at a
     /// time, its tail, so one signal serves them all.
     live: RwSignal<String>,
-    /// Set on send, cleared by the item that ends the turn.
+    /// Set on send and as the snapshot says, cleared by the item that
+    /// ends the turn.
     busy: RwSignal<bool>,
     /// The backend's reason for refusing the last send. A refusal is
     /// about the send, so it sits by the composer and ends no turn: it
