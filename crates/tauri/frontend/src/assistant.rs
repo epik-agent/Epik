@@ -11,7 +11,7 @@
 //! a [`Card`] or a [`QuestionCard`] drawn as a [`leptos_rich_chat::Body::View`].
 
 use epik_core::assistant::{
-    Body, Change, Entry, Role, Segment, Transcript, TranscriptItem, segments,
+    Body, Change, Entry, Role, Segment, Tone, Transcript, TranscriptItem, segments,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -21,7 +21,7 @@ use leptos_rich_chat::{
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::card::{Card, QuestionCard};
+use crate::card::{Card, QuestionCard, tone_class};
 use crate::ipc;
 use crate::json::JsonTree;
 
@@ -59,7 +59,8 @@ fn is_web(url: &str) -> bool {
 }
 
 /// The tab's state: the transcript, the messages drawn from it, the text
-/// of the reply still arriving, and whether a turn is in flight.
+/// of the reply still arriving, whether a turn is in flight, and why the
+/// last send went nowhere.
 #[derive(Clone, Copy)]
 struct Window {
     transcript: StoredValue<Transcript>,
@@ -69,6 +70,10 @@ struct Window {
     live: RwSignal<String>,
     /// Set on send, cleared by the item that ends the turn.
     busy: RwSignal<bool>,
+    /// The backend's reason for refusing the last send. A refusal is
+    /// about the send, so it sits by the composer and ends no turn: it
+    /// lasts until the next send, or the end of the turn in flight.
+    refusal: RwSignal<Option<String>>,
     on_link: Callback<String>,
 }
 
@@ -79,17 +84,31 @@ impl Window {
             messages: RwSignal::new(Vec::new()),
             live: RwSignal::new(String::new()),
             busy: RwSignal::new(false),
+            refusal: RwSignal::new(None),
             on_link,
         }
     }
 
-    /// A live item: the one that ends the turn clears `busy`, and every
-    /// one is folded.
+    /// A live item: the one that ends the turn clears `busy` and the
+    /// refusal, and every one is folded.
     fn hear(self, item: TranscriptItem) {
         if item.ends_turn() {
             self.busy.set(false);
+            self.refusal.set(None);
         }
         self.fold(item);
+    }
+
+    /// A send is out: the composer waits for the turn it starts.
+    fn sending(self) {
+        self.busy.set(true);
+        self.refusal.set(None);
+    }
+
+    /// The backend refused the send. The turn in flight is someone
+    /// else's and carries on; only the reason changes hands.
+    fn refused(self, reason: String) {
+        self.refusal.set(Some(reason));
     }
 
     /// Folds one item, history or live, into the transcript and applies
@@ -227,12 +246,10 @@ pub fn Assistant() -> impl IntoView {
     };
 
     let send = move |text: String| {
-        tab.busy.set(true);
+        tab.sending();
         spawn_local(async move {
-            // A refusal from the command channel: the send never
-            // started, so the failure that ends the turn is folded here.
             if let Err(reason) = ipc::send_message(text).await {
-                tab.hear(TranscriptItem::TurnFailed { reason });
+                tab.refused(reason);
             }
         });
     };
@@ -297,6 +314,14 @@ pub fn Assistant() -> impl IntoView {
                     options=options()
                 />
             </div>
+            <Show when=move || tab.refusal.get().is_some()>
+                <p
+                    role="alert"
+                    class=format!("shrink-0 border-t px-3 py-1.5 text-sm {}", tone_class(Tone::Error))
+                >
+                    "Not sent: " {move || tab.refusal.get()}
+                </p>
+            </Show>
         </main>
     }
 }
@@ -485,6 +510,55 @@ mod tests {
             reason: "the wire went quiet".to_owned(),
         });
         assert!(!window.busy.get_untracked());
+    }
+
+    #[test]
+    fn a_refused_send_leaves_the_turn_in_flight_whole() {
+        // The window mounted mid-reply, so `busy` is out of step.
+        let window = window();
+        window.hear(said(Role::User, "hi"));
+        window.hear(delta("Hel"));
+        let streaming = window.messages.get_untracked()[1].id.clone();
+
+        window.sending();
+        window.refused("a turn is already in flight".to_owned());
+        assert_eq!(
+            shown(window),
+            [text("user", false, "hi"), text("assistant", true, "Hel")],
+            "the streamed text is still there"
+        );
+        assert!(
+            window.busy.get_untracked(),
+            "the turn in flight is still out"
+        );
+        assert_eq!(
+            window.refusal.get_untracked().as_deref(),
+            Some("a turn is already in flight")
+        );
+
+        window.hear(delta("lo"));
+        assert_eq!(window.messages.get_untracked()[1].id, streaming);
+        window.hear(said(Role::Assistant, "Hello"));
+        assert_eq!(
+            shown(window),
+            [text("user", false, "hi"), text("assistant", false, "Hello")],
+            "the reply finished into the same bubble"
+        );
+        assert!(!window.busy.get_untracked());
+        assert_eq!(
+            window.refusal.get_untracked(),
+            None,
+            "the turn's end spends the refusal"
+        );
+    }
+
+    #[test]
+    fn the_next_send_spends_the_refusal() {
+        let window = window();
+        window.refused("a turn is already in flight".to_owned());
+        window.sending();
+        assert!(window.busy.get_untracked());
+        assert_eq!(window.refusal.get_untracked(), None);
     }
 
     #[test]

@@ -31,7 +31,9 @@ const CHROME: &str = "self-stretch rounded-lg border px-3.5 py-2 text-sm";
 /// What a card's title wears.
 const TITLE: &str = "mb-1 font-mono text-xs font-semibold tracking-wide opacity-70";
 
-const fn tone_class(tone: Tone) -> &'static str {
+/// The colors a tone wears, on a card or on any notice that shares its
+/// manner.
+pub(crate) const fn tone_class(tone: Tone) -> &'static str {
     match tone {
         Tone::Neutral => {
             "border-neutral-200 bg-neutral-100 text-neutral-600 \
