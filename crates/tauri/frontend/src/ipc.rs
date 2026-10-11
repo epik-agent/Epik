@@ -2,10 +2,12 @@
 //! bindings, the command names, and typed calls over them.
 //!
 //! The types on the wire are the library's own — [`Resolved`],
-//! [`Secret`], [`Config`], [`ModelInfo`], [`TranscriptItem`], [`Entry`]
-//! — so nothing here re-declares what the library already says.
+//! [`Secret`], [`Config`], [`ModelInfo`], [`Event`], [`Snapshot`],
+//! [`Entry`] — so nothing here re-declares what the library already says.
 
-use epik_core::assistant::{Answer, ModelInfo, TRANSCRIPT_EVENT, TranscriptItem};
+use std::fmt;
+
+use epik_core::assistant::{Answer, Event, ModelInfo, Refusal, Snapshot, TRANSCRIPT_EVENT};
 use epik_core::config::Config;
 use epik_core::keystore::{Resolved, Secret};
 use epik_core::monitor::{EVENT, Entry};
@@ -77,10 +79,10 @@ struct SaveDialogOptions<'a> {
     can_create_directories: bool,
 }
 
-/// What the event binding hands the callback; the item rides in `payload`.
+/// What the event binding hands the callback; the event rides in `payload`.
 #[derive(Deserialize)]
 struct TranscriptEnvelope {
-    payload: TranscriptItem,
+    payload: Event,
 }
 
 /// The same envelope on the monitor's channel; the entry rides in
@@ -111,12 +113,19 @@ async fn ask<T: DeserializeOwned>(command: &str) -> Result<T, String> {
 /// A command that answers with nothing: `args` encoded, sent, and the
 /// Err is the channel's refusal.
 async fn tell(command: &str, args: &impl Serialize) -> Result<(), String> {
+    tell_or(command, args, |error| error_text(&error)).await
+}
+
+/// [`tell`] with the refusal read by `refused`, in its own type. A
+/// request that cannot be encoded is refused in words.
+async fn tell_or<E: From<String>>(
+    command: &str,
+    args: &impl Serialize,
+    refused: impl FnOnce(JsValue) -> E,
+) -> Result<(), E> {
     let args = serde_wasm_bindgen::to_value(args)
-        .map_err(|_| "the request could not be encoded".to_owned())?;
-    invoke(command, args)
-        .await
-        .map(|_| ())
-        .map_err(|error| error_text(&error))
+        .map_err(|_| E::from("the request could not be encoded".to_owned()))?;
+    invoke(command, args).await.map(|_| ()).map_err(refused)
 }
 
 /// Where the secret filed under `name` stands, by asking the backend.
@@ -161,11 +170,49 @@ pub async fn github_login() -> Result<String, String> {
     ask("github_login").await
 }
 
+/// Why a send went nowhere, distinct from a turn that fails: the
+/// backend's own refusal, or a command that never reached it.
+#[derive(Debug)]
+pub enum Refused {
+    /// The backend holds a turn in flight, which the composer waits for.
+    TurnInFlight,
+    /// The command channel failed, so no turn started. The reason, for
+    /// the notice by the composer.
+    Unreachable(String),
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::TurnInFlight => Self::TurnInFlight,
+        }
+    }
+}
+
+/// A reason in words is a send the backend never heard.
+impl From<String> for Refused {
+    fn from(reason: String) -> Self {
+        Self::Unreachable(reason)
+    }
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TurnInFlight => f.write_str("a turn is already in flight"),
+            Self::Unreachable(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// Posts the user's message. The message becomes visible when it comes
-/// back around as a transcript event; the Err is the command channel's
-/// refusal, distinct from a turn that fails.
-pub async fn send_message(text: String) -> Result<(), String> {
-    tell("send_message", &SendArgs { text: &text }).await
+/// back around as a transcript event.
+pub async fn send_message(text: String) -> Result<(), Refused> {
+    tell_or("send_message", &SendArgs { text: &text }, |error| {
+        serde_wasm_bindgen::from_value::<Refusal>(error.clone())
+            .map_or_else(|_| Refused::from(error_text(&error)), Refused::from)
+    })
+    .await
 }
 
 /// Answers the pending question `id`. The card that asked shows nothing
@@ -194,26 +241,26 @@ pub async fn browse_repository() -> Option<String> {
     invoke("plugin:dialog|save", args).await.ok()?.as_string()
 }
 
-/// The whole transcript so far, for a window that has just mounted.
-pub async fn get_transcript() -> Vec<TranscriptItem> {
-    match invoke("get_transcript", JsValue::UNDEFINED).await {
-        Ok(items) => serde_wasm_bindgen::from_value(items).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
+/// The transcript so far, for a window that has just mounted: the
+/// conversation, where the channel stands, and whether a turn is in
+/// flight. A channel that would not answer gives an empty snapshot at
+/// position 0, so everything heard from then on counts.
+pub async fn get_transcript() -> Snapshot {
+    ask("get_transcript").await.unwrap_or_default()
 }
 
-/// Hands every arriving transcript item to `fold`, for the lifetime of the
-/// window — which is why the closure is forgotten rather than dropped.
-pub fn listen_transcript(fold: impl Fn(TranscriptItem) + 'static) {
-    spawn_local(async move {
-        let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-            if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {
-                fold(envelope.payload);
-            }
-        });
-        let _ = listen(TRANSCRIPT_EVENT, handler.as_ref()).await;
-        handler.forget();
+/// Hands every arriving transcript event to `hear`, for the lifetime of
+/// the window — which is why the closure is forgotten rather than
+/// dropped. Resolves once the listener is up, so every event emitted
+/// after a request made then is heard.
+pub async fn listen_transcript(hear: impl Fn(Event) + 'static) {
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        if let Ok(envelope) = serde_wasm_bindgen::from_value::<TranscriptEnvelope>(event) {
+            hear(envelope.payload);
+        }
     });
+    let _ = listen(TRANSCRIPT_EVENT, handler.as_ref()).await;
+    handler.forget();
 }
 
 /// The window's feed of feature-build entries: each one as an event on

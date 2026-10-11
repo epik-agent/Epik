@@ -43,8 +43,7 @@ pub enum Role {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptItem {
-    /// A complete utterance, said by `role`. The only variant a
-    /// [`Conversation`] holds.
+    /// A complete utterance, said by `role`.
     Message { role: Role, text: String },
     /// A streaming fragment of the assistant's reply in progress.
     /// Ephemeral: it exists on the event channel and nowhere else.
@@ -65,8 +64,8 @@ pub enum TranscriptItem {
     },
     /// The persona is asking the user something and the turn is waiting
     /// on the answer. Ephemeral like a delta: it exists on the event
-    /// channel and is never pushed into a [`Conversation`] — the settled
-    /// record is [`QuestionResolved`](Self::QuestionResolved).
+    /// channel alone — the settled record is
+    /// [`QuestionResolved`](Self::QuestionResolved).
     Question { id: String, ask: Ask },
     /// A question and what the user answered — the settled record,
     /// appended and emitted exactly like a tool call and its result.
@@ -75,6 +74,15 @@ pub enum TranscriptItem {
         ask: Ask,
         answer: Answer,
     },
+}
+
+/// Why the backend turned a send away. Its serde form is tagged like a
+/// [`TranscriptItem`], and crosses the IPC barrier as the command's Err.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Refusal {
+    /// A turn is already in flight, and it keeps the floor.
+    TurnInFlight,
 }
 
 /// What the persona needs from the user, in modality-free terms: the
@@ -114,24 +122,27 @@ pub enum Answer {
 /// The event channel transcript items arrive on, backend to window.
 pub const TRANSCRIPT_EVENT: &str = "transcript";
 
-/// The canonical transcript: what was actually said, in order. One holder
-/// per conversation — in the app, the backend. Completed [`Message`]s
-/// only; deltas and failures never land here.
-///
-/// [`Message`]: TranscriptItem::Message
-#[derive(Debug, Default)]
-pub struct Conversation(Vec<TranscriptItem>);
+/// One item as the channel carries it: stamped with its place. `seq`
+/// counts from 0 over everything the channel has carried, so a window
+/// that holds a [`Snapshot`] can tell by comparison whether an event
+/// it hears is already in the snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Event {
+    pub seq: u64,
+    pub item: TranscriptItem,
+}
 
-impl Conversation {
-    /// Appends `item`. The transcript only ever grows.
-    pub fn push(&mut self, item: TranscriptItem) {
-        self.0.push(item);
-    }
-
-    /// The transcript, oldest first.
-    pub fn items(&self) -> std::slice::Iter<'_, TranscriptItem> {
-        self.0.iter()
-    }
+/// The channel as it stands, which is what a window that has just
+/// mounted asks for: the conversation so far — the items that are
+/// conversation by [`TranscriptItem::is_conversation`], in order — the
+/// channel's position, which is the `seq` the next event carries, so
+/// every event below it was emitted before this snapshot was taken, and
+/// whether a turn is in flight.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Snapshot {
+    pub items: Vec<TranscriptItem>,
+    pub seq: u64,
+    pub turning: bool,
 }
 
 /// How much of a tool's answer the transcript keeps. The model always
@@ -192,28 +203,6 @@ mod tests {
             role,
             text: text.to_owned(),
         }
-    }
-
-    #[test]
-    fn a_conversation_keeps_items_in_the_order_they_were_said() {
-        let mut conversation = Conversation::default();
-        conversation.push(message(Role::User, "first"));
-        conversation.push(message(Role::Assistant, "second"));
-        conversation.push(message(Role::User, "third"));
-
-        let texts: Vec<_> = conversation
-            .items()
-            .map(|item| match item {
-                TranscriptItem::Message { text, .. } => text.as_str(),
-                _ => panic!("only messages were pushed"),
-            })
-            .collect();
-        assert_eq!(texts, ["first", "second", "third"]);
-    }
-
-    #[test]
-    fn a_fresh_conversation_has_nothing_to_say() {
-        assert_eq!(Conversation::default().items().count(), 0);
     }
 
     /// The tag in the JSON is the forward-compatibility contract: a
@@ -300,6 +289,16 @@ mod tests {
             let received: TranscriptItem = serde_json::from_str(&wire).unwrap();
             assert_eq!(received, item);
         }
+    }
+
+    #[test]
+    fn a_refusal_is_tagged_like_an_item() {
+        let wire = serde_json::to_string(&Refusal::TurnInFlight).unwrap();
+        assert_eq!(wire, r#"{"kind":"turn_in_flight"}"#);
+        assert_eq!(
+            serde_json::from_str::<Refusal>(&wire).unwrap(),
+            Refusal::TurnInFlight
+        );
     }
 
     /// Asks and answers are tagged inside the item, one tag each.
