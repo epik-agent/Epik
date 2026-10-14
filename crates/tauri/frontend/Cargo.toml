@@ -8,10 +8,10 @@ console_error_panic_hook = "0.1"
 epik-core = { path = "../../epik-core" }
 leptos = { version = "0.8", features = ["csr"] }
 # The assistant tab's window: Markdown, math and highlighted code, a
-# transcript that follows its tail, and the composer. It has no release,
-# so `rev` names the commit: the page's styles lean on this crate's
-# class names, tokens and layer, which a later commit may rename.
-leptos-rich-chat = { git = "https://github.com/wpm/Rich-Chat", rev = "f3b9d626d7483bac1dd516c90dcc103383458eb6" }
+# transcript that follows its tail, and the composer. Pinned exactly:
+# the page's styles lean on this crate's class names, tokens and layer,
+# which a release below 1.0 may rename.
+leptos-rich-chat = "=0.1.0"
 serde = { version = "1", features = ["derive"] }
 # Already in this lockfile through epik-core; the line only makes it
 # nameable for the browser's event stream.
