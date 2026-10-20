@@ -11,7 +11,7 @@ leptos = { version = "0.8", features = ["csr"] }
 # transcript that follows its tail, and the composer. Pinned exactly:
 # the page's styles lean on this crate's class names, tokens and layer,
 # which a release below 1.0 may rename.
-leptos-rich-chat = "=0.1.0"
+leptos-rich-chat = "=0.2.2"
 serde = { version = "1", features = ["derive"] }
 # Already in this lockfile through epik-core; the line only makes it
 # nameable for the browser's event stream.
