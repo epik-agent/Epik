@@ -38,6 +38,8 @@ architecture.
 | `2026-09-24-task-machines` | Loops live inside a node as a Task Machine; an issue is one, and fixes its own red checks | **Live and built** (#284). The `Integrate` edge waits on `2026-09-23-where-a-feature-accumulates`. |
 | `2026-09-24-the-repositorys-rulesets-are-the-builds-policy` | A build reads the repository's rulesets at launch and waits only for required checks; Epik never changes GitHub settings | **Live and built** (#284). Rulesets only; classic branch protection is not read. |
 | `2026-10-10-the-run-log-is-the-monitors-log-kept` | A build's record is the monitor's log on disk: one file per run, written by a reader of the log | **Proposed.** Restates #233, which placed the log at the sink before the monitor's log existed; builds the permanent run log `2026-08-19` names as unbuilt. |
+| `2026-10-20-the-user-always-understands` | The user always understands the code and the build; shipping is the goal pursued under it; three invariants, three dials, four habits | **Accepted.** The principles are decided; `prompt.md`'s wording is not, and is written from this entry. |
+| `2026-10-20-what-planning-tells-implementation` | The issue is the only planning channel; departures are reported only when they happen and reach dependents mechanically; agents have no general GitHub access | **Proposed.** The handoff, direct-or-transitive and credential withholding are open. Notes that `2026-09-20`'s "no GitHub token" withholds none either. |
 
 Three entries carry a reconstruction note in their headers:
 `2026-07-29-github-app-as-credential`, `2026-08-17-build-from-chat`, and
