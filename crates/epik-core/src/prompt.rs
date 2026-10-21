@@ -27,6 +27,10 @@ static RESUMED: include_crypt::EncryptedFile = include_crypt::include_crypt!("fi
 /// session that held it.
 static FRESH: include_crypt::EncryptedFile = include_crypt::include_crypt!("fix-fresh.md");
 
+/// The rules every change to the code is bound by, composed into
+/// [the system prompt](crate::assistant::SYSTEM_PROMPT).
+static RULES: include_crypt::EncryptedFile = include_crypt::include_crypt!("rules.md");
+
 /// A compiled-in prompt as the words it was written as, without the
 /// newline a text file ends with. Decrypted once, on the first brief
 /// that needs it, as [the system prompt](crate::assistant::SYSTEM_PROMPT)
@@ -45,6 +49,10 @@ static RESUMED_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| t
 
 /// The words of `FRESH`, read once.
 static FRESH_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| text(&FRESH));
+
+/// The words of `RULES`, read once.
+pub(crate) static RULES_TEXT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| text(&RULES));
 
 /// What one issue's agent is told: the preamble, the branch it is on,
 /// then the issue as the tracker holds it. The branch is already
@@ -153,6 +161,7 @@ mod tests {
             FRESH.decrypt_str().unwrap(),
             include_str!("../fix-fresh.md")
         );
+        assert_eq!(RULES.decrypt_str().unwrap(), include_str!("../rules.md"));
     }
 
     #[test]
