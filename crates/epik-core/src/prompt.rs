@@ -71,8 +71,8 @@ pub fn issue_brief(branch: &str, issue: &str) -> String {
 
 /// What the agent that wrote the branch is told when it is resumed to
 /// fix it: the preamble, the rules, then the required checks that went
-/// red on the commit it pushed. The session it comes back to holds what it built
-/// and why, so neither is repeated here.
+/// red on the commit it pushed. The session it comes back to holds what
+/// it built and why, so neither is repeated here.
 #[must_use]
 pub fn resumed_fix_brief(checks: &str) -> String {
     format!("{}\n\nRed checks: {checks}", with_rules(&RESUMED_TEXT))
@@ -80,8 +80,8 @@ pub fn resumed_fix_brief(checks: &str) -> String {
 
 /// What a fresh agent is told to fix a branch whose session is gone:
 /// the preamble, the rules, the branch, the issue, the branch's diff
-/// against the feature branch, and the same red checks. Everything the resumed
-/// agent would have remembered is written out.
+/// against the feature branch, and the same red checks. Everything the
+/// resumed agent would have remembered is written out.
 #[must_use]
 pub fn fresh_fix_brief(branch: &str, issue: &str, diff: &str, checks: &str) -> String {
     let fence = fence(diff);
