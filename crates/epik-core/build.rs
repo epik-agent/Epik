@@ -6,4 +6,5 @@ fn main() {
     println!("cargo:rerun-if-changed=issue-brief.md");
     println!("cargo:rerun-if-changed=fix-resumed.md");
     println!("cargo:rerun-if-changed=fix-fresh.md");
+    println!("cargo:rerun-if-changed=rules.md");
 }
