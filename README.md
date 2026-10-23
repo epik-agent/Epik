@@ -4,24 +4,19 @@ _You say it. We make it._
 
 Epik is a software-design partner that turns a conversation into working code.
 Talk through what you want to build; Epik writes the plan up as GitHub issues,
-then starts builds that write the code, commit it, and open a pull request for
-you to review. There is nothing to babysit: the work runs on GitHub, and you
-check in whenever you like.
+then Claude Code builds them on your machine: it writes the code, commits it,
+and opens a pull request for you to review.
 
 ## Layout
 
 - [`mcp/`](mcp/README.md) — **EpikMCP**, the GitHub mechanism: an MCP server
-  that authors the issue graph, reads status, and carries Epik's prompts.
+  that authors the issue graph and reads status.
 - [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy
-  layer: skills, hooks, and the declaration of the EpikMCP server.
+  layer: skills and the declaration of the EpikMCP server.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
 ## Installing and uninstalling
-
-Installing Epik is all that has to happen before Epik can speak. Everything
-after that — checking your GitHub sign-in, setting a repository up, configuring
-builds — Epik does itself, in conversation.
 
 ### Install in Claude Desktop or Cowork
 
@@ -39,7 +34,7 @@ Epik acts on GitHub as you.
    installs itself.
 3. Start a **new** conversation.
 
-Once Epik can speak, Claude Desktop and Cowork ask you to approve Epik's
+Once Epik is installed, Claude Desktop and Cowork ask you to approve Epik's
 actions as it works. That is intended — Epik never acts without your say-so.
 If a chat ever seems hung, it usually isn't: look for an approval prompt
 waiting on your screen.
@@ -90,24 +85,6 @@ To update later, again one command at a time:
 /reload-plugins
 ```
 
-### Last step: summon Epik
-
-You know Epik is installed because you can summon it.
-
-| Surface | Summon Epik |
-|---|---|
-| Claude Desktop / Cowork | Send the **summon-epik** prompt from the **+** menu, where installed extensions list their prompts ([Anthropic's guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop)) |
-| Claude Code (CLI, desktop app, web, IDE) | `/epik:summon` |
-
-Epik introduces itself: *"Hello, I'm Epik."* If it didn't say hello, you
-aren't talking to Epik.
-
-From there, everything is dialogue. One command is worth knowing:
-`/epik:init-repository` sets a repository up for Epik, or repairs one that has
-drifted — safe to run any time, and running it on a healthy project is how you
-check. (In Claude Desktop and Cowork it is the **init-repository** prompt,
-invoked the same way as the summon-epik prompt above.)
-
 ### Uninstalling
 
 | Surface | Uninstall |
@@ -118,46 +95,18 @@ invoked the same way as the summon-epik prompt above.)
 `~/.epik-mcp/` is only a cache; delete it whenever you like and Epik will
 rebuild it. Uninstalling never touches your own settings in `~/.epik/`.
 
-**Uninstalling Epik from a machine does not remove Epik from a project.** A
-repository Epik has set up keeps its settings, its build workflow, and its
-secrets, and it will offer to install Epik for the next person who clones it
-and trusts the folder. That is intended: what got set up is the project, not
-your laptop.
-
 ## How it works
 
-**The work happens on GitHub, not on your computer.** When you launch a build,
-Epik starts a GitHub Action — a program GitHub runs on its own computers.
-Nothing runs on your machine, and nothing depends on your chat staying open.
-Your laptop can go to sleep, run out of battery, or be closed for the night;
-the build carries on without you.
+You create the GitHub repository yourself. In conversation (Claude Desktop,
+Cowork, or Claude Code), Epik helps you settle a design and writes it up as a
+feature issue with sub-issues, using the EpikMCP tools.
 
-**GitHub is the dashboard.** There is no separate Epik app, website, or status
-page to check. Everything Epik does shows up on GitHub as it happens:
-
-- progress comments on the issue,
-- commits on a branch,
-- a pull request when the work is ready for a look,
-- and the Action's live log, for anyone who wants the play-by-play.
-
-Watching Epik work *means* looking at GitHub — from any browser, phone
-included. When you ask Epik for a status in chat, it is reading that same
-GitHub state back to you; the issue and the pull request are always the source
-of truth.
-
-**There is nothing to reconnect to.** Because the build was never attached to a
-session of yours, there is no lost connection to recover. To catch up after
-being away, open the issue or the pull request. The one thing Epik always
-leaves for a human is the review: the pull request is where you decide what
-merges.
-
-While a build runs, you can close the chat, start another conversation, follow
-along on your phone, or ignore it entirely until the pull request arrives.
+To build, run Claude Code in a local clone and invoke `/epik:feature` for a
+feature or `/epik:issue` for a single issue. The code is written on your
+machine; GitHub is where the results land — branches, pull requests, CI runs,
+and closed issues. The pull request is where you decide what merges.
 
 ## Troubleshooting the install
-
-Epik handles problems that arise once it can speak. Only failures *of the
-install itself* need this section:
 
 **Claude Code: `/plugin marketplace add` fails with `JSON Parse error`**
 Claude Code's own marketplace registry is corrupt (often a stray trailing
