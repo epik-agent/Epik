@@ -4,7 +4,9 @@
 //! heard of; [`View`] holds that fold and what the page adds to it —
 //! which tab is open, which issue each feature has selected, which
 //! finished tabs have been closed, and whether the feed is still
-//! speaking. Every rule about what the user sees is a method here,
+//! speaking. The selected issue's own lines — its steps, its agent's
+//! narration, its stderr — are the pane's live feed, said in words
+//! here. Every rule about what the user sees is a method here,
 //! tested on the host with plain `cargo test`; the components in
 //! [`pane`](crate::pane) draw the answers and nothing else.
 //!
@@ -29,8 +31,16 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use epik_core::agent::Update;
+use epik_core::happening::{Happened, Step as Phase, Verdict};
 use epik_core::monitor::layout::{Form, Layout, Node};
-use epik_core::monitor::{Counts, Entry, Progress, RunId, Stage, State, Watch};
+use epik_core::monitor::{Counts, Entry, Line, Progress, RunId, Stage, State, Watch};
+
+/// How many of the selected issue's lines the pane shows: the tail,
+/// which is what says whether the work is still moving. The rest are
+/// counted, not drawn, so a long agent run does not redraw thousands of
+/// lines on every entry.
+pub const FEED_LINES: usize = 200;
 
 /// Where entries come from: a channel that delivers each as it lands,
 /// and a replay of everything so far. The window's is Tauri's event
@@ -188,6 +198,38 @@ pub struct Pane {
     pub layout: Option<Layout>,
     pub selected: Option<u64>,
     pub detail: Option<Detail>,
+    /// The selected issue's last [`FEED_LINES`] lines, oldest first:
+    /// empty when nothing is selected or it has said nothing yet.
+    pub feed: Vec<FeedLine>,
+    /// How many earlier lines the feed leaves out.
+    pub elided: usize,
+}
+
+/// What a feed line is, for the color it wears.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Tone {
+    /// A step starting or ending, a push, a verdict: the machine's.
+    Event,
+    /// The agent's narration.
+    Said,
+    /// The agent reaching for a tool.
+    Tool,
+    /// A line of a process's stderr.
+    Stderr,
+    /// A failure, the attempt's or the issue's.
+    Failed,
+}
+
+/// One line of the selected issue's feed, in words.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedLine {
+    /// Unix milliseconds, as the host heard it; [`clock`] says it.
+    pub at: u64,
+    /// The step that spoke: `agent`, `checks`, or `issue` for the
+    /// issue's own node.
+    pub step: &'static str,
+    pub text: String,
+    pub tone: Tone,
 }
 
 /// The whole view: the library's fold plus the page's own state.
@@ -378,6 +420,9 @@ impl View {
         let detail = selected
             .and_then(|id| layout.as_ref()?.node(id))
             .map(detail);
+        let lines = selected.map_or(&[][..], |id| watch.feed(id));
+        let elided = lines.len().saturating_sub(FEED_LINES);
+        let feed = lines[elided..].iter().map(feed_line).collect();
         let mut notices = Vec::new();
         if let Stage::Abandoned { reason } = watch.stage() {
             notices.push(format!("abandoned: {reason}"));
@@ -394,8 +439,84 @@ impl View {
             layout,
             selected,
             detail,
+            feed,
+            elided,
         })
     }
+}
+
+/// The step a line came from, as the feed names it.
+const fn step_word(step: Option<Phase>) -> &'static str {
+    match step {
+        None => "issue",
+        Some(Phase::Worktree) => "worktree",
+        Some(Phase::Agent) => "agent",
+        Some(Phase::Commit) => "commit",
+        Some(Phase::Push) => "push",
+        Some(Phase::PullRequest) => "pull request",
+        Some(Phase::Checks) => "checks",
+        Some(Phase::Merge) => "merge",
+        Some(Phase::Close) => "close",
+    }
+}
+
+/// One line of an issue's stream, said.
+#[must_use]
+pub fn feed_line(line: &Line) -> FeedLine {
+    let (text, tone) = match &line.happened {
+        Happened::Started => ("started".to_owned(), Tone::Event),
+        Happened::Finished => ("finished".to_owned(), Tone::Event),
+        Happened::Failed(report) => (format!("failed: {report}"), Tone::Failed),
+        Happened::Pushed(commit) => (
+            format!("pushed {}", commit.chars().take(7).collect::<String>()),
+            Tone::Event,
+        ),
+        Happened::Checked(Verdict::Green) => ("required checks green".to_owned(), Tone::Event),
+        Happened::Checked(Verdict::Red(names)) => {
+            (format!("required checks red: {names}"), Tone::Failed)
+        }
+        Happened::Checked(Verdict::Unclaimed) => ("no checks required".to_owned(), Tone::Event),
+        Happened::Ran(conclusions) => (format!("other checks: {conclusions}"), Tone::Event),
+        Happened::Stderr(text) => (text.clone(), Tone::Stderr),
+        Happened::Said(Update::Session { model, .. }) => {
+            (format!("session opened · {model}"), Tone::Event)
+        }
+        Happened::Said(Update::Text { text }) => (text.clone(), Tone::Said),
+        Happened::Said(Update::ToolUse { name }) => (format!("→ {name}"), Tone::Tool),
+        Happened::Said(Update::Result {
+            ok, text, cost_usd, ..
+        }) => {
+            let ended = if *ok { "done" } else { "stopped" };
+            let bill = cost_usd
+                .map(|cost| format!(" · ${cost}"))
+                .unwrap_or_default();
+            let tone = if *ok { Tone::Event } else { Tone::Failed };
+            (format!("{ended}: {text}{bill}"), tone)
+        }
+    };
+    FeedLine {
+        at: line.at,
+        step: step_word(line.step),
+        text,
+        tone,
+    }
+}
+
+/// `at` as a time of day, `HH:MM:SS`, on a clock `offset` minutes east
+/// of UTC: what the viewer's own clock read when the host heard it, so
+/// the last line's time against the clock on the wall says whether
+/// the work is still moving.
+#[must_use]
+pub fn clock(at: u64, offset: i64) -> String {
+    const DAY: i64 = 24 * 60 * 60;
+    let seconds = i64::try_from(at / 1_000).unwrap_or(i64::MAX);
+    let of_day = (seconds + offset * 60).rem_euclid(DAY);
+    format!(
+        "{:02}:{:02}:{:02}",
+        of_day / 3_600,
+        of_day / 60 % 60,
+        of_day % 60
+    )
 }
 
 const fn closable(stage: &Stage) -> bool {
@@ -1083,6 +1204,123 @@ mod tests {
         assert_eq!(says(&mut view, 2), "failed: the check went red");
         assert_eq!(says(&mut view, 3), "skipped: #2 never settled");
         assert_eq!(view.pane().unwrap().counts, "1 failed · 1 skipped");
+    }
+
+    /// The selected issue's stream is the pane's feed, in words and in
+    /// order, narration and all; another issue's lines are its own.
+    #[test]
+    fn the_selected_issues_feed_is_what_it_said_in_words() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        assert!(view.pane().unwrap().feed.is_empty(), "nothing selected");
+
+        let agent = Name::Step(2, Phase::Agent);
+        let said = |text: &str| {
+            Happened::Said(Update::Text {
+                text: text.to_owned(),
+            })
+        };
+        view.step(Step::Heard(entry(
+            3,
+            happening(1, agent, said("Reading the tests")),
+        )));
+        let tool = Happened::Said(Update::ToolUse {
+            name: "Bash".to_owned(),
+        });
+        view.step(Step::Heard(entry(4, happening(1, agent, tool))));
+        let stderr = Happened::Stderr("warning: unused".to_owned());
+        view.step(Step::Heard(entry(5, happening(1, agent, stderr))));
+        view.step(Step::Heard(entry(6, pushed(1, 2, "abc1234def"))));
+        let other = Name::Step(3, Phase::Agent);
+        view.step(Step::Heard(entry(7, happening(1, other, said("not 2's")))));
+
+        view.select(RunId(1), 2);
+        let pane = view.pane().unwrap();
+        let said: Vec<(&str, &str, Tone)> = pane
+            .feed
+            .iter()
+            .map(|line| (line.step, line.text.as_str(), line.tone))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("agent", "started", Tone::Event),
+                ("agent", "Reading the tests", Tone::Said),
+                ("agent", "→ Bash", Tone::Tool),
+                ("agent", "warning: unused", Tone::Stderr),
+                ("push", "pushed abc1234", Tone::Event),
+            ]
+        );
+        assert_eq!(pane.feed[1].at, 1_003, "stamped as the host heard it");
+        assert_eq!(pane.elided, 0);
+    }
+
+    /// A long run shows its tail and counts the rest.
+    #[test]
+    fn a_long_feed_shows_its_tail_and_counts_what_it_leaves_out() {
+        let mut view = attached(&opening());
+        view.open(Tab::Feature(RunId(1)));
+        let agent = Name::Step(2, Phase::Agent);
+        let extra = FEED_LINES as u64 + 10;
+        for n in 0..extra {
+            let said = Happened::Said(Update::Text {
+                text: format!("line {n}"),
+            });
+            view.step(Step::Heard(entry(3 + n, happening(1, agent, said))));
+        }
+        view.select(RunId(1), 2);
+        let pane = view.pane().unwrap();
+        assert_eq!(pane.feed.len(), FEED_LINES);
+        assert_eq!(pane.elided, 11, "the agent's start and the first ten");
+        assert_eq!(
+            pane.feed.last().unwrap().text,
+            format!("line {}", extra - 1)
+        );
+    }
+
+    #[test]
+    fn the_ends_of_an_agent_run_and_the_verdicts_are_said() {
+        let line = |happened| {
+            feed_line(&Line {
+                at: 0,
+                step: Some(Phase::Agent),
+                happened,
+            })
+        };
+        let done = line(Happened::Said(Update::Result {
+            ok: true,
+            text: "All green".to_owned(),
+            cost_usd: Some("0.4213".parse().unwrap()),
+            input_tokens: None,
+            output_tokens: None,
+        }));
+        assert_eq!(
+            (done.text.as_str(), done.tone),
+            ("done: All green · $0.4213", Tone::Event)
+        );
+        let red = line(Happened::Checked(Verdict::Red("test".to_owned())));
+        assert_eq!(
+            (red.text.as_str(), red.tone),
+            ("required checks red: test", Tone::Failed)
+        );
+        let issue = feed_line(&Line {
+            at: 0,
+            step: None,
+            happened: Happened::Failed("out of runs".to_owned()),
+        });
+        assert_eq!(
+            (issue.step, issue.text.as_str()),
+            ("issue", "failed: out of runs")
+        );
+    }
+
+    #[test]
+    fn the_clock_reads_the_viewers_time_of_day() {
+        // 2026-10-23T04:22:05.900Z
+        let at = 1_792_729_325_900;
+        assert_eq!(clock(at, 0), "04:22:05");
+        assert_eq!(clock(at, -300), "23:22:05", "Austin, the evening before");
+        assert_eq!(clock(at, 330), "09:52:05");
     }
 
     #[test]

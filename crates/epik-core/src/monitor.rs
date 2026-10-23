@@ -20,6 +20,11 @@
 //! handful of entries per issue and then stops — which is what makes
 //! replay affordable.
 //!
+//! Beside the states, a watch keeps each issue's [`Line`]s: everything
+//! its node and steps said, narration and stderr included, stamped with
+//! when the host heard it. A state says where an issue stands; its feed
+//! says that it is still moving.
+//!
 //! [`Entry::seq`] is host-wide and monotonic from 0, and is three
 //! things at once by design: the deduplication key, the replay cursor,
 //! and the id an event stream carries. [`Entry::at`] is unix
@@ -135,6 +140,20 @@ impl Progressed {
             _ => State::Running,
         }
     }
+}
+
+/// One thing an issue's tasks said, in the order the host heard it: a
+/// line of the feed a watcher follows to see that the work is still
+/// moving. Everything the stream carries for an issue is a line — each
+/// step's start and end as well as the agent's narration and stderr —
+/// so the feed is the issue's stream, unfolded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Line {
+    /// Unix milliseconds: the [`Entry::at`] it arrived in.
+    pub at: u64,
+    /// The step that spoke, or `None` for the issue's own node.
+    pub step: Option<Step>,
+    pub happened: Happened,
 }
 
 /// One thing that happened to a feature build that its own stream does
@@ -253,6 +272,8 @@ pub struct Watch {
     problems: Vec<String>,
     /// How far each issue has got, by the stream's account.
     progressed: BTreeMap<u64, Progressed>,
+    /// What each issue has said, line by line.
+    feeds: BTreeMap<u64, Vec<Line>>,
     stage: Stage,
 }
 
@@ -275,6 +296,7 @@ impl Watch {
             titles: BTreeMap::new(),
             problems: Vec::new(),
             progressed: BTreeMap::new(),
+            feeds: BTreeMap::new(),
             stage: Stage::Starting,
         }
     }
@@ -399,6 +421,13 @@ impl Watch {
             .map_or(0, |progressed| progressed.attempts)
     }
 
+    /// Everything `issue`'s node and steps have said, oldest first —
+    /// nothing for an issue the stream has not reached.
+    #[must_use]
+    pub fn feed(&self, issue: u64) -> &[Line] {
+        self.feeds.get(&issue).map_or(&[], Vec::as_slice)
+    }
+
     /// How many issues stand where: the picture's nodes tallied by
     /// [`Form`](layout::Form), which is where Waiting is split into
     /// ready and blocked by what has merged.
@@ -421,10 +450,9 @@ impl Watch {
         counts
     }
 
-    /// One change about this run, taken in. Borrowed: the stream's
-    /// commonest event by far is an agent's narration, which moves
-    /// nothing, so the fold clones only what it keeps.
-    fn apply(&mut self, change: &Change) {
+    /// One change about this run, recorded at `at`, taken in. Borrowed:
+    /// the fold clones only what it keeps.
+    fn apply(&mut self, change: &Change, at: u64) {
         match change {
             Change::Reserved { .. } => {}
             Change::Started {
@@ -440,7 +468,7 @@ impl Watch {
                 self.problems = problems.clone();
                 self.stage = Stage::Building;
             }
-            Change::Happened { event, .. } => self.heard(event),
+            Change::Happened { event, .. } => self.heard(event, at),
             Change::Finished { .. } => self.stage = Stage::Finished,
             Change::Abandoned { reason, .. } => {
                 self.stage = Stage::Abandoned {
@@ -459,15 +487,23 @@ impl Watch {
     /// the last word wins. What the issue itself accumulates over the
     /// attempts is the count of them and, at the end, the words its own
     /// node failed in.
-    fn heard(&mut self, event: &Event) {
+    ///
+    /// Whatever an issue's event says, it is a line of that issue's
+    /// feed.
+    fn heard(&mut self, event: &Event, at: u64) {
         let (issue, step) = match event.node {
             Name::Issue(issue) => (issue, None),
             Name::Step(issue, step) => (issue, Some(step)),
             Name::Branch | Name::PullRequest => return,
         };
-        // What an agent says is for the transcript, not the state, and
-        // it is most of what crosses: turned away before a node is
-        // made for an issue whose only traffic so far is narration.
+        self.feeds.entry(issue).or_default().push(Line {
+            at,
+            step,
+            happened: event.happened.clone(),
+        });
+        // What an agent says is for the feed, not the state, and it is
+        // most of what crosses: turned away before a node is made for
+        // an issue whose only traffic so far is narration.
         if matches!(event.happened, Happened::Said(_) | Happened::Stderr(_)) {
             return;
         }
@@ -502,7 +538,7 @@ impl Watch {
             // the close finishing.
             (Happened::Started, None) => {}
             // The conclusions of the checks no policy required decide
-            // nothing; they are the transcript's.
+            // nothing; they are the feed's.
             (Happened::Ran(_), _) => {}
             (
                 Happened::Checked(_)
@@ -559,7 +595,7 @@ impl Progress {
             }
             change => {
                 if let Some(watch) = self.watches.get_mut(&change.run()) {
-                    watch.apply(change);
+                    watch.apply(change, entry.at);
                 }
             }
         }
@@ -963,6 +999,63 @@ mod tests {
             assert!(!both.absorb(entry), "already applied");
         }
         assert_eq!(both, listened);
+    }
+
+    /// Everything an issue says is a line of its feed, in the order
+    /// heard and stamped with the entry's time — narration and stderr
+    /// as much as the steps — while narration still moves no state, and
+    /// the build's own nodes are no issue's.
+    #[test]
+    fn an_issues_feed_is_everything_it_said_and_narration_moves_nothing() {
+        use crate::agent::Update;
+        let said = Happened::Said(Update::Text {
+            text: "Reading the tests".to_owned(),
+        });
+        let stderr = Happened::Stderr("warning: unused import".to_owned());
+        let changes = vec![
+            reserved(1),
+            started(1, diamond()),
+            change(1, Name::Branch, Happened::Started),
+            change(1, Name::Issue(154), Happened::Started),
+            change(1, Name::Step(154, Step::Agent), Happened::Started),
+            change(1, Name::Step(154, Step::Agent), said.clone()),
+            change(1, Name::Step(155, Step::Agent), said.clone()),
+            change(1, Name::Step(154, Step::Agent), stderr.clone()),
+        ];
+        let progress = fold(&changes);
+        let watch = progress.watch(RunId(1)).unwrap();
+        assert_eq!(
+            watch.feed(154),
+            [
+                Line {
+                    at: 1_003,
+                    step: None,
+                    happened: Happened::Started,
+                },
+                Line {
+                    at: 1_004,
+                    step: Some(Step::Agent),
+                    happened: Happened::Started,
+                },
+                Line {
+                    at: 1_005,
+                    step: Some(Step::Agent),
+                    happened: said.clone(),
+                },
+                Line {
+                    at: 1_007,
+                    step: Some(Step::Agent),
+                    happened: stderr,
+                },
+            ]
+        );
+        assert_eq!(watch.feed(155).len(), 1, "155's narration is its own");
+        assert_eq!(
+            watch.states()[&155],
+            State::Waiting,
+            "and narration alone moves no state"
+        );
+        assert_eq!(watch.feed(156), [], "an issue never reached says nothing");
     }
 
     #[test]
