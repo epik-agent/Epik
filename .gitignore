@@ -8,8 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
-.claude/*
-!.claude/settings.json
+.claude/
 
 # IDE
 .idea/
