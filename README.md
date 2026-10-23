@@ -93,7 +93,7 @@ To update later, again one command at a time:
 | Claude Code | `/plugin uninstall epik@epik`, then `/plugin marketplace remove epik` |
 
 `~/.epik-mcp/` is only a cache; delete it whenever you like and Epik will
-rebuild it. Uninstalling never touches your own settings in `~/.epik/`.
+rebuild it.
 
 ## How it works
 
