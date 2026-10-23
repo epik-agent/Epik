@@ -13,6 +13,8 @@ and opens a pull request for you to review.
   that authors the issue graph and reads status.
 - [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy
   layer: skills and the declaration of the EpikMCP server.
+- [`scripts/`](scripts/dev-install.sh) — `dev-install.sh`, which installs
+  Epik from a local clone and smoke-tests its MCP server.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
@@ -93,7 +95,32 @@ To update later, again one command at a time:
 | Claude Code | `/plugin uninstall epik@epik`, then `/plugin marketplace remove epik` |
 
 `~/.epik-mcp/` is only a cache; delete it whenever you like and Epik will
-rebuild it. Uninstalling never touches your own settings in `~/.epik/`.
+rebuild it.
+
+### Install from a checkout
+
+To run Epik from a local clone, so that what runs is exactly the branch you
+have checked out, run:
+
+```bash
+scripts/dev-install.sh
+```
+
+It needs `git`, `uv`, `gh`, `python3` and Claude Code on your `PATH`. It
+reports any Epik installs it finds and leaves removing them to you. Then it
+adds the clone as the `epik` plugin marketplace in Claude Code, installs
+`epik@epik` from it, registers an `epik-dev` MCP server that runs
+`uv run --project mcp epik-mcp` in Claude Code and in Claude Desktop, and
+smoke-tests that server.
+
+Plugin edits take effect at the next session start or `/reload-plugins`,
+because a marketplace added from a folder loads in place. MCP server edits
+take effect when the client restarts the server. Quit and reopen Claude
+Desktop after the first run so it picks up `epik-dev`.
+
+`scripts/dev-install.sh --check` repeats the report and the smoke test
+without installing anything. The smoke test lists the server's tools and
+fails if any expected tool is missing or a removed one is still there.
 
 ## How it works
 

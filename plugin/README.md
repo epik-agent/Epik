@@ -38,19 +38,7 @@ Iterate with `/reload-plugins` after edits. No marketplace or install step neede
 
 ### Developing the plugin — install from a local clone (persistent)
 
-The repo root is a single-entry marketplace, so a local clone works exactly like the GitHub install in the root README — just add the clone's root directory instead of `epik-agent/Epik`:
-
-```
-/plugin marketplace add /path/to/Epik
-```
-
-```
-/plugin install epik@epik
-```
-
-After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` to pick them up. `plugin.json` sets no `version`, so each commit counts as a new version.
-
-Note: if an `EpikMCP` server is also registered by hand in the same client (e.g. an entry you added to a `.mcp.json` outside the plugin), the two same-named servers collide as duplicate `mcp__EpikMCP__*` tools. Remove the manual entry — `/plugin uninstall` doesn't touch plain MCP registrations.
+Run [`scripts/dev-install.sh`](../scripts/dev-install.sh) from a clone; the [root README](../README.md#install-from-a-checkout) describes what it does. The repo root is a single-entry marketplace, and a marketplace added from a folder loads the plugin in place, so edits take effect at the next session start or `/reload-plugins` with no update step.
 
 ## Usage
 
