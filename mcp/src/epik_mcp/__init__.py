@@ -1,7 +1,6 @@
 """EpikMCP: the single MCP for Epik.
 
-EpikMCP has two internal modules: a plan module (GitHub access via the gh CLI)
-and a build module (launch feature builds on GitHub Actions). This package can be
+EpikMCP provides GitHub access via the gh CLI. This package can be
 used as a library (import individual functions directly) or as an MCP server
 (run `epik-mcp` or `python -m epik_mcp.server`).
 """
@@ -14,9 +13,6 @@ from .errors import (
     RateLimitError,
     ValidationError,
 )
-
-# Feature launch (build module)
-from .feature_launch import feature_launch
 
 # Feature status aggregator
 from .feature_status import feature_status
@@ -72,7 +68,6 @@ __all__ = [
     "NotFoundError",
     "RateLimitError",
     "ValidationError",
-    "feature_launch",
     "feature_status",
     "gh_raw",
     "issue_add_sub_issue",
