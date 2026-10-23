@@ -1,11 +1,14 @@
-/target
-# `crates/tauri/frontend` is its own workspace, so it has its own target directory.
-/crates/tauri/frontend/target
-# Trunk's output, which the Tauri host embeds at compile time.
-/crates/tauri/frontend/dist
-# Permission schemas, regenerated from the plugin set on every build.
-/crates/tauri/backend/gen/schemas
-# Claude Code's session-local state: commands, worktrees, never the repo's.
-/.claude
-# What `cargo llvm-cov` leaves where it is run; CI uploads it and forgets it.
-lcov.info
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.claude/
+
+# IDE
+.idea/

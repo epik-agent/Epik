@@ -1,0 +1,15 @@
+{
+  "name": "epik",
+  "description": "Epik: manager-mode feature development on GitHub.",
+  "owner": {
+    "name": "W.P. McNeill",
+    "url": "https://github.com/epik-agent"
+  },
+  "plugins": [
+    {
+      "name": "epik",
+      "source": "./plugin",
+      "description": "Manager-mode feature development on GitHub."
+    }
+  ]
+}

@@ -1,237 +1,55 @@
-# Check every push and pull request; bundle the app from main.
-#
-# Pushes to rewrite run too, and only those base-branch runs save the
-# build cache: a pull request can restore caches from its base branch
-# but not from other pull requests, so a base branch that never runs
-# leaves every pull request to build the whole dependency tree cold.
-# The frontend is a workspace of its own and checks in a job of its own,
-# in parallel with the native one, each job with a cache of its size.
-#
-# Both jobs run over an OS matrix. Only macOS is in it today; Linux is
-# a matter of adding `ubuntu-latest` — its system packages and its
-# artifact paths are already here, gated on runner.os.
-#
-# macOS signing is armed by secrets and absent otherwise: without them
-# the bundle job still runs and proves the build, it just produces an
-# unsigned app. Adding the secrets is the only step between this file and
-# a signed, notarized Epik.app — no workflow change needed.
-#
-#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
-#   APPLE_CERTIFICATE_PASSWORD  the .p12's password
-#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
-#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   (optional) notarization via an
-#                               app-specific password; tauri-cli notarizes and
-#                               staples when all three are present, otherwise
-#                               warns and skips.
-#
-# tauri-cli reads all of these itself: it imports the certificate into a
-# temporary keychain for the build and tears it down afterwards.
-
 name: CI
 
 on:
-  push:
-    branches: [main, rewrite]
   pull_request:
-  workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
+  push:
+    branches: [main]
 
 jobs:
-  check:
-    name: fmt, clippy, test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Linux system packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy, llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      # The same hermetic suite as before, instrumented: the live tiers
-      # (EPIK_LIVE_*) skip themselves when their environment is unset.
-      # `cargo llvm-cov` runs the tests, so this is the test step.
-      - name: test
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
-      # Coverage is a reading, never a gate: an upload that cannot happen
-      # leaves the build green. The token is absent on a fork's pull
-      # request and until the secret is set, and neither is a failure.
-      - name: Coverage
-        uses: codecov/codecov-action@v5
-        with:
-          files: lcov.info
-          flags: native
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-        continue-on-error: true
-
-  frontend:
-    name: frontend fmt, clippy, test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
-    runs-on: ${{ matrix.os }}
+  ci:
+    # The branch ruleset requires a status check with this exact context.
+    name: CI
+    runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: crates/tauri/frontend
+        working-directory: mcp
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy, llvm-tools-preview
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/tauri/frontend -> target
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+      # Validate the marketplace and plugin manifests the way Claude Code
+      # reads them. Not --strict: plugin.json omits `version` on purpose so
+      # each commit is a new version, and --strict fails on that warning.
+      - run: npm install --global @anthropic-ai/claude-code@2.1.309
+      - run: claude plugin validate .
+        working-directory: .
+      - run: claude plugin validate ./plugin
+        working-directory: .
 
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-      # The crate builds for wasm by default, but its tests are plain
-      # `#[test]` and need a host that can run them. The triple is read
-      # with awk rather than sed: `host: ` carries a colon and a space,
-      # which YAML reads as a mapping unless the whole line is quoted.
-      - name: test
-        run: cargo llvm-cov --lcov --output-path lcov.info --target "$(rustc -vV | awk '/^host/ { print $2 }')"
-      # Its own flag: this crate is a separate workspace built for a
-      # different target, and one number over both would average a
-      # library against a browser page.
-      - name: Coverage
-        uses: codecov/codecov-action@v5
-        with:
-          files: crates/tauri/frontend/lcov.info
-          flags: frontend
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-        continue-on-error: true
-
-  # The one check branch protection requires. Matrix legs and job names
-  # can change without touching the ruleset; this name must not.
-  # always() keeps it from being skipped (a skipped required check
-  # counts as passing) when a job it needs fails. bundle is left out:
-  # it only runs on main, so pull requests would never satisfy it.
-  ci-ok:
-    name: ci-ok
-    if: always()
-    needs: [check, frontend]
+  deploy-website:
+    # The website is the deployed version of this project: every push to
+    # main that passes CI redeploys it to GitHub Pages.
+    name: Deploy website
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci
     runs-on: ubuntu-latest
-    steps:
-      - name: Every needed job succeeded
-        env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "results: $RESULTS"
-          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
-
-  bundle:
-    name: bundle (${{ matrix.os }})
-    needs: [check, frontend]
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
-    runs-on: ${{ matrix.os }}
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
-      - name: Linux system packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            crates/tauri/frontend -> target
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: cargo-bins/cargo-binstall@main
-      - name: Install trunk and tauri-cli
-        run: cargo binstall -y trunk tauri-cli@^2
-
-      - name: Arm code signing
-        if: runner.os == 'macOS'
-        # Secrets reach tauri-cli only when they exist: an empty
-        # APPLE_SIGNING_IDENTITY would be taken as an identity and fail.
-        env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
-          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          NOTARY_ID: ${{ secrets.APPLE_ID }}
-          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          NOTARY_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          if [ -z "$CERT" ] || [ -z "$IDENTITY" ]; then
-            echo "::notice::No signing secrets; the bundle will be unsigned."
-            exit 0
-          fi
-          {
-            echo "APPLE_CERTIFICATE<<__EOF__"; echo "$CERT"; echo "__EOF__"
-            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
-            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
-          } >> "$GITHUB_ENV"
-          if [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM" ]; then
-            {
-              echo "APPLE_ID=$NOTARY_ID"
-              echo "APPLE_PASSWORD=$NOTARY_PASSWORD"
-              echo "APPLE_TEAM_ID=$NOTARY_TEAM"
-            } >> "$GITHUB_ENV"
-          else
-            echo "::notice::No notarization secrets; the bundle will be signed but not notarized."
-          fi
-
-      - name: Bundle
-        run: cargo tauri build
-        working-directory: crates/tauri/backend
-
-      # The monitor page is embedded at compile time by `include_dir!`,
-      # and an empty directory embeds as a valid empty bundle: nothing
-      # fails, the app just serves no page. Only an assertion on the
-      # artifact catches that, and only here, where Trunk has run.
-      - name: The monitor's page is embedded
-        run: |
-          test -s crates/tauri/frontend/dist/index.html
-          app=$(ls -d target/release/bundle/macos/*.app | head -1)
-          strings "$app/Contents/MacOS/Epik" | grep -q wasm_bindgen
-
-      - name: Signature
-        if: runner.os == 'macOS'
-        run: |
-          app=$(ls -d target/release/bundle/macos/*.app | head -1)
-          codesign --verify --deep --strict --verbose=2 "$app" || echo "::notice::unsigned bundle"
-          codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)' || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Epik-${{ runner.os }}
-          path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app
-            target/release/bundle/deb/*.deb
-            target/release/bundle/rpm/*.rpm
-            target/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
+          path: website
+      - id: deployment
+        uses: actions/deploy-pages@v4

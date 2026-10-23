@@ -1,0 +1,18 @@
+{
+  "name": "epik",
+  "description": "Manager-mode feature development on GitHub: settle the design in chat, author the issue graph, and build it locally with Claude Code.",
+  "author": {
+    "name": "W.P. McNeill",
+    "url": "https://github.com/epik-agent"
+  },
+  "homepage": "https://github.com/epik-agent/Epik",
+  "repository": "https://github.com/epik-agent/Epik",
+  "license": "MIT",
+  "keywords": [
+    "github",
+    "feature",
+    "workflow",
+    "agent-teams",
+    "cowork"
+  ]
+}
