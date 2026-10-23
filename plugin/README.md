@@ -48,7 +48,7 @@ The repo root is a single-entry marketplace, so a local clone works exactly like
 /plugin install epik@epik
 ```
 
-After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` (or bump `version` in `plugin.json`) to pick them up.
+After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` to pick them up. `plugin.json` sets no `version`, so each commit counts as a new version.
 
 Note: if an `EpikMCP` server is also registered by hand in the same client (e.g. an entry you added to a `.mcp.json` outside the plugin), the two same-named servers collide as duplicate `mcp__EpikMCP__*` tools. Remove the manual entry — `/plugin uninstall` doesn't touch plain MCP registrations.
 
@@ -58,7 +58,3 @@ Two build skills, both invoked explicitly as slash commands namespaced under `ep
 
 - **`/epik:feature [feature issue number or GitHub URL] [feature branch]`** — implement a feature: the set of related issues a feature issue points to. Creates the feature branch if needed, then uses Agent Teams to implement the issues in dependency order (in parallel where the order allows), each via `/epik:issue` targeting the feature branch, and finally opens a pull request for the feature.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, run `/simplify`, open a pull request linked to the issue, drive it through CI, merge into the target branch, close the issue, and clean up.
-
-## Status
-
-Skeleton (v0.1.0). Manifest, marketplace, and hook formats are starting points and may need adjustment against the current plugin schema.
