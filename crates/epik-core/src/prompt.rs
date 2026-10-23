@@ -27,6 +27,10 @@ static RESUMED: include_crypt::EncryptedFile = include_crypt::include_crypt!("fi
 /// session that held it.
 static FRESH: include_crypt::EncryptedFile = include_crypt::include_crypt!("fix-fresh.md");
 
+/// The rules every change to the code is bound by, composed into
+/// [the system prompt](crate::assistant::SYSTEM_PROMPT) and every brief.
+static RULES: include_crypt::EncryptedFile = include_crypt::include_crypt!("rules.md");
+
 /// A compiled-in prompt as the words it was written as, without the
 /// newline a text file ends with. Decrypted once, on the first brief
 /// that needs it, as [the system prompt](crate::assistant::SYSTEM_PROMPT)
@@ -46,35 +50,45 @@ static RESUMED_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| t
 /// The words of `FRESH`, read once.
 static FRESH_TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| text(&FRESH));
 
-/// What one issue's agent is told: the preamble, the branch it is on,
-/// then the issue as the tracker holds it. The branch is already
+/// The words of `RULES`, read once.
+pub(crate) static RULES_TEXT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| text(&RULES));
+
+/// A brief's preface, then the rules every agent Epik launches works
+/// by.
+fn with_rules(preface: &str) -> String {
+    format!("{preface}\n\n{}", *RULES_TEXT)
+}
+
+/// What one issue's agent is told: the preamble, the rules, the branch
+/// it is on, then the issue as the tracker holds it. The branch is already
 /// checked out in the worktree the agent runs in, and the commit and
 /// the push are the build's own steps, after the agent has exited.
 #[must_use]
 pub fn issue_brief(branch: &str, issue: &str) -> String {
-    format!("{}\n\nBranch: {branch}\n\n{issue}", *ISSUE_TEXT)
+    format!("{}\n\nBranch: {branch}\n\n{issue}", with_rules(&ISSUE_TEXT))
 }
 
 /// What the agent that wrote the branch is told when it is resumed to
-/// fix it: the preamble, then the required checks that went red on the
-/// commit it pushed. The session it comes back to holds what it built
-/// and why, so neither is repeated here.
+/// fix it: the preamble, the rules, then the required checks that went
+/// red on the commit it pushed. The session it comes back to holds what
+/// it built and why, so neither is repeated here.
 #[must_use]
 pub fn resumed_fix_brief(checks: &str) -> String {
-    format!("{}\n\nRed checks: {checks}", *RESUMED_TEXT)
+    format!("{}\n\nRed checks: {checks}", with_rules(&RESUMED_TEXT))
 }
 
 /// What a fresh agent is told to fix a branch whose session is gone:
-/// the preamble, the branch, the issue, the branch's diff against the
-/// feature branch, and the same red checks. Everything the resumed
-/// agent would have remembered is written out.
+/// the preamble, the rules, the branch, the issue, the branch's diff
+/// against the feature branch, and the same red checks. Everything the
+/// resumed agent would have remembered is written out.
 #[must_use]
 pub fn fresh_fix_brief(branch: &str, issue: &str, diff: &str, checks: &str) -> String {
     let fence = fence(diff);
     format!(
         "{}\n\nBranch: {branch}\n\nRed checks: {checks}\n\n{issue}\n\n## The branch so far\n\n\
          {fence}diff\n{diff}\n{fence}",
-        *FRESH_TEXT
+        with_rules(&FRESH_TEXT)
     )
 }
 
@@ -153,6 +167,7 @@ mod tests {
             FRESH.decrypt_str().unwrap(),
             include_str!("../fix-fresh.md")
         );
+        assert_eq!(RULES.decrypt_str().unwrap(), include_str!("../rules.md"));
     }
 
     #[test]
@@ -191,6 +206,40 @@ mod tests {
         assert!(brief.contains("--- a/wall.rs"), "{brief}");
         assert!(brief.contains("Red checks: build, clippy"), "{brief}");
         assert!(brief.contains("Do not push"), "{brief}");
+    }
+
+    /// Every brief is its preface, the rules, then what it carries: the
+    /// rules once, between the two.
+    #[test]
+    fn every_brief_carries_the_rules_after_its_preface() {
+        for (preface, brief) in [
+            (&*ISSUE_TEXT, issue_brief("issue-7", "the issue")),
+            (&*RESUMED_TEXT, resumed_fix_brief("build")),
+            (
+                &*FRESH_TEXT,
+                fresh_fix_brief("issue-7", "the issue", "the diff", "build"),
+            ),
+        ] {
+            assert!(
+                brief.starts_with(&format!("{preface}\n\n{}\n\n", *RULES_TEXT)),
+                "{brief}"
+            );
+            assert_eq!(brief.matches(RULES_TEXT.as_str()).count(), 1, "{brief}");
+        }
+    }
+
+    /// The issue is the whole of the agent's scope, and the rules, not
+    /// the preface, say to write tests.
+    #[test]
+    fn the_issue_brief_leaves_scope_to_the_issue() {
+        assert!(ISSUE_TEXT.contains("gets the smaller option"));
+        assert!(!ISSUE_TEXT.contains("Write tests covering the work"));
+    }
+
+    #[test]
+    fn every_fix_brief_puts_the_fix_in_the_code() {
+        assert!(RESUMED_TEXT.contains("The fix is in the code"));
+        assert!(FRESH_TEXT.contains("The fix is in the code"));
     }
 
     /// The rule of `2026-09-20-epik-does-everything-around-the-code`:
