@@ -5,7 +5,9 @@
 //! plan as the library lays it out — containment as labelled rounded
 //! rects, ordering as arrows, left to right — scaled by [`geometry`]
 //! into an SVG whose `viewBox` fits the picture, with a slim column
-//! naming the selected issue beside it.
+//! naming the selected issue beside it and the issue's live feed under
+//! it. The feed is pinned to its tail: its scroller runs bottom-up, so
+//! a pane drawn afresh for every entry opens on the newest line.
 //!
 //! Fill means state and nothing else; selection is a ring. The graph
 //! palette is the `.graph-*` classes in `styles.css`, taken from
@@ -18,7 +20,7 @@ use epik_core::monitor::RunId;
 use epik_core::monitor::layout::{Form, Layout};
 use leptos::prelude::*;
 
-use crate::monitor::{Dot, Pane, Tab, TabSpec, View};
+use crate::monitor::{self, Dot, FeedLine, Pane, Tab, TabSpec, Tone, View};
 
 /// The grid, in SVG units: a column's stride, a row's.
 const COLUMN: f64 = 150.0;
@@ -201,6 +203,23 @@ const fn form_class(form: Form, pulse: bool) -> &'static str {
     }
 }
 
+/// The color a feed line's text wears.
+const fn tone_class(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Event => "text-neutral-500 dark:text-neutral-400",
+        Tone::Said => "text-neutral-800 dark:text-neutral-200",
+        Tone::Tool => "graph-open",
+        Tone::Stderr => "text-[#b45309] dark:text-[#f59e0b]",
+        Tone::Failed => "graph-error",
+    }
+}
+
+/// Minutes east of UTC on the viewer's clock, which is what
+/// [`monitor::clock`] reads a line's time on. JavaScript counts west.
+fn offset() -> i64 {
+    -(js_sys::Date::new_0().get_timezone_offset() as i64)
+}
+
 /// The strip: the assistant first, where there is one, then a tab per build
 /// the fold knows.
 #[component]
@@ -304,6 +323,7 @@ pub fn FeaturePane(view: RwSignal<View>, pane: Pane) -> impl IntoView {
         .layout
         .as_ref()
         .map(|layout| graph(view, run, layout, pane.selected, pane.pulse));
+    let feed = feed(pane.feed, pane.elided, pane.selected.is_some());
     let detail = pane.detail.map(|detail| {
         let colour = form_class(detail.form, false);
         view! {
@@ -336,10 +356,14 @@ pub fn FeaturePane(view: RwSignal<View>, pane: Pane) -> impl IntoView {
                 </div>
                 {disconnected}
                 {notices}
-                <div class="min-h-0 flex-1 px-6 pt-2.5 pb-5">
+                <div class="min-h-0 flex-1 px-6 pt-2.5 pb-2.5">
                     <div class="h-full rounded-lg border border-neutral-200 bg-neutral-100 p-2 dark:border-neutral-800 dark:bg-neutral-950">
                         {graph}
                     </div>
+                </div>
+                <div class="flex h-[38%] min-h-32 shrink-0 flex-col gap-1.5 px-6 pb-5">
+                    <div class=LABEL>"Feed"</div>
+                    {feed}
                 </div>
             </div>
             <aside class="flex w-72 shrink-0 flex-col gap-2.5 border-l border-neutral-200 bg-neutral-100 px-4 py-4 dark:border-neutral-800 dark:bg-neutral-950">
@@ -356,6 +380,55 @@ pub fn FeaturePane(view: RwSignal<View>, pane: Pane) -> impl IntoView {
             </aside>
         </section>
     }
+}
+
+/// The selected issue's feed: a line per thing it said, the time the
+/// host heard it on the viewer's clock, the step that said it, and the
+/// words. Bottom-up, so it opens on its tail.
+fn feed(lines: Vec<FeedLine>, elided: usize, selected: bool) -> impl IntoView {
+    const BOX: &str = "min-h-0 flex-1 rounded-lg border border-neutral-200 bg-neutral-100 px-3 py-2 dark:border-neutral-800 dark:bg-neutral-950";
+    const QUIET: &str = "font-mono text-[12px] text-neutral-500 dark:text-neutral-400";
+    if lines.is_empty() {
+        let why = if selected {
+            "Nothing yet: the issue's steps and its agent speak here once it starts."
+        } else {
+            "Click a node to follow what it is doing."
+        };
+        return view! { <div class=format!("{BOX} {QUIET}")>{why}</div> }.into_any();
+    }
+    let offset = offset();
+    let earlier = (elided > 0).then(|| {
+        view! {
+            <div class=format!("{QUIET} pb-1")>
+                {format!("… {elided} earlier line{}", if elided == 1 { "" } else { "s" })}
+            </div>
+        }
+    });
+    let lines = lines
+        .into_iter()
+        .map(|line| {
+            view! {
+                <div class="grid grid-cols-[auto_6.5rem_minmax(0,1fr)] gap-x-3 font-mono text-[12px] leading-[1.55]">
+                    <span class="text-neutral-400 tabular-nums dark:text-neutral-500">
+                        {monitor::clock(line.at, offset)}
+                    </span>
+                    <span class="truncate text-neutral-400 dark:text-neutral-500">{line.step}</span>
+                    <span class=format!("break-words whitespace-pre-wrap {}", tone_class(line.tone))>
+                        {line.text}
+                    </span>
+                </div>
+            }
+        })
+        .collect_view();
+    view! {
+        <div class=format!("{BOX} flex flex-col-reverse overflow-y-auto")>
+            <div>
+                {earlier}
+                {lines}
+            </div>
+        </div>
+    }
+    .into_any()
 }
 
 /// The graph: boxes under arrows under nodes, the selected node ringed.
@@ -604,7 +677,7 @@ mod tests {
         }
     }
 
-    /// Every form at both flags: the colour it wears, and the one that
+    /// Every form at both flags: the color it wears, and the one that
     /// moves. Running is the only row whose two entries differ, so the
     /// table says what pulses by showing what does not.
     #[test]
@@ -622,6 +695,14 @@ mod tests {
             assert_eq!(form_class(form, false), still, "{form:?}");
             assert_eq!(form_class(form, true), speaking, "{form:?}");
         }
+    }
+
+    /// Failure and the agent's tools wear the graph's own colors, so a
+    /// red line in the feed is the red of a failed node.
+    #[test]
+    fn a_feed_line_shares_the_graphs_palette_where_their_meanings_meet() {
+        assert_eq!(tone_class(Tone::Failed), form_class(Form::Failed, false));
+        assert_eq!(tone_class(Tone::Tool), form_class(Form::Running, false));
     }
 
     #[test]
