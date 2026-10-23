@@ -20,6 +20,14 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      # Validate the marketplace and plugin manifests the way Claude Code
+      # reads them. Not --strict: plugin.json omits `version` on purpose so
+      # each commit is a new version, and --strict fails on that warning.
+      - run: npm install --global @anthropic-ai/claude-code@2.1.309
+      - run: claude plugin validate .
+        working-directory: .
+      - run: claude plugin validate ./plugin
+        working-directory: .
 
   deploy-website:
     # The website is the deployed version of this project: every push to
