@@ -98,11 +98,11 @@ rebuild it.
 ## How it works
 
 You create the GitHub repository yourself. In conversation (Claude Desktop,
-Cowork, or Claude Code), Epik helps you settle a design and writes it up as a
-feature issue with sub-issues, using the EpikMCP tools.
+Cowork, or Claude Code), Epik helps you settle a design and writes it up as an
+epic issue with sub-issues, using the EpikMCP tools.
 
-To build, run Claude Code in a local clone and invoke `/epik:feature` for a
-feature or `/epik:issue` for a single issue. The code is written on your
+To build, run Claude Code in a local clone and invoke `/epik:epic` for an
+epic or `/epik:issue` for a single issue. The code is written on your
 machine; GitHub is where the results land — branches, pull requests, CI runs,
 and closed issues. The pull request is where you decide what merges.
 
