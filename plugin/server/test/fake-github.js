@@ -19,10 +19,17 @@ export async function fakeGithub(replies) {
   process.env.FAKE_GITHUB_LOG = log;
   const restorePath = await fakeGh(`exec '${process.execPath}' '${responder}' "$@"`);
   return {
-    calls: async () => (await readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)),
+    calls: async () =>
+      (await readFile(log, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line)),
     restore: async () => {
       await restorePath();
       await rm(log, { force: true });
     },
   };
 }
+
+// The `gh api` arguments that fetch every page of `path`.
+export const pages = (path) => `api --paginate --slurp ${path}${path.includes('?') ? '&' : '?'}per_page=100`;

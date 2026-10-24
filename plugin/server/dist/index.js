@@ -7228,8 +7228,8 @@ var require_dist = __commonJS({
         return ajv;
       }
       const [formats, exportName] = opts.mode === "fast" ? [formats_1.fastFormats, fastName] : [formats_1.fullFormats, fullName];
-      const list = opts.formats || formats_1.formatNames;
-      addFormats(ajv, list, formats, exportName);
+      const list2 = opts.formats || formats_1.formatNames;
+      addFormats(ajv, list2, formats, exportName);
       if (opts.keywords)
         (0, limit_1.default)(ajv);
       return ajv;
@@ -7241,11 +7241,11 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs, exportName) {
+    function addFormats(ajv, list2, fs, exportName) {
       var _a3;
       var _b;
       (_a3 = (_b = ajv.opts.code).formats) !== null && _a3 !== void 0 ? _a3 : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
-      for (const f of list)
+      for (const f of list2)
         ajv.addFormat(f, fs[f]);
     }
     module.exports = exports = formatsPlugin;
@@ -9670,14 +9670,14 @@ var $ZodObject = /* @__PURE__ */ $constructor("$ZodObject", (inst, def) => {
   const desc = Object.getOwnPropertyDescriptor(def, "shape");
   const sh = desc?.get ? desc.get.raw : def.shape ?? {};
   if (sh) {
-    const get = () => {
+    const get2 = () => {
       const newSh = { ...sh };
       Object.defineProperty(def, "shape", { value: newSh });
-      get.raw = newSh;
+      get2.raw = newSh;
       return newSh;
     };
-    get.raw = sh;
-    Object.defineProperty(def, "shape", { get });
+    get2.raw = sh;
+    Object.defineProperty(def, "shape", { get: get2 });
   }
   const _normalized = cached(() => normalizeDef(def));
   defineLazyInternal(inst, "propValues", (zod) => {
@@ -12160,8 +12160,8 @@ var contributors = {
 function aggregateChecks(schema) {
   const agg = {};
   const def = schema._zod.def;
-  const list = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
-  for (const ch of list)
+  const list2 = schema._zod.traits.has("$ZodCheck") ? [schema, ...def.checks ?? []] : def.checks ?? [];
+  for (const ch of list2)
     contributors[ch._zod.def.check]?.(agg, ch._zod.def);
   const bag = schema._zod.bag;
   if (bag.minimum !== void 0)
@@ -23609,6 +23609,137 @@ function explain(exitCode, stderr) {
 (exit code ${exitCode})`;
 }
 
+// src/rest.js
+var get = (path) => gh(["api", path], { json: true });
+async function list(path, field) {
+  const separator = path.includes("?") ? "&" : "?";
+  const pages = await gh(["api", "--paginate", "--slurp", `${path}${separator}per_page=100`], { json: true });
+  return pages.flatMap((page) => field ? page[field] : page);
+}
+
+// src/blocked_by.js
+var edges = (repo, number3) => `repos/${repo}/issues/${number3}/dependencies/blocked_by`;
+var issueId = async (repo, number3) => (await get(`repos/${repo}/issues/${number3}`)).id;
+var blockers = (repo, number3) => list(edges(repo, number3));
+var repoOf = (issue2) => issue2.repository_url.split("/repos/")[1];
+var edgeInput = {
+  inputSchema: {
+    repo: string2(),
+    issue_number: number2().int(),
+    blocked_by_number: number2().int(),
+    blocked_by_repo: string2().optional()
+  },
+  args: `Args:
+    repo: Repository of the blocked issue, in owner/name format.
+    issue_number: The issue that is blocked.
+    blocked_by_number: The issue that blocks it.
+    blocked_by_repo: Repository of the blocking issue. Defaults to repo.`
+};
+
+// src/graph.js
+function levels(blockers2) {
+  const positions = /* @__PURE__ */ new Map();
+  const cycles = [];
+  const index = /* @__PURE__ */ new Map();
+  const low = /* @__PURE__ */ new Map();
+  const stack = [];
+  const onStack = /* @__PURE__ */ new Set();
+  const visit = (issue2) => {
+    index.set(issue2, index.size);
+    low.set(issue2, index.get(issue2));
+    stack.push(issue2);
+    onStack.add(issue2);
+    for (const blocker of blockers2.get(issue2)) {
+      if (!index.has(blocker)) {
+        visit(blocker);
+        low.set(issue2, Math.min(low.get(issue2), low.get(blocker)));
+      } else if (onStack.has(blocker)) {
+        low.set(issue2, Math.min(low.get(issue2), index.get(blocker)));
+      }
+    }
+    if (low.get(issue2) !== index.get(issue2)) return;
+    const component = stack.splice(stack.indexOf(issue2));
+    for (const member of component) onStack.delete(member);
+    if (component.length > 1 || blockers2.get(issue2).includes(issue2)) {
+      cycles.push(component.sort((a, b) => a - b));
+      for (const member of component) positions.set(member, null);
+    } else {
+      const below = blockers2.get(issue2).map((blocker) => positions.get(blocker));
+      positions.set(issue2, below.includes(null) ? null : 1 + Math.max(-1, ...below));
+    }
+  };
+  for (const issue2 of blockers2.keys()) if (!index.has(issue2)) visit(issue2);
+  return { positions, cycles: cycles.sort((a, b) => a[0] - b[0]) };
+}
+
+// src/tools/epic_status.js
+function linkedPr(timeline, repo, number3) {
+  const escaped = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const closing = new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?\\s+(${escaped})?#${number3}\\b`, "i");
+  const rank = (pr2) => [
+    closing.test(`${pr2.title}
+${pr2.body ?? ""}`) ? 0 : 1,
+    pr2.state === "open" ? 0 : 1,
+    -Date.parse(pr2.pull_request.merged_at) || 0
+  ];
+  const [pr] = timeline.filter((event) => event.event === "cross-referenced").map((event) => event.source.issue).filter((source) => source.pull_request && source.repository.full_name === repo).map((source) => [rank(source), source]).sort(([a], [b]) => a.map((x, i) => x - b[i]).find(Boolean) ?? 0).map(([, source]) => source);
+  if (!pr) return null;
+  const state = pr.pull_request.merged_at ? "merged" : pr.state;
+  return { number: pr.number, state, url: pr.html_url };
+}
+function ci(checkRuns) {
+  if (checkRuns.length === 0) return null;
+  const passed = ["success", "neutral", "skipped"];
+  const done = checkRuns.filter((run2) => run2.status === "completed");
+  if (done.some((run2) => !passed.includes(run2.conclusion))) return "failure";
+  return done.length < checkRuns.length ? "pending" : "success";
+}
+var prCi = async (repo, pr) => ci(await list(`repos/${repo}/commits/refs/pull/${pr.number}/head/check-runs`, "check_runs"));
+async function row(repo, issue2, epic) {
+  const [timeline, blocking] = await Promise.all([
+    list(`repos/${repo}/issues/${issue2.number}/timeline`),
+    issue2.issue_dependencies_summary.total_blocked_by ? blockers(repo, issue2.number) : []
+  ]);
+  const pr = linkedPr(timeline, repo, issue2.number);
+  return {
+    number: issue2.number,
+    title: issue2.title,
+    state: issue2.state,
+    linked_pr: pr,
+    ci: pr && await prCi(repo, pr),
+    blocked_by: blocking.map((blocker) => blocker.number).filter((number3) => epic.has(number3))
+  };
+}
+var epic_status_default = {
+  name: "epic_status",
+  description: `Report the status of each sub-issue of an epic.
+
+For each sub-issue: number, title, state; linked_pr, the pull request that
+references it (number, state, url); ci, the combined check-run result on that
+pull request's head commit (failure, pending, success, or null); blocked_by,
+its blocking issues that are sub-issues of the epic; and position, its level
+in the dependency graph (0 with no blockers, else one more than its deepest
+blocker). Issues on a dependency cycle have position null, and each cycle is
+listed under the top-level cycles key.
+
+Args:
+    repo: Repository in owner/name format.
+    epic_issue_number: The epic issue.`,
+  inputSchema: { repo: string2(), epic_issue_number: number2().int() },
+  run: async ({ repo, epic_issue_number }) => {
+    const subIssues = await list(`repos/${repo}/issues/${epic_issue_number}/sub_issues`);
+    const epic = new Set(subIssues.map((issue2) => issue2.number));
+    const rows = await Promise.all(subIssues.map((issue2) => row(repo, issue2, epic)));
+    const { positions, cycles } = levels(new Map(rows.map((r) => [r.number, r.blocked_by])));
+    return {
+      epic: epic_issue_number,
+      repo,
+      issues: rows.map((r) => ({ ...r, position: positions.get(r.number) })),
+      cycles
+    };
+  }
+};
+
 // src/tools/gh_raw.js
 var gh_raw_default = {
   name: "gh_raw",
@@ -23622,6 +23753,53 @@ Args:
     args: The list of arguments passed to gh, excluding the leading "gh".`,
   inputSchema: { args: array(string2()) },
   run: ({ args }) => ghRaw(args)
+};
+
+// src/tools/issue_list_blocked_by.js
+var issue_list_blocked_by_default = {
+  name: "issue_list_blocked_by",
+  description: `List the issues blocking an issue.
+
+Returns each blocking issue's number, title, state and repository.
+
+Args:
+    repo: Repository in owner/name format.
+    issue_number: The blocked issue.`,
+  inputSchema: { repo: string2(), issue_number: number2().int() },
+  run: async ({ repo, issue_number }) => (await blockers(repo, issue_number)).map((issue2) => ({
+    number: issue2.number,
+    title: issue2.title,
+    state: issue2.state,
+    repository: repoOf(issue2)
+  }))
+};
+
+// src/tools/issue_remove_blocked_by.js
+var issue_remove_blocked_by_default = {
+  name: "issue_remove_blocked_by",
+  description: `Remove a blocked-by relationship between two issues.
+
+${edgeInput.args}`,
+  inputSchema: edgeInput.inputSchema,
+  run: async ({ repo, issue_number, blocked_by_number, blocked_by_repo = repo }) => {
+    const id = await issueId(blocked_by_repo, blocked_by_number);
+    await gh(["api", "--method", "DELETE", `${edges(repo, issue_number)}/${id}`]);
+    return { repo, issue_number, removed_blocked_by: { repo: blocked_by_repo, number: blocked_by_number } };
+  }
+};
+
+// src/tools/issue_set_blocked_by.js
+var issue_set_blocked_by_default = {
+  name: "issue_set_blocked_by",
+  description: `Mark an issue as blocked by another issue.
+
+${edgeInput.args}`,
+  inputSchema: edgeInput.inputSchema,
+  run: async ({ repo, issue_number, blocked_by_number, blocked_by_repo = repo }) => {
+    const id = await issueId(blocked_by_repo, blocked_by_number);
+    await gh(["api", "--method", "POST", edges(repo, issue_number), "-F", `issue_id=${id}`]);
+    return { repo, issue_number, blocked_by: { repo: blocked_by_repo, number: blocked_by_number } };
+  }
 };
 
 // src/tools/label_create.js
@@ -23865,13 +24043,13 @@ Returns { item_id, status }.`,
   inputSchema: { ...issueInProject, status_name: string2() },
   run: async ({ status_name, ...input }) => {
     const { owner, number: number3 } = input;
-    const [{ projectId, field }, { issueId, item }] = await Promise.all([statusField(owner, number3), issueItem(input)]);
+    const [{ projectId, field }, { issueId: issueId2, item }] = await Promise.all([statusField(owner, number3), issueItem(input)]);
     const option = field.options.find(({ name }) => name === status_name);
     if (!option) {
       const statuses = field.options.map(({ name }) => name).join(", ");
       throw new GhError(`Project ${owner} #${number3} has no status "${status_name}". Its statuses are ${statuses}.`);
     }
-    const itemId = item?.id ?? await add(projectId, issueId);
+    const itemId = item?.id ?? await add(projectId, issueId2);
     await graphql(
       `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
         updateProjectV2ItemFieldValue(input: {
@@ -23883,12 +24061,12 @@ Returns { item_id, status }.`,
     return { item_id: itemId, status: status_name };
   }
 };
-async function add(projectId, issueId) {
+async function add(projectId, issueId2) {
   const data = await graphql(
     `mutation($project: ID!, $content: ID!) {
       addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
     }`,
-    { project: projectId, content: issueId }
+    { project: projectId, content: issueId2 }
   );
   return data.addProjectV2ItemById.item.id;
 }
@@ -23982,7 +24160,11 @@ var tools = [
   project_list_default,
   project_list_items_default,
   project_get_item_default,
-  project_set_status_default
+  project_set_status_default,
+  issue_set_blocked_by_default,
+  issue_remove_blocked_by_default,
+  issue_list_blocked_by_default,
+  epic_status_default
 ];
 
 // src/index.js
