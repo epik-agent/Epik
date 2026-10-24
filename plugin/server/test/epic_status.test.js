@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
 import epicStatus, { ci, linkedPr } from '../src/tools/epic_status.js';
-import { fakeGitHub, pages } from './fake-github.js';
+import { fakeGithub, pages } from './fake-github.js';
 
-let restore;
-afterEach(() => restore?.());
+let github;
+afterEach(() => github?.restore());
 
 const repository = (repo) => ({ full_name: repo });
 const issue = (number, title, state = 'open', blockedBy = 0) => ({
@@ -77,22 +77,24 @@ test('ci combines the check runs on a commit', () => {
 });
 
 test('epic_status reports each sub-issue with its PR, CI, in-epic blockers and level', async () => {
-  restore = await fakeGitHub({
-    [pages('repos/o/r/issues/9/sub_issues')]: [
-      [issue(10, 'Ten', 'closed'), issue(11, 'Eleven', 'open', 2), issue(12, 'Twelve', 'open', 1)],
-    ],
-    [pages('repos/o/r/issues/11/dependencies/blocked_by')]: [[issue(10, 'Ten'), issue(99, 'Elsewhere')]],
-    [pages('repos/o/r/issues/12/dependencies/blocked_by')]: [[issue(11, 'Eleven')]],
-    [pages('repos/o/r/issues/10/timeline')]: [[reference(16, { merged_at: '2026-06-28T21:44:46Z' })]],
-    [pages('repos/o/r/issues/11/timeline')]: [[reference(20, { state: 'open' })]],
-    [pages('repos/o/r/issues/12/timeline')]: [[]],
-    [pages('repos/o/r/commits/refs/pull/16/head/check-runs')]: [
-      { check_runs: [{ status: 'completed', conclusion: 'success' }] },
-    ],
-    [pages('repos/o/r/commits/refs/pull/20/head/check-runs')]: [
-      { check_runs: [{ status: 'queued', conclusion: null }] },
-    ],
-  });
+  github = await fakeGithub(
+    Object.entries({
+      [pages('repos/o/r/issues/9/sub_issues')]: [
+        [issue(10, 'Ten', 'closed'), issue(11, 'Eleven', 'open', 2), issue(12, 'Twelve', 'open', 1)],
+      ],
+      [pages('repos/o/r/issues/11/dependencies/blocked_by')]: [[issue(10, 'Ten'), issue(99, 'Elsewhere')]],
+      [pages('repos/o/r/issues/12/dependencies/blocked_by')]: [[issue(11, 'Eleven')]],
+      [pages('repos/o/r/issues/10/timeline')]: [[reference(16, { merged_at: '2026-06-28T21:44:46Z' })]],
+      [pages('repos/o/r/issues/11/timeline')]: [[reference(20, { state: 'open' })]],
+      [pages('repos/o/r/issues/12/timeline')]: [[]],
+      [pages('repos/o/r/commits/refs/pull/16/head/check-runs')]: [
+        { check_runs: [{ status: 'completed', conclusion: 'success' }] },
+      ],
+      [pages('repos/o/r/commits/refs/pull/20/head/check-runs')]: [
+        { check_runs: [{ status: 'queued', conclusion: null }] },
+      ],
+    }),
+  );
   assert.deepEqual(await epicStatus.run({ repo: 'o/r', epic_issue_number: 9 }), {
     epic: 9,
     repo: 'o/r',
@@ -122,16 +124,18 @@ test('epic_status reports each sub-issue with its PR, CI, in-epic blockers and l
 });
 
 test('epic_status levels around a cycle and lists it', async () => {
-  restore = await fakeGitHub({
-    [pages('repos/o/r/issues/9/sub_issues')]: [
-      [issue(1, 'One', 'open', 1), issue(2, 'Two', 'open', 1), issue(3, 'Three')],
-    ],
-    [pages('repos/o/r/issues/1/dependencies/blocked_by')]: [[issue(2, 'Two')]],
-    [pages('repos/o/r/issues/2/dependencies/blocked_by')]: [[issue(1, 'One')]],
-    [pages('repos/o/r/issues/1/timeline')]: [[]],
-    [pages('repos/o/r/issues/2/timeline')]: [[]],
-    [pages('repos/o/r/issues/3/timeline')]: [[]],
-  });
+  github = await fakeGithub(
+    Object.entries({
+      [pages('repos/o/r/issues/9/sub_issues')]: [
+        [issue(1, 'One', 'open', 1), issue(2, 'Two', 'open', 1), issue(3, 'Three')],
+      ],
+      [pages('repos/o/r/issues/1/dependencies/blocked_by')]: [[issue(2, 'Two')]],
+      [pages('repos/o/r/issues/2/dependencies/blocked_by')]: [[issue(1, 'One')]],
+      [pages('repos/o/r/issues/1/timeline')]: [[]],
+      [pages('repos/o/r/issues/2/timeline')]: [[]],
+      [pages('repos/o/r/issues/3/timeline')]: [[]],
+    }),
+  );
   const { issues, cycles } = await epicStatus.run({ repo: 'o/r', epic_issue_number: 9 });
   assert.deepEqual(
     issues.map(({ number, position }) => [number, position]),

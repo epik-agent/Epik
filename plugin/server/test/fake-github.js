@@ -1,29 +1,34 @@
-// A fake gh that answers `gh api` calls from a table, for tools that make
-// many of them.
+// A fake `gh` for tools that make several calls: it records each call's
+// arguments and answers with the first reply whose needle the call contains.
 
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { fakeGh, quote } from './fake-gh.js';
+import { fakeGh } from './fake-gh.js';
 
-// Puts a fake gh on PATH that prints `responses[args]` as JSON, where `args`
-// is its arguments joined by spaces, and fails on any other call. Every call
-// is recorded for `calls`. Returns the function that restores PATH.
-export function fakeGitHub(responses) {
-  const cases = Object.entries(responses).map(
-    ([args, response]) => `'${args}') printf "%s\\n" ${quote(JSON.stringify(response))};;`,
-  );
-  return fakeGh(`echo "$*" >> "\${0%/*}/calls"
-case "$*" in
-${cases.join('\n')}
-*) echo "HTTP 404: Not Found ($*)" >&2; exit 1;;
-esac`);
-}
+const responder = fileURLToPath(new URL('./fake-github-gh.js', import.meta.url));
 
-// The argument lists the fake gh has been called with, in order.
-export async function calls() {
-  const log = await readFile(join(process.env.PATH, 'calls'), 'utf8');
-  return log.trimEnd().split('\n');
+// `replies` is a list of `[needle, body]`. A call whose arguments, joined by
+// spaces, contain `needle` prints `body` as JSON. Returns `{ calls, restore }`:
+// `calls()` resolves to each call's argument list, in order.
+export async function fakeGithub(replies) {
+  const log = join(tmpdir(), `fake-github-${process.pid}-${Date.now()}.jsonl`);
+  process.env.FAKE_GITHUB_REPLIES = JSON.stringify(replies);
+  process.env.FAKE_GITHUB_LOG = log;
+  const restorePath = await fakeGh(`exec '${process.execPath}' '${responder}' "$@"`);
+  return {
+    calls: async () =>
+      (await readFile(log, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line)),
+    restore: async () => {
+      await restorePath();
+      await rm(log, { force: true });
+    },
+  };
 }
 
 // The `gh api` arguments that fetch every page of `path`.

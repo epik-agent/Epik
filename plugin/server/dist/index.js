@@ -23573,6 +23573,11 @@ async function gh(args, { json = false } = {}) {
   if (exit_code !== 0) throw new GhError(explain(exit_code, stderr));
   return json ? JSON.parse(stdout) : stdout;
 }
+async function graphql(query, variables = {}) {
+  const fields = Object.entries(variables).filter(([, value]) => value !== void 0).flatMap(([name, value]) => [Number.isInteger(value) ? "-F" : "-f", `${name}=${value}`]);
+  const { data } = await gh(["api", "graphql", "-f", `query=${query}`, ...fields], { json: true });
+  return data;
+}
 async function ghRaw(args) {
   try {
     const result = await run(args);
@@ -23857,6 +23862,215 @@ Args:
   run: ({ repo }) => gh(["label", "list", "--repo", repo, "--json", "name,color,description"], { json: true })
 };
 
+// src/projects.js
+var issueInProject = {
+  owner: string2(),
+  number: number2().int(),
+  repo: string2().regex(/^[^/]+\/[^/]+$/, "repo is owner/name"),
+  issue_number: number2().int()
+};
+var VARIABLE_TYPES = { number: "Int!", cursor: "String" };
+async function projectOwner(owner, selection, variables = {}) {
+  const data = await graphql(
+    `query($owner: String!${Object.keys(variables).map((name) => `, $${name}: ${VARIABLE_TYPES[name]}`).join("")}) {
+      repositoryOwner(login: $owner) { ... on ProjectV2Owner { ${selection} } }
+    }`,
+    { owner, ...variables }
+  );
+  if (!data.repositoryOwner) throw new GhError(`There is no GitHub user or organization named ${owner}.`);
+  return data.repositoryOwner;
+}
+async function paginate(query, connection) {
+  const nodes = [];
+  let cursor;
+  do {
+    const { pageInfo, nodes: page } = connection(await query(cursor));
+    nodes.push(...page);
+    cursor = pageInfo.hasNextPage ? pageInfo.endCursor : void 0;
+  } while (cursor);
+  return nodes;
+}
+var FIELD_VALUE_TYPES = { SingleSelect: "name", Text: "text", Number: "number", Date: "date", Iteration: "title" };
+var FIELD_VALUES = `fieldValues(first: 50) {
+  nodes {
+    ${Object.entries(FIELD_VALUE_TYPES).map(([type, value]) => `... on ProjectV2ItemField${type}Value { value: ${value} field { ... on ProjectV2FieldCommon { name } } }`).join("\n    ")}
+  }
+}`;
+function fieldValues(item) {
+  return Object.fromEntries(item.fieldValues.nodes.filter(({ field }) => field).map(({ field, value }) => [field.name, value]));
+}
+async function statusField(owner, number3) {
+  const { projectV2 } = await projectOwner(
+    owner,
+    `projectV2(number: $number) {
+      id
+      field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+    }`,
+    { number: number3 }
+  );
+  if (!projectV2.field?.id) throw new GhError(`Project ${owner} #${number3} has no Status field.`);
+  return { projectId: projectV2.id, field: projectV2.field };
+}
+async function issueItem({ owner, number: number3, repo, issue_number }) {
+  const [repoOwner, name] = repo.split("/");
+  const { issue: issue2 } = (await graphql(
+    `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          issue(number: $number) {
+            id
+            projectItems(first: 100) {
+              nodes {
+                id
+                project { number owner { ... on User { login } ... on Organization { login } } }
+                ${FIELD_VALUES}
+              }
+            }
+          }
+        }
+      }`,
+    { owner: repoOwner, name, number: issue_number }
+  )).repository;
+  const item = issue2.projectItems.nodes.find(
+    ({ project }) => project.number === number3 && project.owner.login.toLowerCase() === owner.toLowerCase()
+  );
+  return { issueId: issue2.id, item: item ?? null };
+}
+
+// src/tools/project_get_item.js
+var project_get_item_default = {
+  name: "project_get_item",
+  description: `Get an issue's item in a GitHub Project, with its field values.
+
+Args:
+    owner: The user or organization login that owns the project.
+    number: The project number, from its URL or project_list.
+    repo: The issue's repository, as owner/name.
+    issue_number: The issue number.
+
+Returns { found: true, item_id, fields: { field name: value } }, or
+{ found: false } when the issue is not in the project.`,
+  inputSchema: issueInProject,
+  run: async (input) => {
+    const { item } = await issueItem(input);
+    return item ? { found: true, item_id: item.id, fields: fieldValues(item) } : { found: false };
+  }
+};
+
+// src/tools/project_list.js
+var project_list_default = {
+  name: "project_list",
+  description: `List a GitHub user's or organization's open Projects.
+
+Use this to find a project's number for the other project tools.
+
+Args:
+    owner: The user or organization login that owns the projects.
+
+Returns a list of { number, title, url }.`,
+  inputSchema: { owner: string2() },
+  run: async ({ owner }) => {
+    const projects = await paginate(
+      (cursor) => projectOwner(
+        owner,
+        `projectsV2(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { number title url closed }
+          }`,
+        { cursor }
+      ),
+      (data) => data.projectsV2
+    );
+    return projects.filter(({ closed }) => !closed).map(({ number: number3, title, url }) => ({ number: number3, title, url }));
+  }
+};
+
+// src/tools/project_list_items.js
+var project_list_items_default = {
+  name: "project_list_items",
+  description: `List the issues in a GitHub Project, optionally only those with one status.
+
+Args:
+    owner: The user or organization login that owns the project.
+    number: The project number, from its URL or project_list.
+    status_filter: If given, only items whose Status is this.
+
+Returns a list of { issue_number, title, url, repo, status }.`,
+  inputSchema: {
+    owner: string2(),
+    number: number2().int(),
+    status_filter: string2().optional()
+  },
+  run: async ({ owner, number: number3, status_filter }) => {
+    const items = await paginate(
+      (cursor) => projectOwner(
+        owner,
+        `projectV2(number: $number) {
+            items(first: 100, after: $cursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                content { ... on Issue { number title url repository { nameWithOwner } } }
+                ${FIELD_VALUES}
+              }
+            }
+          }`,
+        { number: number3, cursor }
+      ),
+      (data) => data.projectV2.items
+    );
+    return items.filter(({ content }) => content?.number).map(({ content: { number: number4, title, url, repository }, ...item }) => ({
+      issue_number: number4,
+      title,
+      url,
+      repo: repository.nameWithOwner,
+      status: fieldValues(item).Status ?? null
+    })).filter(({ status }) => status_filter === void 0 || status === status_filter);
+  }
+};
+
+// src/tools/project_set_status.js
+var project_set_status_default = {
+  name: "project_set_status",
+  description: `Set an issue's Status in a GitHub Project, adding the issue to the project if it is not in it.
+
+Args:
+    owner: The user or organization login that owns the project.
+    number: The project number, from its URL or project_list.
+    repo: The issue's repository, as owner/name.
+    issue_number: The issue number.
+    status_name: The Status option, e.g. "In Progress" or "Done".
+
+Returns { item_id, status }.`,
+  inputSchema: { ...issueInProject, status_name: string2() },
+  run: async ({ status_name, ...input }) => {
+    const { owner, number: number3 } = input;
+    const [{ projectId, field }, { issueId: issueId2, item }] = await Promise.all([statusField(owner, number3), issueItem(input)]);
+    const option = field.options.find(({ name }) => name === status_name);
+    if (!option) {
+      const statuses = field.options.map(({ name }) => name).join(", ");
+      throw new GhError(`Project ${owner} #${number3} has no status "${status_name}". Its statuses are ${statuses}.`);
+    }
+    const itemId = item?.id ?? await add(projectId, issueId2);
+    await graphql(
+      `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option }
+        }) { projectV2Item { id } }
+      }`,
+      { project: projectId, item: itemId, field: field.id, option: option.id }
+    );
+    return { item_id: itemId, status: status_name };
+  }
+};
+async function add(projectId, issueId2) {
+  const data = await graphql(
+    `mutation($project: ID!, $content: ID!) {
+      addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+    }`,
+    { project: projectId, content: issueId2 }
+  );
+  return data.addProjectV2ItemById.item.id;
+}
+
 // src/tools/run_list.js
 var RUN_FIELDS = ["databaseId", "name", "workflowName", "headBranch", "status", "conclusion", "url"];
 var run_list_default = {
@@ -23943,6 +24157,10 @@ var tools = [
   run_list_default,
   run_get_default,
   run_logs_default,
+  project_list_default,
+  project_list_items_default,
+  project_get_item_default,
+  project_set_status_default,
   issue_set_blocked_by_default,
   issue_remove_blocked_by_default,
   issue_list_blocked_by_default,
