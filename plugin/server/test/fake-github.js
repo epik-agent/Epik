@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { fakeGh } from './fake-gh.js';
+import { fakeGh, quote } from './fake-gh.js';
 
 // Puts a fake gh on PATH that prints `responses[args]` as JSON, where `args`
 // is its arguments joined by spaces, and fails on any other call. Every call
@@ -19,9 +19,6 @@ ${cases.join('\n')}
 *) echo "HTTP 404: Not Found ($*)" >&2; exit 1;;
 esac`);
 }
-
-// `text` as a single-quoted shell word.
-const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 // The argument lists the fake gh has been called with, in order.
 export async function calls() {

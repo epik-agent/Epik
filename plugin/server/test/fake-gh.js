@@ -36,6 +36,6 @@ export async function expectGh(args, stdout = '') {
 printf '%s' ${quote(stdout)}`);
 }
 
-function quote(text) {
+export function quote(text) {
   return `'${text.replaceAll("'", `'\\''`)}'`;
 }
