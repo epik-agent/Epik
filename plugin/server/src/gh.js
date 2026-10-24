@@ -17,6 +17,17 @@ export async function gh(args, { json = false } = {}) {
   return json ? JSON.parse(stdout) : stdout;
 }
 
+// Runs a GraphQL `query` and resolves to its data. gh sends each `-f`/`-F`
+// field as its own variable, so each variable gets one: `-F` for integers,
+// which gh sends as numbers, and `-f` for strings. Undefined ones are left out.
+export async function graphql(query, variables = {}) {
+  const fields = Object.entries(variables)
+    .filter(([, value]) => value !== undefined)
+    .flatMap(([name, value]) => [Number.isInteger(value) ? '-F' : '-f', `${name}=${value}`]);
+  const { data } = await gh(['api', 'graphql', '-f', `query=${query}`, ...fields], { json: true });
+  return data;
+}
+
 // Runs gh with `args` and reports the outcome, failure included, as a value.
 export async function ghRaw(args) {
   try {

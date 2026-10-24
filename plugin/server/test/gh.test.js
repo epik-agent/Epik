@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { gh } from '../src/gh.js';
+import { gh, graphql } from '../src/gh.js';
 import { fakeGh, noGh } from './fake-gh.js';
 
 let restore;
@@ -41,4 +41,12 @@ test('gh missing names installing it as the fix', async () => {
     name: 'GhError',
     message: 'gh is not installed. Install it from https://cli.github.com/',
   });
+});
+
+test('graphql sends each variable as its own field, integers as -F and strings as -f', async () => {
+  restore = await fakeGh(`printf '{"data": {"args": ['; for a in "$@"; do printf '"%s",' "$a"; done; printf '""]}}'`);
+  const { args } = await graphql('query($owner: String!, $number: Int!) { x }', { owner: 'epik-agent', number: 12, cursor: undefined });
+  assert.deepEqual(args, [
+    'api', 'graphql', '-f', 'query=query($owner: String!, $number: Int!) { x }', '-f', 'owner=epik-agent', '-F', 'number=12', '',
+  ]);
 });
