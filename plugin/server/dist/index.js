@@ -23624,6 +23624,66 @@ Args:
   run: ({ args }) => ghRaw(args)
 };
 
+// src/tools/label_create.js
+var label_create_default = {
+  name: "label_create",
+  description: `Create a label in a repository, or with force update an existing one.
+
+Args:
+    repo: Repository in owner/name format.
+    name: Label name.
+    color: Hex color without the leading '#' (e.g. 'ff0000').
+    description: Description of the label. Default "".
+    force: Update the label if it already exists. Default false.`,
+  inputSchema: {
+    repo: string2(),
+    name: string2().min(1),
+    color: string2().regex(/^[0-9a-fA-F]{6}$/),
+    description: string2().optional(),
+    force: boolean2().optional()
+  },
+  run: async ({ repo, name, color, description = "", force }) => {
+    await gh([
+      "label",
+      "create",
+      name,
+      "--repo",
+      repo,
+      "--color",
+      color,
+      ...description ? ["--description", description] : [],
+      ...force ? ["--force"] : []
+    ]);
+    return { name, color, description };
+  }
+};
+
+// src/tools/label_delete.js
+var label_delete_default = {
+  name: "label_delete",
+  description: `Delete a label from a repository.
+
+Args:
+    repo: Repository in owner/name format.
+    name: Label name.`,
+  inputSchema: { repo: string2(), name: string2().min(1) },
+  run: async ({ repo, name }) => {
+    await gh(["label", "delete", name, "--repo", repo, "--yes"]);
+    return { deleted: name, repo };
+  }
+};
+
+// src/tools/label_list.js
+var label_list_default = {
+  name: "label_list",
+  description: `List every label in a repository with its color and description.
+
+Args:
+    repo: Repository in owner/name format.`,
+  inputSchema: { repo: string2() },
+  run: ({ repo }) => gh(["label", "list", "--repo", repo, "--json", "name,color,description"], { json: true })
+};
+
 // src/projects.js
 var issueInProject = {
   owner: string2(),
@@ -23833,8 +23893,97 @@ async function add(projectId, issueId) {
   return data.addProjectV2ItemById.item.id;
 }
 
+// src/tools/run_list.js
+var RUN_FIELDS = ["databaseId", "name", "workflowName", "headBranch", "status", "conclusion", "url"];
+var run_list_default = {
+  name: "run_list",
+  description: `List a repository's GitHub Actions runs, newest first.
+
+Args:
+    repo: Repository in owner/name format.
+    workflow: Only runs of this workflow, by name or filename.
+    branch: Only runs on this branch.
+    status: Only runs with this status or conclusion (e.g. in_progress, failure).
+    limit: Maximum number of runs. Default 20.`,
+  inputSchema: {
+    repo: string2(),
+    workflow: string2().optional(),
+    branch: string2().optional(),
+    status: string2().optional(),
+    limit: number2().int().positive().optional()
+  },
+  run: ({ repo, workflow, branch, status, limit = 20 }) => gh(
+    [
+      "run",
+      "list",
+      "--repo",
+      repo,
+      "--limit",
+      String(limit),
+      ...workflow ? ["--workflow", workflow] : [],
+      ...branch ? ["--branch", branch] : [],
+      ...status ? ["--status", status] : [],
+      "--json",
+      RUN_FIELDS.join(",")
+    ],
+    { json: true }
+  )
+};
+
+// src/tools/run_get.js
+var FIELDS = [...RUN_FIELDS, "event", "headSha", "createdAt", "updatedAt"];
+var run_get_default = {
+  name: "run_get",
+  description: `Get one GitHub Actions run, with its event, head SHA and timestamps.
+
+Args:
+    repo: Repository in owner/name format.
+    run_id: The run's database ID.`,
+  inputSchema: { repo: string2(), run_id: number2().int() },
+  run: ({ repo, run_id }) => gh(["run", "view", String(run_id), "--repo", repo, "--json", FIELDS.join(",")], { json: true })
+};
+
+// src/tools/run_logs.js
+var run_logs_default = {
+  name: "run_logs",
+  description: `Get the logs of a GitHub Actions run, of one of its jobs, or of only its failed steps.
+
+Args:
+    repo: Repository in owner/name format.
+    run_id: The run's database ID.
+    job_id: Only this job's logs.
+    failed_only: Only the failed steps' logs. Default false.`,
+  inputSchema: {
+    repo: string2(),
+    run_id: number2().int(),
+    job_id: number2().int().optional(),
+    failed_only: boolean2().optional()
+  },
+  run: ({ repo, run_id, job_id, failed_only }) => gh([
+    "run",
+    "view",
+    String(run_id),
+    "--repo",
+    repo,
+    ...job_id ? ["--job", String(job_id)] : [],
+    failed_only ? "--log-failed" : "--log"
+  ])
+};
+
 // src/tools/index.js
-var tools = [gh_raw_default, project_list_default, project_list_items_default, project_get_item_default, project_set_status_default];
+var tools = [
+  gh_raw_default,
+  label_list_default,
+  label_create_default,
+  label_delete_default,
+  run_list_default,
+  run_get_default,
+  run_logs_default,
+  project_list_default,
+  project_list_items_default,
+  project_get_item_default,
+  project_set_status_default
+];
 
 // src/index.js
 await createServer(tools).connect(new StdioServerTransport());
