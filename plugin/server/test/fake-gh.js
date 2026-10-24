@@ -28,3 +28,14 @@ function onPath(dir) {
     await rm(dir, { recursive: true, force: true });
   };
 }
+
+// Puts a fake `gh` on PATH that prints `stdout` when called with exactly
+// `args`, and otherwise fails naming the arguments it got.
+export async function expectGh(args, stdout = '') {
+  return fakeGh(`[ "$*" = ${quote(args.join(' '))} ] || { echo "unexpected: gh $*" >&2; exit 1; }
+printf '%s' ${quote(stdout)}`);
+}
+
+function quote(text) {
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
