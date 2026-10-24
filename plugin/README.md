@@ -10,17 +10,18 @@ An *epic* is a dependency-ordered set of issues: an epic issue with sub-issues, 
 plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
+  server/               # the Node MCP server (see server/README.md)
   skills/
     epic/
       SKILL.md          # /epik:epic — implement an epic's issues with Agent Teams
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
-  .mcp.json             # declares the EpikMCP server (does not contain it)
+  .mcp.json             # declares the epik server and GitHub's hosted server
 ```
 
 ## Design in one paragraph
 
-The plugin is **policy**; the MCP is **mechanism**. `EpikMCP` (`../mcp` in this repo) is the GitHub mechanism — it authors the issue graph and reads status. The plugin declares the server via `.mcp.json`; it never vendors its source. Installing the plugin brings the declared server along.
+The skills are **policy**; GitHub's tooling is **mechanism**. GitHub's own connector does most of the work. The `epik` server ships inside the plugin and provides only what that connector lacks. It runs every operation through the `gh` CLI, under the user's own Node. Installing the plugin brings both servers along.
 
 ## Install
 
@@ -50,7 +51,7 @@ The repo root is a single-entry marketplace, so a local clone works exactly like
 
 After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` to pick them up. `plugin.json` sets no `version`, so each commit counts as a new version.
 
-Note: if an `EpikMCP` server is also registered by hand in the same client (e.g. an entry you added to a `.mcp.json` outside the plugin), the two same-named servers collide as duplicate `mcp__EpikMCP__*` tools. Remove the manual entry — `/plugin uninstall` doesn't touch plain MCP registrations.
+Changes to the server's source need a rebuilt `server/dist/index.js` (see [`server/README.md`](server/README.md)); CI fails when the bundle is stale.
 
 ## Usage
 

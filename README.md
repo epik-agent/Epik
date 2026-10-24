@@ -9,49 +9,36 @@ and opens a pull request for you to review.
 
 ## Layout
 
-- [`mcp/`](mcp/README.md) — **EpikMCP**, the GitHub mechanism: an MCP server
-  that authors the issue graph and reads status.
-- [`plugin/`](plugin/README.md) — the **epik** Claude Code plugin, the policy
-  layer: skills and the declaration of the EpikMCP server.
+- [`plugin/`](plugin/README.md) — the **epik** plugin: skills, and the Node
+  server that provides the GitHub operations the standard GitHub connector
+  lacks.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
 ## Installing and uninstalling
 
-### Install in Claude Desktop or Cowork
+Epik is one plugin, installed the same way in Claude Desktop and Claude Code:
+from this repository's marketplace.
 
-Epik installs as a one-click extension. There is no config file to edit and no
-Python or command-line tooling to set up.
+You need:
 
-You need a GitHub account, a current version of
-[Claude Desktop](https://claude.com/download), and the
-[`gh` CLI](https://cli.github.com/) signed in (`gh auth login`) — that is how
-Epik acts on GitHub as you.
+- A GitHub account.
+- [Node](https://nodejs.org/) 20 or later, which runs Epik's server.
+- The [`gh` CLI](https://cli.github.com/), signed in with `gh auth login`.
+  That is how Epik acts on GitHub as you.
+- For Claude Desktop: a current version of
+  [Claude Desktop](https://claude.com/download), running, with the GitHub
+  connector connected.
+- For Claude Code: a current version of
+  [Claude Code](https://claude.com/claude-code).
 
-1. Download the `.mcpb` file from the
-   [latest release](https://github.com/epik-agent/Epik/releases/latest).
-2. Double-click it, or drag it onto the Claude Desktop window. The extension
-   installs itself.
-3. Start a **new** conversation.
+### Install
 
-Once Epik is installed, Claude Desktop and Cowork ask you to approve Epik's
-actions as it works. That is intended — Epik never acts without your say-so.
-If a chat ever seems hung, it usually isn't: look for an approval prompt
-waiting on your screen.
+In Claude Desktop, add the marketplace `epik-agent/Epik` in the app's plugin
+settings, install the `epik` plugin from it, and start a **new**
+conversation.
 
-To update later, install the newer `.mcpb` the same way.
-
-(No release published yet? Until the first one lands, the bundle can be built
-from this repository — see [`mcp/mcpb/`](mcp/mcpb/README.md).)
-
-### Install in Claude Code
-
-You need a GitHub account, [Claude Code](https://claude.com/claude-code)
-(current version), the [`gh` CLI](https://cli.github.com/) signed in
-(`gh auth login`), and [`uv`](https://docs.astral.sh/uv/) — its `uvx` command
-runs the EpikMCP server for you (plus `git`, which you almost certainly
-already have). Then, inside a Claude Code session, enter the following
-commands one at a time:
+In Claude Code, enter the following commands one at a time:
 
 ```
 /plugin marketplace add epik-agent/Epik
@@ -71,11 +58,11 @@ installation scope; confirm it, then reload:
 (`epik-agent/Epik` is this repository; the doubled `epik@epik` is
 `plugin@marketplace`, both named in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).)
 
-As Epik works, Claude Code asks you to approve its actions. That is intended —
-Epik never acts without your say-so. If the chat seems hung, it usually isn't:
-look for an approval prompt waiting on your screen.
+Once Epik is installed, Claude asks you to approve Epik's actions as it works.
+That is intended — Epik never acts without your say-so. If a chat ever seems
+hung, it usually isn't: look for an approval prompt waiting on your screen.
 
-To update later, again one command at a time:
+To update later in Claude Code, again one command at a time:
 
 ```
 /plugin marketplace update epik
@@ -87,19 +74,17 @@ To update later, again one command at a time:
 
 ### Uninstalling
 
-| Surface | Uninstall |
-|---|---|
-| Claude Desktop / Cowork | Settings → Extensions → Epik → uninstall |
-| Claude Code | `/plugin uninstall epik@epik`, then `/plugin marketplace remove epik` |
+In Claude Desktop, uninstall the `epik` plugin and remove the `epik`
+marketplace in the app's plugin settings.
 
-`~/.epik-mcp/` is only a cache; delete it whenever you like and Epik will
-rebuild it.
+In Claude Code, `/plugin uninstall epik@epik`, then
+`/plugin marketplace remove epik`.
 
 ## How it works
 
 You create the GitHub repository yourself. In conversation (Claude Desktop,
 Cowork, or Claude Code), Epik helps you settle a design and writes it up as an
-epic issue with sub-issues, using the EpikMCP tools.
+epic issue with sub-issues, using the GitHub connector and Epik's own tools.
 
 To build, run Claude Code in a local clone and invoke `/epik:epic` for an
 epic or `/epik:issue` for a single issue. The code is written on your
@@ -110,12 +95,12 @@ and closed issues. The pull request is where you decide what merges.
 
 **Claude Code: `/plugin marketplace add` fails with `JSON Parse error`**
 Claude Code's own marketplace registry is corrupt (often a stray trailing
-comma). Check `python3 -m json.tool ~/.claude/plugins/known_marketplaces.json`
-and fix the syntax it points at. If it says the name `epik` is already in
-use, `/plugin marketplace remove epik` and add it again.
+comma). Check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the
+syntax it points at. If it says the name `epik` is already in use,
+`/plugin marketplace remove epik` and add it again.
 
-**Claude Desktop: Epik never appears after installing the extension**
-Check Settings → Extensions to confirm the extension is enabled, then start a
-fresh conversation — extensions are picked up when a conversation begins. If it
-still doesn't appear, the desktop app's logs are in `~/Library/Logs/Claude/` on
+**Claude Desktop: Epik's tools never appear after installing the plugin**
+Check that `node --version` reports 20 or later, then start a fresh
+conversation — plugins are picked up when a conversation begins. If the tools
+still don't appear, the desktop app's logs are in `~/Library/Logs/Claude/` on
 macOS.
