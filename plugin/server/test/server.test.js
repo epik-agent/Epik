@@ -41,6 +41,12 @@ test('a tool result reaches the caller as JSON text', async () => {
   assert.ok(!result.isError);
 });
 
+test('a string result reaches the caller as the string itself', async () => {
+  const client = await connect([echo]);
+  const result = await client.callTool({ name: 'echo', arguments: { value: 'line one\n"quoted"' } });
+  assert.deepEqual(result.content, [{ type: 'text', text: 'line one\n"quoted"' }]);
+});
+
 test("a failing tool is an MCP error whose text is the failure's message", async () => {
   const client = await connect([failing]);
   const result = await client.callTool({ name: 'failing', arguments: {} });
