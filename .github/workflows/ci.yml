@@ -12,14 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: mcp
+        working-directory: plugin/server
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pytest
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: plugin/server/package-lock.json
+      - run: npm ci
+      - run: npm test
+      # The committed bundle is what the plugin runs, so it must match its
+      # source.
+      - run: npm run build
+      - run: git diff --exit-code dist
       # Validate the marketplace and plugin manifests the way Claude Code
       # reads them. Not --strict: plugin.json omits `version` on purpose so
       # each commit is a new version, and --strict fails on that warning.
@@ -49,10 +55,10 @@ jobs:
       group: pages
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: website
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
