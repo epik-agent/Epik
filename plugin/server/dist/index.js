@@ -23555,9 +23555,10 @@ var EMPTY_COMPLETION_RESULT = {
 function createServer(tools2) {
   const server = new McpServer({ name: "epik", version: "1.0.0" });
   for (const { name, description, inputSchema, run: run2 } of tools2) {
-    server.registerTool(name, { description, inputSchema }, async (input) => ({
-      content: [{ type: "text", text: JSON.stringify(await run2(input)) }]
-    }));
+    server.registerTool(name, { description, inputSchema }, async (input) => {
+      const result = await run2(input);
+      return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result) }] };
+    });
   }
   return server;
 }
@@ -23565,6 +23566,8 @@ function createServer(tools2) {
 // src/gh.js
 import { execFile } from "node:child_process";
 var TIMEOUT_SECONDS = 60;
+var MAX_BUFFER_MB = 64;
+var MAX_PROCESSES = 8;
 var GhError = class extends Error {
   name = "GhError";
 };
@@ -23587,21 +23590,39 @@ async function ghRaw(args) {
     return { ok: false, exit_code: -1, stdout: "", stderr: error2.message };
   }
 }
+var running = 0;
+var waiting = [];
+async function throttled(start) {
+  if (running < MAX_PROCESSES) running++;
+  else await new Promise((resolve) => waiting.push(resolve));
+  try {
+    return await start();
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else running--;
+  }
+}
 function run(args) {
-  const options = { timeout: TIMEOUT_SECONDS * 1e3, maxBuffer: 64 * 1024 * 1024 };
-  return new Promise((resolve, reject) => {
-    execFile("gh", args, options, (error2, stdout, stderr) => {
-      if (error2?.code === "ENOENT") {
-        reject(new GhError("gh is not installed. Install it from https://cli.github.com/"));
-      } else if (error2?.killed) {
-        reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: gh ${args.join(" ")}`));
-      } else if (error2 && typeof error2.code !== "number") {
-        reject(error2);
-      } else {
-        resolve({ exit_code: error2?.code ?? 0, stdout, stderr });
-      }
-    });
-  });
+  const command = `gh ${args.join(" ")}`;
+  const options = { timeout: TIMEOUT_SECONDS * 1e3, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
+  return throttled(
+    () => new Promise((resolve, reject) => {
+      execFile("gh", args, options, (error2, stdout, stderr) => {
+        if (error2?.code === "ENOENT") {
+          reject(new GhError("gh is not installed. Install it from https://cli.github.com/"));
+        } else if (error2?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+          reject(new GhError(`gh printed more than ${MAX_BUFFER_MB} MB: ${command}`));
+        } else if (error2?.killed) {
+          reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: ${command}`));
+        } else if (error2 && typeof error2.code !== "number") {
+          reject(new GhError(`gh was stopped by ${error2.signal ?? error2.message}: ${command}`));
+        } else {
+          resolve({ exit_code: error2?.code ?? 0, stdout, stderr });
+        }
+      });
+    })
+  );
 }
 function explain(exitCode, stderr) {
   const signedOut = stderr.includes("gh auth login") ? "gh is not signed in. Run `gh auth login`.\n" : "";
@@ -23621,7 +23642,6 @@ async function list(path, field) {
 var edges = (repo, number3) => `repos/${repo}/issues/${number3}/dependencies/blocked_by`;
 var issueId = async (repo, number3) => (await get(`repos/${repo}/issues/${number3}`)).id;
 var blockers = (repo, number3) => list(edges(repo, number3));
-var repoOf = (issue2) => issue2.repository_url.split("/repos/")[1];
 var edgeInput = {
   inputSchema: {
     repo: string2(),
@@ -23637,7 +23657,7 @@ var edgeInput = {
 };
 
 // src/graph.js
-function levels(blockers2) {
+function levels(blockers2, compare = (a, b) => a - b) {
   const positions = /* @__PURE__ */ new Map();
   const cycles = [];
   const index = /* @__PURE__ */ new Map();
@@ -23661,7 +23681,7 @@ function levels(blockers2) {
     const component = stack.splice(stack.indexOf(issue2));
     for (const member of component) onStack.delete(member);
     if (component.length > 1 || blockers2.get(issue2).includes(issue2)) {
-      cycles.push(component.sort((a, b) => a - b));
+      cycles.push(component.sort(compare));
       for (const member of component) positions.set(member, null);
     } else {
       const below = blockers2.get(issue2).map((blocker) => positions.get(blocker));
@@ -23669,23 +23689,31 @@ function levels(blockers2) {
     }
   };
   for (const issue2 of blockers2.keys()) if (!index.has(issue2)) visit(issue2);
-  return { positions, cycles: cycles.sort((a, b) => a[0] - b[0]) };
+  return { positions, cycles: cycles.sort((a, b) => compare(a[0], b[0])) };
 }
+
+// src/ref.js
+var issueUrl = (repo, number3) => `https://github.com/${repo.toLowerCase()}/issues/${number3}`;
+var pullUrl = (repo, number3) => `https://github.com/${repo.toLowerCase()}/pull/${number3}`;
+var repoOf = (item) => item.repository_url.split("/repos/")[1];
+var sameRepo = (a, b) => a.toLowerCase() === b.toLowerCase();
+var byUrl = (a, b) => a.localeCompare(b, "en", { numeric: true });
 
 // src/tools/epic_status.js
 function linkedPr(timeline, repo, number3) {
   const escaped = repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const closing = new RegExp(`\\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?\\s+(${escaped})?#${number3}\\b`, "i");
   const rank = (pr2) => [
+    pr2.state === "closed" && !pr2.pull_request.merged_at ? 1 : 0,
     closing.test(`${pr2.title}
 ${pr2.body ?? ""}`) ? 0 : 1,
     pr2.state === "open" ? 0 : 1,
     -Date.parse(pr2.pull_request.merged_at) || 0
   ];
-  const [pr] = timeline.filter((event) => event.event === "cross-referenced").map((event) => event.source.issue).filter((source) => source.pull_request && source.repository.full_name === repo).map((source) => [rank(source), source]).sort(([a], [b]) => a.map((x, i) => x - b[i]).find(Boolean) ?? 0).map(([, source]) => source);
+  const [pr] = timeline.filter((event) => event.event === "cross-referenced").map((event) => event.source.issue).filter((source) => source.pull_request && sameRepo(source.repository.full_name, repo)).map((source) => [rank(source), source]).sort(([a], [b]) => a.map((x, i) => x - b[i]).find(Boolean) ?? 0).map(([, source]) => source);
   if (!pr) return null;
   const state = pr.pull_request.merged_at ? "merged" : pr.state;
-  return { number: pr.number, state, url: pr.html_url };
+  return { number: pr.number, state, url: pullUrl(repo, pr.number) };
 }
 function ci(checkRuns) {
   if (checkRuns.length === 0) return null;
@@ -23695,32 +23723,45 @@ function ci(checkRuns) {
   return done.length < checkRuns.length ? "pending" : "success";
 }
 var prCi = async (repo, pr) => ci(await list(`repos/${repo}/commits/refs/pull/${pr.number}/head/check-runs`, "check_runs"));
-async function row(repo, issue2, epic) {
+var attempt = (promise, fallback, errors) => promise.catch((error2) => {
+  errors.push(error2.message);
+  return fallback;
+});
+async function row(issue2, epic) {
+  const repo = repoOf(issue2);
+  const errors = [];
   const [timeline, blocking] = await Promise.all([
-    list(`repos/${repo}/issues/${issue2.number}/timeline`),
-    issue2.issue_dependencies_summary.total_blocked_by ? blockers(repo, issue2.number) : []
+    attempt(list(`repos/${repo}/issues/${issue2.number}/timeline`), [], errors),
+    issue2.issue_dependencies_summary.total_blocked_by ? attempt(blockers(repo, issue2.number), [], errors) : []
   ]);
   const pr = linkedPr(timeline, repo, issue2.number);
   return {
+    url: issueUrl(repo, issue2.number),
     number: issue2.number,
     title: issue2.title,
     state: issue2.state,
     linked_pr: pr,
-    ci: pr && await prCi(repo, pr),
-    blocked_by: blocking.map((blocker) => blocker.number).filter((number3) => epic.has(number3))
+    ci: pr && await attempt(prCi(repo, pr), null, errors),
+    blocked_by: blocking.map((blocker) => issueUrl(repoOf(blocker), blocker.number)).filter((url) => epic.has(url)),
+    ...errors.length > 0 && { degraded: true, errors }
   };
 }
 var epic_status_default = {
   name: "epic_status",
   description: `Report the status of each sub-issue of an epic.
 
-For each sub-issue: number, title, state; linked_pr, the pull request that
-references it (number, state, url); ci, the combined check-run result on that
-pull request's head commit (failure, pending, success, or null); blocked_by,
-its blocking issues that are sub-issues of the epic; and position, its level
-in the dependency graph (0 with no blockers, else one more than its deepest
-blocker). Issues on a dependency cycle have position null, and each cycle is
-listed under the top-level cycles key.
+Issues and pull requests are named by URL, which holds their repository as
+well as their number; sub-issues may be in other repositories.
+
+For each sub-issue: url, number, title, state; linked_pr, the pull request in
+its repository that references it (number, state, url); ci, the combined
+check-run result on that pull request's head commit (failure, pending,
+success, or null); blocked_by, the URLs of its blocking issues that are
+sub-issues of the epic; and position, its level in the dependency graph (0
+with no blockers, else one more than its deepest blocker). Issues on a
+dependency cycle have position null, and each cycle is listed under the
+top-level cycles key. When a read fails, its sub-issue has degraded: true and
+errors, the failures, and the fields the read would fill are null or empty.
 
 Args:
     repo: Repository in owner/name format.
@@ -23728,13 +23769,12 @@ Args:
   inputSchema: { repo: string2(), epic_issue_number: number2().int() },
   run: async ({ repo, epic_issue_number }) => {
     const subIssues = await list(`repos/${repo}/issues/${epic_issue_number}/sub_issues`);
-    const epic = new Set(subIssues.map((issue2) => issue2.number));
-    const rows = await Promise.all(subIssues.map((issue2) => row(repo, issue2, epic)));
-    const { positions, cycles } = levels(new Map(rows.map((r) => [r.number, r.blocked_by])));
+    const epic = new Set(subIssues.map((issue2) => issueUrl(repoOf(issue2), issue2.number)));
+    const rows = await Promise.all(subIssues.map((issue2) => row(issue2, epic)));
+    const { positions, cycles } = levels(new Map(rows.map((r) => [r.url, r.blocked_by])), byUrl);
     return {
-      epic: epic_issue_number,
-      repo,
-      issues: rows.map((r) => ({ ...r, position: positions.get(r.number) })),
+      epic: issueUrl(repo, epic_issue_number),
+      issues: rows.map((r) => ({ ...r, position: positions.get(r.url) })),
       cycles
     };
   }
@@ -23760,13 +23800,14 @@ var issue_list_blocked_by_default = {
   name: "issue_list_blocked_by",
   description: `List the issues blocking an issue.
 
-Returns each blocking issue's number, title, state and repository.
+Returns each blocking issue's url, number, title, state and repository.
 
 Args:
     repo: Repository in owner/name format.
     issue_number: The blocked issue.`,
   inputSchema: { repo: string2(), issue_number: number2().int() },
   run: async ({ repo, issue_number }) => (await blockers(repo, issue_number)).map((issue2) => ({
+    url: issueUrl(repoOf(issue2), issue2.number),
     number: issue2.number,
     title: issue2.title,
     state: issue2.state,
@@ -23880,6 +23921,11 @@ async function projectOwner(owner, selection, variables = {}) {
   if (!data.repositoryOwner) throw new GhError(`There is no GitHub user or organization named ${owner}.`);
   return data.repositoryOwner;
 }
+async function project(owner, number3, selection, variables = {}) {
+  const { projectV2 } = await projectOwner(owner, `projectV2(number: $number) { ${selection} }`, { number: number3, ...variables });
+  if (!projectV2) throw new GhError(`${owner} has no project #${number3}, or it is not visible to you.`);
+  return projectV2;
+}
 async function paginate(query, connection) {
   const nodes = [];
   let cursor;
@@ -23900,16 +23946,14 @@ function fieldValues(item) {
   return Object.fromEntries(item.fieldValues.nodes.filter(({ field }) => field).map(({ field, value }) => [field.name, value]));
 }
 async function statusField(owner, number3) {
-  const { projectV2 } = await projectOwner(
+  const { id, field } = await project(
     owner,
-    `projectV2(number: $number) {
-      id
-      field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
-    }`,
-    { number: number3 }
+    number3,
+    `id
+    field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }`
   );
-  if (!projectV2.field?.id) throw new GhError(`Project ${owner} #${number3} has no Status field.`);
-  return { projectId: projectV2.id, field: projectV2.field };
+  if (!field?.id) throw new GhError(`Project ${owner} #${number3} has no Status field.`);
+  return { projectId: id, field };
 }
 async function issueItem({ owner, number: number3, repo, issue_number }) {
   const [repoOwner, name] = repo.split("/");
@@ -23931,7 +23975,7 @@ async function issueItem({ owner, number: number3, repo, issue_number }) {
     { owner: repoOwner, name, number: issue_number }
   )).repository;
   const item = issue2.projectItems.nodes.find(
-    ({ project }) => project.number === number3 && project.owner.login.toLowerCase() === owner.toLowerCase()
+    ({ project: project2 }) => project2.number === number3 && project2.owner.login.toLowerCase() === owner.toLowerCase()
   );
   return { issueId: issue2.id, item: item ?? null };
 }
@@ -24002,25 +24046,24 @@ Returns a list of { issue_number, title, url, repo, status }.`,
   },
   run: async ({ owner, number: number3, status_filter }) => {
     const items = await paginate(
-      (cursor) => projectOwner(
+      (cursor) => project(
         owner,
-        `projectV2(number: $number) {
-            items(first: 100, after: $cursor) {
-              pageInfo { hasNextPage endCursor }
-              nodes {
-                content { ... on Issue { number title url repository { nameWithOwner } } }
-                ${FIELD_VALUES}
-              }
+        number3,
+        `items(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              content { ... on Issue { number title repository { nameWithOwner } } }
+              ${FIELD_VALUES}
             }
           }`,
-        { number: number3, cursor }
+        { cursor }
       ),
-      (data) => data.projectV2.items
+      (data) => data.items
     );
-    return items.filter(({ content }) => content?.number).map(({ content: { number: number4, title, url, repository }, ...item }) => ({
+    return items.filter(({ content }) => content?.number).map(({ content: { number: number4, title, repository }, ...item }) => ({
       issue_number: number4,
       title,
-      url,
+      url: issueUrl(repository.nameWithOwner, number4),
       repo: repository.nameWithOwner,
       status: fieldValues(item).Status ?? null
     })).filter(({ status }) => status_filter === void 0 || status === status_filter);

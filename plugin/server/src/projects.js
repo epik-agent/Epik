@@ -29,6 +29,14 @@ export async function projectOwner(owner, selection, variables = {}) {
   return data.repositoryOwner;
 }
 
+// Selects `selection` on project `owner` #`number` and resolves to it.
+// `variables` may hold a `cursor`.
+export async function project(owner, number, selection, variables = {}) {
+  const { projectV2 } = await projectOwner(owner, `projectV2(number: $number) { ${selection} }`, { number, ...variables });
+  if (!projectV2) throw new GhError(`${owner} has no project #${number}, or it is not visible to you.`);
+  return projectV2;
+}
+
 // Every node of a paginated connection. `connection` picks the connection out
 // of a page's data; the query takes a `$cursor`.
 export async function paginate(query, connection) {
@@ -60,16 +68,14 @@ export function fieldValues(item) {
 
 // The project's node ID and its Status field, with the field's options.
 export async function statusField(owner, number) {
-  const { projectV2 } = await projectOwner(
+  const { id, field } = await project(
     owner,
-    `projectV2(number: $number) {
-      id
-      field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
-    }`,
-    { number },
+    number,
+    `id
+    field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }`,
   );
-  if (!projectV2.field?.id) throw new GhError(`Project ${owner} #${number} has no Status field.`);
-  return { projectId: projectV2.id, field: projectV2.field };
+  if (!field?.id) throw new GhError(`Project ${owner} #${number} has no Status field.`);
+  return { projectId: id, field };
 }
 
 // The issue's node ID and its item in the project `owner` #`number`, or null

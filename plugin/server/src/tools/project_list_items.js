@@ -1,6 +1,7 @@
 import * as z from 'zod';
 
-import { FIELD_VALUES, fieldValues, paginate, projectOwner } from '../projects.js';
+import { FIELD_VALUES, fieldValues, paginate, project } from '../projects.js';
+import { issueUrl } from '../ref.js';
 
 export default {
   name: 'project_list_items',
@@ -20,27 +21,26 @@ Returns a list of { issue_number, title, url, repo, status }.`,
   run: async ({ owner, number, status_filter }) => {
     const items = await paginate(
       (cursor) =>
-        projectOwner(
+        project(
           owner,
-          `projectV2(number: $number) {
-            items(first: 100, after: $cursor) {
-              pageInfo { hasNextPage endCursor }
-              nodes {
-                content { ... on Issue { number title url repository { nameWithOwner } } }
-                ${FIELD_VALUES}
-              }
+          number,
+          `items(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              content { ... on Issue { number title repository { nameWithOwner } } }
+              ${FIELD_VALUES}
             }
           }`,
-          { number, cursor },
+          { cursor },
         ),
-      (data) => data.projectV2.items,
+      (data) => data.items,
     );
     return items
       .filter(({ content }) => content?.number)
-      .map(({ content: { number, title, url, repository }, ...item }) => ({
+      .map(({ content: { number, title, repository }, ...item }) => ({
         issue_number: number,
         title,
-        url,
+        url: issueUrl(repository.nameWithOwner, number),
         repo: repository.nameWithOwner,
         status: fieldValues(item).Status ?? null,
       }))

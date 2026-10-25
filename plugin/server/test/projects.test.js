@@ -18,7 +18,7 @@ const page = (nodes, endCursor = null) => ({ pageInfo: { hasNextPage: endCursor 
 const noProjects = ['projectsV2', owned({ projectsV2: page([]) })];
 
 const item = (number, status) => ({
-  content: { number, title: `Issue ${number}`, url: `https://github.com/epik-agent/Epik/issues/${number}`, repository: { nameWithOwner: 'epik-agent/Epik' } },
+  content: { number, title: `Issue ${number}`, repository: { nameWithOwner: 'epik-agent/Epik' } },
   fieldValues: { nodes: [{ value: status, field: { name: 'Status' } }, {}] },
 });
 
@@ -76,7 +76,7 @@ test('project_list_items returns each issue with its status, filtered by status'
     ['items(', owned({ projectV2: { items: page([item(1, 'Done'), { content: {}, fieldValues: { nodes: [] } }, item(2, 'Todo')]) } })],
   ]);
   assert.deepEqual(await projectListItems.run({ owner: 'epik-agent', number: 12, status_filter: 'Todo' }), [
-    { issue_number: 2, title: 'Issue 2', url: 'https://github.com/epik-agent/Epik/issues/2', repo: 'epik-agent/Epik', status: 'Todo' },
+    { issue_number: 2, title: 'Issue 2', url: 'https://github.com/epik-agent/epik/issues/2', repo: 'epik-agent/Epik', status: 'Todo' },
   ]);
   assert.deepEqual((await call('items(')).slice(-4), ['-f', 'owner=epik-agent', '-F', 'number=12']);
 });
@@ -142,4 +142,11 @@ test('a project without a Status field says so', async () => {
   await assert.rejects(projectSetStatus.run({ ...issue311, status_name: 'Done' }), {
     message: 'Project epik-agent #12 has no Status field.',
   });
+});
+
+test('a project that does not exist is named in the error', async () => {
+  github = await fakeGithub([['projectV2(number', owned({ projectV2: null })], inProject12]);
+  const missing = { name: 'GhError', message: 'epik-agent has no project #999, or it is not visible to you.' };
+  await assert.rejects(projectListItems.run({ owner: 'epik-agent', number: 999 }), missing);
+  await assert.rejects(projectSetStatus.run({ ...issue311, number: 999, status: 'Done' }), missing);
 });
