@@ -9,7 +9,7 @@ disable-model-invocation: true
 2. Implement the issue. Get it working locally and make sure all tests pass.
 3. Run `/simplify`.
 4. Create a pull request.
-   1. Ensure that the pull request will close its corresponding feature.
+   1. Ensure that the pull request will close its issue.
       - Put the issue number in the pull request's Development field on GitHub.
    2. Monitor the pull request for problems and fix them as they occur. Problems may include:
       - Errors in the continuous integration pipeline

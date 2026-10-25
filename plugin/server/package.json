@@ -1,0 +1,20 @@
+{
+  "name": "epik-server",
+  "private": true,
+  "description": "Epik's MCP server: the GitHub operations the standard connector lacks.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --platform=node --format=esm --target=node20 --outfile=dist/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
