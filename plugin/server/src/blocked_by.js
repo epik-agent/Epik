@@ -14,9 +14,6 @@ export const issueId = async (repo, number) => (await get(`repos/${repo}/issues/
 // The issues blocking issue `number` in `repo`.
 export const blockers = (repo, number) => list(edges(repo, number));
 
-// The `owner/name` of the repository an issue from the REST API is in.
-export const repoOf = (issue) => issue.repository_url.split('/repos/')[1];
-
 // The input naming one edge, and its documentation.
 export const edgeInput = {
   inputSchema: {

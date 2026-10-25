@@ -81,7 +81,7 @@ test('listing gives every blocking issue, across all pages', async () => {
     }),
   );
   assert.deepEqual(await listBlockedBy.run({ repo: 'o/r', issue_number: 12 }), [
-    { number: 10, title: 'Ten', state: 'open', repository: 'o/r' },
-    { number: 3, title: 'Three', state: 'closed', repository: 'x/y' },
+    { url: 'https://github.com/o/r/issues/10', number: 10, title: 'Ten', state: 'open', repository: 'o/r' },
+    { url: 'https://github.com/x/y/issues/3', number: 3, title: 'Three', state: 'closed', repository: 'x/y' },
   ]);
 });

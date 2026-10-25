@@ -40,3 +40,11 @@ test('issues on a cycle, and those waiting on one, have no level', () => {
     cycles: [[1, 2], [5]],
   });
 });
+
+test('cycles are ordered by the compare function given', () => {
+  const blockers = new Map([
+    ['b', ['a']],
+    ['a', ['b']],
+  ]);
+  assert.deepEqual(levels(blockers, (x, y) => x.localeCompare(y)).cycles, [['a', 'b']]);
+});
