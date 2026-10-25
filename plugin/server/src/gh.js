@@ -3,6 +3,11 @@
 import { execFile } from 'node:child_process';
 
 const TIMEOUT_SECONDS = 60;
+const MAX_BUFFER_MB = 64;
+
+// The most gh processes that run at once. A tool that fans out across an
+// epic's issues stays under GitHub's secondary rate limits.
+export const MAX_PROCESSES = 8;
 
 // A gh call that failed. The message is what the caller sees.
 export class GhError extends Error {
@@ -39,23 +44,47 @@ export async function ghRaw(args) {
   }
 }
 
+let running = 0;
+const waiting = [];
+
+// Resolves to `start()`'s result once one of the MAX_PROCESSES slots is free.
+// A finishing call hands its slot straight to the next waiting one.
+async function throttled(start) {
+  if (running < MAX_PROCESSES) running++;
+  else await new Promise((resolve) => waiting.push(resolve));
+  try {
+    return await start();
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else running--;
+  }
+}
+
 // Resolves to gh's exit code and output. Throws a GhError when gh never
-// produced an exit code: it is not installed, or it ran out of time.
+// produced an exit code: it is not installed, printed too much, ran out of
+// time, or was stopped by a signal.
 function run(args) {
-  const options = { timeout: TIMEOUT_SECONDS * 1000, maxBuffer: 64 * 1024 * 1024 };
-  return new Promise((resolve, reject) => {
-    execFile('gh', args, options, (error, stdout, stderr) => {
-      if (error?.code === 'ENOENT') {
-        reject(new GhError('gh is not installed. Install it from https://cli.github.com/'));
-      } else if (error?.killed) {
-        reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: gh ${args.join(' ')}`));
-      } else if (error && typeof error.code !== 'number') {
-        reject(error);
-      } else {
-        resolve({ exit_code: error?.code ?? 0, stdout, stderr });
-      }
-    });
-  });
+  const command = `gh ${args.join(' ')}`;
+  const options = { timeout: TIMEOUT_SECONDS * 1000, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
+  return throttled(
+    () =>
+      new Promise((resolve, reject) => {
+        execFile('gh', args, options, (error, stdout, stderr) => {
+          if (error?.code === 'ENOENT') {
+            reject(new GhError('gh is not installed. Install it from https://cli.github.com/'));
+          } else if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+            reject(new GhError(`gh printed more than ${MAX_BUFFER_MB} MB: ${command}`));
+          } else if (error?.killed) {
+            reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: ${command}`));
+          } else if (error && typeof error.code !== 'number') {
+            reject(new GhError(`gh was stopped by ${error.signal ?? error.message}: ${command}`));
+          } else {
+            resolve({ exit_code: error?.code ?? 0, stdout, stderr });
+          }
+        });
+      }),
+  );
 }
 
 function explain(exitCode, stderr) {

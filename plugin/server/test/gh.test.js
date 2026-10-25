@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { gh, graphql } from '../src/gh.js';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { gh, ghRaw, graphql, MAX_PROCESSES } from '../src/gh.js';
 import { fakeGh, noGh } from './fake-gh.js';
 
 let restore;
@@ -49,4 +53,44 @@ test('graphql sends each variable as its own field, integers as -F and strings a
   assert.deepEqual(args, [
     'api', 'graphql', '-f', 'query=query($owner: String!, $number: Int!) { x }', '-f', 'owner=epik-agent', '-F', 'number=12', '',
   ]);
+});
+
+test('gh printing more than 64 MB is a GhError naming the limit', async () => {
+  restore = await fakeGh(`'${process.execPath}' -e 'process.stdout.write(Buffer.alloc(64 * 1024 * 1024 + 1))'`);
+  await assert.rejects(gh(['run', 'view', '1', '--log']), {
+    name: 'GhError',
+    message: 'gh printed more than 64 MB: gh run view 1 --log',
+  });
+});
+
+test('gh stopped by a signal is a GhError naming the signal', async () => {
+  restore = await fakeGh(`kill -TERM $$`);
+  await assert.rejects(gh(['issue', 'list']), { name: 'GhError', message: 'gh was stopped by SIGTERM: gh issue list' });
+});
+
+test('ghRaw reports gh stopped by a signal as a value', async () => {
+  restore = await fakeGh(`kill -TERM $$`);
+  assert.deepEqual(await ghRaw(['issue', 'list']), {
+    ok: false,
+    exit_code: -1,
+    stdout: '',
+    stderr: 'gh was stopped by SIGTERM: gh issue list',
+  });
+});
+
+test(`at most ${MAX_PROCESSES} gh processes run at once`, async () => {
+  const log = join(tmpdir(), `gh-concurrency-${process.pid}.log`);
+  restore = await fakeGh(`echo + >> '${log}'; '${process.execPath}' -e 'setTimeout(() => {}, 100)'; echo - >> '${log}'`);
+  try {
+    await Promise.all(Array.from({ length: 3 * MAX_PROCESSES }, () => gh(['api', 'x'])));
+    let running = 0;
+    let most = 0;
+    for (const mark of (await readFile(log, 'utf8')).trim().split('\n')) {
+      running += mark === '+' ? 1 : -1;
+      most = Math.max(most, running);
+    }
+    assert.equal(most, MAX_PROCESSES);
+  } finally {
+    await rm(log, { force: true });
+  }
 });
