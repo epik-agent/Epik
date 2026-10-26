@@ -7255,7 +7255,7 @@ var require_dist = __commonJS({
 });
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
-import process from "node:process";
+import process2 from "node:process";
 
 // node_modules/zod/v4/core/util.js
 var util_exports = {};
@@ -15442,7 +15442,7 @@ function serializeMessage(message) {
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var StdioServerTransport = class {
-  constructor(_stdin = process.stdin, _stdout = process.stdout, options) {
+  constructor(_stdin = process2.stdin, _stdout = process2.stdout, options) {
     this._stdin = _stdin;
     this._stdout = _stdout;
     this._started = false;
@@ -23563,6 +23563,13 @@ function createServer(tools2) {
   return server;
 }
 
+// src/tools/build_start.js
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, open as open2 } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 // src/gh.js
 import { execFile } from "node:child_process";
 var TIMEOUT_SECONDS = 60;
@@ -23571,8 +23578,8 @@ var MAX_PROCESSES = 8;
 var GhError = class extends Error {
   name = "GhError";
 };
-async function gh(args, { json = false } = {}) {
-  const { exit_code, stdout, stderr } = await run(args);
+async function gh(args, { json = false, timeoutSeconds = TIMEOUT_SECONDS } = {}) {
+  const { exit_code, stdout, stderr } = await run(args, timeoutSeconds);
   if (exit_code !== 0) throw new GhError(explain(exit_code, stderr));
   return json ? JSON.parse(stdout) : stdout;
 }
@@ -23603,9 +23610,9 @@ async function throttled(start) {
     else running--;
   }
 }
-function run(args) {
+function run(args, timeoutSeconds = TIMEOUT_SECONDS) {
   const command = `gh ${args.join(" ")}`;
-  const options = { timeout: TIMEOUT_SECONDS * 1e3, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
+  const options = { timeout: timeoutSeconds * 1e3, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
   return throttled(
     () => new Promise((resolve, reject) => {
       execFile("gh", args, options, (error2, stdout, stderr) => {
@@ -23614,7 +23621,7 @@ function run(args) {
         } else if (error2?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
           reject(new GhError(`gh printed more than ${MAX_BUFFER_MB} MB: ${command}`));
         } else if (error2?.killed) {
-          reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: ${command}`));
+          reject(new GhError(`gh timed out after ${timeoutSeconds} seconds: ${command}`));
         } else if (error2 && typeof error2.code !== "number") {
           reject(new GhError(`gh was stopped by ${error2.signal ?? error2.message}: ${command}`));
         } else {
@@ -23637,6 +23644,109 @@ async function list(path, field) {
   const pages = await gh(["api", "--paginate", "--slurp", `${path}${separator}per_page=100`], { json: true });
   return pages.flatMap((page) => field ? page[field] : page);
 }
+
+// src/tools/build_start.js
+var CLONE_TIMEOUT_SECONDS = 10 * 60;
+var ONLY_PLUGIN_DIR = JSON.stringify({ enabledPlugins: { "epik@epik": false } });
+function slug(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
+}
+function epicBranch(number3, title) {
+  const tail = slug(title);
+  return tail ? `epic/${number3}-${tail}` : `epic/${number3}`;
+}
+function stamp(date3) {
+  return date3.toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+}
+function claudeArgs(command, pluginRoot) {
+  return [
+    "-p",
+    command,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--forward-subagent-text",
+    "--permission-mode",
+    "auto",
+    "--permission-prompts",
+    "none",
+    "--plugin-dir",
+    pluginRoot,
+    "--settings",
+    ONLY_PLUGIN_DIR
+  ];
+}
+async function launch(args, cwd, log, errorsLog) {
+  const out = await open2(log, "a");
+  const err = await open2(errorsLog, "a");
+  try {
+    const child = spawn("claude", args, { cwd, detached: true, stdio: ["ignore", out.fd, err.fd] });
+    const error2 = await once(child, "spawn").then(
+      () => null,
+      (e) => e
+    );
+    if (error2) {
+      throw error2.code === "ENOENT" ? new Error("Claude Code is not installed. Install it from https://claude.com/claude-code and sign in.") : error2;
+    }
+    child.on("error", () => {
+    });
+    child.unref();
+    return child.pid;
+  } finally {
+    await out.close();
+    await err.close();
+  }
+}
+var build_start_default = {
+  name: "build_start",
+  description: `Start a local Claude Code build of a GitHub issue or epic, and return at once.
+
+This is how to implement an issue or an epic. Never implement one in this
+conversation: when the user asks to build, implement or work on an issue or
+an epic, call this tool.
+
+An issue with sub-issues is an epic and is built with /epik:epic; any other
+issue is built with /epik:issue. The build runs headless in a fresh clone
+under ~/.epik/builds/ and streams its output to the log this returns; the
+user can follow it with \`tail -f\`. The build opens pull requests, merges
+them and closes the issues itself.
+
+Args:
+    repo: Repository in owner/name format.
+    number: The issue or epic issue to build.
+    branch: For an epic, the epic branch, created if missing; default
+        epic/<number>-<slug of its title>. For an issue, the branch its pull
+        request merges into; default the repository's default branch.
+
+Returns run_id, kind (epic or issue), command (the slash command the build
+runs), branch, clone, log, errors_log and pid.`,
+  inputSchema: {
+    repo: string2(),
+    number: number2().int().positive(),
+    branch: string2().min(1).optional()
+  },
+  run: async ({ repo, number: number3, branch }) => {
+    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (!pluginRoot) throw new Error("CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.");
+    const issue2 = await get(`repos/${repo}/issues/${number3}`);
+    if (issue2.pull_request) throw new Error(`#${number3} in ${repo} is a pull request, not an issue.`);
+    if (issue2.state !== "open") throw new Error(`#${number3} in ${repo} is ${issue2.state}.`);
+    const kind = (await list(`repos/${repo}/issues/${number3}/sub_issues`)).length > 0 ? "epic" : "issue";
+    const target = branch ?? (kind === "epic" ? epicBranch(number3, issue2.title) : (await get(`repos/${repo}`)).default_branch);
+    const command = `/epik:${kind} ${number3} ${target}`;
+    const home = join(homedir(), ".epik");
+    const runId = `${repo.replace("/", "-")}-${number3}-${stamp(/* @__PURE__ */ new Date())}`;
+    const clone2 = join(home, "builds", runId);
+    const runs = join(home, "runs");
+    await mkdir(clone2, { recursive: true });
+    await mkdir(runs, { recursive: true });
+    await gh(["repo", "clone", repo, clone2], { timeoutSeconds: CLONE_TIMEOUT_SECONDS });
+    const log = join(runs, `${runId}.jsonl`);
+    const errorsLog = join(runs, `${runId}.err`);
+    const pid = await launch(claudeArgs(command, pluginRoot), clone2, log, errorsLog);
+    return { run_id: runId, kind, command, branch: target, clone: clone2, log, errors_log: errorsLog, pid };
+  }
+};
 
 // src/blocked_by.js
 var edges = (repo, number3) => `repos/${repo}/issues/${number3}/dependencies/blocked_by`;
@@ -24207,7 +24317,8 @@ var tools = [
   issue_set_blocked_by_default,
   issue_remove_blocked_by_default,
   issue_list_blocked_by_default,
-  epic_status_default
+  epic_status_default,
+  build_start_default
 ];
 
 // src/index.js
