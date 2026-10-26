@@ -1,6 +1,6 @@
 # epik (plugin)
 
-The Epik plugin: manager-mode **feature** development on GitHub. Settle a design in conversation, author the feature's issue graph, and build it locally with Claude Code.
+The Epik plugin: manager-mode **epic** development on GitHub. Settle a design in conversation, author the epic's issue graph, and build it with Claude Code.
 
 An *epic* is a dependency-ordered set of issues: an epic issue with sub-issues, implemented together on an epic branch.
 

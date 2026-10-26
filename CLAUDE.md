@@ -1,7 +1,7 @@
 # Epik
 
-Manager-mode feature development on GitHub: converge on a design, author the
-feature's issue graph, and build it locally with Claude Code.
+Manager-mode epic development on GitHub: converge on a design, author the
+epic's issue graph, and build it with Claude Code.
 
 ## Design
 
