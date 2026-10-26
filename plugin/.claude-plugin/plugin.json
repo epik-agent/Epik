@@ -1,6 +1,6 @@
 {
   "name": "epik",
-  "description": "Manager-mode feature development on GitHub: settle the design in chat, author the issue graph, and build it locally with Claude Code.",
+  "description": "Manager-mode epic development on GitHub: settle the design in chat, author the epic's issue graph, and build it with Claude Code.",
   "author": {
     "name": "W.P. McNeill",
     "url": "https://github.com/epik-agent"
