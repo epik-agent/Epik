@@ -29,8 +29,9 @@ You need:
 - For Claude Desktop: a current version of
   [Claude Desktop](https://claude.com/download), running, with the GitHub
   connector connected.
-- For Claude Code: a current version of
-  [Claude Code](https://claude.com/claude-code).
+- [Claude Code](https://claude.com/claude-code), installed and signed in
+  with your claude.ai account, on the machine that runs Epik. Epik runs every
+  build with it, including builds you ask for in Claude Desktop.
 
 ### Install
 
@@ -86,10 +87,13 @@ You create the GitHub repository yourself. In conversation (Claude Desktop,
 Cowork, or Claude Code), Epik helps you settle a design and writes it up as an
 epic issue with sub-issues, using the GitHub connector and Epik's own tools.
 
-To build, run Claude Code in a local clone and invoke `/epik:epic` for an
-epic or `/epik:issue` for a single issue. The code is written on your
-machine; GitHub is where the results land — branches, pull requests, CI runs,
-and closed issues. The pull request is where you decide what merges.
+To build, ask Epik to build an issue or an epic. Epik starts Claude Code on
+your machine, in a fresh clone under `~/.epik/builds/`, and tells you where
+the build's log is; follow it with `tail -f`. An issue with sub-issues is
+built as an epic, its sub-issues in dependency order. Keep the machine awake
+until the build finishes. GitHub is where the results land — branches, pull
+requests, CI runs, and closed issues. The pull request is where you decide
+what merges.
 
 ## Troubleshooting the install
 
