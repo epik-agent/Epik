@@ -1,5 +1,6 @@
 // The server's tools. A new tool is a module in this directory, listed here.
 
+import buildStart from './build_start.js';
 import epicStatus from './epic_status.js';
 import ghRaw from './gh_raw.js';
 import issueListBlockedBy from './issue_list_blocked_by.js';
@@ -32,4 +33,5 @@ export const tools = [
   issueRemoveBlockedBy,
   issueListBlockedBy,
   epicStatus,
+  buildStart,
 ];
