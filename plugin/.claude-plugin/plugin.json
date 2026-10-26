@@ -7,7 +7,7 @@
   },
   "homepage": "https://github.com/epik-agent/Epik",
   "repository": "https://github.com/epik-agent/Epik",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "github",
     "epic",
