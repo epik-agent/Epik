@@ -1,11 +1,11 @@
 ---
 name: epic
-description: Implement an epic — a dependency-ordered set of GitHub issues — on its own branch using Agent Teams
+description: Implement an epic — a dependency-ordered set of GitHub issues — on its own branch
 argument-hint: [epic issue number or GitHub URL] [GitHub epic branch]
 disable-model-invocation: true
 ---
 
-Use Agent Teams to implement the epic issue or all of the issues it indicates.
+Implement the epic issue or all of the issues it indicates.
 The epic issue may specify a set of issues, either as child issues or linked issues described in the text.
 Do all work on the epic branch. Never touch the default branch.
 
@@ -21,8 +21,10 @@ Do all work on the epic branch. Never touch the default branch.
     - For a single issue, the order does not matter.
     - An epic with multiple issues may specify their dependency order in issue text or by using the GitHub
       Relationships fields.
-    - Use Agent Teams to implement issues in parallel as much as the dependency order allows.
-4. Implement each individual issue using the /issue command. The issue's target branch is the epic branch from step 2.
+    - Implement issues in parallel as much as the dependency order allows.
+4. Implement each individual issue in its own subagent. Give the subagent the issue, its target branch (the epic
+   branch from step 2), and the instruction to follow the procedure in
+   `${CLAUDE_PLUGIN_ROOT}/skills/issue/procedure.md`.
 5. After all of its issues have been implemented, create a pull request for the epic issue that will close the
    epic issue.
 
