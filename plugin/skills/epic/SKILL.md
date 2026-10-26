@@ -5,8 +5,8 @@ argument-hint: [epic issue number or GitHub URL] [GitHub epic branch]
 disable-model-invocation: true
 ---
 
-Implement the epic issue or all of the issues it indicates.
-The epic issue may specify a set of issues, either as child issues or linked issues described in the text.
+Implement all of the epic issue's sub-issues. They are the epic's only members, and the `epic_status` tool is the
+only source of their dependency order: never work out membership or order from issue text.
 Do all work on the epic branch. Never touch the default branch.
 
 1. Make sure the epic issue has the `epic` label.
@@ -17,11 +17,15 @@ Do all work on the epic branch. Never touch the default branch.
 2. If it does not already exist, create the epic branch on GitHub for the current repo.
     - If you must create the epic branch, base it on the HEAD of the current repo's default branch.
     - Stop if the current repo is not clear from context.
-3. Implement the issues in dependency order.
-    - For a single issue, the order does not matter.
-    - An epic with multiple issues may specify their dependency order in issue text or by using the GitHub
-      Relationships fields.
-    - Implement issues in parallel as much as the dependency order allows.
+3. Implement the sub-issues in dependency order.
+    1. Call `epic_status` on the epic issue.
+    2. If it reports `cycles`, stop and report them.
+    3. If the epic has no sub-issues, stop and say it is not an epic.
+    4. If any sub-issue is in another repository, stop and report it.
+    5. Start a subagent (step 4) for every open sub-issue whose `blocked_by` issues are all closed and that is not
+       already running.
+    6. Each time a subagent finishes, call `epic_status` again and repeat from 5.
+    7. The sub-issues are implemented when every one of them is closed.
 4. Implement each individual issue in its own subagent. Give the subagent the issue, its target branch (the epic
    branch from step 2), and the instruction to follow the procedure in
    `${CLAUDE_PLUGIN_ROOT}/skills/issue/procedure.md`.

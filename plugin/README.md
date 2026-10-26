@@ -58,5 +58,5 @@ Changes to the server's source need a rebuilt `server/dist/index.js` (see [`serv
 
 Two build skills, both invoked explicitly as slash commands namespaced under `epik` (they never auto-trigger):
 
-- **`/epik:epic [epic issue number or GitHub URL] [epic branch]`** — implement an epic: the dependency-ordered set of issues an epic issue points to. Creates the epic branch if needed, then implements the issues in dependency order (in parallel subagents where the order allows), each following `/epik:issue`'s procedure and targeting the epic branch, and finally opens a pull request for the epic.
+- **`/epik:epic [epic issue number or GitHub URL] [epic branch]`** — implement an epic: the epic issue's sub-issues. Creates the epic branch if needed, then implements the sub-issues in the dependency order the `epic_status` tool reports (in parallel subagents where the order allows), each following `/epik:issue`'s procedure and targeting the epic branch, and finally opens a pull request for the epic.
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, run `/simplify`, open a pull request linked to the issue, drive it through CI, merge into the target branch, close the issue, and clean up.
