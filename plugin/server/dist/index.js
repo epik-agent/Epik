@@ -23566,9 +23566,6 @@ function createServer(tools2) {
   return server;
 }
 
-// src/tools/build_start.js
-import { join as join2 } from "node:path";
-
 // src/app.js
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -23637,12 +23634,13 @@ async function awaitApp(timeoutMs) {
     await sleep(PING_INTERVAL_MS);
   }
 }
-async function request(message, { startTimeoutMs = START_TIMEOUT_MS } = {}) {
+async function request(message, { start: startApp = true, startTimeoutMs = START_TIMEOUT_MS } = {}) {
   let reply;
   try {
     reply = await send(message);
   } catch (error2) {
     if (!(error2 instanceof NotListening)) throw error2;
+    if (!startApp) throw new Error("The Epik app isn't running.");
     await start();
     await awaitApp(startTimeoutMs);
     reply = await send(message);
@@ -23651,7 +23649,25 @@ async function request(message, { startTimeoutMs = START_TIMEOUT_MS } = {}) {
   return reply;
 }
 
+// src/tools/build_list.js
+var build_list_default = {
+  name: "build_list",
+  description: `List the Epik app's latest builds, newest first.
+
+The app isn't started: when it isn't running, this says so.
+
+Args:
+    limit: Maximum number of runs. Default 20.
+
+Returns each run's state, as build_status gives it.`,
+  inputSchema: {
+    limit: number2().int().positive().optional()
+  },
+  run: async ({ limit }) => (await request({ type: "list", limit }, { start: false })).runs
+};
+
 // src/tools/build_start.js
+import { join as join2 } from "node:path";
 var build_start_default = {
   name: "build_start",
   description: `Ask the Epik app to build a GitHub issue or epic, and return once the build has started.
@@ -23694,6 +23710,30 @@ events (the run's events log, in run_dir).`,
       run_dir: reply.run_dir,
       events: join2(reply.run_dir, "events.jsonl")
     };
+  }
+};
+
+// src/tools/build_status.js
+var build_status_default = {
+  name: "build_status",
+  description: `Ask the Epik app where a build is: the run's state and each of its issues'.
+
+The app isn't started: when it isn't running, this says so.
+
+Args:
+    run_id: The run, as build_start or build_list gives it.
+
+Returns the run's repo, number, title, kind (epic or issue), branch, status
+(running, succeeded, failed or interrupted), reason (why it failed or was
+interrupted), pull_request, started_at, ended_at, elapsed_ms and cost_usd, and
+its members: each issue's number, title, blocked_by, status (waiting, running,
+succeeded, merged or failed), reason, pull_request, duration_ms and cost_usd.`,
+  inputSchema: {
+    run_id: string2().min(1)
+  },
+  run: async ({ run_id }) => {
+    const { type, ...run2 } = await request({ type: "status", run_id }, { start: false });
+    return run2;
   }
 };
 
@@ -24342,7 +24382,9 @@ var tools = [
   issue_remove_blocked_by_default,
   issue_list_blocked_by_default,
   epic_status_default,
-  build_start_default
+  build_start_default,
+  build_status_default,
+  build_list_default
 ];
 
 // src/index.js

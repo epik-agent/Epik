@@ -87,13 +87,15 @@ async function awaitApp(timeoutMs) {
 }
 
 // Sends `message` to the app, starting the app first when it isn't running,
-// and resolves to its reply. A reply of type "error" is thrown.
-export async function request(message, { startTimeoutMs = START_TIMEOUT_MS } = {}) {
+// and resolves to its reply. A reply of type "error" is thrown. With
+// `start: false` an app that isn't running is an error instead.
+export async function request(message, { start: startApp = true, startTimeoutMs = START_TIMEOUT_MS } = {}) {
   let reply;
   try {
     reply = await send(message);
   } catch (error) {
     if (!(error instanceof NotListening)) throw error;
+    if (!startApp) throw new Error("The Epik app isn't running.");
     await start();
     await awaitApp(startTimeoutMs);
     reply = await send(message);
