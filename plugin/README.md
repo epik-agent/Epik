@@ -15,11 +15,9 @@ plugin/
     assistant/
       SKILL.md          # epik:assistant — how Epik plans; loads itself
       rules.md          # the rules that bind every change to the code
-    epic/
-      SKILL.md          # /epik:epic — implement an epic's issues in parallel subagents
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
-      procedure.md      # the per-issue procedure, shared by both skills
+      procedure.md      # the per-issue procedure
   .mcp.json             # declares the epik server
 ```
 
@@ -59,9 +57,8 @@ Changes to the server's source need a rebuilt `server/dist/index.js` (see [`serv
 
 ## Usage
 
-- **The assistant skill (`epik:assistant`) loads itself.** It is not a command you run. The server's instructions point every session at it, so any conversation with the plugin enabled knows it is Epik. It is the exception to the explicit-invocation rule because it only shapes how Claude plans and writes. `epic` and `issue` take actions (branches, builds, merges), so they stay explicit.
+- **The assistant skill (`epik:assistant`) loads itself.** It is not a command you run. The server's instructions point every session at it, so any conversation with the plugin enabled knows it is Epik. It is the exception to the explicit-invocation rule because it only shapes how Claude plans and writes. `issue` takes actions (branches, pull requests), so it stays explicit.
 
-Two build skills, both invoked explicitly as slash commands namespaced under `epik` (they never auto-trigger):
+The Epik app builds epics: it runs each issue's agent, merges each issue's pull request into the epic branch, and opens the epic's pull request. Each agent runs:
 
-- **`/epik:epic [epic issue number or GitHub URL] [epic branch]`** — implement an epic: the epic issue's sub-issues. Creates the epic branch if needed, then implements the sub-issues in the dependency order the `epic_status` tool reports (in parallel subagents where the order allows), each following `/epik:issue`'s procedure and targeting the epic branch, and finally opens a pull request for the epic.
-- **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue end to end: work in a git worktree, get tests passing, run `/simplify`, open a pull request linked to the issue, drive it through CI, merge into the target branch, close the issue, and clean up.
+- **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue: work in a git worktree, write tests first and get them passing, open a pull request into the target branch whose body says `Closes #<issue number>`, and drive it until every check passes. It never merges the pull request or closes the issue; it removes its worktree and leaves the branch for the open pull request.
