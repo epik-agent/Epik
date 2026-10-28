@@ -31,14 +31,29 @@ afterEach(async () => {
 
 const issue = (state = 'open', extra = {}) => ({ number: 7, title: 'Add the Thing: part 2!', state, ...extra });
 
+// GitHub's replies for building issue 7 without sub-issues into main.
+const issueReplies = () => [
+    [pages('repos/o/r/issues/7/sub_issues'), [[]]],
+    ['api repos/o/r/issues/7', issue()],
+    ['api repos/o/r', { default_branch: 'main' }],
+    ['repo clone', ''],
+  ];
+
+// What a build in auto mode writes to its log first: a hook event, then its
+// init event.
+const startsInAuto = `echo '{"type":"system","subtype":"hook_started"}'
+echo '{"type":"system","subtype":"init","permissionMode":"auto","model":"claude-opus-5-5"}'`;
+
 // Fakes GitHub with `replies`, and puts beside the fake gh a fake claude that
-// records its arguments and working directory in its log, then exits.
-async function fakeBoth(replies) {
+// runs the shell commands `start`, then records its arguments and working
+// directory in its log, then exits.
+async function fakeBoth(replies, start = startsInAuto) {
   github = await fakeGithub(replies);
   const claude = join(process.env.PATH, 'claude');
   await writeFile(
     claude,
     `#!/bin/sh
+${start}
 printf '%s\\n' "$(pwd)"
 for arg in "$@"; do printf '%s\\n' "$arg"; done
 echo 'claude stderr' >&2
@@ -47,23 +62,22 @@ echo 'claude stderr' >&2
   await chmod(claude, 0o755);
 }
 
-// The lines the fake claude wrote to `log`, once it has written them.
+// The lines the fake claude wrote to `log` after its init event, once it has
+// written them.
 async function claudeOutput(log) {
   for (let i = 0; i < 100; i++) {
     const text = await readFile(log, 'utf8').catch(() => '');
-    if (text.includes('--settings')) return text.trim().split('\n');
+    if (text.includes('--settings')) {
+      const lines = text.trim().split('\n');
+      return lines.slice(lines.findIndex((line) => line.includes('"subtype":"init"')) + 1);
+    }
     await sleep(20);
   }
   throw new Error(`fake claude never wrote ${log}`);
 }
 
 test('an issue without sub-issues is built with /epik:issue into the default branch', async () => {
-  await fakeBoth([
-    [pages('repos/o/r/issues/7/sub_issues'), [[]]],
-    ['api repos/o/r/issues/7', issue()],
-    ['api repos/o/r', { default_branch: 'main' }],
-    ['repo clone', ''],
-  ]);
+  await fakeBoth(issueReplies());
   const result = await buildStart.run({ repo: 'o/r', number: 7 });
 
   assert.equal(result.kind, 'issue');
@@ -109,6 +123,67 @@ test('a given branch is used as is', async () => {
   await claudeOutput(result.log);
 });
 
+// Whether the process `pid` is running.
+function running(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('a build that starts in auto mode after hook events is returned', async () => {
+  await fakeBoth(
+    issueReplies(),
+    `echo 'not json'
+echo '{"type":"system","subtype":"hook_started"}'
+echo '{"type":"system","subtype":"hook_response"}'
+echo '{"type":"system","subtype":"init","permissionMode":"auto","model":"m"}'`,
+  );
+  const result = await buildStart.run({ repo: 'o/r', number: 7 });
+  assert.equal(result.command, '/epik:issue 7 main');
+  await claudeOutput(result.log);
+});
+
+test('a build that starts in another permission mode is stopped', async () => {
+  const pidFile = join(home, 'pid');
+  await fakeBoth(
+    issueReplies(),
+    `echo $$ > '${pidFile}'
+echo '{"type":"system","subtype":"hook_started"}'
+echo '{"type":"system","subtype":"init","permissionMode":"default","model":"claude-sonnet-4-5"}'
+/bin/sleep 30`,
+  );
+  await assert.rejects(buildStart.run({ repo: 'o/r', number: 7 }), {
+    message:
+      'The build started in "default" permission mode, not "auto", so it couldn\'t run unattended, and it has been ' +
+      'stopped. Its model was claude-sonnet-4-5. Auto mode needs a recent model (choose one with /model), and an ' +
+      'organization admin can turn it off. See "Troubleshooting the install" in Epik\'s README.',
+  });
+  assert.equal(running(Number(await readFile(pidFile, 'utf8'))), false);
+});
+
+test('a build that exits before it starts fails with its errors', async () => {
+  await fakeBoth(issueReplies(), `echo 'no auth' >&2
+exit 1`);
+  await assert.rejects(buildStart.run({ repo: 'o/r', number: 7 }), { message: /exited before it started[^]*no auth/ });
+});
+
+test('a build that does not report its permission mode in time is stopped', async () => {
+  const pidFile = join(home, 'pid');
+  await fakeBoth(
+    issueReplies(),
+    `echo $$ > '${pidFile}'
+echo '{"type":"system","subtype":"hook_started"}'
+/bin/sleep 30`,
+  );
+  await assert.rejects(buildStart.run({ repo: 'o/r', number: 7 }, { initTimeoutMs: 300 }), {
+    message: /didn't report its permission mode within 0\.3 seconds[^]*\.err/,
+  });
+  assert.equal(running(Number(await readFile(pidFile, 'utf8'))), false);
+});
+
 test('a closed issue is not built', async () => {
   await fakeBoth([['api repos/o/r/issues/7', issue('closed')]]);
   await assert.rejects(buildStart.run({ repo: 'o/r', number: 7 }), { message: '#7 in o/r is closed.' });
@@ -125,12 +200,7 @@ test('without CLAUDE_PLUGIN_ROOT nothing is built', async () => {
 });
 
 test('without Claude Code the build fails saying so', async () => {
-  github = await fakeGithub([
-    [pages('repos/o/r/issues/7/sub_issues'), [[]]],
-    ['api repos/o/r/issues/7', issue()],
-    ['api repos/o/r', { default_branch: 'main' }],
-    ['repo clone', ''],
-  ]);
+  github = await fakeGithub(issueReplies());
   await assert.rejects(buildStart.run({ repo: 'o/r', number: 7 }), { message: /Claude Code is not installed/ });
 });
 

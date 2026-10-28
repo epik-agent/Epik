@@ -23569,9 +23569,10 @@ function createServer(tools2) {
 // src/tools/build_start.js
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, open as open2 } from "node:fs/promises";
+import { mkdir, open as open2, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 // src/gh.js
 import { execFile } from "node:child_process";
@@ -23650,6 +23651,8 @@ async function list(path, field) {
 
 // src/tools/build_start.js
 var CLONE_TIMEOUT_SECONDS = 10 * 60;
+var INIT_TIMEOUT_MS = 60 * 1e3;
+var INIT_POLL_MS = 50;
 var ONLY_PLUGIN_DIR = JSON.stringify({ enabledPlugins: { "epik@epik": false } });
 function slug(title) {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
@@ -23694,15 +23697,65 @@ async function launch(args, cwd, log, errorsLog) {
     child.on("error", () => {
     });
     child.unref();
-    return child.pid;
+    return child;
   } finally {
     await out.close();
     await err.close();
   }
 }
+function initEvent(text) {
+  for (const line of text.split("\n")) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type === "system" && event.subtype === "init") return event;
+  }
+  return void 0;
+}
+var exited = (child) => child.exitCode !== null || child.signalCode !== null;
+async function stop(child) {
+  if (exited(child)) return;
+  const exit = once(child, "exit");
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  await exit;
+}
+async function awaitAutoMode(child, log, errorsLog, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    const ended = exited(child);
+    const init = initEvent(await readFile(log, "utf8"));
+    if (init) {
+      if (init.permissionMode === "auto") return;
+      await stop(child);
+      throw new Error(
+        `The build started in "${init.permissionMode}" permission mode, not "auto", so it couldn't run unattended, and it has been stopped. Its model was ${init.model}. Auto mode needs a recent model (choose one with /model), and an organization admin can turn it off. See "Troubleshooting the install" in Epik's README.`
+      );
+    }
+    if (ended) {
+      const errors = (await readFile(errorsLog, "utf8")).trim();
+      throw new Error(`The build exited before it started.${errors ? `
+
+${errors}` : ""}`);
+    }
+    if (Date.now() >= deadline) {
+      await stop(child);
+      throw new Error(
+        `The build didn't report its permission mode within ${timeoutMs / 1e3} seconds, so it has been stopped. Its errors log is ${errorsLog}.`
+      );
+    }
+    await sleep(INIT_POLL_MS);
+  }
+}
 var build_start_default = {
   name: "build_start",
-  description: `Start a local Claude Code build of a GitHub issue or epic, and return at once.
+  description: `Start a local Claude Code build of a GitHub issue or epic, and return once it has started in auto mode.
 
 This is how to implement an issue or an epic. Never implement one in this
 conversation: when the user asks to build, implement or work on an issue or
@@ -23713,7 +23766,8 @@ issue is built with /epik:issue. The build runs headless in a fresh clone
 under ~/.epik/builds/ and streams its output to the log this returns; the
 user can follow it with \`tail -f\`. The build opens pull requests. It merges
 them into an epic branch itself, but a pull request into the repository's
-default branch waits for the user to review and merge it.
+default branch waits for the user to review and merge it. If the build
+didn't start in auto mode, this stops it and returns an error saying why.
 
 Args:
     repo: Repository in owner/name format.
@@ -23729,7 +23783,7 @@ runs), branch, clone, log, errors_log and pid.`,
     number: number2().int().positive(),
     branch: string2().min(1).optional()
   },
-  run: async ({ repo, number: number3, branch }) => {
+  run: async ({ repo, number: number3, branch }, { initTimeoutMs = INIT_TIMEOUT_MS } = {}) => {
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
     if (!pluginRoot) throw new Error("CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.");
     const issue2 = await get(`repos/${repo}/issues/${number3}`);
@@ -23747,8 +23801,9 @@ runs), branch, clone, log, errors_log and pid.`,
     await gh(["repo", "clone", repo, clone2], { timeoutSeconds: CLONE_TIMEOUT_SECONDS });
     const log = join(runs, `${runId}.jsonl`);
     const errorsLog = join(runs, `${runId}.err`);
-    const pid = await launch(claudeArgs(command, pluginRoot), clone2, log, errorsLog);
-    return { run_id: runId, kind, command, branch: target, clone: clone2, log, errors_log: errorsLog, pid };
+    const child = await launch(claudeArgs(command, pluginRoot), clone2, log, errorsLog);
+    await awaitAutoMode(child, log, errorsLog, initTimeoutMs);
+    return { run_id: runId, kind, command, branch: target, clone: clone2, log, errors_log: errorsLog, pid: child.pid };
   }
 };
 
