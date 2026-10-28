@@ -1,7 +1,7 @@
 {
   "name": "epik-server",
   "private": true,
-  "description": "Epik's MCP server: the GitHub operations the standard connector lacks.",
+  "description": "Epik's MCP server: its GitHub operations, run through the gh CLI.",
   "type": "module",
   "engines": {
     "node": ">=26"
