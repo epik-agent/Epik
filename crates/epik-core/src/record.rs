@@ -179,8 +179,27 @@ impl RunWriter {
 
 /// Reads a run's events. A final line without its newline is one still
 /// being written, and is skipped unless it is already a whole event.
+///
+/// An id that could name anything but a directory in `<root>/runs`, such as
+/// `../x`, is a run that doesn't exist: [`io::ErrorKind::NotFound`].
 pub fn read_events(root: &Path, run_id: &str) -> io::Result<Vec<Event>> {
+    if !is_run_id(run_id) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no run {run_id:?}"),
+        ));
+    }
     read_events_in(&run_dir(root, run_id))
+}
+
+/// Whether `run_id` can be a run's id: ASCII letters, digits, `-`, `_` and
+/// `.`, not starting with `.`.
+fn is_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && !run_id.starts_with('.')
+        && run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn read_events_in(dir: &Path) -> io::Result<Vec<Event>> {
@@ -761,5 +780,19 @@ mod tests {
     fn listing_an_empty_root_is_empty() {
         let root = tempfile::tempdir().unwrap();
         assert!(list_runs(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_id_that_leaves_the_runs_directory_is_no_run() {
+        let root = tempfile::tempdir().unwrap();
+        // `../x` would reach this run outside `runs`.
+        fs::create_dir(root.path().join("x")).unwrap();
+        fs::write(root.path().join("x").join(EVENTS_FILE), "").unwrap();
+
+        for run_id in ["..", "../x", "a/b", "a\\b", ".hidden", ""] {
+            let error = read_events(root.path(), run_id).unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::NotFound, "{run_id}");
+        }
     }
 }

@@ -2,8 +2,10 @@
 
 pub mod agent;
 pub mod build;
+pub mod builds;
 pub mod github;
 pub mod graph;
+pub mod ipc;
 pub mod record;
 
 /// The version of Epik, which every crate in the workspace shares.
