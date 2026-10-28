@@ -25,7 +25,8 @@ You need:
 - [Node](https://nodejs.org/) 26 or later, which runs Epik's server.
 - The [`gh` CLI](https://cli.github.com/), signed in with
   `gh auth login -s project`, with `gh auth setup-git` run so builds can push.
-  That is how Epik acts on GitHub as you.
+  Already signed in to `gh`? Run `gh auth refresh -s project` instead of
+  logging in again. That is how Epik acts on GitHub as you.
 - [Claude Code](https://claude.com/claude-code), installed and signed in
   with your claude.ai account, on the machine that runs Epik. You talk to Epik
   in it, and Epik runs every build with it.
@@ -42,8 +43,9 @@ In Claude Code, enter the following commands one at a time:
 /plugin install epik@epik
 ```
 
-The install command opens a details view asking you to confirm an
-installation scope; confirm it, then reload:
+The install command opens a details view asking you to choose an
+installation scope. Choose **user**, so Epik loads in every folder you start
+Claude Code from, then reload:
 
 ```
 /reload-plugins
@@ -88,6 +90,9 @@ Builds never merge into the default branch. A single issue's build stops at
 an open pull request into it. An epic's issues merge into the epic branch,
 whose pull request into the default branch waits for you. The pull request is
 where you decide what merges.
+
+To learn more about how Epik works, ask Epik itself. Start Claude Code in any
+folder and say, "Hello, Epik."
 
 ## Troubleshooting the install
 
