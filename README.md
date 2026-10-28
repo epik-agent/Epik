@@ -96,3 +96,12 @@ Claude Code's marketplace registry is corrupt (often a stray trailing
 comma). Check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the
 syntax it points at. If it says the name `epik` is already in use,
 `/plugin marketplace remove epik` and add it again.
+
+**A build stops at once: it "started in "default" permission mode, not "auto""**
+Epik runs builds in Claude Code's auto mode, so they can work without you
+answering prompts. When auto mode isn't available, Claude Code starts in its
+ordinary mode instead, and Epik stops the build rather than let it stall.
+Auto mode needs a recent model, so choose one with `/model`. On a Team or
+Enterprise plan, an admin can turn auto mode off for the organization. Claude
+Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes)
+lists the models that support it.

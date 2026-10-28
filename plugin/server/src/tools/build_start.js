@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir, open, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import * as z from 'zod';
 
@@ -10,6 +11,12 @@ import { gh } from '../gh.js';
 import { get, list } from '../rest.js';
 
 const CLONE_TIMEOUT_SECONDS = 10 * 60;
+
+// How long a build has to report its permission mode.
+const INIT_TIMEOUT_MS = 60 * 1000;
+
+// How often to read a starting build's log for its init event.
+const INIT_POLL_MS = 50;
 
 // The settings that turn off an installed copy of the plugin, so a build
 // loads only the copy named by --plugin-dir.
@@ -51,7 +58,7 @@ export function claudeArgs(command, pluginRoot) {
 }
 
 // Starts `claude` with `args` in `cwd`, detached, writing stdout to `log` and
-// stderr to `errorsLog`. Resolves to its pid once it has started.
+// stderr to `errorsLog`. Resolves to its child process once it has started.
 async function launch(args, cwd, log, errorsLog) {
   const out = await open(log, 'a');
   const err = await open(errorsLog, 'a');
@@ -70,16 +77,79 @@ async function launch(args, cwd, log, errorsLog) {
     // The build outlives this call; its later failures show in its logs.
     child.on('error', () => {});
     child.unref();
-    return child.pid;
+    return child;
   } finally {
     await out.close();
     await err.close();
   }
 }
 
+// The first event in the JSON lines `text` with type "system" and subtype
+// "init", skipping lines that aren't complete JSON, or undefined.
+function initEvent(text) {
+  for (const line of text.split('\n')) {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type === 'system' && event.subtype === 'init') return event;
+  }
+  return undefined;
+}
+
+// Whether `child` has exited.
+const exited = (child) => child.exitCode !== null || child.signalCode !== null;
+
+// Kills the process group of the detached `child` and waits for it to exit.
+async function stop(child) {
+  if (exited(child)) return;
+  const exit = once(child, 'exit');
+  try {
+    process.kill(-child.pid, 'SIGTERM');
+  } catch {
+    return;
+  }
+  await exit;
+}
+
+// Waits until the build `child` writes its init event to `log`, and stops it
+// unless that event says it is in auto mode. Throws when it isn't, when the
+// build exits first, or when `timeoutMs` passes first.
+async function awaitAutoMode(child, log, errorsLog, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    // Checked before reading the log, so a build that exited has written all of it.
+    const ended = exited(child);
+    const init = initEvent(await readFile(log, 'utf8'));
+    if (init) {
+      if (init.permissionMode === 'auto') return;
+      await stop(child);
+      throw new Error(
+        `The build started in "${init.permissionMode}" permission mode, not "auto", so it couldn't run unattended, ` +
+          `and it has been stopped. Its model was ${init.model}. Auto mode needs a recent model (choose one with ` +
+          `/model), and an organization admin can turn it off. See "Troubleshooting the install" in Epik's README.`,
+      );
+    }
+    if (ended) {
+      const errors = (await readFile(errorsLog, 'utf8')).trim();
+      throw new Error(`The build exited before it started.${errors ? `\n\n${errors}` : ''}`);
+    }
+    if (Date.now() >= deadline) {
+      await stop(child);
+      throw new Error(
+        `The build didn't report its permission mode within ${timeoutMs / 1000} seconds, so it has been stopped. ` +
+          `Its errors log is ${errorsLog}.`,
+      );
+    }
+    await sleep(INIT_POLL_MS);
+  }
+}
+
 export default {
   name: 'build_start',
-  description: `Start a local Claude Code build of a GitHub issue or epic, and return at once.
+  description: `Start a local Claude Code build of a GitHub issue or epic, and return once it has started in auto mode.
 
 This is how to implement an issue or an epic. Never implement one in this
 conversation: when the user asks to build, implement or work on an issue or
@@ -90,7 +160,8 @@ issue is built with /epik:issue. The build runs headless in a fresh clone
 under ~/.epik/builds/ and streams its output to the log this returns; the
 user can follow it with \`tail -f\`. The build opens pull requests. It merges
 them into an epic branch itself, but a pull request into the repository's
-default branch waits for the user to review and merge it.
+default branch waits for the user to review and merge it. If the build
+didn't start in auto mode, this stops it and returns an error saying why.
 
 Args:
     repo: Repository in owner/name format.
@@ -106,7 +177,7 @@ runs), branch, clone, log, errors_log and pid.`,
     number: z.number().int().positive(),
     branch: z.string().min(1).optional(),
   },
-  run: async ({ repo, number, branch }) => {
+  run: async ({ repo, number, branch }, { initTimeoutMs = INIT_TIMEOUT_MS } = {}) => {
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
     if (!pluginRoot) throw new Error('CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.');
 
@@ -128,7 +199,8 @@ runs), branch, clone, log, errors_log and pid.`,
 
     const log = join(runs, `${runId}.jsonl`);
     const errorsLog = join(runs, `${runId}.err`);
-    const pid = await launch(claudeArgs(command, pluginRoot), clone, log, errorsLog);
-    return { run_id: runId, kind, command, branch: target, clone, log, errors_log: errorsLog, pid };
+    const child = await launch(claudeArgs(command, pluginRoot), clone, log, errorsLog);
+    await awaitAutoMode(child, log, errorsLog, initTimeoutMs);
+    return { run_id: runId, kind, command, branch: target, clone, log, errors_log: errorsLog, pid: child.pid };
   },
 };
