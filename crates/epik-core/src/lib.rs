@@ -1,5 +1,7 @@
 //! The logic of the Epik app. Everything here is tested without a desktop.
 
+pub mod graph;
+
 /// The version of Epik, which every crate in the workspace shares.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
