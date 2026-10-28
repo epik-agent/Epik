@@ -16,8 +16,8 @@ and opens a pull request for you to review.
 
 ## Installing and uninstalling
 
-Epik is one plugin for the Claude Code terminal, installed from this
-repository's marketplace.
+Epik is one plugin for Claude Code, used in the terminal or in Claude
+Desktop's Code tab, installed from this repository's marketplace.
 
 You need:
 
@@ -67,6 +67,14 @@ To update later, again one command at a time:
 ```
 /reload-plugins
 ```
+
+### Claude Desktop
+
+Install Epik as above, in a Claude Code terminal. Desktop's Code tab loads
+user-scope plugins, so it then has Epik too. Use Epik in Desktop's **Code**
+tab with the **My Computer** environment selected. The Code tab's cloud
+environment doesn't load Epik, because cloud sessions don't have locally
+installed plugins. Desktop's chat doesn't run Epik either.
 
 ### Uninstalling
 
