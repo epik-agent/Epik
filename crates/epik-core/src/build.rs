@@ -292,6 +292,16 @@ impl Build<'_> {
         &self.run_id
     }
 
+    /// Whether the run builds an epic or a single issue.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The branch the run's pull requests merge into.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
     /// The run's record directory, `<root>/runs/<run-id>`.
     pub fn dir(&self) -> &Path {
         &self.dir
