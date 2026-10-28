@@ -23,6 +23,7 @@ use tauri::{AppHandle, RunEvent, Wry};
 
 use crate::App;
 use crate::menu::{self, Item, Menu};
+use crate::window;
 
 /// How often the menu is redrawn from the run listing.
 const REFRESH: Duration = Duration::from_secs(2);
@@ -54,14 +55,19 @@ fn headless(app: App, reason: &str) -> ExitCode {
     app.serve()
 }
 
-/// Starts Tauri with no window and puts the icon in the tray, or says why
-/// it can't.
+/// Starts Tauri with no window, ready to open runs' windows, and puts the
+/// icon in the tray, or says why it can't.
 fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     if !has_display() {
         return Err("no display".to_owned());
     }
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tauri = tauri::Builder::default()
+        .manage(window::Runs {
+            root: app.root.clone(),
+            builds: app.builds.clone(),
+        })
+        .invoke_handler(tauri::generate_handler![window::run_view])
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
     // No Dock icon.
@@ -76,15 +82,16 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .icon_as_template(true)
         .tooltip("Epik")
         .menu(&native(tauri.handle(), &shown).map_err(|error| error.to_string())?)
-        .on_menu_event(move |_, event| {
+        .on_menu_event(move |handle, event| {
             let id = event.id().as_ref();
             if id == QUIT {
                 stop.store(true, Ordering::SeqCst);
             } else if id == OPEN_RUNS_FOLDER {
                 reveal(&record::runs_dir(&root));
-            } else if let Some(run_id) = id.strip_prefix(RUN) {
-                // Until runs have a window, a run opens as its directory.
-                reveal(&record::run_dir(&root, run_id));
+            } else if let Some(run_id) = id.strip_prefix(RUN)
+                && let Err(error) = window::open(handle, run_id)
+            {
+                eprintln!("epik-app: couldn't open the window of run {run_id}: {error}");
             }
         })
         .build(&tauri)

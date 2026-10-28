@@ -2,6 +2,8 @@
 
 mod menu;
 mod tray;
+mod view;
+mod window;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
