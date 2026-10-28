@@ -1,4 +1,7 @@
 .claude/
 
+# Rust
+/target/
+
 # IDE
 .idea/
