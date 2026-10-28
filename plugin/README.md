@@ -17,12 +17,12 @@ plugin/
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
       procedure.md      # the per-issue procedure, shared by both skills
-  .mcp.json             # declares the epik server and GitHub's hosted server
+  .mcp.json             # declares the epik server
 ```
 
 ## Design in one paragraph
 
-The skills are **policy**; GitHub's tooling is **mechanism**. GitHub's own connector does most of the work. The `epik` server ships inside the plugin and provides only what that connector lacks. It runs every operation through the `gh` CLI, under the user's own Node. Installing the plugin brings both servers along.
+The skills are **policy**; GitHub's tooling is **mechanism**. GitHub's own connector does most of the work. The `epik` server ships inside the plugin and provides only what that connector lacks. It runs every operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along.
 
 ## Install
 
