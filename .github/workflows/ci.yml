@@ -10,6 +10,10 @@ jobs:
     # The branch ruleset requires a status check with this exact context.
     name: CI
     runs-on: ubuntu-latest
+    # No step writes to GitHub, and actions/checkout needs contents: read to
+    # clone this private repository.
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: plugin/server
