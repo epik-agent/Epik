@@ -23,7 +23,7 @@ from this repository's marketplace.
 You need:
 
 - A GitHub account.
-- [Node](https://nodejs.org/) 20 or later, which runs Epik's server.
+- [Node](https://nodejs.org/) 26 or later, which runs Epik's server.
 - The [`gh` CLI](https://cli.github.com/), signed in with `gh auth login`.
   That is how Epik acts on GitHub as you.
 - For Claude Desktop: a current version of
@@ -104,7 +104,7 @@ syntax it points at. If it says the name `epik` is already in use,
 `/plugin marketplace remove epik` and add it again.
 
 **Claude Desktop: Epik's tools never appear after installing the plugin**
-Check that `node --version` reports 20 or later, then start a fresh
+Check that `node --version` reports 26 or later, then start a fresh
 conversation — plugins are picked up when a conversation begins. If the tools
 still don't appear, the desktop app's logs are in `~/Library/Logs/Claude/` on
 macOS.
