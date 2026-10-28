@@ -14,7 +14,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    PullRequest, PullState, Result, State, SubIssue, closing_pull_request,
+    MergeMethods, PullRequest, PullState, Result, State, SubIssue, closing_pull_request,
 };
 
 /// Runs `gh` with some arguments and returns its stdout.
@@ -55,6 +55,10 @@ impl GhCli {
         parse_pages(&self.gh(["api", "--paginate", "--slurp", &path])?)
     }
 
+    fn repo(&self, repo: &str) -> Result<RawRepo> {
+        self.json(["api", &format!("repos/{repo}")])
+    }
+
     /// The commit `branch` stands on, if it exists. Reading the refs that
     /// start with its name answers a missing branch with an empty list
     /// rather than an error.
@@ -82,8 +86,7 @@ impl GitHub for GhCli {
     }
 
     fn default_branch(&self, repo: &str) -> Result<String> {
-        let raw: RawRepo = self.json(["api", &format!("repos/{repo}")])?;
-        Ok(raw.default_branch)
+        Ok(self.repo(repo)?.default_branch)
     }
 
     fn ensure_branch(&self, repo: &str, branch: &str) -> Result<()> {
@@ -177,13 +180,14 @@ impl GitHub for GhCli {
         if pull.state() == PullState::Merged {
             return Ok(());
         }
+        let method = self.repo(repo)?.merge_methods().choose(repo)?;
         self.gh([
             "api",
             "-X",
             "PUT",
             &format!("repos/{repo}/pulls/{pr}/merge"),
             "-f",
-            "merge_method=merge",
+            &format!("merge_method={}", method.as_str()),
         ])?;
         Ok(())
     }
@@ -325,9 +329,32 @@ fn repo_of(url: &str) -> Result<String> {
     }
 }
 
+/// A repository as the REST API returns it. GitHub reports the merge
+/// methods only to those who may merge; when it doesn't, they take
+/// GitHub's default, allowed.
 #[derive(Deserialize)]
 struct RawRepo {
     default_branch: String,
+    #[serde(default = "allowed")]
+    allow_merge_commit: bool,
+    #[serde(default = "allowed")]
+    allow_squash_merge: bool,
+    #[serde(default = "allowed")]
+    allow_rebase_merge: bool,
+}
+
+fn allowed() -> bool {
+    true
+}
+
+impl RawRepo {
+    fn merge_methods(&self) -> MergeMethods {
+        MergeMethods {
+            merge_commit: self.allow_merge_commit,
+            squash: self.allow_squash_merge,
+            rebase: self.allow_rebase_merge,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -771,16 +798,42 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn an_open_pull_request_merges_with_a_merge_commit() {
-        let open = fixture("pull.json")
+    fn open_pull() -> String {
+        fixture("pull.json")
             .replace("\"closed\"", "\"open\"")
             .replace(
                 "\"merged_at\": \"2026-10-28T21:00:43Z\"",
                 "\"merged_at\": null",
-            );
+            )
+    }
+
+    #[test]
+    fn parses_the_allowed_merge_methods() {
+        let repo: RawRepo = parse(&fixture("repo.json")).unwrap();
+        let squash_only = MergeMethods {
+            squash: true,
+            ..MergeMethods::NONE
+        };
+        assert_eq!(repo.merge_methods(), squash_only);
+    }
+
+    #[test]
+    fn unreported_merge_methods_are_allowed() {
+        let repo: RawRepo = parse(r#"{"default_branch": "main"}"#).unwrap();
+        assert_eq!(repo.merge_methods(), MergeMethods::ALL);
+    }
+
+    #[test]
+    fn an_open_pull_request_merges_with_a_method_the_repository_allows() {
         let (gh, _) = scripted(vec![
-            (vec!["api", "repos/epik-agent/Epik/pulls/367"], ok(&open)),
+            (
+                vec!["api", "repos/epik-agent/Epik/pulls/367"],
+                ok(&open_pull()),
+            ),
+            (
+                vec!["api", "repos/epik-agent/Epik"],
+                ok(&fixture("repo.json")),
+            ),
             (
                 vec![
                     "api",
@@ -788,12 +841,30 @@ mod tests {
                     "PUT",
                     "repos/epik-agent/Epik/pulls/367/merge",
                     "-f",
-                    "merge_method=merge",
+                    "merge_method=squash",
                 ],
                 ok(r#"{"merged": true}"#),
             ),
         ]);
         gh.merge_pull_request(REPO, 367).unwrap();
+    }
+
+    #[test]
+    fn a_repository_allowing_no_merge_method_is_not_merged_into() {
+        let none = r#"{
+            "default_branch": "main",
+            "allow_merge_commit": false,
+            "allow_squash_merge": false,
+            "allow_rebase_merge": false
+        }"#;
+        let (gh, _) = scripted(vec![
+            (
+                vec!["api", "repos/epik-agent/Epik/pulls/367"],
+                ok(&open_pull()),
+            ),
+            (vec!["api", "repos/epik-agent/Epik"], ok(none)),
+        ]);
+        assert!(gh.merge_pull_request(REPO, 367).is_err());
     }
 
     #[test]

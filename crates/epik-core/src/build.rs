@@ -620,7 +620,7 @@ fn issues<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{FakeGitHub, PullState};
+    use crate::github::{FakeGitHub, MergeMethods, PullState};
     use crate::record::{MemberStatus, RunStatus};
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
@@ -1044,6 +1044,26 @@ mod tests {
             format!("issue_finished 2 Failed #{pr} (couldn't merge #{pr}: gh: conflict)")
         );
         assert_eq!(github.repo(REPO).issues[&2].state, State::Open);
+    }
+
+    #[test]
+    fn an_issue_merges_with_a_method_the_repository_allows() {
+        let github = epic([(2, &[])]);
+        let squash_only = MergeMethods {
+            squash: true,
+            ..MergeMethods::NONE
+        };
+        github.set_merge_methods(REPO, squash_only);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let state = build(&github, &agent, root.path(), 1);
+        let pr = pr_of(&github, 2);
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!("issue_merged 2 #{pr}")
+        );
+        let repo = github.repo(REPO);
+        assert_eq!(repo.issues[&2].state, State::Closed);
     }
 
     #[test]

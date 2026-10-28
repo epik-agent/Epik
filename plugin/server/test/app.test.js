@@ -82,3 +82,11 @@ test("an app that doesn't answer pings in time is an error", async () => {
     message: /didn't start within 0\.6 seconds/,
   });
 });
+
+test("with start: false, when nothing listens, the app isn't started and the error says it isn't running", async () => {
+  await installEpikApp(`exec '${process.execPath}' '${fakeEpikApp}' "$@"`);
+  process.env.FAKE_APP_ARGS = join(dir, 'args.json');
+
+  await assert.rejects(request({ type: 'list' }, { start: false }), { message: /Epik app isn't running/ });
+  await assert.rejects(readFile(process.env.FAKE_APP_ARGS, 'utf8'), { code: 'ENOENT' });
+});

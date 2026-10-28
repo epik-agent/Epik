@@ -3,5 +3,8 @@
   "name": "Epik",
   "full_name": "epik-agent/Epik",
   "private": false,
-  "default_branch": "main"
+  "default_branch": "main",
+  "allow_squash_merge": true,
+  "allow_merge_commit": false,
+  "allow_rebase_merge": false
 }

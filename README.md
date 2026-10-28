@@ -11,18 +11,25 @@ and opens a pull request for you to review.
 
 - [`plugin/`](plugin/README.md) — the **epik** plugin: skills, and the Node
   server that runs Epik's GitHub operations through the `gh` CLI.
+- [`crates/`](crates) — the **Epik app** (`epik-app`), which runs builds, and
+  `epik-core`, the library it is built on. [`docs/app-protocol.md`](docs/app-protocol.md)
+  is how the plugin talks to it.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
 ## Installing and uninstalling
 
-Epik is one plugin for Claude Code, used in the terminal or in Claude
-Desktop's Code tab, installed from this repository's marketplace.
+Epik is a plugin for Claude Code, used in the terminal or in Claude
+Desktop's Code tab, installed from this repository's marketplace, and the
+Epik app, which runs builds on your machine.
 
 You need:
 
 - A GitHub account.
-- [Node](https://nodejs.org/) 26 or later, which runs Epik's server.
+- [Node](https://nodejs.org/) 26 or later, which runs Epik's server and
+  the app's coding agents.
+- [Rust](https://www.rust-lang.org/), stable, installed with
+  [rustup](https://rustup.rs/), which builds the Epik app.
 - The [`gh` CLI](https://cli.github.com/), signed in with
   `gh auth login -s project`, with `gh auth setup-git` run so builds can push.
   Already signed in to `gh`? Run `gh auth refresh -s project` instead of
@@ -31,7 +38,24 @@ You need:
   with your claude.ai account, on the machine that runs Epik. You talk to Epik
   in it, and Epik runs every build with it.
 
-### Install
+### Install the Epik app
+
+In a terminal:
+
+```
+cargo install --git https://github.com/epik-agent/Epik epik-app
+```
+
+That puts `epik-app` in `~/.cargo/bin`, which rustup adds to your `PATH`.
+You don't need to start it: Epik starts it the first time you build. On
+Linux, the app needs the system packages Tauri needs; see Tauri's
+[Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
+Where there is no tray, such as a server without a desktop, the app runs
+without one and builds the same.
+
+To update the app later, run the same command again.
+
+### Install the plugin
 
 In Claude Code, enter the following commands one at a time:
 
@@ -79,7 +103,8 @@ installed plugins. Desktop's chat doesn't run Epik either.
 ### Uninstalling
 
 Run `/plugin uninstall epik@epik`, then
-`/plugin marketplace remove epik`.
+`/plugin marketplace remove epik`. Quit the Epik app from its menu, then run
+`cargo uninstall epik-app`.
 
 ## How it works
 
@@ -87,17 +112,26 @@ You create the GitHub repository yourself. In a Claude Code session, Epik
 helps you settle a design and writes it up as an epic issue with sub-issues,
 using `gh` and Epik's own tools.
 
-To build, ask Epik to build an issue or an epic. Epik starts Claude Code on
-your machine, in a fresh clone under `~/.epik/builds/`, and tells you where
-the build's log is; follow it with `tail -f`. An issue with sub-issues is
-built as an epic, its sub-issues in dependency order. Keep the machine awake
-until the build finishes. GitHub is where the results land — branches, pull
-requests, CI runs, and closed issues.
+To build, ask Epik to build an issue or an epic. Epik hands the build to the
+Epik app, starting the app if it isn't running. The app clones the
+repository under `~/.epik/builds/` and runs one Claude Code agent per issue.
+An issue with sub-issues is built as an epic, its sub-issues in dependency
+order. Keep the machine awake until the build finishes. GitHub is where the
+results land — branches, pull requests, CI runs, and closed issues.
+
+The app appears in the menu bar (macOS), the notification area (Windows) or
+the system tray (Linux). Its menu lists runs; choose one to open a window
+that shows the epic's issues live. Each run's record is in
+`~/.epik/runs/<run-id>/`: `events.jsonl`, what happened in the run; each
+issue's agent log, `<issue>.jsonl` and `<issue>.err`; and `summary.json`,
+with the run's cost and duration, once it ends. You can also ask Epik how a
+build is going.
 
 Builds never merge into the default branch. A single issue's build stops at
-an open pull request into it. An epic's issues merge into the epic branch,
-whose pull request into the default branch waits for you. The pull request is
-where you decide what merges.
+an open pull request into it. For an epic, the app merges each issue's pull
+request into the epic branch, then opens the epic's pull request into the
+default branch, which waits for you. The pull request is where you decide
+what merges.
 
 To learn more about how Epik works, ask Epik itself. Start Claude Code in any
 folder and say, "Hello, Epik."
@@ -110,10 +144,10 @@ comma). Check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the
 syntax it points at. If it says the name `epik` is already in use,
 `/plugin marketplace remove epik` and add it again.
 
-**A build stops at once: it "started in "default" permission mode, not "auto""**
-Epik runs builds in Claude Code's auto mode, so they can work without you
-answering prompts. When auto mode isn't available, Claude Code starts in its
-ordinary mode instead, and Epik stops the build rather than let it stall.
+**A build's agent stops at once: it "can't run in auto mode"**
+The Epik app runs its agents in Claude Code's auto mode, so they can work
+without you answering prompts. When auto mode isn't available, the app stops
+the agent rather than let it stall.
 Auto mode needs a recent model, so choose one with `/model`. On a Team or
 Enterprise plan, an admin can turn auto mode off for the organization. Claude
 Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes)
