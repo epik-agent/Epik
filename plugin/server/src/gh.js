@@ -16,9 +16,9 @@ export class GhError extends Error {
 
 // Runs gh with `args`, returning stdout, or its parsed value when `json` is
 // set. Throws a GhError carrying gh's stderr and exit code when gh fails, or
-// when it runs longer than `timeoutSeconds`.
-export async function gh(args, { json = false, timeoutSeconds = TIMEOUT_SECONDS } = {}) {
-  const { exit_code, stdout, stderr } = await run(args, timeoutSeconds);
+// when it runs longer than TIMEOUT_SECONDS.
+export async function gh(args, { json = false } = {}) {
+  const { exit_code, stdout, stderr } = await run(args);
   if (exit_code !== 0) throw new GhError(explain(exit_code, stderr));
   return json ? JSON.parse(stdout) : stdout;
 }
@@ -65,9 +65,9 @@ async function throttled(start) {
 // Resolves to gh's exit code and output. Throws a GhError when gh never
 // produced an exit code: it is not installed, printed too much, ran out of
 // time, or was stopped by a signal.
-function run(args, timeoutSeconds = TIMEOUT_SECONDS) {
+function run(args) {
   const command = `gh ${args.join(' ')}`;
-  const options = { timeout: timeoutSeconds * 1000, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
+  const options = { timeout: TIMEOUT_SECONDS * 1000, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
   return throttled(
     () =>
       new Promise((resolve, reject) => {
@@ -77,7 +77,7 @@ function run(args, timeoutSeconds = TIMEOUT_SECONDS) {
           } else if (error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
             reject(new GhError(`gh printed more than ${MAX_BUFFER_MB} MB: ${command}`));
           } else if (error?.killed) {
-            reject(new GhError(`gh timed out after ${timeoutSeconds} seconds: ${command}`));
+            reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: ${command}`));
           } else if (error && typeof error.code !== 'number') {
             reject(new GhError(`gh was stopped by ${error.signal ?? error.message}: ${command}`));
           } else {
