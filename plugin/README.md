@@ -23,11 +23,11 @@ plugin/
 
 ## Design in one paragraph
 
-The skills are **policy**; `gh` is **mechanism**. The `epik` server ships inside the plugin and runs every GitHub operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along.
+The skills are **policy**; `gh` is **mechanism**. The `epik` server ships inside the plugin and runs every GitHub operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along. Builds are handed to the Epik app (`crates/epik-app`), which is installed separately: `build_start` asks it to build, and `build_status` and `build_list` ask it about builds, over the local socket in [`docs/app-protocol.md`](../docs/app-protocol.md).
 
 ## Install
 
-For normal installation — prerequisites, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installing-and-uninstalling). The sections below only cover development setups.
+For normal installation — prerequisites, the Epik app, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installing-and-uninstalling). The sections below only cover development setups.
 
 ### Developing the plugin — quick local test (no marketplace)
 
