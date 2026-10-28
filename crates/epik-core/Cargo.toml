@@ -1,0 +1,6 @@
+[package]
+name = "epik-core"
+description = "The logic of the Epik app, tested without a desktop."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

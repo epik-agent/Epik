@@ -39,6 +39,30 @@ jobs:
       - run: claude plugin validate ./plugin
         working-directory: .
 
+  rust:
+    # The Epik app is cross-platform, so its workspace is checked on each
+    # platform it runs on.
+    # GitHub appends the matrix's os to the name: "Rust (ubuntu-latest)".
+    name: Rust
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
   deploy-website:
     # The website is the deployed version of this project: every push to
     # main that passes CI redeploys it to GitHub Pages.

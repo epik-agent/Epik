@@ -1,0 +1,9 @@
+[package]
+name = "epik-app"
+description = "The Epik app, which runs Epik's builds."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+epik-core = { path = "../epik-core" }
