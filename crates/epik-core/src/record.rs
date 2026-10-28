@@ -420,6 +420,12 @@ pub fn fold(events: &[Event]) -> Option<RunState> {
 /// Every run under the root whose events can be read and folded, newest
 /// first. A run that can't be read is skipped, so one bad run doesn't hide
 /// the rest.
+///
+/// Known cost, left for now: this reads and folds every run's events on each
+/// call, and the tray calls it every two seconds, so the work grows with
+/// every run ever kept. Runs' events are small, so it doesn't matter yet.
+/// When it does, read `summary.json` for runs that have ended and fold
+/// only the rest; cleanup of old runs also bounds it.
 pub fn list_runs(root: &Path) -> io::Result<Vec<RunState>> {
     let entries = match fs::read_dir(runs_dir(root)) {
         Ok(entries) => entries,
