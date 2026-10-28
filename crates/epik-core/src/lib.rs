@@ -1,6 +1,7 @@
 //! The logic of the Epik app. Everything here is tested without a desktop.
 
 pub mod agent;
+pub mod awake;
 pub mod build;
 pub mod builds;
 pub mod github;
