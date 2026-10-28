@@ -25,7 +25,7 @@ plugin/
 
 ## Design in one paragraph
 
-The skills are **policy**; GitHub's tooling is **mechanism**. GitHub's own connector does most of the work. The `epik` server ships inside the plugin and provides only what that connector lacks. It runs every operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along.
+The skills are **policy**; `gh` is **mechanism**. The `epik` server ships inside the plugin and runs every GitHub operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along.
 
 ## Install
 

@@ -1,7 +1,7 @@
 # Epik server
 
-The MCP server inside the plugin. It provides the GitHub operations the
-standard GitHub connector lacks, running each one through the `gh` CLI.
+The MCP server inside the plugin. It runs Epik's GitHub operations through
+the `gh` CLI.
 
 - `src/gh.js` runs `gh`. Every tool goes through it.
 - `src/tools/` holds one module per tool. `src/tools/index.js` lists them.
