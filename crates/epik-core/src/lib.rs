@@ -1,6 +1,7 @@
 //! The logic of the Epik app. Everything here is tested without a desktop.
 
 pub mod graph;
+pub mod record;
 
 /// The version of Epik, which every crate in the workspace shares.
 pub fn version() -> &'static str {

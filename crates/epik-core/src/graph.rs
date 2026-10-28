@@ -195,7 +195,10 @@ mod tests {
         assert_eq!(chain.ready(&set([]), &set([]), &set([])), [1]);
         assert_eq!(chain.ready(&set([1]), &set([]), &set([])), [2]);
         assert_eq!(chain.ready(&set([1, 2]), &set([]), &set([])), [3]);
-        assert_eq!(chain.ready(&set([1, 2, 3]), &set([]), &set([])), []);
+        assert_eq!(
+            chain.ready(&set([1, 2, 3]), &set([]), &set([])),
+            Vec::<Issue>::new()
+        );
     }
 
     #[test]
@@ -303,18 +306,18 @@ mod tests {
         assert_eq!(diamond.stuck(&set([1]), &set([2])), [4]);
         assert_eq!(diamond.stuck(&set([]), &set([1])), [2, 3, 4]);
         assert_eq!(diamond.stuck(&set([]), &set([5])), [6]);
-        assert_eq!(diamond.stuck(&set([]), &set([])), []);
+        assert_eq!(diamond.stuck(&set([]), &set([])), Vec::<Issue>::new());
     }
 
     #[test]
     fn a_closed_issue_is_never_stuck() {
         let chain = graph([(1, &[]), (2, &[1]), (3, &[2])]);
-        assert_eq!(chain.stuck(&set([2]), &set([1])), []);
+        assert_eq!(chain.stuck(&set([2]), &set([1])), Vec::<Issue>::new());
     }
 
     #[test]
     fn a_failed_issue_is_not_itself_stuck() {
         let chain = graph([(1, &[]), (2, &[1])]);
-        assert_eq!(chain.stuck(&set([]), &set([1, 2])), []);
+        assert_eq!(chain.stuck(&set([]), &set([1, 2])), Vec::<Issue>::new());
     }
 }
