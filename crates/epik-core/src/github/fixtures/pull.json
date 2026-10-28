@@ -1,0 +1,16 @@
+{
+  "url": "https://api.github.com/repos/epik-agent/Epik/pulls/367",
+  "number": 367,
+  "state": "closed",
+  "title": "build: add the Rust workspace and its CI for the Epik app",
+  "merged": true,
+  "merged_at": "2026-10-28T21:00:43Z",
+  "head": {
+    "ref": "issue-357-rust-workspace",
+    "sha": "edbb8412fc97b3483af130acc955209d7f90ca7f"
+  },
+  "base": {
+    "ref": "daemon",
+    "sha": "d1e3228d96a9a3f45b0a8354901a91d2b171d937"
+  }
+}

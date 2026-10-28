@@ -1,0 +1,74 @@
+[
+  [
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/357",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 357,
+      "title": "Rust workspace and CI for the Epik app",
+      "state": "closed"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/358",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 358,
+      "title": "Run record: events.jsonl and summary.json",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/359",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 359,
+      "title": "GitHub operations for the Epik app, through gh",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/360",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 360,
+      "title": "Dependency graph for an epic's issues",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/361",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 361,
+      "title": "ACP coding agent: Claude Code through claude-agent-acp",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/362",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 362,
+      "title": "Orchestrate a build: clone, run issues in order, merge, open the epic's pull request",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/363",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 363,
+      "title": "The app's local socket: build, status and list",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/364",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 364,
+      "title": "epik-app runs headless: socket, builds and keep-awake",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/365",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 365,
+      "title": "Tray icon and menu for the Epik app",
+      "state": "open"
+    },
+    {
+      "url": "https://api.github.com/repos/epik-agent/Epik/issues/366",
+      "repository_url": "https://api.github.com/repos/epik-agent/Epik",
+      "number": 366,
+      "title": "Run window: the epic's graph with live issue states",
+      "state": "open"
+    }
+  ]
+]

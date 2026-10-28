@@ -1,5 +1,6 @@
 //! The logic of the Epik app. Everything here is tested without a desktop.
 
+pub mod github;
 pub mod graph;
 pub mod record;
 
