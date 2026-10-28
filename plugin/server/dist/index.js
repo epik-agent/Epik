@@ -23708,8 +23708,9 @@ an epic, call this tool.
 An issue with sub-issues is an epic and is built with /epik:epic; any other
 issue is built with /epik:issue. The build runs headless in a fresh clone
 under ~/.epik/builds/ and streams its output to the log this returns; the
-user can follow it with \`tail -f\`. The build opens pull requests, merges
-them and closes the issues itself.
+user can follow it with \`tail -f\`. The build opens pull requests. It merges
+them into an epic branch itself, but a pull request into the repository's
+default branch waits for the user to review and merge it.
 
 Args:
     repo: Repository in owner/name format.
