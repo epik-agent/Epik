@@ -7387,9 +7387,9 @@ function nullish(input) {
   return input === null || input === void 0;
 }
 function cleanRegex(source) {
-  const start = source.startsWith("^") ? 1 : 0;
+  const start2 = source.startsWith("^") ? 1 : 0;
   const end = source.endsWith("$") ? source.length - 1 : source.length;
-  return source.slice(start, end);
+  return source.slice(start2, end);
 }
 function floatSafeRemainder(val, step) {
   const ratio = val / step;
@@ -7860,9 +7860,9 @@ function sizeCaps(defChecks) {
   }
   return caps;
 }
-function attachSchema(issues, start, inst) {
+function attachSchema(issues, start2, inst) {
   var _a3;
-  for (let i = start; i < issues.length; i++) {
+  for (let i = start2; i < issues.length; i++) {
     (_a3 = issues[i]).schema ?? (_a3.schema = inst);
   }
 }
@@ -9507,10 +9507,10 @@ function capSize(inst, size) {
     if (n > cap && !ctx?.skipChecks && ctx?.direction !== "backward") {
       for (const [max, ch] of sizeCaps(inst._zod.def.checks)) {
         if (n > max && ch._zod.def.when(payload)) {
-          const start = payload.issues.length;
+          const start2 = payload.issues.length;
           ch._zod.check(payload);
-          payload.issues[start].continue = false;
-          attachSchema(payload.issues, start, inst);
+          payload.issues[start2].continue = false;
+          attachSchema(payload.issues, start2, inst);
           return payload;
         }
       }
@@ -15246,17 +15246,17 @@ var CompleteRequestSchema = RequestSchema.extend({
   method: literal("completion/complete"),
   params: CompleteRequestParamsSchema
 });
-function assertCompleteRequestPrompt(request) {
-  if (request.params.ref.type !== "ref/prompt") {
-    throw new TypeError(`Expected CompleteRequestPrompt, but got ${request.params.ref.type}`);
+function assertCompleteRequestPrompt(request2) {
+  if (request2.params.ref.type !== "ref/prompt") {
+    throw new TypeError(`Expected CompleteRequestPrompt, but got ${request2.params.ref.type}`);
   }
-  void request;
+  void request2;
 }
-function assertCompleteRequestResourceTemplate(request) {
-  if (request.params.ref.type !== "ref/resource") {
-    throw new TypeError(`Expected CompleteRequestResourceTemplate, but got ${request.params.ref.type}`);
+function assertCompleteRequestResourceTemplate(request2) {
+  if (request2.params.ref.type !== "ref/resource") {
+    throw new TypeError(`Expected CompleteRequestResourceTemplate, but got ${request2.params.ref.type}`);
   }
-  void request;
+  void request2;
 }
 var CompleteResultSchema = ResultSchema.extend({
   completion: looseObject({
@@ -20988,8 +20988,8 @@ var Protocol = class {
     this._taskStore = _options?.taskStore;
     this._taskMessageQueue = _options?.taskMessageQueue;
     if (this._taskStore) {
-      this.setRequestHandler(GetTaskRequestSchema, async (request, extra) => {
-        const task = await this._taskStore.getTask(request.params.taskId, extra.sessionId);
+      this.setRequestHandler(GetTaskRequestSchema, async (request2, extra) => {
+        const task = await this._taskStore.getTask(request2.params.taskId, extra.sessionId);
         if (!task) {
           throw new McpError(ErrorCode.InvalidParams, "Failed to retrieve task: Task not found");
         }
@@ -20997,9 +20997,9 @@ var Protocol = class {
           ...task
         };
       });
-      this.setRequestHandler(GetTaskPayloadRequestSchema, async (request, extra) => {
+      this.setRequestHandler(GetTaskPayloadRequestSchema, async (request2, extra) => {
         const handleTaskResult = async () => {
-          const taskId = request.params.taskId;
+          const taskId = request2.params.taskId;
           if (!await this._taskStore.getTask(taskId, extra.sessionId)) {
             throw new McpError(ErrorCode.InvalidParams, `Task not found: ${taskId}`);
           }
@@ -21053,9 +21053,9 @@ var Protocol = class {
         };
         return await handleTaskResult();
       });
-      this.setRequestHandler(ListTasksRequestSchema, async (request, extra) => {
+      this.setRequestHandler(ListTasksRequestSchema, async (request2, extra) => {
         try {
-          const { tasks, nextCursor } = await this._taskStore.listTasks(request.params?.cursor, extra.sessionId);
+          const { tasks, nextCursor } = await this._taskStore.listTasks(request2.params?.cursor, extra.sessionId);
           return {
             tasks,
             nextCursor,
@@ -21065,20 +21065,20 @@ var Protocol = class {
           throw new McpError(ErrorCode.InvalidParams, `Failed to list tasks: ${error2 instanceof Error ? error2.message : String(error2)}`);
         }
       });
-      this.setRequestHandler(CancelTaskRequestSchema, async (request, extra) => {
+      this.setRequestHandler(CancelTaskRequestSchema, async (request2, extra) => {
         try {
-          const task = await this._taskStore.getTask(request.params.taskId, extra.sessionId);
+          const task = await this._taskStore.getTask(request2.params.taskId, extra.sessionId);
           if (!task) {
-            throw new McpError(ErrorCode.InvalidParams, `Task not found: ${request.params.taskId}`);
+            throw new McpError(ErrorCode.InvalidParams, `Task not found: ${request2.params.taskId}`);
           }
           if (isTerminal(task.status)) {
             throw new McpError(ErrorCode.InvalidParams, `Cannot cancel task in terminal status: ${task.status}`);
           }
-          await this._taskStore.updateTaskStatus(request.params.taskId, "cancelled", "Client cancelled task execution.", extra.sessionId);
-          this._clearTaskQueue(request.params.taskId, extra.sessionId);
-          const cancelledTask = await this._taskStore.getTask(request.params.taskId, extra.sessionId);
+          await this._taskStore.updateTaskStatus(request2.params.taskId, "cancelled", "Client cancelled task execution.", extra.sessionId);
+          this._clearTaskQueue(request2.params.taskId, extra.sessionId);
+          const cancelledTask = await this._taskStore.getTask(request2.params.taskId, extra.sessionId);
           if (!cancelledTask) {
-            throw new McpError(ErrorCode.InvalidParams, `Task not found after cancellation: ${request.params.taskId}`);
+            throw new McpError(ErrorCode.InvalidParams, `Task not found after cancellation: ${request2.params.taskId}`);
           }
           return {
             _meta: {},
@@ -21199,10 +21199,10 @@ var Protocol = class {
     }
     Promise.resolve().then(() => handler(notification)).catch((error2) => this._onerror(new Error(`Uncaught error in notification handler: ${error2}`)));
   }
-  _onrequest(request, extra) {
-    const handler = this._requestHandlers.get(request.method) ?? this.fallbackRequestHandler;
+  _onrequest(request2, extra) {
+    const handler = this._requestHandlers.get(request2.method) ?? this.fallbackRequestHandler;
     const capturedTransport = this._transport;
-    const relatedTaskId = request.params?._meta?.[RELATED_TASK_META_KEY]?.taskId;
+    const relatedTaskId = request2.params?._meta?.[RELATED_TASK_META_KEY]?.taskId;
     const sessionId = capturedTransport?.sessionId;
     const store = this._taskStore;
     let relatedTaskFound = true;
@@ -21219,7 +21219,7 @@ var Protocol = class {
     if (handler === void 0) {
       const errorResponse = {
         jsonrpc: "2.0",
-        id: request.id,
+        id: request2.id,
         error: {
           code: ErrorCode.MethodNotFound,
           message: "Method not found"
@@ -21240,17 +21240,17 @@ var Protocol = class {
       return;
     }
     const abortController = new AbortController();
-    this._requestHandlerAbortControllers.set(request.id, abortController);
-    const taskCreationParams = isTaskAugmentedRequestParams(request.params) ? request.params.task : void 0;
-    const taskStore = this._taskStore ? this.requestTaskStore(request, capturedTransport?.sessionId) : void 0;
+    this._requestHandlerAbortControllers.set(request2.id, abortController);
+    const taskCreationParams = isTaskAugmentedRequestParams(request2.params) ? request2.params.task : void 0;
+    const taskStore = this._taskStore ? this.requestTaskStore(request2, capturedTransport?.sessionId) : void 0;
     const fullExtra = {
       signal: abortController.signal,
       sessionId: capturedTransport?.sessionId,
-      _meta: request.params?._meta,
+      _meta: request2.params?._meta,
       sendNotification: async (notification) => {
         if (abortController.signal.aborted)
           return;
-        const notificationOptions = { relatedRequestId: request.id };
+        const notificationOptions = { relatedRequestId: request2.id };
         if (relatedTaskId) {
           notificationOptions.relatedTask = { taskId: relatedTaskId };
         }
@@ -21260,7 +21260,7 @@ var Protocol = class {
         if (abortController.signal.aborted) {
           throw new McpError(ErrorCode.ConnectionClosed, "Request was cancelled");
         }
-        const requestOptions = { ...options, relatedRequestId: request.id };
+        const requestOptions = { ...options, relatedRequestId: request2.id };
         if (relatedTaskId && !requestOptions.relatedTask) {
           requestOptions.relatedTask = { taskId: relatedTaskId };
         }
@@ -21271,7 +21271,7 @@ var Protocol = class {
         return await this.request(r, resultSchema, requestOptions);
       },
       authInfo: extra?.authInfo,
-      requestId: request.id,
+      requestId: request2.id,
       requestInfo: extra?.requestInfo,
       taskId: relatedTaskId,
       taskStore,
@@ -21284,16 +21284,16 @@ var Protocol = class {
         throw new McpError(ErrorCode.ConnectionClosed, "Request was cancelled");
       }
       if (taskCreationParams) {
-        this.assertTaskHandlerCapability(request.method);
+        this.assertTaskHandlerCapability(request2.method);
       }
-    }).then(() => handler(request, fullExtra)).then(async (result) => {
+    }).then(() => handler(request2, fullExtra)).then(async (result) => {
       if (abortController.signal.aborted) {
         return;
       }
       const response = {
         result,
         jsonrpc: "2.0",
-        id: request.id
+        id: request2.id
       };
       if (relatedTaskId && this._taskMessageQueue) {
         await this._enqueueTaskMessage(relatedTaskId, {
@@ -21310,7 +21310,7 @@ var Protocol = class {
       }
       const errorResponse = {
         jsonrpc: "2.0",
-        id: request.id,
+        id: request2.id,
         error: {
           code: Number.isSafeInteger(error2["code"]) ? error2["code"] : ErrorCode.InternalError,
           message: error2.message ?? "Internal error",
@@ -21327,8 +21327,8 @@ var Protocol = class {
         await capturedTransport?.send(errorResponse);
       }
     }).catch((error2) => this._onerror(new Error(`Failed to send response: ${error2}`))).finally(() => {
-      if (this._requestHandlerAbortControllers.get(request.id) === abortController) {
-        this._requestHandlerAbortControllers.delete(request.id);
+      if (this._requestHandlerAbortControllers.get(request2.id) === abortController) {
+        this._requestHandlerAbortControllers.delete(request2.id);
       }
     });
   }
@@ -21432,11 +21432,11 @@ var Protocol = class {
    *
    * @experimental Use `client.experimental.tasks.requestStream()` to access this method.
    */
-  async *requestStream(request, resultSchema, options) {
+  async *requestStream(request2, resultSchema, options) {
     const { task } = options ?? {};
     if (!task) {
       try {
-        const result = await this.request(request, resultSchema, options);
+        const result = await this.request(request2, resultSchema, options);
         yield { type: "result", result };
       } catch (error2) {
         yield {
@@ -21448,7 +21448,7 @@ var Protocol = class {
     }
     let taskId;
     try {
-      const createResult = await this.request(request, CreateTaskResultSchema, options);
+      const createResult = await this.request(request2, CreateTaskResultSchema, options);
       if (createResult.task) {
         taskId = createResult.task.taskId;
         yield { type: "taskCreated", task: createResult.task };
@@ -21496,7 +21496,7 @@ var Protocol = class {
    *
    * Do not use this method to emit notifications! Use notification() instead.
    */
-  request(request, resultSchema, options) {
+  request(request2, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
     return new Promise((resolve, reject) => {
       const earlyReject = (error2) => {
@@ -21508,9 +21508,9 @@ var Protocol = class {
       }
       if (this._options?.enforceStrictCapabilities === true) {
         try {
-          this.assertCapabilityForMethod(request.method);
+          this.assertCapabilityForMethod(request2.method);
           if (task) {
-            this.assertTaskCapability(request.method);
+            this.assertTaskCapability(request2.method);
           }
         } catch (e) {
           earlyReject(e);
@@ -21520,16 +21520,16 @@ var Protocol = class {
       options?.signal?.throwIfAborted();
       const messageId = this._requestMessageId++;
       const jsonrpcRequest = {
-        ...request,
+        ...request2,
         jsonrpc: "2.0",
         id: messageId
       };
       if (options?.onprogress) {
         this._progressHandlers.set(messageId, options.onprogress);
         jsonrpcRequest.params = {
-          ...request.params,
+          ...request2.params,
           _meta: {
-            ...request.params?._meta || {},
+            ...request2.params?._meta || {},
             progressToken: messageId
           }
         };
@@ -21733,8 +21733,8 @@ var Protocol = class {
   setRequestHandler(requestSchema, handler) {
     const method = getMethodLiteral(requestSchema);
     this.assertRequestHandlerCapability(method);
-    this._requestHandlers.set(method, (request, extra) => {
-      const parsed = parseWithCompat(requestSchema, request);
+    this._requestHandlers.set(method, (request2, extra) => {
+      const parsed = parseWithCompat(requestSchema, request2);
       return Promise.resolve(handler(parsed, extra));
     });
   }
@@ -21850,19 +21850,19 @@ var Protocol = class {
       }, { once: true });
     });
   }
-  requestTaskStore(request, sessionId) {
+  requestTaskStore(request2, sessionId) {
     const taskStore = this._taskStore;
     if (!taskStore) {
       throw new Error("No task store configured");
     }
     return {
       createTask: async (taskParams) => {
-        if (!request) {
+        if (!request2) {
           throw new Error("No request provided");
         }
-        return await taskStore.createTask(taskParams, request.id, {
-          method: request.method,
-          params: request.params
+        return await taskStore.createTask(taskParams, request2.id, {
+          method: request2.method,
+          params: request2.params
         }, sessionId);
       },
       getTask: async (taskId) => {
@@ -22023,8 +22023,8 @@ var ExperimentalServerTasks = class {
    *
    * @experimental
    */
-  requestStream(request, resultSchema, options) {
-    return this._server.requestStream(request, resultSchema, options);
+  requestStream(request2, resultSchema, options) {
+    return this._server.requestStream(request2, resultSchema, options);
   }
   /**
    * Sends a sampling request and returns an AsyncGenerator that yields response messages.
@@ -22269,12 +22269,12 @@ var Server = class extends Protocol {
     this._capabilities = options?.capabilities ?? {};
     this._instructions = options?.instructions;
     this._jsonSchemaValidator = options?.jsonSchemaValidator ?? new AjvJsonSchemaValidator();
-    this.setRequestHandler(InitializeRequestSchema, (request) => this._oninitialize(request));
+    this.setRequestHandler(InitializeRequestSchema, (request2) => this._oninitialize(request2));
     this.setNotificationHandler(InitializedNotificationSchema, () => this.oninitialized?.());
     if (this._capabilities.logging) {
-      this.setRequestHandler(SetLevelRequestSchema, async (request, extra) => {
+      this.setRequestHandler(SetLevelRequestSchema, async (request2, extra) => {
         const transportSessionId = extra.sessionId || extra.requestInfo?.headers["mcp-session-id"] || void 0;
-        const { level } = request.params;
+        const { level } = request2.params;
         const parseResult = LoggingLevelSchema.safeParse(level);
         if (parseResult.success) {
           this._loggingLevels.set(transportSessionId, parseResult.data);
@@ -22324,14 +22324,14 @@ var Server = class extends Protocol {
     }
     const method = methodValue;
     if (method === "tools/call") {
-      const wrappedHandler = async (request, extra) => {
-        const validatedRequest = safeParse3(CallToolRequestSchema, request);
+      const wrappedHandler = async (request2, extra) => {
+        const validatedRequest = safeParse3(CallToolRequestSchema, request2);
         if (!validatedRequest.success) {
           const errorMessage = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
           throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage}`);
         }
         const { params } = validatedRequest.data;
-        const result = await Promise.resolve(handler(request, extra));
+        const result = await Promise.resolve(handler(request2, extra));
         if (params.task) {
           const taskValidationResult = safeParse3(CreateTaskResultSchema, result);
           if (!taskValidationResult.success) {
@@ -22462,10 +22462,10 @@ var Server = class extends Protocol {
     }
     assertToolsCallTaskCapability(this._capabilities.tasks?.requests, method, "Server");
   }
-  async _oninitialize(request) {
-    const requestedVersion = request.params.protocolVersion;
-    this._clientCapabilities = request.params.capabilities;
-    this._clientVersion = request.params.clientInfo;
+  async _oninitialize(request2) {
+    const requestedVersion = request2.params.protocolVersion;
+    this._clientCapabilities = request2.params.capabilities;
+    this._clientVersion = request2.params.clientInfo;
     const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion) ? requestedVersion : LATEST_PROTOCOL_VERSION;
     return {
       protocolVersion,
@@ -22838,33 +22838,33 @@ var McpServer = class {
         return toolDefinition;
       })
     }));
-    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request2, extra) => {
       try {
-        const tool = this._registeredTools[request.params.name];
+        const tool = this._registeredTools[request2.params.name];
         if (!tool) {
-          throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+          throw new McpError(ErrorCode.InvalidParams, `Tool ${request2.params.name} not found`);
         }
         if (!tool.enabled) {
-          throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} disabled`);
+          throw new McpError(ErrorCode.InvalidParams, `Tool ${request2.params.name} disabled`);
         }
-        const isTaskRequest = !!request.params.task;
+        const isTaskRequest = !!request2.params.task;
         const taskSupport = tool.execution?.taskSupport;
         const isTaskHandler = "createTask" in tool.handler;
         if ((taskSupport === "required" || taskSupport === "optional") && !isTaskHandler) {
-          throw new McpError(ErrorCode.InternalError, `Tool ${request.params.name} has taskSupport '${taskSupport}' but was not registered with registerToolTask`);
+          throw new McpError(ErrorCode.InternalError, `Tool ${request2.params.name} has taskSupport '${taskSupport}' but was not registered with registerToolTask`);
         }
         if (taskSupport === "required" && !isTaskRequest) {
-          throw new McpError(ErrorCode.MethodNotFound, `Tool ${request.params.name} requires task augmentation (taskSupport: 'required')`);
+          throw new McpError(ErrorCode.MethodNotFound, `Tool ${request2.params.name} requires task augmentation (taskSupport: 'required')`);
         }
         if (taskSupport === "optional" && !isTaskRequest && isTaskHandler) {
-          return await this.handleAutomaticTaskPolling(tool, request, extra);
+          return await this.handleAutomaticTaskPolling(tool, request2, extra);
         }
-        const args = await this.validateToolInput(tool, request.params.arguments, request.params.name);
+        const args = await this.validateToolInput(tool, request2.params.arguments, request2.params.name);
         const result = await this.executeToolHandler(tool, args, extra);
         if (isTaskRequest) {
           return result;
         }
-        await this.validateToolOutput(tool, result, request.params.name);
+        await this.validateToolOutput(tool, result, request2.params.name);
         return result;
       } catch (error2) {
         if (error2 instanceof McpError) {
@@ -22968,11 +22968,11 @@ var McpServer = class {
   /**
    * Handles automatic task polling for tools with taskSupport 'optional'.
    */
-  async handleAutomaticTaskPolling(tool, request, extra) {
+  async handleAutomaticTaskPolling(tool, request2, extra) {
     if (!extra.taskStore) {
       throw new Error("No task store provided for task-capable tool.");
     }
-    const args = await this.validateToolInput(tool, request.params.arguments, request.params.name);
+    const args = await this.validateToolInput(tool, request2.params.arguments, request2.params.name);
     const handler = tool.handler;
     const taskExtra = { ...extra, taskStore: extra.taskStore };
     const createTaskResult = args ? await Promise.resolve(handler.createTask(args, taskExtra)) : (
@@ -23000,21 +23000,21 @@ var McpServer = class {
     this.server.registerCapabilities({
       completions: {}
     });
-    this.server.setRequestHandler(CompleteRequestSchema, async (request) => {
-      switch (request.params.ref.type) {
+    this.server.setRequestHandler(CompleteRequestSchema, async (request2) => {
+      switch (request2.params.ref.type) {
         case "ref/prompt":
-          assertCompleteRequestPrompt(request);
-          return this.handlePromptCompletion(request, request.params.ref);
+          assertCompleteRequestPrompt(request2);
+          return this.handlePromptCompletion(request2, request2.params.ref);
         case "ref/resource":
-          assertCompleteRequestResourceTemplate(request);
-          return this.handleResourceCompletion(request, request.params.ref);
+          assertCompleteRequestResourceTemplate(request2);
+          return this.handleResourceCompletion(request2, request2.params.ref);
         default:
-          throw new McpError(ErrorCode.InvalidParams, `Invalid completion reference: ${request.params.ref}`);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid completion reference: ${request2.params.ref}`);
       }
     });
     this._completionHandlerInitialized = true;
   }
-  async handlePromptCompletion(request, ref) {
+  async handlePromptCompletion(request2, ref) {
     const prompt = this._registeredPrompts[ref.name];
     if (!prompt) {
       throw new McpError(ErrorCode.InvalidParams, `Prompt ${ref.name} not found`);
@@ -23026,7 +23026,7 @@ var McpServer = class {
       return EMPTY_COMPLETION_RESULT;
     }
     const promptShape = getObjectShape(prompt.argsSchema);
-    const field = promptShape?.[request.params.argument.name];
+    const field = promptShape?.[request2.params.argument.name];
     if (!isCompletable(field)) {
       return EMPTY_COMPLETION_RESULT;
     }
@@ -23034,22 +23034,22 @@ var McpServer = class {
     if (!completer) {
       return EMPTY_COMPLETION_RESULT;
     }
-    const suggestions = await completer(request.params.argument.value, request.params.context);
+    const suggestions = await completer(request2.params.argument.value, request2.params.context);
     return createCompletionResult(suggestions);
   }
-  async handleResourceCompletion(request, ref) {
+  async handleResourceCompletion(request2, ref) {
     const template = Object.values(this._registeredResourceTemplates).find((t) => t.resourceTemplate.uriTemplate.toString() === ref.uri);
     if (!template) {
       if (this._registeredResources[ref.uri]) {
         return EMPTY_COMPLETION_RESULT;
       }
-      throw new McpError(ErrorCode.InvalidParams, `Resource template ${request.params.ref.uri} not found`);
+      throw new McpError(ErrorCode.InvalidParams, `Resource template ${request2.params.ref.uri} not found`);
     }
-    const completer = template.resourceTemplate.completeCallback(request.params.argument.name);
+    const completer = template.resourceTemplate.completeCallback(request2.params.argument.name);
     if (!completer) {
       return EMPTY_COMPLETION_RESULT;
     }
-    const suggestions = await completer(request.params.argument.value, request.params.context);
+    const suggestions = await completer(request2.params.argument.value, request2.params.context);
     return createCompletionResult(suggestions);
   }
   setResourceRequestHandlers() {
@@ -23064,7 +23064,7 @@ var McpServer = class {
         listChanged: true
       }
     });
-    this.server.setRequestHandler(ListResourcesRequestSchema, async (request, extra) => {
+    this.server.setRequestHandler(ListResourcesRequestSchema, async (request2, extra) => {
       const resources = Object.entries(this._registeredResources).filter(([_, resource]) => resource.enabled).map(([uri, resource]) => ({
         uri,
         name: resource.name,
@@ -23094,8 +23094,8 @@ var McpServer = class {
       }));
       return { resourceTemplates };
     });
-    this.server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
-      const uri = new URL(request.params.uri);
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request2, extra) => {
+      const uri = new URL(request2.params.uri);
       const resource = this._registeredResources[uri.toString()];
       if (resource) {
         if (!resource.enabled) {
@@ -23134,21 +23134,21 @@ var McpServer = class {
         };
       })
     }));
-    this.server.setRequestHandler(GetPromptRequestSchema, async (request, extra) => {
-      const prompt = this._registeredPrompts[request.params.name];
+    this.server.setRequestHandler(GetPromptRequestSchema, async (request2, extra) => {
+      const prompt = this._registeredPrompts[request2.params.name];
       if (!prompt) {
-        throw new McpError(ErrorCode.InvalidParams, `Prompt ${request.params.name} not found`);
+        throw new McpError(ErrorCode.InvalidParams, `Prompt ${request2.params.name} not found`);
       }
       if (!prompt.enabled) {
-        throw new McpError(ErrorCode.InvalidParams, `Prompt ${request.params.name} disabled`);
+        throw new McpError(ErrorCode.InvalidParams, `Prompt ${request2.params.name} disabled`);
       }
       if (prompt.argsSchema) {
         const argsObj = normalizeObjectSchema(prompt.argsSchema);
-        const parseResult = await safeParseAsync3(argsObj, request.params.arguments ?? {});
+        const parseResult = await safeParseAsync3(argsObj, request2.params.arguments ?? {});
         if (!parseResult.success) {
           const error2 = "error" in parseResult ? parseResult.error : "Unknown error";
           const errorMessage = getParseErrorMessage(error2);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for prompt ${request.params.name}: ${errorMessage}`);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for prompt ${request2.params.name}: ${errorMessage}`);
         }
         const args = parseResult.data;
         const cb = prompt.callback;
@@ -23567,12 +23567,135 @@ function createServer(tools2) {
 }
 
 // src/tools/build_start.js
+import { join as join2 } from "node:path";
+
+// src/app.js
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, open as open2, readFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+var START_TIMEOUT_MS = 15 * 1e3;
+var PING_INTERVAL_MS = 250;
+function socketPath() {
+  if (process.env.EPIK_SOCKET) return process.env.EPIK_SOCKET;
+  return process.platform === "win32" ? "\\\\.\\pipe\\epik" : join(homedir(), ".epik", "epik.sock");
+}
+var NotListening = class extends Error {
+};
+function send(message) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath());
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("connect", () => socket.write(`${JSON.stringify(message)}
+`));
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const end = buffer.indexOf("\n");
+      if (end < 0) return;
+      socket.destroy();
+      try {
+        resolve(JSON.parse(buffer.slice(0, end)));
+      } catch (error2) {
+        reject(error2);
+      }
+    });
+    socket.on("end", () => reject(new Error("The Epik app closed the connection without replying.")));
+    socket.on(
+      "error",
+      (error2) => reject(["ENOENT", "ECONNREFUSED"].includes(error2.code) ? new NotListening(error2.message) : error2)
+    );
+  });
+}
+async function start() {
+  const child = spawn("epik-app", [], { detached: true, stdio: "ignore" });
+  const error2 = await once(child, "spawn").then(
+    () => null,
+    (e) => e
+  );
+  if (error2) {
+    throw error2.code === "ENOENT" ? new Error(
+      "The Epik app isn't installed, and it runs Epik's builds. Install it with `cargo install --git https://github.com/epik-agent/Epik epik-app`."
+    ) : error2;
+  }
+  child.on("error", () => {
+  });
+  child.unref();
+}
+async function awaitApp(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (; ; ) {
+    try {
+      await send({ type: "ping" });
+      return;
+    } catch (error2) {
+      if (!(error2 instanceof NotListening)) throw error2;
+    }
+    if (Date.now() >= deadline) throw new Error(`The Epik app didn't start within ${timeoutMs / 1e3} seconds.`);
+    await sleep(PING_INTERVAL_MS);
+  }
+}
+async function request(message, { startTimeoutMs = START_TIMEOUT_MS } = {}) {
+  let reply;
+  try {
+    reply = await send(message);
+  } catch (error2) {
+    if (!(error2 instanceof NotListening)) throw error2;
+    await start();
+    await awaitApp(startTimeoutMs);
+    reply = await send(message);
+  }
+  if (reply.type === "error") throw new Error(reply.message);
+  return reply;
+}
+
+// src/tools/build_start.js
+var build_start_default = {
+  name: "build_start",
+  description: `Ask the Epik app to build a GitHub issue or epic, and return once the build has started.
+
+This is how to implement an issue or an epic. Never implement one in this
+conversation: when the user asks to build, implement or work on an issue or
+an epic, call this tool.
+
+The Epik app runs the build, and is started first if it isn't running. An
+issue with sub-issues is built as an epic: the app runs its issues in
+dependency order, one coding agent each, and merges each issue's pull
+request into the epic branch itself; the epic's pull request into the
+repository's default branch waits for the user to review and merge it. Any
+other issue is built alone, and its pull request into the default branch
+waits for the user. The user can watch the build from the Epik app's tray
+icon, or with \`tail -f\` on the events log this returns.
+
+Args:
+    repo: Repository in owner/name format.
+    number: The issue or epic issue to build.
+    branch: The branch the pull requests merge into. Default
+        epic/<number>-<slug of its title> for an epic, and the repository's
+        default branch for an issue.
+
+Returns run_id, kind (epic or issue), branch, run_dir (the run's record) and
+events (the run's events log, in run_dir).`,
+  inputSchema: {
+    repo: string2(),
+    number: number2().int().positive(),
+    branch: string2().min(1).optional()
+  },
+  run: async ({ repo, number: number3, branch }) => {
+    const pluginDir = process.env.CLAUDE_PLUGIN_ROOT;
+    if (!pluginDir) throw new Error("CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.");
+    const reply = await request({ type: "build", repo, number: number3, branch, plugin_dir: pluginDir });
+    return {
+      run_id: reply.run_id,
+      kind: reply.kind,
+      branch: reply.branch,
+      run_dir: reply.run_dir,
+      events: join2(reply.run_dir, "events.jsonl")
+    };
+  }
+};
 
 // src/gh.js
 import { execFile } from "node:child_process";
@@ -23582,8 +23705,8 @@ var MAX_PROCESSES = 8;
 var GhError = class extends Error {
   name = "GhError";
 };
-async function gh(args, { json = false, timeoutSeconds = TIMEOUT_SECONDS } = {}) {
-  const { exit_code, stdout, stderr } = await run(args, timeoutSeconds);
+async function gh(args, { json = false } = {}) {
+  const { exit_code, stdout, stderr } = await run(args);
   if (exit_code !== 0) throw new GhError(explain(exit_code, stderr));
   return json ? JSON.parse(stdout) : stdout;
 }
@@ -23603,20 +23726,20 @@ async function ghRaw(args) {
 }
 var running = 0;
 var waiting = [];
-async function throttled(start) {
+async function throttled(start2) {
   if (running < MAX_PROCESSES) running++;
   else await new Promise((resolve) => waiting.push(resolve));
   try {
-    return await start();
+    return await start2();
   } finally {
     const next = waiting.shift();
     if (next) next();
     else running--;
   }
 }
-function run(args, timeoutSeconds = TIMEOUT_SECONDS) {
+function run(args) {
   const command = `gh ${args.join(" ")}`;
-  const options = { timeout: timeoutSeconds * 1e3, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
+  const options = { timeout: TIMEOUT_SECONDS * 1e3, maxBuffer: MAX_BUFFER_MB * 1024 * 1024 };
   return throttled(
     () => new Promise((resolve, reject) => {
       execFile("gh", args, options, (error2, stdout, stderr) => {
@@ -23625,7 +23748,7 @@ function run(args, timeoutSeconds = TIMEOUT_SECONDS) {
         } else if (error2?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
           reject(new GhError(`gh printed more than ${MAX_BUFFER_MB} MB: ${command}`));
         } else if (error2?.killed) {
-          reject(new GhError(`gh timed out after ${timeoutSeconds} seconds: ${command}`));
+          reject(new GhError(`gh timed out after ${TIMEOUT_SECONDS} seconds: ${command}`));
         } else if (error2 && typeof error2.code !== "number") {
           reject(new GhError(`gh was stopped by ${error2.signal ?? error2.message}: ${command}`));
         } else {
@@ -23648,164 +23771,6 @@ async function list(path, field) {
   const pages = await gh(["api", "--paginate", "--slurp", `${path}${separator}per_page=100`], { json: true });
   return pages.flatMap((page) => field ? page[field] : page);
 }
-
-// src/tools/build_start.js
-var CLONE_TIMEOUT_SECONDS = 10 * 60;
-var INIT_TIMEOUT_MS = 60 * 1e3;
-var INIT_POLL_MS = 50;
-var ONLY_PLUGIN_DIR = JSON.stringify({ enabledPlugins: { "epik@epik": false } });
-function slug(title) {
-  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
-}
-function epicBranch(number3, title) {
-  const tail = slug(title);
-  return tail ? `epic/${number3}-${tail}` : `epic/${number3}`;
-}
-function stamp(date3) {
-  return date3.toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
-}
-function claudeArgs(command, pluginRoot) {
-  return [
-    "-p",
-    command,
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--forward-subagent-text",
-    "--permission-mode",
-    "auto",
-    "--permission-prompts",
-    "none",
-    "--plugin-dir",
-    pluginRoot,
-    "--settings",
-    ONLY_PLUGIN_DIR
-  ];
-}
-async function launch(args, cwd, log, errorsLog) {
-  const out = await open2(log, "a");
-  const err = await open2(errorsLog, "a");
-  try {
-    const child = spawn("claude", args, { cwd, detached: true, stdio: ["ignore", out.fd, err.fd] });
-    const error2 = await once(child, "spawn").then(
-      () => null,
-      (e) => e
-    );
-    if (error2) {
-      throw error2.code === "ENOENT" ? new Error("Claude Code is not installed. Install it from https://claude.com/claude-code and sign in.") : error2;
-    }
-    child.on("error", () => {
-    });
-    child.unref();
-    return child;
-  } finally {
-    await out.close();
-    await err.close();
-  }
-}
-function initEvent(text) {
-  for (const line of text.split("\n")) {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (event?.type === "system" && event.subtype === "init") return event;
-  }
-  return void 0;
-}
-var exited = (child) => child.exitCode !== null || child.signalCode !== null;
-async function stop(child) {
-  if (exited(child)) return;
-  const exit = once(child, "exit");
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  await exit;
-}
-async function awaitAutoMode(child, log, errorsLog, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (; ; ) {
-    const ended = exited(child);
-    const init = initEvent(await readFile(log, "utf8"));
-    if (init) {
-      if (init.permissionMode === "auto") return;
-      await stop(child);
-      throw new Error(
-        `The build started in "${init.permissionMode}" permission mode, not "auto", so it couldn't run unattended, and it has been stopped. Its model was ${init.model}. Auto mode needs a recent model (choose one with /model), and an organization admin can turn it off. See "Troubleshooting the install" in Epik's README.`
-      );
-    }
-    if (ended) {
-      const errors = (await readFile(errorsLog, "utf8")).trim();
-      throw new Error(`The build exited before it started.${errors ? `
-
-${errors}` : ""}`);
-    }
-    if (Date.now() >= deadline) {
-      await stop(child);
-      throw new Error(
-        `The build didn't report its permission mode within ${timeoutMs / 1e3} seconds, so it has been stopped. Its errors log is ${errorsLog}.`
-      );
-    }
-    await sleep(INIT_POLL_MS);
-  }
-}
-var build_start_default = {
-  name: "build_start",
-  description: `Start a local Claude Code build of a GitHub issue or epic, and return once it has started in auto mode.
-
-This is how to implement an issue or an epic. Never implement one in this
-conversation: when the user asks to build, implement or work on an issue or
-an epic, call this tool.
-
-An issue with sub-issues is an epic and is built with /epik:epic; any other
-issue is built with /epik:issue. The build runs headless in a fresh clone
-under ~/.epik/builds/ and streams its output to the log this returns; the
-user can follow it with \`tail -f\`. The build opens pull requests. It merges
-them into an epic branch itself, but a pull request into the repository's
-default branch waits for the user to review and merge it. If the build
-didn't start in auto mode, this stops it and returns an error saying why.
-
-Args:
-    repo: Repository in owner/name format.
-    number: The issue or epic issue to build.
-    branch: For an epic, the epic branch, created if missing; default
-        epic/<number>-<slug of its title>. For an issue, the branch its pull
-        request merges into; default the repository's default branch.
-
-Returns run_id, kind (epic or issue), command (the slash command the build
-runs), branch, clone, log, errors_log and pid.`,
-  inputSchema: {
-    repo: string2(),
-    number: number2().int().positive(),
-    branch: string2().min(1).optional()
-  },
-  run: async ({ repo, number: number3, branch }, { initTimeoutMs = INIT_TIMEOUT_MS } = {}) => {
-    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-    if (!pluginRoot) throw new Error("CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.");
-    const issue2 = await get(`repos/${repo}/issues/${number3}`);
-    if (issue2.pull_request) throw new Error(`#${number3} in ${repo} is a pull request, not an issue.`);
-    if (issue2.state !== "open") throw new Error(`#${number3} in ${repo} is ${issue2.state}.`);
-    const kind = (await list(`repos/${repo}/issues/${number3}/sub_issues`)).length > 0 ? "epic" : "issue";
-    const target = branch ?? (kind === "epic" ? epicBranch(number3, issue2.title) : (await get(`repos/${repo}`)).default_branch);
-    const command = `/epik:${kind} ${number3} ${target}`;
-    const home = join(homedir(), ".epik");
-    const runId = `${repo.replace("/", "-")}-${number3}-${stamp(/* @__PURE__ */ new Date())}`;
-    const clone2 = join(home, "builds", runId);
-    const runs = join(home, "runs");
-    await mkdir(clone2, { recursive: true });
-    await mkdir(runs, { recursive: true });
-    await gh(["repo", "clone", repo, clone2], { timeoutSeconds: CLONE_TIMEOUT_SECONDS });
-    const log = join(runs, `${runId}.jsonl`);
-    const errorsLog = join(runs, `${runId}.err`);
-    const child = await launch(claudeArgs(command, pluginRoot), clone2, log, errorsLog);
-    await awaitAutoMode(child, log, errorsLog, initTimeoutMs);
-    return { run_id: runId, kind, command, branch: target, clone: clone2, log, errors_log: errorsLog, pid: child.pid };
-  }
-};
 
 // src/blocked_by.js
 var edges = (repo, number3) => `repos/${repo}/issues/${number3}/dependencies/blocked_by`;

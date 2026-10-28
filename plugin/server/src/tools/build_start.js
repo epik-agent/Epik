@@ -1,206 +1,51 @@
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdir, open, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 
 import * as z from 'zod';
 
-import { gh } from '../gh.js';
-import { get, list } from '../rest.js';
-
-const CLONE_TIMEOUT_SECONDS = 10 * 60;
-
-// How long a build has to report its permission mode.
-const INIT_TIMEOUT_MS = 60 * 1000;
-
-// How often to read a starting build's log for its init event.
-const INIT_POLL_MS = 50;
-
-// The settings that turn off an installed copy of the plugin, so a build
-// loads only the copy named by --plugin-dir.
-const ONLY_PLUGIN_DIR = JSON.stringify({ enabledPlugins: { 'epik@epik': false } });
-
-// The branch name part made from `title`: lowercase, each run of characters
-// other than a-z and 0-9 replaced by '-', cut to 40 characters, with '-'
-// trimmed from both ends.
-export function slug(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .slice(0, 40)
-    .replace(/^-+|-+$/g, '');
-}
-
-// The default branch for epic `number` titled `title`: epic/<number>-<slug>,
-// or epic/<number> when the title has no letters or digits to slug.
-export function epicBranch(number, title) {
-  const tail = slug(title);
-  return tail ? `epic/${number}-${tail}` : `epic/${number}`;
-}
-
-// `date` as YYYYMMDDTHHMMSSZ, in UTC.
-export function stamp(date) {
-  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
-}
-
-// The arguments to `claude` that run `command` headless with the plugin at
-// `pluginRoot`.
-export function claudeArgs(command, pluginRoot) {
-  return [
-    '-p', command,
-    '--output-format', 'stream-json', '--verbose', '--forward-subagent-text',
-    '--permission-mode', 'auto', '--permission-prompts', 'none',
-    '--plugin-dir', pluginRoot,
-    '--settings', ONLY_PLUGIN_DIR,
-  ];
-}
-
-// Starts `claude` with `args` in `cwd`, detached, writing stdout to `log` and
-// stderr to `errorsLog`. Resolves to its child process once it has started.
-async function launch(args, cwd, log, errorsLog) {
-  const out = await open(log, 'a');
-  const err = await open(errorsLog, 'a');
-  try {
-    const child = spawn('claude', args, { cwd, detached: true, stdio: ['ignore', out.fd, err.fd] });
-    // once() rejects when the child emits 'error' before 'spawn'.
-    const error = await once(child, 'spawn').then(
-      () => null,
-      (e) => e,
-    );
-    if (error) {
-      throw error.code === 'ENOENT'
-        ? new Error('Claude Code is not installed. Install it from https://claude.com/claude-code and sign in.')
-        : error;
-    }
-    // The build outlives this call; its later failures show in its logs.
-    child.on('error', () => {});
-    child.unref();
-    return child;
-  } finally {
-    await out.close();
-    await err.close();
-  }
-}
-
-// The first event in the JSON lines `text` with type "system" and subtype
-// "init", skipping lines that aren't complete JSON, or undefined.
-function initEvent(text) {
-  for (const line of text.split('\n')) {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (event?.type === 'system' && event.subtype === 'init') return event;
-  }
-  return undefined;
-}
-
-// Whether `child` has exited.
-const exited = (child) => child.exitCode !== null || child.signalCode !== null;
-
-// Kills the process group of the detached `child` and waits for it to exit.
-async function stop(child) {
-  if (exited(child)) return;
-  const exit = once(child, 'exit');
-  try {
-    process.kill(-child.pid, 'SIGTERM');
-  } catch {
-    return;
-  }
-  await exit;
-}
-
-// Waits until the build `child` writes its init event to `log`, and stops it
-// unless that event says it is in auto mode. Throws when it isn't, when the
-// build exits first, or when `timeoutMs` passes first.
-async function awaitAutoMode(child, log, errorsLog, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    // Checked before reading the log, so a build that exited has written all of it.
-    const ended = exited(child);
-    const init = initEvent(await readFile(log, 'utf8'));
-    if (init) {
-      if (init.permissionMode === 'auto') return;
-      await stop(child);
-      throw new Error(
-        `The build started in "${init.permissionMode}" permission mode, not "auto", so it couldn't run unattended, ` +
-          `and it has been stopped. Its model was ${init.model}. Auto mode needs a recent model (choose one with ` +
-          `/model), and an organization admin can turn it off. See "Troubleshooting the install" in Epik's README.`,
-      );
-    }
-    if (ended) {
-      const errors = (await readFile(errorsLog, 'utf8')).trim();
-      throw new Error(`The build exited before it started.${errors ? `\n\n${errors}` : ''}`);
-    }
-    if (Date.now() >= deadline) {
-      await stop(child);
-      throw new Error(
-        `The build didn't report its permission mode within ${timeoutMs / 1000} seconds, so it has been stopped. ` +
-          `Its errors log is ${errorsLog}.`,
-      );
-    }
-    await sleep(INIT_POLL_MS);
-  }
-}
+import { request } from '../app.js';
 
 export default {
   name: 'build_start',
-  description: `Start a local Claude Code build of a GitHub issue or epic, and return once it has started in auto mode.
+  description: `Ask the Epik app to build a GitHub issue or epic, and return once the build has started.
 
 This is how to implement an issue or an epic. Never implement one in this
 conversation: when the user asks to build, implement or work on an issue or
 an epic, call this tool.
 
-An issue with sub-issues is an epic and is built with /epik:epic; any other
-issue is built with /epik:issue. The build runs headless in a fresh clone
-under ~/.epik/builds/ and streams its output to the log this returns; the
-user can follow it with \`tail -f\`. The build opens pull requests. It merges
-them into an epic branch itself, but a pull request into the repository's
-default branch waits for the user to review and merge it. If the build
-didn't start in auto mode, this stops it and returns an error saying why.
+The Epik app runs the build, and is started first if it isn't running. An
+issue with sub-issues is built as an epic: the app runs its issues in
+dependency order, one coding agent each, and merges each issue's pull
+request into the epic branch itself; the epic's pull request into the
+repository's default branch waits for the user to review and merge it. Any
+other issue is built alone, and its pull request into the default branch
+waits for the user. The user can watch the build from the Epik app's tray
+icon, or with \`tail -f\` on the events log this returns.
 
 Args:
     repo: Repository in owner/name format.
     number: The issue or epic issue to build.
-    branch: For an epic, the epic branch, created if missing; default
-        epic/<number>-<slug of its title>. For an issue, the branch its pull
-        request merges into; default the repository's default branch.
+    branch: The branch the pull requests merge into. Default
+        epic/<number>-<slug of its title> for an epic, and the repository's
+        default branch for an issue.
 
-Returns run_id, kind (epic or issue), command (the slash command the build
-runs), branch, clone, log, errors_log and pid.`,
+Returns run_id, kind (epic or issue), branch, run_dir (the run's record) and
+events (the run's events log, in run_dir).`,
   inputSchema: {
     repo: z.string(),
     number: z.number().int().positive(),
     branch: z.string().min(1).optional(),
   },
-  run: async ({ repo, number, branch }, { initTimeoutMs = INIT_TIMEOUT_MS } = {}) => {
-    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-    if (!pluginRoot) throw new Error('CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.');
+  run: async ({ repo, number, branch }) => {
+    const pluginDir = process.env.CLAUDE_PLUGIN_ROOT;
+    if (!pluginDir) throw new Error('CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.');
 
-    const issue = await get(`repos/${repo}/issues/${number}`);
-    if (issue.pull_request) throw new Error(`#${number} in ${repo} is a pull request, not an issue.`);
-    if (issue.state !== 'open') throw new Error(`#${number} in ${repo} is ${issue.state}.`);
-
-    const kind = (await list(`repos/${repo}/issues/${number}/sub_issues`)).length > 0 ? 'epic' : 'issue';
-    const target = branch ?? (kind === 'epic' ? epicBranch(number, issue.title) : (await get(`repos/${repo}`)).default_branch);
-    const command = `/epik:${kind} ${number} ${target}`;
-
-    const home = join(homedir(), '.epik');
-    const runId = `${repo.replace('/', '-')}-${number}-${stamp(new Date())}`;
-    const clone = join(home, 'builds', runId);
-    const runs = join(home, 'runs');
-    await mkdir(clone, { recursive: true });
-    await mkdir(runs, { recursive: true });
-    await gh(['repo', 'clone', repo, clone], { timeoutSeconds: CLONE_TIMEOUT_SECONDS });
-
-    const log = join(runs, `${runId}.jsonl`);
-    const errorsLog = join(runs, `${runId}.err`);
-    const child = await launch(claudeArgs(command, pluginRoot), clone, log, errorsLog);
-    await awaitAutoMode(child, log, errorsLog, initTimeoutMs);
-    return { run_id: runId, kind, command, branch: target, clone, log, errors_log: errorsLog, pid: child.pid };
+    const reply = await request({ type: 'build', repo, number, branch, plugin_dir: pluginDir });
+    return {
+      run_id: reply.run_id,
+      kind: reply.kind,
+      branch: reply.branch,
+      run_dir: reply.run_dir,
+      events: join(reply.run_dir, 'events.jsonl'),
+    };
   },
 };
