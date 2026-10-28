@@ -161,34 +161,85 @@ impl Address {
     }
 }
 
+impl std::fmt::Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Address::Path(path) => write!(f, "{}", path.display()),
+            Address::Pipe(pipe) => write!(f, r"\\.\pipe\{pipe}"),
+        }
+    }
+}
+
+/// The version of the app answering `ping` at `address`, or `None` if no
+/// app does.
+pub fn running(address: &Address) -> Option<String> {
+    match request(address, &Request::Ping) {
+        Ok(Response::Pong { version }) => Some(version),
+        _ => None,
+    }
+}
+
+/// Why [`Server::bind`] couldn't listen.
+#[derive(Debug)]
+pub enum BindError {
+    /// An Epik app, of this version, already answers `ping` there.
+    AlreadyRunning { version: String },
+    /// Listening failed for another reason.
+    Io(io::Error),
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindError::AlreadyRunning { version } => {
+                write!(f, "an Epik app {version} is already running")
+            }
+            BindError::Io(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for BindError {}
+
+impl From<io::Error> for BindError {
+    fn from(error: io::Error) -> Self {
+        BindError::Io(error)
+    }
+}
+
 /// The app's end of the socket.
 pub struct Server {
     listener: Listener,
 }
 
 impl Server {
-    /// Listens at `address`, which only this user can open. A socket file
-    /// left there by an app that is no longer running is removed; one an
-    /// app is still serving is an [`io::ErrorKind::AddrInUse`] error.
-    pub fn bind(address: &Address) -> io::Result<Self> {
+    /// Listens at `address`, which only this user can open. When an app
+    /// already answers `ping` there, the error is
+    /// [`BindError::AlreadyRunning`]. A socket file left there by an app
+    /// that is no longer running is removed.
+    pub fn bind(address: &Address) -> Result<Self, BindError> {
+        let already_running = |error: io::Error| match running(address) {
+            Some(version) => BindError::AlreadyRunning { version },
+            None => BindError::Io(error),
+        };
         let Address::Path(path) = address else {
-            return Ok(Self {
-                listener: listen(address)?,
-            });
+            return listen(address)
+                .map(|listener| Self { listener })
+                .map_err(already_running);
         };
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
         let listener = match listen(address) {
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                if Stream::connect(address.name()?).is_ok() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AddrInUse,
-                        format!("an Epik app is already serving {}", path.display()),
-                    ));
+                match already_running(error) {
+                    // Nothing answers: the file is stale.
+                    BindError::Io(_) => {
+                        fs::remove_file(path)?;
+                        listen(address)?
+                    }
+                    running => return Err(running),
                 }
-                fs::remove_file(path)?;
-                listen(address)?
             }
             listening => listening?,
         };
@@ -516,6 +567,44 @@ mod tests {
     }
 
     #[test]
+    fn a_serving_app_is_running() {
+        let app = Running::new(fake_github());
+
+        assert_eq!(running(&app.address), Some(crate::version().to_owned()));
+    }
+
+    #[test]
+    fn no_app_is_running_where_nothing_listens() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert_eq!(running(&address(root.path())), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_app_is_running_behind_a_stale_socket_file() {
+        let root = tempfile::tempdir().unwrap();
+        let Address::Path(path) = address(root.path()) else {
+            unreachable!()
+        };
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+        assert_eq!(running(&Address::Path(path)), None);
+    }
+
+    #[test]
+    fn an_address_shows_as_its_path_or_pipe() {
+        assert_eq!(
+            Address::Path("/home/me/.epik/epik.sock".into()).to_string(),
+            "/home/me/.epik/epik.sock"
+        );
+        assert_eq!(
+            Address::Pipe("epik".to_owned()).to_string(),
+            r"\\.\pipe\epik"
+        );
+    }
+
+    #[test]
     fn the_default_address_is_the_socket_in_the_root_or_the_pipe_epik() {
         let address = Address::in_root(Path::new("/home/me/.epik"));
 
@@ -562,10 +651,10 @@ mod tests {
 
         let error = Server::bind(&app.address).err().unwrap();
 
-        // Windows refuses a second first instance of a pipe in its own way.
-        if cfg!(unix) {
-            assert_eq!(error.kind(), io::ErrorKind::AddrInUse, "{error}");
-        }
+        assert!(
+            matches!(&error, BindError::AlreadyRunning { version } if version == crate::version()),
+            "{error}"
+        );
         assert!(
             matches!(
                 app.send(r#"{"type": "ping"}"#)["type"].as_str(),

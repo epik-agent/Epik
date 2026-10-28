@@ -2,7 +2,8 @@
 //!
 //! [`Builds`] starts each build on its own thread, says once it has started
 //! (its run recorded, its repository cloned), knows which are still running,
-//! and cancels and waits for them all when the app shuts down.
+//! tells an observer whenever how many are running changes, and cancels and
+//! waits for them all when the app shuts down.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,8 @@ pub struct Builds {
     cancel: Arc<AtomicBool>,
     /// The run ids of the builds still running.
     active: Arc<Mutex<BTreeSet<String>>>,
+    /// Told how many builds are running each time that changes.
+    on_active: Arc<dyn Fn(usize) + Send + Sync>,
     /// Every build's thread not yet known to have ended.
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -55,8 +58,16 @@ impl Builds {
             agent,
             cancel: Arc::new(AtomicBool::new(false)),
             active: Arc::default(),
+            on_active: Arc::new(|_| {}),
             threads: Mutex::default(),
         }
+    }
+
+    /// Calls `observer` with how many builds are running each time that
+    /// changes, in the order the changes happen.
+    pub fn on_active(mut self, observer: impl Fn(usize) + Send + Sync + 'static) -> Self {
+        self.on_active = Arc::new(observer);
+        self
     }
 
     /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`].
@@ -99,6 +110,7 @@ impl Builds {
             let agent = self.agent.clone();
             let cancel = self.cancel.clone();
             let active = self.active.clone();
+            let on_active = self.on_active.clone();
             let thread = thread::Builder::new()
                 .name(format!("build {repo}#{number}"))
                 .spawn(move || {
@@ -110,7 +122,9 @@ impl Builds {
                         }
                     };
                     let run_id = build.run_id().to_owned();
-                    lock(&active).insert(run_id.clone());
+                    change(&active, &*on_active, |active| {
+                        active.insert(run_id.clone());
+                    });
                     let _ = started.send(Ok(Started {
                         run_id: run_id.clone(),
                         kind: build.kind(),
@@ -118,7 +132,9 @@ impl Builds {
                         run_dir: build.dir().to_owned(),
                     }));
                     build.run(&cancel);
-                    lock(&active).remove(&run_id);
+                    change(&active, &*on_active, |active| {
+                        active.remove(&run_id);
+                    });
                 })
                 .map_err(|error| format!("couldn't start a thread for the build: {error}"))?;
             threads.push(thread);
@@ -150,6 +166,19 @@ impl Drop for Builds {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Changes the running builds with `edit`, and tells `observer` how many
+/// there now are. The lock is held while it's told, so it hears of the
+/// changes in order.
+fn change(
+    active: &Mutex<BTreeSet<String>>,
+    observer: &(dyn Fn(usize) + Send + Sync),
+    edit: impl FnOnce(&mut BTreeSet<String>),
+) {
+    let mut active = lock(active);
+    edit(&mut active);
+    observer(active.len());
 }
 
 /// A lock that a panicked build thread doesn't spoil.
@@ -226,6 +255,29 @@ mod tests {
         let events = record::read_events(root.path(), &started.run_id).unwrap();
         let state = record::fold(&events).unwrap();
         assert_eq!(state.status, RunStatus::Interrupted);
+    }
+
+    #[test]
+    fn the_observer_hears_how_many_builds_are_running() {
+        let root = tempfile::tempdir().unwrap();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let github = fake_github();
+        github.add_issue("owner/repo", 8, "Another issue");
+        let builds = builds(root.path(), github).on_active({
+            let heard = heard.clone();
+            move |n| heard.lock().unwrap().push(n)
+        });
+
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+        builds
+            .start("owner/repo", 8, None, "/plugin".into())
+            .unwrap();
+        assert_eq!(*heard.lock().unwrap(), [1, 2]);
+
+        builds.shutdown();
+        assert_eq!(*heard.lock().unwrap(), [1, 2, 1, 0]);
     }
 
     #[test]
