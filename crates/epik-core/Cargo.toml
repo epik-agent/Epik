@@ -1,0 +1,28 @@
+[package]
+name = "epik-core"
+description = "The logic of the Epik app, tested without a desktop."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-client-protocol = { version = "3.6.0", features = ["process"] }
+async-io = "2.6.0"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+dirs = "7.0.0"
+futures = "0.3.34"
+interprocess = "2.4.7"
+keepawake = "0.6.1"
+rust_decimal = { version = "1.43.0", default-features = false, features = ["std", "serde-float"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# A stand-in for claude-agent-acp in this crate's tests. It is not part of
+# Epik and is never installed: only epik-app is.
+[[bin]]
+name = "fake-acp-agent"
+test = false
+doc = false

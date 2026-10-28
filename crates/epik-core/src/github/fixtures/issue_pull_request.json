@@ -1,0 +1,16 @@
+{
+  "url": "https://api.github.com/repos/epik-agent/Epik/issues/367",
+  "number": 367,
+  "title": "build: add the Rust workspace and its CI for the Epik app",
+  "state": "closed",
+  "state_reason": null,
+  "comments": 0,
+  "pull_request": {
+    "url": "https://api.github.com/repos/epik-agent/Epik/pulls/367",
+    "html_url": "https://github.com/epik-agent/Epik/pull/367",
+    "diff_url": "https://github.com/epik-agent/Epik/pull/367.diff",
+    "patch_url": "https://github.com/epik-agent/Epik/pull/367.patch",
+    "merged_at": "2026-10-28T21:00:43Z"
+  },
+  "body": "Closes #357\n…"
+}

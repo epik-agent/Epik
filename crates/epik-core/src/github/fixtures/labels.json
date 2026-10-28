@@ -1,0 +1,84 @@
+[
+  [
+    {
+      "id": 11349943583,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/bug",
+      "name": "bug",
+      "color": "d73a4a",
+      "default": true,
+      "description": "Something isn't working"
+    },
+    {
+      "id": 11349943588,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/documentation",
+      "name": "documentation",
+      "color": "0075ca",
+      "default": true,
+      "description": "Improvements or additions to documentation"
+    },
+    {
+      "id": 11349943595,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/duplicate",
+      "name": "duplicate",
+      "color": "cfd3d7",
+      "default": true,
+      "description": "This issue or pull request already exists"
+    },
+    {
+      "id": 11349943602,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/enhancement",
+      "name": "enhancement",
+      "color": "a2eeef",
+      "default": true,
+      "description": "New feature or request"
+    },
+    {
+      "id": 12823414125,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/epic",
+      "name": "epic",
+      "color": "5319E7",
+      "default": false,
+      "description": "A dependency-ordered set of issues"
+    },
+    {
+      "id": 11349943617,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/good%20first%20issue",
+      "name": "good first issue",
+      "color": "7057ff",
+      "default": true,
+      "description": "Good for newcomers"
+    },
+    {
+      "id": 11349943610,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/help%20wanted",
+      "name": "help wanted",
+      "color": "008672",
+      "default": true,
+      "description": "Extra attention is needed"
+    },
+    {
+      "id": 11349943629,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/invalid",
+      "name": "invalid",
+      "color": "e4e669",
+      "default": true,
+      "description": "This doesn't seem right"
+    },
+    {
+      "id": 11349943638,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/question",
+      "name": "question",
+      "color": "d876e3",
+      "default": true,
+      "description": "Further information is requested"
+    },
+    {
+      "id": 11349943645,
+      "url": "https://api.github.com/repos/epik-agent/Epik/labels/wontfix",
+      "name": "wontfix",
+      "color": "ffffff",
+      "default": true,
+      "description": "This will not be worked on"
+    }
+  ]
+]

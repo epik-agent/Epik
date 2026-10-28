@@ -1,0 +1,24 @@
+{
+  "statusCheckRollup": [
+    {
+      "__typename": "CheckRun",
+      "completedAt": "2026-10-28T20:59:50Z",
+      "conclusion": "FAILURE",
+      "detailsUrl": "https://github.com/epik-agent/Epik/actions/runs/40768111814/job/123097677073",
+      "name": "CI",
+      "startedAt": "2026-10-28T20:59:33Z",
+      "status": "COMPLETED",
+      "workflowName": "CI"
+    },
+    {
+      "__typename": "CheckRun",
+      "completedAt": "0001-01-01T00:00:00Z",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/epik-agent/Epik/actions/runs/40768111814/job/123097677014",
+      "name": "Rust (ubuntu-latest)",
+      "startedAt": "2026-10-28T20:59:32Z",
+      "status": "QUEUED",
+      "workflowName": "CI"
+    }
+  ]
+}

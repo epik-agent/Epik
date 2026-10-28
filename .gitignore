@@ -1,4 +1,10 @@
 .claude/
 
+# Rust
+/target/
+
 # IDE
 .idea/
+
+# Tauri
+/crates/epik-app/gen/
