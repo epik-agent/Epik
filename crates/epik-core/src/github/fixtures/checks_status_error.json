@@ -1,0 +1,11 @@
+{
+  "statusCheckRollup": [
+    {
+      "__typename": "StatusContext",
+      "context": "ci/external",
+      "startedAt": "2026-10-28T20:59:32Z",
+      "state": "ERROR",
+      "targetUrl": "https://ci.example.com/build/1"
+    }
+  ]
+}
