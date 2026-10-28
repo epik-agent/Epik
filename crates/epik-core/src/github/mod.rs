@@ -109,6 +109,63 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
+/// How a pull request is merged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MergeMethod {
+    /// With a merge commit.
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The REST API's `merge_method`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+}
+
+/// The merge methods a repository allows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MergeMethods {
+    pub merge_commit: bool,
+    pub squash: bool,
+    pub rebase: bool,
+}
+
+impl MergeMethods {
+    /// Every method, as GitHub allows by default.
+    pub const ALL: Self = Self {
+        merge_commit: true,
+        squash: true,
+        rebase: true,
+    };
+
+    /// No method at all.
+    pub const NONE: Self = Self {
+        merge_commit: false,
+        squash: false,
+        rebase: false,
+    };
+
+    /// The first allowed of merge commit, squash and rebase, or an error
+    /// naming `repo` when none is.
+    pub fn choose(self, repo: &str) -> Result<MergeMethod> {
+        [
+            (self.merge_commit, MergeMethod::Merge),
+            (self.squash, MergeMethod::Squash),
+            (self.rebase, MergeMethod::Rebase),
+        ]
+        .into_iter()
+        .find_map(|(allowed, method)| allowed.then_some(method))
+        .ok_or_else(|| Error::new(format!("{repo} allows no merge method")))
+    }
+}
+
 /// What a pull request's checks add up to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Checks {
@@ -155,8 +212,9 @@ pub trait GitHub: Send + Sync {
     /// What pull request `pr`'s checks add up to.
     fn checks(&self, repo: &str, pr: u64) -> Result<Checks>;
 
-    /// Merges pull request `pr` with a merge commit. An already-merged
-    /// pull request is success.
+    /// Merges pull request `pr` with the first method the repository
+    /// allows of merge commit, squash and rebase, failing when it allows
+    /// none. An already-merged pull request is success.
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()>;
 
     /// Comments `comment` on issue `number` and closes it.
@@ -300,6 +358,46 @@ mod tests {
     fn a_closed_pull_request_does_not_count() {
         let candidates = [(1, PullState::Closed, "Fixes #9")];
         assert_eq!(closing_pull_request(candidates, 9), None);
+    }
+
+    #[test]
+    fn a_merge_commit_is_preferred_to_squash_and_rebase() {
+        assert_eq!(MergeMethods::ALL.choose("o/r"), Ok(MergeMethod::Merge));
+    }
+
+    #[test]
+    fn squash_is_preferred_to_rebase() {
+        let both = MergeMethods {
+            squash: true,
+            rebase: true,
+            ..MergeMethods::NONE
+        };
+        assert_eq!(both.choose("o/r"), Ok(MergeMethod::Squash));
+    }
+
+    #[test]
+    fn each_method_allowed_alone_is_chosen() {
+        let merge_commit = MergeMethods {
+            merge_commit: true,
+            ..MergeMethods::NONE
+        };
+        let squash = MergeMethods {
+            squash: true,
+            ..MergeMethods::NONE
+        };
+        let rebase = MergeMethods {
+            rebase: true,
+            ..MergeMethods::NONE
+        };
+        assert_eq!(merge_commit.choose("o/r"), Ok(MergeMethod::Merge));
+        assert_eq!(squash.choose("o/r"), Ok(MergeMethod::Squash));
+        assert_eq!(rebase.choose("o/r"), Ok(MergeMethod::Rebase));
+    }
+
+    #[test]
+    fn a_repository_allowing_no_method_is_an_error() {
+        let error = MergeMethods::NONE.choose("o/r").unwrap_err();
+        assert_eq!(error.message, "o/r allows no merge method");
     }
 
     #[test]

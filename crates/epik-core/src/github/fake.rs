@@ -11,7 +11,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    PullRequest, PullState, Result, State, SubIssue, closing_pull_request,
+    MergeMethod, MergeMethods, PullRequest, PullState, Result, State, SubIssue,
+    closing_pull_request,
 };
 
 /// A label's color and description.
@@ -42,6 +43,8 @@ pub struct FakePull {
     pub body: String,
     pub state: PullState,
     pub checks: Checks,
+    /// How it was merged, once it is.
+    pub merged_with: Option<MergeMethod>,
 }
 
 /// A repository the fake holds.
@@ -52,6 +55,7 @@ pub struct FakeRepo {
     pub labels: BTreeMap<String, FakeLabel>,
     pub issues: BTreeMap<u64, FakeIssue>,
     pub pulls: BTreeMap<u64, FakePull>,
+    pub merge_methods: MergeMethods,
 }
 
 impl FakeRepo {
@@ -144,6 +148,7 @@ impl FakeGitHub {
             labels: BTreeMap::new(),
             issues: BTreeMap::new(),
             pulls: BTreeMap::new(),
+            merge_methods: MergeMethods::ALL,
         };
         self.world().repos.insert(repo.to_owned(), fake);
     }
@@ -185,6 +190,12 @@ impl FakeGitHub {
     /// Sets issue `number`'s state.
     pub fn set_state(&self, repo: &str, number: u64, state: State) {
         self.arrange_issue(repo, number, |issue| issue.state = state);
+    }
+
+    /// Sets the merge methods `repo` allows, all of them until this is
+    /// called.
+    pub fn set_merge_methods(&self, repo: &str, methods: MergeMethods) {
+        self.arrange(repo, |fake| fake.merge_methods = methods);
     }
 
     /// Sets pull request `pr`'s checks.
@@ -345,10 +356,14 @@ impl GitHub for FakeGitHub {
 
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()> {
         let mut world = self.enter("merge_pull_request")?;
-        let pull = world.repo_mut(repo)?.pull_mut(pr)?;
+        let fake = world.repo_mut(repo)?;
+        let methods = fake.merge_methods;
+        let pull = fake.pull_mut(pr)?;
         match pull.state {
             PullState::Closed => Err(Error::new("gh: Pull Request is not mergeable (HTTP 405)")),
-            PullState::Open | PullState::Merged => {
+            PullState::Merged => Ok(()),
+            PullState::Open => {
+                pull.merged_with = Some(methods.choose(repo)?);
                 pull.state = PullState::Merged;
                 Ok(())
             }
@@ -390,6 +405,7 @@ impl GitHub for FakeGitHub {
             body: body.to_owned(),
             state: PullState::Open,
             checks: Checks::None,
+            merged_with: None,
         };
         fake.pulls.insert(number, pull);
         Ok(number)
@@ -571,6 +587,44 @@ mod tests {
         github.merge_pull_request(REPO, pr).unwrap();
         assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Merged);
         assert_eq!(github.issue(REPO, pr).unwrap().state, State::Closed);
+    }
+
+    /// The method a fresh pull request in a repository allowing `methods`
+    /// merges with, or the merge's error.
+    fn merged_with(methods: MergeMethods) -> Result<MergeMethod> {
+        let github = epic();
+        github.set_merge_methods(REPO, methods);
+        let pr = github
+            .open_pull_request(REPO, "issue-2", "epic/1", "First", "Closes #2")
+            .unwrap();
+        github.merge_pull_request(REPO, pr)?;
+        Ok(github.repo(REPO).pulls[&pr].merged_with.unwrap())
+    }
+
+    #[test]
+    fn merges_with_a_merge_commit_by_default() {
+        assert_eq!(merged_with(MergeMethods::ALL), Ok(MergeMethod::Merge));
+    }
+
+    #[test]
+    fn merges_with_a_method_the_repository_allows() {
+        let squash = MergeMethods {
+            squash: true,
+            ..MergeMethods::NONE
+        };
+        assert_eq!(merged_with(squash), Ok(MergeMethod::Squash));
+        assert!(merged_with(MergeMethods::NONE).is_err());
+    }
+
+    #[test]
+    fn a_merged_pull_request_is_merged_whatever_is_allowed() {
+        let github = epic();
+        let pr = github
+            .open_pull_request(REPO, "issue-2", "epic/1", "First", "Closes #2")
+            .unwrap();
+        github.merge_pull_request(REPO, pr).unwrap();
+        github.set_merge_methods(REPO, MergeMethods::NONE);
+        github.merge_pull_request(REPO, pr).unwrap();
     }
 
     #[test]
