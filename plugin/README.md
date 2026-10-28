@@ -12,6 +12,9 @@ plugin/
     plugin.json         # plugin manifest
   server/               # the Node MCP server (see server/README.md)
   skills/
+    assistant/
+      SKILL.md          # epik:assistant — how Epik plans; loads itself
+      rules.md          # the rules that bind every change to the code
     epic/
       SKILL.md          # /epik:epic — implement an epic's issues in parallel subagents
     issue/
@@ -55,6 +58,8 @@ After committing later changes to the plugin, run `/plugin marketplace update ep
 Changes to the server's source need a rebuilt `server/dist/index.js` (see [`server/README.md`](server/README.md)); CI fails when the bundle is stale.
 
 ## Usage
+
+- **The assistant skill (`epik:assistant`) loads itself.** It is not a command you run. The server's instructions point every session at it, so any conversation with the plugin enabled knows it is Epik. It is the exception to the explicit-invocation rule because it only shapes how Claude plans and writes. `epic` and `issue` take actions (branches, builds, merges), so they stay explicit.
 
 Two build skills, both invoked explicitly as slash commands namespaced under `epik` (they never auto-trigger):
 

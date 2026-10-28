@@ -7,6 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as z from 'zod';
 
+import { instructions } from '../src/instructions.js';
 import { createServer } from '../src/server.js';
 import { tools as registered } from '../src/tools/index.js';
 
@@ -56,7 +57,7 @@ test("a failing tool is an MCP error whose text is the failure's message", async
   });
 });
 
-test('the built server answers initialize and lists exactly the registered tools', async () => {
+test('the built server answers initialize with its instructions and lists exactly the registered tools', async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL('../dist/index.js', import.meta.url))],
@@ -65,6 +66,7 @@ test('the built server answers initialize and lists exactly the registered tools
   await client.connect(transport);
   try {
     assert.equal(client.getServerVersion().name, 'epik');
+    assert.equal(client.getInstructions(), instructions);
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name),

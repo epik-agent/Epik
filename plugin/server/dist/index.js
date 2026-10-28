@@ -23551,9 +23551,12 @@ var EMPTY_COMPLETION_RESULT = {
   }
 };
 
+// src/instructions.js
+var instructions = "Epik plans software with the user and has Claude Code build it from GitHub issues. Before you design, plan or scope software with the user, write or revise an epic or issue, or start a build, read Epik's `assistant` skill (`epik:assistant`): it holds what Epik believes about building software and how Epik writes epics. The user always understands what is going on; that principle outranks speed.";
+
 // src/server.js
 function createServer(tools2) {
-  const server = new McpServer({ name: "epik", version: "1.0.0" });
+  const server = new McpServer({ name: "epik", version: "1.0.0" }, { instructions });
   for (const { name, description, inputSchema, run: run2 } of tools2) {
     server.registerTool(name, { description, inputSchema }, async (input) => {
       const result = await run2(input);
@@ -23708,8 +23711,9 @@ an epic, call this tool.
 An issue with sub-issues is an epic and is built with /epik:epic; any other
 issue is built with /epik:issue. The build runs headless in a fresh clone
 under ~/.epik/builds/ and streams its output to the log this returns; the
-user can follow it with \`tail -f\`. The build opens pull requests, merges
-them and closes the issues itself.
+user can follow it with \`tail -f\`. The build opens pull requests. It merges
+them into an epic branch itself, but a pull request into the repository's
+default branch waits for the user to review and merge it.
 
 Args:
     repo: Repository in owner/name format.
