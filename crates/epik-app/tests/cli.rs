@@ -89,4 +89,27 @@ mod headless {
         assert!(ipc::running(&address(home.path())).is_some());
         terminate(first);
     }
+
+    /// With no tray, as on Linux without a display, the app with no flags
+    /// says so and runs headless.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_a_display_it_runs_headless_and_says_so() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .env("HOME", home.path())
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        wait_for_ping(home.path(), &mut app);
+
+        let output = terminate(app);
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("there is no tray (no display)"), "{stderr}");
+    }
 }
