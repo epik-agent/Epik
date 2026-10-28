@@ -65,7 +65,7 @@ main { padding: 24px; overflow: auto; }
   border-radius: 8px;
   border: 1px solid var(--edge);
   border-left: 6px solid var(--state);
-  background: var(--card);
+  background: color-mix(in srgb, var(--state) 12%, var(--card));
   overflow: hidden;
 }
 .node .number { font-weight: 600; }
