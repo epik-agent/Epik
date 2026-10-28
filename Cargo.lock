@@ -1079,6 +1079,8 @@ dependencies = [
  "epik-core",
  "open",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tempfile",
