@@ -446,6 +446,206 @@ pub fn refusal(checks: &[Check]) -> Option<String> {
     })
 }
 
+/// What pressing an item's button does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Install Epik's private copy of `gh` or Node.
+    Install(Item),
+    /// Run these commands in order, each a program and its arguments,
+    /// stopping at the first that fails.
+    Run(Vec<Vec<String>>),
+}
+
+/// The one button an item that isn't done offers: what it says, and what
+/// it does. Nothing happens until the user presses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub label: String,
+    pub action: Action,
+}
+
+fn command(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| (*word).to_owned()).collect()
+}
+
+/// The step for `check`, or none when it's done.
+pub fn step(check: &Check) -> Option<Step> {
+    if check.state == State::Done {
+        return None;
+    }
+    let (label, action) = match check.item {
+        Item::Gh | Item::Node => {
+            let label = if check.state == State::Outdated {
+                "Update the private copy"
+            } else {
+                "Install a private copy"
+            };
+            (label.to_owned(), Action::Install(check.item))
+        }
+        Item::GhAuth if check.detail == "signed in without the project scope" => (
+            "Add the project scope (opens the browser)".to_owned(),
+            Action::Run(vec![
+                command(&["gh", "auth", "refresh", "-h", "github.com", "-s", "project"]),
+                command(&["gh", "auth", "setup-git"]),
+            ]),
+        ),
+        Item::GhAuth if check.detail == "git isn't set to use gh to push" => (
+            "Let git push with gh".to_owned(),
+            Action::Run(vec![command(&["gh", "auth", "setup-git"])]),
+        ),
+        Item::GhAuth => (
+            "Sign in to GitHub (opens the browser)".to_owned(),
+            Action::Run(vec![
+                command(&[
+                    "gh",
+                    "auth",
+                    "login",
+                    "--web",
+                    "-h",
+                    "github.com",
+                    "-p",
+                    "https",
+                    "-s",
+                    "project",
+                ]),
+                command(&["gh", "auth", "setup-git"]),
+            ]),
+        ),
+        Item::Claude if cfg!(windows) => (
+            "Run Anthropic's installer: irm https://claude.ai/install.ps1 | iex".to_owned(),
+            Action::Run(vec![command(&[
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "irm https://claude.ai/install.ps1 | iex",
+            ])]),
+        ),
+        Item::Claude => (
+            "Run Anthropic's installer: curl -fsSL https://claude.ai/install.sh | bash".to_owned(),
+            Action::Run(vec![command(&[
+                "bash",
+                "-c",
+                "curl -fsSL https://claude.ai/install.sh | bash",
+            ])]),
+        ),
+        Item::ClaudeAuth => (
+            "Sign in to Claude (opens the browser)".to_owned(),
+            Action::Run(vec![command(&["claude", "auth", "login"])]),
+        ),
+        Item::Plugin if check.detail == "installed but turned off" => (
+            "Turn the plugin on".to_owned(),
+            Action::Run(vec![command(&["claude", "plugin", "enable", "epik@epik"])]),
+        ),
+        Item::Plugin if check.state == State::Outdated => (
+            "Update the plugin".to_owned(),
+            Action::Run(vec![
+                command(&["claude", "plugin", "marketplace", "update", "epik"]),
+                command(&["claude", "plugin", "update", "epik@epik"]),
+            ]),
+        ),
+        Item::Plugin => (
+            "Install the plugin".to_owned(),
+            Action::Run(vec![
+                command(&["claude", "plugin", "marketplace", "add", "epik-agent/Epik"]),
+                command(&[
+                    "claude",
+                    "plugin",
+                    "install",
+                    "epik@epik",
+                    "--scope",
+                    "user",
+                ]),
+            ]),
+        ),
+    };
+    Some(Step { label, action })
+}
+
+/// The program to run for a step's command word: Epik's own `gh` or
+/// `claude` where it would check them, else the word as found on the
+/// `PATH`.
+pub fn program(root: &Path, word: &str) -> PathBuf {
+    match word {
+        "gh" => gh(root),
+        "claude" => claude(root),
+        other => PathBuf::from(other),
+    }
+}
+
+/// Does `step`, telling `on_line` each line of output as it comes, or
+/// why it failed.
+pub fn run_step(root: &Path, step: &Step, on_line: &(dyn Fn(String) + Sync)) -> Result<(), String> {
+    match &step.action {
+        Action::Install(item) => {
+            let platform = crate::install::Platform::current()
+                .ok_or("Epik installs no tools for this machine")?;
+            let sources = crate::install::Sources::default();
+            on_line(format!("Downloading {}…", item.title()));
+            let version = match item {
+                Item::Gh => crate::install::install_gh(root, &sources, platform)?,
+                _ => crate::install::install_node(root, &sources, platform)?,
+            };
+            on_line(format!(
+                "Installed {} {version}, checked against its published checksum.",
+                item.title()
+            ));
+            Ok(())
+        }
+        Action::Run(commands) => {
+            for words in commands {
+                on_line(format!("$ {}", words.join(" ")));
+                run_streaming(&program(root, &words[0]), &words[1..], on_line)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Runs `program` with `args`, its stdin closed so a prompt to press Enter
+/// goes on by itself, telling `on_line` each line of its stdout and stderr.
+fn run_streaming(
+    program: &Path,
+    args: &[String],
+    on_line: &(dyn Fn(String) + Sync),
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let name = program.display().to_string();
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("couldn't run {name}: {error}"))?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                on_line(line);
+            }
+        });
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            on_line(line);
+        }
+    });
+    let status = child
+        .wait()
+        .map_err(|error| format!("{name} didn't finish: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{name} {} failed ({status})", args.join(" ")))
+    }
+}
+
+/// The file whose presence says setup was once completed, so the checklist
+/// doesn't open by itself again while everything stays done.
+pub fn done_file(root: &Path) -> PathBuf {
+    root.join("setup-done")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -713,6 +913,162 @@ pub(crate) mod tests {
                 .filter(|dir| dir.ends_with("homebrew/bin"))
                 .count(),
             1
+        );
+    }
+
+    fn step_of(item: Item, state: State, detail: &str) -> Option<Step> {
+        step(&Check::new(item, state, detail))
+    }
+
+    #[test]
+    fn a_done_item_offers_nothing() {
+        for item in Item::ALL {
+            assert_eq!(step_of(item, State::Done, "fine"), None);
+        }
+    }
+
+    #[test]
+    fn each_item_offers_the_one_step_that_does_it() {
+        let label = |item, state, detail| step_of(item, state, detail).unwrap().label;
+        assert_eq!(
+            label(Item::Gh, State::Missing, "not installed"),
+            "Install a private copy"
+        );
+        assert_eq!(
+            label(Item::Node, State::Outdated, "Node 22"),
+            "Update the private copy"
+        );
+        assert_eq!(
+            step_of(Item::Node, State::Missing, "not installed")
+                .unwrap()
+                .action,
+            Action::Install(Item::Node)
+        );
+        assert_eq!(
+            step_of(Item::GhAuth, State::Missing, "not signed in").unwrap(),
+            Step {
+                label: "Sign in to GitHub (opens the browser)".to_owned(),
+                action: Action::Run(vec![
+                    command(&[
+                        "gh",
+                        "auth",
+                        "login",
+                        "--web",
+                        "-h",
+                        "github.com",
+                        "-p",
+                        "https",
+                        "-s",
+                        "project"
+                    ]),
+                    command(&["gh", "auth", "setup-git"]),
+                ]),
+            }
+        );
+        assert_eq!(
+            step_of(
+                Item::GhAuth,
+                State::Missing,
+                "signed in without the project scope"
+            )
+            .unwrap()
+            .action,
+            Action::Run(vec![
+                command(&["gh", "auth", "refresh", "-h", "github.com", "-s", "project"]),
+                command(&["gh", "auth", "setup-git"]),
+            ])
+        );
+        assert_eq!(
+            label(
+                Item::GhAuth,
+                State::Missing,
+                "git isn't set to use gh to push"
+            ),
+            "Let git push with gh"
+        );
+        assert!(
+            label(Item::Claude, State::Missing, "not installed")
+                .starts_with("Run Anthropic's installer: ")
+        );
+        assert_eq!(
+            step_of(Item::ClaudeAuth, State::Missing, "not signed in")
+                .unwrap()
+                .action,
+            Action::Run(vec![command(&["claude", "auth", "login"])])
+        );
+        assert_eq!(
+            step_of(Item::Plugin, State::Missing, "not installed")
+                .unwrap()
+                .action,
+            Action::Run(vec![
+                command(&["claude", "plugin", "marketplace", "add", "epik-agent/Epik"]),
+                command(&[
+                    "claude",
+                    "plugin",
+                    "install",
+                    "epik@epik",
+                    "--scope",
+                    "user"
+                ]),
+            ])
+        );
+        assert_eq!(
+            label(Item::Plugin, State::Missing, "installed but turned off"),
+            "Turn the plugin on"
+        );
+        assert_eq!(
+            label(Item::Plugin, State::Outdated, "behind"),
+            "Update the plugin"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_steps_commands_run_in_order_with_their_output_streamed() {
+        let root = tempfile::tempdir().unwrap();
+        let lines = std::sync::Mutex::new(Vec::new());
+        let step = Step {
+            label: "Do it".to_owned(),
+            action: Action::Run(vec![
+                command(&["sh", "-c", "echo one"]),
+                command(&["sh", "-c", "echo two >&2"]),
+            ]),
+        };
+
+        run_step(root.path(), &step, &|line| lines.lock().unwrap().push(line)).unwrap();
+
+        assert_eq!(
+            *lines.lock().unwrap(),
+            ["$ sh -c echo one", "one", "$ sh -c echo two >&2", "two"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_command_stops_the_step() {
+        let root = tempfile::tempdir().unwrap();
+        let lines = std::sync::Mutex::new(Vec::new());
+        let step = Step {
+            label: "Do it".to_owned(),
+            action: Action::Run(vec![
+                command(&["sh", "-c", "exit 3"]),
+                command(&["sh", "-c", "echo never"]),
+            ]),
+        };
+
+        let error =
+            run_step(root.path(), &step, &|line| lines.lock().unwrap().push(line)).unwrap_err();
+
+        assert!(error.starts_with("sh -c exit 3 failed"), "{error}");
+        assert_eq!(*lines.lock().unwrap(), ["$ sh -c exit 3"]);
+        let missing = Step {
+            label: "Do it".to_owned(),
+            action: Action::Run(vec![command(&["no-such-program-epik"])]),
+        };
+        let error = run_step(root.path(), &missing, &|_| {}).unwrap_err();
+        assert!(
+            error.starts_with("couldn't run no-such-program-epik"),
+            "{error}"
         );
     }
 

@@ -1,0 +1,46 @@
+/* Epik's light theme: the brand's colors, with the accent darkened to
+   #00875a so green text passes contrast on white. */
+:root {
+  color-scheme: light;
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --raised: #f0f0f0;
+  --text: #0a0a0a;
+  --secondary: #525252;
+  --muted: #737373;
+  --border: #e0e0e0;
+  --strong: #c7c7c7;
+  --accent: #00875a;
+  --accent-fill: #00b377;
+  --accent-muted: rgba(0, 179, 119, 0.10);
+  --warning: #a8740a;
+  --warning-muted: rgba(212, 148, 10, 0.10);
+  --error: #dc2626;
+  --error-muted: rgba(220, 38, 38, 0.08);
+  font: 13px/1.45 "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { background: var(--raised); }
+button.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: #fff; }
+button.primary:hover { background: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }

@@ -28,6 +28,7 @@ pub enum Item {
     /// Text that can't be chosen.
     Note(String),
     Separator,
+    CheckSetup,
     OpenRunsFolder,
     Quit,
 }
@@ -35,7 +36,7 @@ pub enum Item {
 /// The tray for `runs`, newest activity first as
 /// [`epik_core::run::list`] gives them, while the runs `active` are
 /// building: the building runs, then the [`RECENT`] most recent others,
-/// then "Open runs folder" and "Quit".
+/// then "Check setup", "Open runs folder" and "Quit".
 pub fn menu(runs: &[RunState], active: &[RunKey]) -> Menu {
     let building = |run: &RunState| run.disposition == Disposition::Building;
     let mut items: Vec<Item> = runs
@@ -63,7 +64,7 @@ pub fn menu(runs: &[RunState], active: &[RunKey]) -> Menu {
         items.extend(others);
         items.push(Item::Separator);
     }
-    items.extend([Item::OpenRunsFolder, Item::Quit]);
+    items.extend([Item::CheckSetup, Item::OpenRunsFolder, Item::Quit]);
     Menu {
         building: !active.is_empty(),
         items,
@@ -135,6 +136,7 @@ mod tests {
                 items: vec![
                     note("Nothing is building"),
                     Item::Separator,
+                    Item::CheckSetup,
                     Item::OpenRunsFolder,
                     Item::Quit,
                 ],
@@ -160,6 +162,7 @@ mod tests {
                     item(3, "waiting for review"),
                     item(2, "needs attention"),
                     Item::Separator,
+                    Item::CheckSetup,
                     Item::OpenRunsFolder,
                     Item::Quit,
                 ],

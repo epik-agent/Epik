@@ -1,6 +1,7 @@
 //! The Epik app, which runs Epik's builds.
 
 mod menu;
+mod setup_window;
 mod tray;
 mod view;
 mod window;

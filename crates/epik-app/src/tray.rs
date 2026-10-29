@@ -23,13 +23,14 @@ use tauri::{AppHandle, RunEvent, Wry};
 
 use crate::App;
 use crate::menu::{self, Item, Menu};
-use crate::window;
+use crate::{setup_window, window};
 
 /// How often the menu is redrawn from the run listing.
 const REFRESH: Duration = Duration::from_secs(2);
 
 const QUIT: &str = "quit";
 const OPEN_RUNS_FOLDER: &str = "open-runs-folder";
+const CHECK_SETUP: &str = "check-setup";
 /// The prefix of a run's item's id; the run, `owner/name#number`, follows
 /// it.
 const RUN: &str = "run:";
@@ -67,7 +68,17 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .manage(window::Runs {
             root: app.root.clone(),
         })
-        .invoke_handler(tauri::generate_handler![window::run_view])
+        .manage(setup_window::Setup {
+            root: app.root.clone(),
+            builds: app.builds.clone(),
+            outputs: Default::default(),
+        })
+        .invoke_handler(tauri::generate_handler![
+            window::run_view,
+            setup_window::setup_checklist,
+            setup_window::setup_run,
+            setup_window::setup_output,
+        ])
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
     // No Dock icon.
@@ -86,6 +97,10 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             let id = event.id().as_ref();
             if id == QUIT {
                 stop.store(true, Ordering::SeqCst);
+            } else if id == CHECK_SETUP {
+                if let Err(error) = setup_window::open(handle) {
+                    eprintln!("epik-app: couldn't open the setup checklist: {error}");
+                }
             } else if id == OPEN_RUNS_FOLDER {
                 reveal(&record::runs_dir(&root));
             } else if let Some(run) = id.strip_prefix(RUN)
@@ -129,6 +144,20 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
             }
             if let Err(RecvTimeoutError::Disconnected) = changes.recv_timeout(REFRESH) {
                 break;
+            }
+        }
+    });
+    thread::spawn({
+        let handle = tauri.handle().clone();
+        let (root, builds) = (app.root.clone(), app.builds.clone());
+        move || {
+            if setup_window::opens_at_start(&root, &builds.setup()) {
+                let opener = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if let Err(error) = setup_window::open(&opener) {
+                        eprintln!("epik-app: couldn't open the setup checklist: {error}");
+                    }
+                });
             }
         }
     });
@@ -184,6 +213,13 @@ fn native(handle: &AppHandle, shown: &Menu) -> tauri::Result<tauri::menu::Menu<W
                 )?),
                 Item::Note(text) => Box::new(MenuItem::new(handle, text, false, None::<&str>)?),
                 Item::Separator => Box::new(PredefinedMenuItem::separator(handle)?),
+                Item::CheckSetup => Box::new(MenuItem::with_id(
+                    handle,
+                    CHECK_SETUP,
+                    "Check setup",
+                    true,
+                    None::<&str>,
+                )?),
                 Item::OpenRunsFolder => Box::new(MenuItem::with_id(
                     handle,
                     OPEN_RUNS_FOLDER,
