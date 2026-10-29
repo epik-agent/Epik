@@ -135,6 +135,9 @@ impl Builds {
             root: self.root.clone(),
             plugin_dir,
         };
+        if !repositories::is_repo(repo) {
+            return Err(format!("{repo:?} is not a repository: write owner/name"));
+        }
         if let Some(refusal) = setup::refusal(&self.setup()) {
             return Err(refusal);
         }
@@ -456,6 +459,36 @@ mod tests {
         );
         assert!(run::list(root.path()).unwrap().is_empty());
         assert_eq!(builds.setup().len(), 6);
+    }
+
+    #[test]
+    fn a_repository_that_isnt_owner_slash_name_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+
+        for bad in ["github.com/owner/repo", "owner", "../owner/repo"] {
+            let error = builds.start(bad, 7, None, "/plugin".into()).unwrap_err();
+            assert!(
+                error.ends_with("is not a repository: write owner/name"),
+                "{error}"
+            );
+        }
+        assert!(run::list(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_epic_spelled_two_ways_is_one_run() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let error = builds
+            .start("Owner/Repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(error, "a build of owner/repo#7 is already running");
     }
 
     #[test]

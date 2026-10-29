@@ -34,9 +34,11 @@ pub struct RunKey {
 }
 
 impl RunKey {
+    /// The run of issue `number` in `repo`. GitHub's names ignore case, so
+    /// a key is lowercased: one epic is one run however it is spelled.
     pub fn new(repo: &str, number: u64) -> Self {
         Self {
-            repo: repo.to_owned(),
+            repo: repo.to_ascii_lowercase(),
             number,
         }
     }
@@ -574,6 +576,12 @@ mod tests {
         );
         let read: RunKey = serde_json::from_str(r#""wpm/epik-test#13""#).unwrap();
         assert_eq!(read, key());
+    }
+
+    #[test]
+    fn a_key_ignores_case_as_github_does() {
+        assert_eq!(RunKey::new("WPM/Epik-Test", 13), key());
+        assert_eq!("WPM/Epik-Test#13".parse::<RunKey>(), Ok(key()));
     }
 
     #[test]

@@ -726,7 +726,7 @@ mod tests {
             build_dir(root, &run(), "20261028T170839Z-k3f9"),
             root.join("runs")
                 .join("epik-agent")
-                .join("Epik")
+                .join("epik")
                 .join("12")
                 .join("20261028T170839Z-k3f9")
         );
