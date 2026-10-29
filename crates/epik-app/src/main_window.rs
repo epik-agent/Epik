@@ -78,14 +78,28 @@ pub fn run_page(run: String, window: State<'_, Window>) -> Result<RunPage, Strin
     ))
 }
 
-#[tauri::command]
-pub fn rerun(run: String, window: State<'_, Window>) -> Result<(), String> {
-    window.builds.rerun(&key(&run)?).map(drop)
+/// Runs `work` on the builds away from the main thread, which draws every
+/// window: a rerun waits for its clone.
+async fn off_main(
+    window: State<'_, Window>,
+    work: impl FnOnce(&Builds) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let builds = window.builds.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&builds))
+        .await
+        .map_err(failed)?
 }
 
 #[tauri::command]
-pub fn delete_run(run: String, window: State<'_, Window>) -> Result<(), String> {
-    window.builds.delete(&key(&run)?)
+pub async fn rerun(run: String, window: State<'_, Window>) -> Result<(), String> {
+    let key = key(&run)?;
+    off_main(window, move |builds| builds.rerun(&key).map(drop)).await
+}
+
+#[tauri::command]
+pub async fn delete_run(run: String, window: State<'_, Window>) -> Result<(), String> {
+    let key = key(&run)?;
+    off_main(window, move |builds| builds.delete(&key)).await
 }
 
 #[tauri::command]

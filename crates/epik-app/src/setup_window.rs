@@ -92,20 +92,38 @@ fn mark_done(root: &Path) {
 /// Starts the step of the item `id`, as its button said, unless one is
 /// already running.
 #[tauri::command]
-pub fn setup_run(id: String, setup: State<'_, Setup>) -> Result<(), String> {
+pub async fn setup_run(id: String, setup: State<'_, Setup>) -> Result<(), String> {
+    let (root, builds, outputs) = (
+        setup.root.clone(),
+        setup.builds.clone(),
+        setup.outputs.clone(),
+    );
+    // Checking runs commands, so not on the main thread, which draws every
+    // window.
+    tauri::async_runtime::spawn_blocking(move || start_step(id, root, &builds, outputs))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Starts the step of the item `id`, unless one is already running.
+fn start_step(
+    id: String,
+    root: PathBuf,
+    builds: &Builds,
+    outputs: Arc<Mutex<BTreeMap<String, Output>>>,
+) -> Result<(), String> {
     let item = Item::ALL
         .into_iter()
         .find(|item| item.id() == id)
         .ok_or_else(|| format!("no setup item {id:?}"))?;
-    let check = setup
-        .builds
+    let check = builds
         .setup()
         .into_iter()
         .find(|check| check.item == item)
         .ok_or_else(|| format!("no setup item {id:?}"))?;
     let step = setup::step(&check).ok_or_else(|| format!("{} is already done", check.title))?;
     {
-        let mut outputs = setup.outputs.lock().unwrap();
+        let mut outputs = outputs.lock().unwrap();
         if outputs.get(&id).is_some_and(|output| output.running) {
             return Err(format!("{} is already being set up", check.title));
         }
@@ -117,7 +135,6 @@ pub fn setup_run(id: String, setup: State<'_, Setup>) -> Result<(), String> {
             },
         );
     }
-    let (root, outputs) = (setup.root.clone(), setup.outputs.clone());
     thread::spawn(move || {
         let print = |line: String| {
             if let Some(output) = outputs.lock().unwrap().get_mut(&id) {
