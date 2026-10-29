@@ -1,10 +1,9 @@
 //! The `gh` CLI, as Epik's MCP tools run it.
 //!
 //! Every tool's GitHub call goes through [`Gh`], which runs `gh` and keeps
-//! its exit code and output, as `plugin/server/src/gh.js` did. Tests give it
-//! a scripted `gh` instead: [`Gh::scripted`] answers each call with the
-//! first reply whose needle its arguments contain, as the Node server's
-//! `fake-github.js` did.
+//! its exit code and output. Tests give it a scripted `gh` instead:
+//! [`Gh::scripted`] answers each call with the first reply whose needle its
+//! arguments contain.
 
 use std::process::Command;
 use std::sync::Arc;

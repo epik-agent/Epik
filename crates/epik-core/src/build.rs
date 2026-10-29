@@ -96,8 +96,7 @@ impl From<io::Error> for Error {
     }
 }
 
-/// `title` made fit for a branch name, as `slug` in
-/// `plugin/server/src/tools/build_start.js` does it: lowercased, each run
+/// `title` made fit for a branch name: lowercased, each run
 /// of anything but ASCII letters and digits made one `-`, cut to 40
 /// characters, and trimmed of `-`.
 pub fn slug(title: &str) -> String {

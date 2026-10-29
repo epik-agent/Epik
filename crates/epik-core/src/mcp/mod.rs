@@ -1,7 +1,8 @@
 //! Epik's MCP server, which `epik-app mcp` serves over stdio.
 //!
-//! It offers the tools the plugin's Node server offered, with the same
-//! names, descriptions and arguments, so the plugin's skills don't change.
+//! It offers the tools the plugin's Node server offered before it, with
+//! the same names, descriptions and arguments, so the plugin's skills
+//! didn't change.
 //! Each tool's name, description and input schema are in `tools.json`, and
 //! its behavior is a function here or in a module beside this one. A tool
 //! returns text, which the caller gets as is, or JSON, which the caller

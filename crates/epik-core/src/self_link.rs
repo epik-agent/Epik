@@ -141,7 +141,10 @@ mod tests {
 
         // Started as ~/.epik/bin/epik-app, the app may be told that is
         // where it is.
-        assert_eq!(refresh(root.path(), &path(root.path())).unwrap(), Refreshed::Kept);
+        assert_eq!(
+            refresh(root.path(), &path(root.path())).unwrap(),
+            Refreshed::Kept
+        );
 
         assert_eq!(contents(&path(root.path())), "the app");
     }

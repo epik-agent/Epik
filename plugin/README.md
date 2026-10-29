@@ -10,7 +10,6 @@ An *epic* is a dependency-ordered set of issues: an epic issue with sub-issues, 
 plugin/
   .claude-plugin/
     plugin.json         # plugin manifest
-  server/               # the Node MCP server (see server/README.md)
   skills/
     assistant/
       SKILL.md          # epik:assistant — how Epik plans; loads itself
@@ -18,12 +17,12 @@ plugin/
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
       procedure.md      # the per-issue procedure
-  .mcp.json             # declares the epik server
+  .mcp.json             # runs the epik server: the Epik app's `epik-app mcp`
 ```
 
 ## Design in one paragraph
 
-The skills are **policy**; `gh` is **mechanism**. The `epik` server ships inside the plugin and runs every GitHub operation through the `gh` CLI, under the user's own Node. Installing the plugin brings the server along. Builds are handed to the Epik app (`crates/epik-app`), which is installed separately: `build_start` asks it to build, and `build_status` and `build_list` ask it about builds, over the local socket in [`docs/app-protocol.md`](../docs/app-protocol.md).
+The skills are **policy**; `gh` is **mechanism**. The plugin is skills and configuration, with no code of its own. Its tools come from the Epik app (`crates/epik-app`), which must be installed: `.mcp.json` runs `epik-app mcp` from `~/.epik/bin/epik-app`, the link the app keeps to itself, and that server runs every GitHub operation through the `gh` CLI. `build_start` asks the running app to build, starting it if needed, and `build_status` and `build_list` ask it about runs, over the local socket in [`docs/app-protocol.md`](../docs/app-protocol.md).
 
 ## Install
 
@@ -53,7 +52,7 @@ The repo root is a single-entry marketplace, so a local clone works exactly like
 
 After committing later changes to the plugin, run `/plugin marketplace update epik` then `/reload-plugins` to pick them up. `plugin.json` sets no `version`, so each commit counts as a new version.
 
-Changes to the server's source need a rebuilt `server/dist/index.js` (see [`server/README.md`](server/README.md)); CI fails when the bundle is stale.
+The tools are the Epik app's, so trying a change to them means building the app (`cargo build -p epik-app`) and running it once, which points `~/.epik/bin/epik-app` at the build.
 
 ## Usage
 

@@ -9,11 +9,13 @@ and opens a pull request for you to review.
 
 ## Layout
 
-- [`plugin/`](plugin/README.md) — the **epik** plugin: skills, and the Node
-  server that runs Epik's GitHub operations through the `gh` CLI.
-- [`crates/`](crates) — the **Epik app** (`epik-app`), which runs builds, and
-  `epik-core`, the library it is built on. [`docs/app-protocol.md`](docs/app-protocol.md)
-  is how the plugin talks to it.
+- [`plugin/`](plugin/README.md) — the **epik** plugin: skills and
+  configuration. Its tools come from the Epik app.
+- [`crates/`](crates) — the **Epik app** (`epik-app`), Epik's only program: it
+  runs builds and, as `epik-app mcp`, serves Epik's MCP tools, running its
+  GitHub operations through the `gh` CLI. `epik-core` is the library it is
+  built on. [`docs/app-protocol.md`](docs/app-protocol.md) is how the MCP
+  server talks to the running app.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
@@ -26,8 +28,8 @@ Epik app, which runs builds on your machine.
 You need:
 
 - A GitHub account.
-- [Node](https://nodejs.org/) 26 or later, which runs Epik's server and
-  the app's coding agents.
+- [Node](https://nodejs.org/) 26 or later, which runs the app's coding
+  agents.
 - [Rust](https://www.rust-lang.org/), stable, installed with
   [rustup](https://rustup.rs/), which builds the Epik app.
 - The [`gh` CLI](https://cli.github.com/), signed in with
@@ -47,7 +49,10 @@ cargo install --git https://github.com/epik-agent/Epik epik-app
 ```
 
 That puts `epik-app` in `~/.cargo/bin`, which rustup adds to your `PATH`.
-You don't need to start it: Epik starts it the first time you build. On
+You don't need to start it: Epik starts it the first time you build. Run it
+once, though (`epik-app --version` will do): each time it runs it links
+itself at `~/.epik/bin/epik-app`, which is where the plugin finds Epik's
+tools. On
 Linux, the app needs the system packages Tauri needs; see Tauri's
 [Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
 Where there is no tray, such as a server without a desktop, the app runs
@@ -158,3 +163,9 @@ Auto mode needs a recent model, so choose one with `/model`. On a Team or
 Enterprise plan, an admin can turn auto mode off for the organization. Claude
 Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes)
 lists the models that support it.
+
+**On Windows, Epik's tools don't appear in Claude Code**
+The plugin runs Epik's tools as `${HOME}/.epik/bin/epik-app mcp`. Claude
+Code expands `${HOME}` on macOS; that it does on Windows is not yet
+checked. If it doesn't, this is a known limitation, to be fixed in a later
+release.

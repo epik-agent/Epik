@@ -89,8 +89,7 @@ impl Graph {
     }
 }
 
-/// Tarjan's algorithm over a [`Graph`], ported from `levels` in
-/// `plugin/server/src/graph.js`. It emits each strongly connected component
+/// Tarjan's algorithm over a [`Graph`]. It emits each strongly connected component
 /// after every component it can reach, so an issue's blockers are leveled
 /// before it is.
 struct Tarjan<'g> {
