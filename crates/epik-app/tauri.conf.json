@@ -3,13 +3,15 @@
   "productName": "Epik",
   "identifier": "dev.epik-agent.app",
   "build": {
-    "frontendDist": "ui"
+    "frontendDist": "../epik-ui/dist",
+    "beforeDevCommand": { "script": "trunk build", "cwd": "../epik-ui", "wait": true },
+    "beforeBuildCommand": { "script": "trunk build --release", "cwd": "../epik-ui" }
   },
   "app": {
     "windows": [],
     "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'"
     }
   },
   "bundle": {

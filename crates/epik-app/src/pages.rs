@@ -1,9 +1,9 @@
 //! What the app's window and popover show, as pure functions of the runs.
 //!
-//! The pages in `ui/` only place what these give them. Everything a page
-//! says is decided here, in words, so it is tested without a desktop: the
-//! window describes, in sentences, what is happening, and every issue or
-//! pull request it mentions links to GitHub.
+//! The windows, in `epik-ui` and `ui/`, only place what these give them.
+//! Everything a page says is decided here, in words, so it is tested
+//! without a desktop: the window describes, in sentences, what is
+//! happening, and every issue or pull request it mentions links to GitHub.
 
 use chrono::{DateTime, FixedOffset, Utc};
 use epik_core::graph::Graph;
