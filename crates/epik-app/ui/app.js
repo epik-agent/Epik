@@ -33,8 +33,13 @@ function route() {
   return { page: "home" };
 }
 
+// The hash for a route. A run's `#` would end the URL's fragment.
+function href(path) {
+  return `#/${path.replaceAll("#", "%23")}`;
+}
+
 function go(path) {
-  window.location.hash = `#/${path.replace("#", "%23")}`;
+  window.location.hash = href(path);
 }
 
 function mark() {
@@ -89,7 +94,7 @@ function buildingCard(card) {
   const head = element("div", "card-head");
   const titles = element("div", "titles");
   const title = element("a", "title", card.title);
-  title.href = `#/${`run/${card.run}`.replace("#", "%23")}`;
+  title.href = href(`run/${card.run}`);
   const sub = element("div", "sub");
   sub.append(githubLink(card.epic.text, card.epic.url), document.createTextNode(` · ${card.count}`));
   titles.append(title, sub);
@@ -107,7 +112,7 @@ function endedCard(card, attention) {
   const head = element("div", "card-head");
   const titles = element("div", "titles");
   const title = element("a", "title", card.title);
-  title.href = `#/${`run/${card.run}`.replace("#", "%23")}`;
+  title.href = href(`run/${card.run}`);
   const sub = element("div", attention ? "sub said bad" : "sub said good");
   sub.append(githubLink(card.epic.text, card.epic.url), document.createTextNode(" · "), words(card.sentence));
   titles.append(title, sub);
@@ -183,7 +188,7 @@ function drawRunBarNow(page) {
     page.also_building.forEach(([run, title], i) => {
       if (i) also.append(document.createTextNode(", "));
       const a = element("a", "", title);
-      a.href = `#/${`run/${run}`.replace("#", "%23")}`;
+      a.href = href(`run/${run}`);
       also.append(a);
     });
     parts.push(also);
