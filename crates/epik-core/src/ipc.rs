@@ -537,6 +537,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: Vec::new(),
                 closed: Vec::new(),
+                plugin_dir: None,
             })
             .unwrap();
     }

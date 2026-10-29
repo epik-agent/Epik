@@ -130,6 +130,7 @@ mod tests {
                     },
                 ],
                 closed: vec![],
+                plugin_dir: None,
             })
             .unwrap();
 

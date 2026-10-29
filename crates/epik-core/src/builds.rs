@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{Agent, ClaudeAcp};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
-use crate::record::Kind;
-use crate::run::RunKey;
+use crate::record::{self, Kind};
+use crate::run::{self, Disposition, RunKey, RunState};
 
 /// A build that has started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +171,48 @@ impl Builds {
         starting
             .recv()
             .unwrap_or_else(|_| Err("the build stopped before it started".to_owned()))
+    }
+
+    /// Starts a new build of `run`, which needs attention, as its last
+    /// build was started: with the same branch and plugin. Like any build,
+    /// it skips the issues already closed.
+    pub fn rerun(&self, run: &RunKey) -> Result<Started, String> {
+        let state = self.needing_attention(run)?;
+        let latest = record::list_builds(&self.root, run)
+            .ok()
+            .and_then(|builds| builds.into_iter().last())
+            .ok_or_else(|| format!("couldn't read {run}'s builds"))?;
+        let plugin_dir = latest
+            .plugin_dir
+            .ok_or_else(|| format!("{run}'s last build didn't record Epik's plugin"))?;
+        self.start(&state.repo, state.number, Some(latest.branch), plugin_dir)
+    }
+
+    /// Deletes `run`, which needs attention: every build's clone and
+    /// record. Refused while one of its builds is running.
+    pub fn delete(&self, run: &RunKey) -> Result<(), String> {
+        // Held so that no build of the run starts while it is deleted.
+        let _threads = lock(&self.threads);
+        if lock(&self.active).contains(run) {
+            return Err(format!("a build of {run} is running"));
+        }
+        self.needing_attention(run)?;
+        run::delete(&self.root, run).map_err(|error| format!("couldn't delete {run}: {error}"))
+    }
+
+    /// `run`'s state, if it needs attention; else why not.
+    fn needing_attention(&self, run: &RunKey) -> Result<RunState, String> {
+        let state = run::read(&self.root, run).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("no run {run}"),
+            _ => format!("couldn't read {run}: {error}"),
+        })?;
+        match state.disposition {
+            Disposition::NeedsAttention => Ok(state),
+            Disposition::Building => Err(format!("a build of {run} is running")),
+            Disposition::WaitingForReview => Err(format!(
+                "{run} is waiting for review, and leaves by itself when its issue closes"
+            )),
+        }
     }
 
     /// The runs with a build still running.
@@ -374,6 +416,92 @@ mod tests {
         let ids: Vec<&str> = run.builds.iter().map(|b| b.build_id.as_str()).collect();
         assert_eq!(ids, [first.build_id.as_str(), second.build_id.as_str()]);
         assert_eq!(run.disposition, crate::run::Disposition::Building);
+    }
+
+    /// A build of `owner/repo#7` that was interrupted, under `root`.
+    fn interrupted(root: &Path) -> Started {
+        let builds = builds(root, fake_github());
+        let started = builds
+            .start("owner/repo", 7, Some("topic".to_owned()), "/plugin".into())
+            .unwrap();
+        builds.shutdown();
+        started
+    }
+
+    #[test]
+    fn rerunning_adds_a_build_with_the_same_branch_and_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let first = interrupted(root.path());
+        let builds = builds(root.path(), fake_github());
+
+        let second = builds.rerun(&first.run).unwrap();
+
+        assert_eq!(second.run, first.run);
+        assert_eq!(second.branch, "topic");
+        let latest = record::list_builds(root.path(), &first.run).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[1].plugin_dir, Some(PathBuf::from("/plugin")));
+        assert_eq!(builds.active(), std::slice::from_ref(&first.run));
+    }
+
+    #[test]
+    fn rerunning_an_interrupted_epic_skips_its_merged_issues() {
+        let root = tempfile::tempdir().unwrap();
+        let github = || {
+            let github = fake_github();
+            github.add_issue("owner/repo", 1, "The epic");
+            for sub in [2, 3] {
+                github.add_issue("owner/repo", sub, "A sub-issue");
+                github.add_sub_issue("owner/repo", 1, "owner/repo", sub);
+            }
+            github.set_state("owner/repo", 2, State::Closed);
+            github
+        };
+        let first = builds(root.path(), github());
+        let started = first
+            .start("owner/repo", 1, None, "/plugin".into())
+            .unwrap();
+        first.shutdown();
+
+        let second = builds(root.path(), github());
+        second.rerun(&started.run).unwrap();
+
+        let run = run::read(root.path(), &started.run).unwrap();
+        assert_eq!(run.builds.len(), 2);
+        assert_eq!(run.issue(2).unwrap().status, record::IssueStatus::Closed);
+        assert_eq!(run.issue(3).unwrap().status, record::IssueStatus::Running);
+    }
+
+    #[test]
+    fn a_running_or_unknown_run_is_not_rerun_or_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        let started = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let rerun = builds.rerun(&started.run).unwrap_err();
+        let delete = builds.delete(&started.run).unwrap_err();
+
+        assert_eq!(rerun, "a build of owner/repo#7 is running");
+        assert_eq!(delete, "a build of owner/repo#7 is running");
+        let unknown = RunKey::new("owner/repo", 9);
+        assert_eq!(builds.rerun(&unknown).unwrap_err(), "no run owner/repo#9");
+        assert_eq!(builds.delete(&unknown).unwrap_err(), "no run owner/repo#9");
+    }
+
+    #[test]
+    fn deleting_a_run_that_needs_attention_leaves_nothing_of_it() {
+        let root = tempfile::tempdir().unwrap();
+        let started = interrupted(root.path());
+        let builds = builds(root.path(), fake_github());
+
+        builds.delete(&started.run).unwrap();
+
+        assert!(run::list(root.path()).unwrap().is_empty());
+        assert!(!run::run_dir(root.path(), &started.run).exists());
+        let clones = crate::cleanup::builds_dir(root.path());
+        assert!(!clones.exists() || std::fs::read_dir(clones).unwrap().count() == 0);
     }
 
     #[test]

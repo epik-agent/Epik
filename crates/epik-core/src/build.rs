@@ -246,6 +246,7 @@ pub fn start<'a>(
         branch: branch.clone(),
         issues,
         closed: closed.iter().copied().collect(),
+        plugin_dir: Some(request.plugin_dir.clone()),
     });
     Ok(Build {
         github,

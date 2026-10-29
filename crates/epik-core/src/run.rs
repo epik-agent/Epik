@@ -373,6 +373,37 @@ pub fn list(root: &Path) -> io::Result<Vec<RunState>> {
     Ok(runs)
 }
 
+/// Removes everything of `run` under `root`: every build's clone, with its
+/// worktrees, and every build's record. The caller makes sure none of its
+/// builds is running.
+pub fn delete(root: &Path, run: &RunKey) -> io::Result<()> {
+    let clones = run.under(cleanup::builds_dir(root));
+    for clone in subdirectories(&clones)? {
+        cleanup::remove_clone(&clone)?;
+    }
+    for dir in [clones, run_dir(root, run)] {
+        match fs::remove_dir_all(&dir) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        prune(&dir, root);
+    }
+    Ok(())
+}
+
+/// Removes the empty directories above `dir`, up to but not including
+/// `<root>/runs` or `<root>/builds`.
+fn prune(dir: &Path, root: &Path) {
+    let stops = [record::runs_dir(root), cleanup::builds_dir(root)];
+    let mut dir = dir.parent();
+    while let Some(parent) = dir {
+        if stops.iter().any(|stop| stop == parent) || fs::remove_dir(parent).is_err() {
+            break;
+        }
+        dir = parent.parent();
+    }
+}
+
 /// Records every build that is still running as interrupted. Called when
 /// the app starts, before any build can run, so a running build is one an
 /// app that stopped was running.
@@ -434,6 +465,7 @@ mod tests {
                 },
             ],
             closed: closed.to_vec(),
+            plugin_dir: None,
         }
     }
 
@@ -684,6 +716,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
+                plugin_dir: None,
             })
             .unwrap();
         std::fs::create_dir_all(run_dir(root.path(), &RunKey::new("wpm/empty", 1))).unwrap();
@@ -715,6 +748,32 @@ mod tests {
         assert!(activity.last_event.is_some());
         assert_eq!(run.issue(14).unwrap().activity, None);
         assert_eq!(list(root.path()).unwrap()[0], run);
+    }
+
+    #[test]
+    fn deleting_a_run_leaves_nothing_of_it() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), &interrupted());
+        write(root.path(), &finished());
+        for build in ["20261028T170000Z-aaaa", "20261028T171640Z-bbbb"] {
+            crate::cleanup::tests::repository(&clone_dir(root.path(), &key(), build));
+        }
+        let other = RunKey::new("wpm/epik-test", 99);
+        BuildWriter::create(root.path(), &other, "b").unwrap();
+        fs::create_dir_all(clone_dir(root.path(), &other, "b")).unwrap();
+
+        delete(root.path(), &key()).unwrap();
+
+        assert!(!run_dir(root.path(), &key()).exists());
+        assert!(!key().under(cleanup::builds_dir(root.path())).exists());
+        assert!(run_dir(root.path(), &other).exists(), "other runs stay");
+        assert!(clone_dir(root.path(), &other, "b").exists());
+        assert_eq!(keys(root.path()).unwrap(), std::slice::from_ref(&other));
+
+        delete(root.path(), &other).unwrap();
+        let runs = fs::read_dir(record::runs_dir(root.path())).unwrap();
+        assert_eq!(runs.count(), 0, "empty parents are pruned");
+        delete(root.path(), &other).unwrap();
     }
 
     #[test]
