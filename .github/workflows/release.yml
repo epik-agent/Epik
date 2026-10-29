@@ -46,11 +46,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Sets Git's init.defaultBranch for every job, which silences the
+  # hint actions/checkout's `git init` prints.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
 
 jobs:
   version:
     name: Tag matches the app's version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Check the tag
@@ -81,7 +86,7 @@ jobs:
           - os: windows-latest
             targets: ""
             args: --bundles msi
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             targets: ""
             args: --bundles appimage,deb
     runs-on: ${{ matrix.os }}
@@ -220,7 +225,7 @@ jobs:
   release:
     name: Draft the release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
         with:
