@@ -355,6 +355,9 @@ pub struct IssueState {
     pub status: IssueStatus,
     pub reason: Option<String>,
     pub pull_request: Option<u64>,
+    /// When its agent last started, if it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     /// Its pull request's merge commit, once Epik has merged it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
@@ -463,6 +466,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 },
                 reason: None,
                 pull_request: None,
+                started_at: None,
                 merge_commit: None,
                 duration_ms: None,
                 cost_usd: None,
@@ -479,9 +483,10 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         state.latest_at = state.latest_at.max(event.at());
         match event {
             Event::BuildStarted { .. } => {}
-            Event::IssueStarted { number, .. } => {
+            Event::IssueStarted { at, number } => {
                 if let Some(issue) = state.issue_mut(*number) {
                     issue.status = IssueStatus::Running;
+                    issue.started_at = Some(*at);
                 }
             }
             Event::IssueFinished {
@@ -864,6 +869,7 @@ mod tests {
         assert_eq!(state.status, BuildStatus::Running);
         assert_eq!(state.issue(13).unwrap().status, IssueStatus::Merged);
         assert_eq!(state.issue(14).unwrap().status, IssueStatus::Running);
+        assert_eq!(state.issue(14).unwrap().started_at, Some(time(12)));
         assert_eq!(state.cost_usd, dollars("0.10"));
         assert_eq!(state.elapsed_ms, 12_000);
         assert_eq!(state.ended_at, None);

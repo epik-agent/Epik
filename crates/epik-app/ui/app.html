@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- The Epik app's main window: Home, a run's page, and Settings. It shows
+     runs while they're being built; GitHub is the archive. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Epik</title>
+    <link rel="stylesheet" href="epik.css" />
+    <link rel="stylesheet" href="app.css" />
+    <script src="common.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header id="bar"></header>
+    <main id="page"></main>
+    <dialog id="settings">
+      <form method="dialog" class="dialog-head">
+        <h2>Settings</h2>
+        <button class="close" aria-label="Close">✕</button>
+      </form>
+      <section>
+        <h3>Monitored repositories</h3>
+        <p class="muted">Epik monitors these repositories. When Epik creates an epic or starts a build in a repository
+          that isn't listed, it adds that repository here.</p>
+        <ul id="repositories"></ul>
+        <form id="add">
+          <label for="repo">Monitor another repository</label>
+          <div class="row">
+            <input id="repo" placeholder="owner/name" autocomplete="off" spellcheck="false" />
+            <button class="primary">Add</button>
+          </div>
+          <p id="add-error" class="error"></p>
+        </form>
+      </section>
+    </dialog>
+    <dialog id="confirm">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-text"></p>
+      <ul id="confirm-runs"></ul>
+      <form method="dialog" class="buttons">
+        <button value="cancel" id="confirm-cancel" autofocus>Cancel</button>
+        <button value="ok" class="danger">Stop monitoring</button>
+      </form>
+    </dialog>
+  </body>
+</html>

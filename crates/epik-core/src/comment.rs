@@ -177,6 +177,7 @@ mod tests {
             reason: None,
             pull_request: Some(pr),
             merge_commit: Some(sha.to_owned()),
+            started_at: None,
             duration_ms: Some(ms),
             cost_usd: Some(Decimal::from_str(cost).unwrap()),
             activity: None,

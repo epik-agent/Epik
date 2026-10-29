@@ -23,7 +23,7 @@ use tauri::{AppHandle, RunEvent, Wry};
 
 use crate::App;
 use crate::menu::{self, Item, Menu};
-use crate::{setup_window, window};
+use crate::{main_window, setup_window};
 
 /// How often the menu is redrawn from the run listing.
 const REFRESH: Duration = Duration::from_secs(2);
@@ -31,6 +31,7 @@ const REFRESH: Duration = Duration::from_secs(2);
 const QUIT: &str = "quit";
 const OPEN_RUNS_FOLDER: &str = "open-runs-folder";
 const CHECK_SETUP: &str = "check-setup";
+const OPEN_EPIK: &str = "open-epik";
 /// The prefix of a run's item's id; the run, `owner/name#number`, follows
 /// it.
 const RUN: &str = "run:";
@@ -65,8 +66,9 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     }
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tauri = tauri::Builder::default()
-        .manage(window::Runs {
+        .manage(main_window::Window {
             root: app.root.clone(),
+            builds: app.builds.clone(),
         })
         .manage(setup_window::Setup {
             root: app.root.clone(),
@@ -74,7 +76,16 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             outputs: Default::default(),
         })
         .invoke_handler(tauri::generate_handler![
-            window::run_view,
+            main_window::home,
+            main_window::popover,
+            main_window::run_page,
+            main_window::rerun,
+            main_window::delete_run,
+            main_window::settings,
+            main_window::monitor,
+            main_window::stop_monitoring,
+            main_window::open_github,
+            main_window::open_log,
             setup_window::setup_checklist,
             setup_window::setup_run,
             setup_window::setup_output,
@@ -103,11 +114,14 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
                 }
             } else if id == OPEN_RUNS_FOLDER {
                 reveal(&record::runs_dir(&root));
+            } else if id == OPEN_EPIK {
+                if let Err(error) = main_window::open(handle, "") {
+                    eprintln!("epik-app: couldn't open Epik's window: {error}");
+                }
             } else if let Some(run) = id.strip_prefix(RUN)
-                && let Ok(key) = run.parse()
-                && let Err(error) = window::open(handle, &key)
+                && let Err(error) = main_window::open(handle, &main_window::run_route(run))
             {
-                eprintln!("epik-app: couldn't open the window of run {run}: {error}");
+                eprintln!("epik-app: couldn't open the page of run {run}: {error}");
             }
         })
         .build(&tauri)
@@ -219,6 +233,13 @@ fn native(handle: &AppHandle, shown: &Menu) -> tauri::Result<tauri::menu::Menu<W
                 )?),
                 Item::Note(text) => Box::new(MenuItem::new(handle, text, false, None::<&str>)?),
                 Item::Separator => Box::new(PredefinedMenuItem::separator(handle)?),
+                Item::OpenEpik => Box::new(MenuItem::with_id(
+                    handle,
+                    OPEN_EPIK,
+                    "Open Epik",
+                    true,
+                    None::<&str>,
+                )?),
                 Item::CheckSetup => Box::new(MenuItem::with_id(
                     handle,
                     CHECK_SETUP,

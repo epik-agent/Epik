@@ -20,7 +20,7 @@ use serde_json::Value;
 pub const RECENT: usize = 30;
 
 /// What a running agent is doing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Activity {
     /// Its latest tool call, in words: "Editing src/eval.rs", "Running
     /// cargo test".
@@ -32,6 +32,10 @@ pub struct Activity {
     pub last_event: Option<DateTime<Utc>>,
     /// Its latest actions in words, oldest first, at most [`RECENT`].
     pub recent: Vec<String>,
+    /// What its session has cost so far, in US dollars, from its latest
+    /// usage update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// The activity in the agent log at `path`.
@@ -59,6 +63,7 @@ pub fn parse(text: &str) -> Activity {
     // The calls with their input known, in the order it arrived.
     let mut actions: Vec<String> = Vec::new();
     let mut last_test = None;
+    let mut cost_usd = None;
     for line in text.lines() {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -74,6 +79,11 @@ pub fn parse(text: &str) -> Activity {
             continue;
         };
         let kind = update.get("sessionUpdate").and_then(Value::as_str);
+        if kind == Some("usage_update")
+            && update.pointer("/cost/currency").and_then(Value::as_str) == Some("USD")
+        {
+            cost_usd = update.pointer("/cost/amount").and_then(Value::as_f64);
+        }
         if !matches!(kind, Some("tool_call" | "tool_call_update")) {
             continue;
         }
@@ -123,6 +133,7 @@ pub fn parse(text: &str) -> Activity {
         last_test,
         last_event: None,
         recent,
+        cost_usd,
     }
 }
 
@@ -314,6 +325,7 @@ mod tests {
 
         assert_eq!(activity.last_action.as_deref(), Some("Running cargo build"));
         assert_eq!(activity.last_test.as_deref(), Some("25 passed, 1 failed"));
+        assert_eq!(activity.cost_usd, Some(0.42));
         assert_eq!(
             activity.recent,
             [

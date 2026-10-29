@@ -1,10 +1,10 @@
 //! The Epik app, which runs Epik's builds.
 
+mod main_window;
 mod menu;
+mod pages;
 mod setup_window;
 mod tray;
-mod view;
-mod window;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
