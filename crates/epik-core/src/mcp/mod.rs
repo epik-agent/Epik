@@ -7,9 +7,14 @@
 //! returns text, which the caller gets as is, or JSON, which the caller
 //! gets as JSON text; a tool that fails gives the caller its message.
 
+mod blocked_by;
 mod build;
 mod epic_status;
 pub mod gh;
+mod gh_raw;
+mod labels;
+mod projects;
+mod runs;
 mod schema;
 
 use std::path::PathBuf;
@@ -144,7 +149,22 @@ fn run(context: &Context, name: &str, args: &Args) -> Result<Reply, String> {
         "build_status" => build::status(context, args),
         "build_list" => build::list(context, args),
         "epic_status" => epic_status::run(context, args),
-        _ => Err(format!("{name} isn't served by epik-app mcp yet")),
+        "gh_raw" => gh_raw::run(context, args),
+        "label_list" => labels::list(context, args),
+        "label_create" => labels::create(context, args),
+        "label_delete" => labels::delete(context, args),
+        "run_list" => runs::list(context, args),
+        "run_get" => runs::get(context, args),
+        "run_logs" => runs::logs(context, args),
+        "project_list" => projects::list(context, args),
+        "project_list_items" => projects::list_items(context, args),
+        "project_get_item" => projects::get_item(context, args),
+        "project_set_status" => projects::set_status(context, args),
+        "issue_set_blocked_by" => blocked_by::set(context, args),
+        "issue_remove_blocked_by" => blocked_by::remove(context, args),
+        "issue_list_blocked_by" => blocked_by::list(context, args),
+        // `Server::call` calls only the tools in `tools.json`.
+        _ => Err(format!("Tool {name} not found")),
     }
 }
 
@@ -156,6 +176,17 @@ fn string<'a>(args: &'a Args, name: &str) -> Option<&'a str> {
 /// An integer argument.
 fn integer(args: &Args, name: &str) -> Option<i64> {
     args.get(name).and_then(Value::as_i64)
+}
+
+/// A boolean argument, false when it's missing.
+fn boolean(args: &Args, name: &str) -> bool {
+    args.get(name).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// A string argument, `None` when it's missing or empty, as JavaScript's
+/// falsy check had it.
+fn nonempty<'a>(args: &'a Args, name: &str) -> Option<&'a str> {
+    string(args, name).filter(|text| !text.is_empty())
 }
 
 impl ServerHandler for Server {
@@ -206,13 +237,76 @@ pub(crate) mod tests {
     /// A server whose `gh` answers with `replies`, and whose app is at an
     /// address where nothing listens and that can't be started.
     pub(crate) fn server(replies: Vec<(&str, Value)>) -> Server {
+        server_with(scripted(replies).0)
+    }
+
+    /// The calls a scripted `gh` got, each its arguments.
+    pub(crate) type Calls = Arc<Mutex<Vec<Vec<String>>>>;
+
+    /// A `gh` that answers with `replies`, as [`Gh::scripted`] does, and the
+    /// calls it gets.
+    pub(crate) fn scripted(replies: Vec<(&str, Value)>) -> (Gh, Calls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let replies = replies
             .into_iter()
             .map(|(needle, body)| (needle.to_owned(), body))
             .collect();
+        (Gh::scripted(replies, calls.clone()), calls)
+    }
+
+    /// A `gh` that prints `stdout` when called with exactly `args`, joined
+    /// by spaces, and otherwise fails naming the arguments it got.
+    pub(crate) fn expect_gh(args: &str, stdout: &str) -> Gh {
+        let (args, stdout) = (args.to_owned(), stdout.to_owned());
+        Gh::with(move |got| {
+            let got = got.join(" ");
+            Ok(if got == args {
+                gh::Output {
+                    exit_code: 0,
+                    stdout: stdout.clone(),
+                    stderr: String::new(),
+                }
+            } else {
+                gh::Output {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("unexpected: gh {got}\n"),
+                }
+            })
+        })
+    }
+
+    /// A `gh` that always fails, printing `stderr`.
+    pub(crate) fn failing_gh(stderr: &str) -> Gh {
+        let stderr = format!("{stderr}\n");
+        Gh::with(move |_| {
+            Ok(gh::Output {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: stderr.clone(),
+            })
+        })
+    }
+
+    /// Calls tool `name` on a server with `gh`, giving its result's text, or
+    /// its message when it fails.
+    pub(crate) fn call(gh: Gh, name: &str, args: Value) -> Result<String, String> {
+        let result = server_with(gh).call(name, args).expect("valid arguments");
+        let (text, error) = text(&result);
+        if error { Err(text) } else { Ok(text) }
+    }
+
+    /// Calls tool `name` as [`call`] does, parsing its result as JSON.
+    pub(crate) fn call_json(gh: Gh, name: &str, args: Value) -> Result<Value, String> {
+        call(gh, name, args).map(|text| serde_json::from_str(&text).expect("JSON"))
+    }
+
+    /// A server with `gh`, whose app is at an address where nothing listens
+    /// and that can't be started.
+    pub(crate) fn server_with(gh: Gh) -> Server {
         let root = std::env::temp_dir().join(format!("epik-mcp-{}", std::process::id()));
         Server::new(Context {
-            gh: Gh::scripted(replies, Arc::new(Mutex::new(Vec::new()))),
+            gh,
             address: crate::ipc::Address::in_root(&root.join("nowhere")),
             root,
             start_app: Box::new(|| Err(std::io::Error::other("no app in tests"))),
