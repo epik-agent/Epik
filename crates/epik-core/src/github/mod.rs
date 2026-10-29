@@ -109,6 +109,13 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
+/// A pull request's state, and its merge commit once it has merged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullStatus {
+    pub state: PullState,
+    pub merge_commit: Option<String>,
+}
+
 /// How a pull request is merged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MergeMethod {
@@ -217,6 +224,17 @@ pub trait GitHub: Send + Sync {
     /// none, and returns the merge commit's SHA. An already-merged pull
     /// request is success.
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
+
+    /// Comments `body` on issue `number`.
+    fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()>;
+
+    /// Pull request `pr`'s state and merge commit.
+    fn pull_request(&self, repo: &str, pr: u64) -> Result<PullStatus>;
+
+    /// Whether the repository exists for the user. GitHub answers "not
+    /// found" both for a repository that is gone and for one the user can
+    /// no longer reach, so this can't tell them apart.
+    fn repo_exists(&self, repo: &str) -> Result<bool>;
 
     /// Comments `comment` on issue `number` and closes it.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()>;

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{Agent, ClaudeAcp};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
+use crate::reconcile;
 use crate::record::{self, Kind};
 use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
@@ -220,6 +221,11 @@ impl Builds {
                 "{run} is waiting for review, and leaves by itself when its issue closes"
             )),
         }
+    }
+
+    /// Checks GitHub for every run not building: see [`reconcile`].
+    pub fn reconcile(&self) -> reconcile::Report {
+        reconcile::reconcile(&self.root, &*self.github, &self.active())
     }
 
     /// The runs with a build still running.
