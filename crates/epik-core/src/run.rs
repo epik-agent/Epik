@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::activity;
 use crate::cleanup;
 use crate::record::{
     self, BuildState, BuildStatus, BuildWriter, Event, IssueState, IssueStatus, Kind,
@@ -286,11 +287,28 @@ fn add<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
     }
 }
 
-/// The run `run`'s state, or [`io::ErrorKind::NotFound`] if it has no
-/// builds.
+/// The run `run`'s state, with what each running agent is doing, or
+/// [`io::ErrorKind::NotFound`] if it has no builds.
 pub fn read(root: &Path, run: &RunKey) -> io::Result<RunState> {
     fold(&record::list_builds(root, run)?)
+        .map(|state| with_activity(root, state))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no run {run}")))
+}
+
+/// `state` with each running issue's [`Activity`], read from its agent's
+/// log in the running build. A log that can't be read gives none.
+fn with_activity(root: &Path, mut state: RunState) -> RunState {
+    let Some(build_id) = state.running_build.clone() else {
+        return state;
+    };
+    let dir = record::build_dir(root, &state.run, &build_id);
+    for issue in &mut state.issues {
+        if issue.status == IssueStatus::Running {
+            let log = dir.join(format!("{}.jsonl", issue.issue.number));
+            issue.activity = activity::read(&log).ok();
+        }
+    }
+    state
 }
 
 /// Every run with a record under `root`, by the directories under
@@ -344,7 +362,7 @@ pub fn list(root: &Path) -> io::Result<Vec<RunState>> {
     let mut runs = Vec::new();
     for key in keys(root)? {
         if let Some(run) = fold(&record::list_builds(root, &key)?) {
-            runs.push(run);
+            runs.push(with_activity(root, run));
         }
     }
     runs.sort_by(|a, b| {
@@ -678,6 +696,25 @@ mod tests {
         assert_eq!(read(root.path(), &key()).unwrap(), runs[0]);
         let missing = read(root.path(), &RunKey::new("wpm/empty", 1)).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_running_issue_reports_what_its_agent_is_doing() {
+        let root = tempfile::tempdir().unwrap();
+        let running = &finished()[..2];
+        write(root.path(), running);
+        let log = format!("{}/src/fixtures/agent.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let dir = record::build_dir(root.path(), &key(), "20261028T171640Z-bbbb");
+        fs::copy(log, dir.join("15.jsonl")).unwrap();
+
+        let run = read(root.path(), &key()).unwrap();
+
+        let activity = run.issue(15).unwrap().activity.as_ref().unwrap();
+        assert_eq!(activity.last_action.as_deref(), Some("Running cargo build"));
+        assert_eq!(activity.last_test.as_deref(), Some("25 passed, 1 failed"));
+        assert!(activity.last_event.is_some());
+        assert_eq!(run.issue(14).unwrap().activity, None);
+        assert_eq!(list(root.path()).unwrap()[0], run);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::activity::Activity;
 use crate::run::{self, RunKey};
 
 /// The file a build's events are appended to.
@@ -349,6 +350,10 @@ pub struct IssueState {
     pub pull_request: Option<u64>,
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<Decimal>,
+    /// What its agent is doing, while it runs. Read from the agent's log
+    /// by [`crate::run::read`] and [`crate::run::list`], never recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<Activity>,
 }
 
 /// A build, as its events leave it. `summary.json` is this, serialized.
@@ -445,6 +450,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 pull_request: None,
                 duration_ms: None,
                 cost_usd: None,
+                activity: None,
             })
             .collect(),
         started_at: *at,

@@ -180,6 +180,7 @@ mod tests {
             pull_request: None,
             duration_ms: None,
             cost_usd: None,
+            activity: None,
         }
     }
 
