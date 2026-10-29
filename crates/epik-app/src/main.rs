@@ -25,6 +25,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 const USAGE: &str = "usage: epik-app [--headless | --version | mcp]";
 
 fn main() -> ExitCode {
+    find_epiks_tools();
     link_self();
     match std::env::args().nth(1).as_deref() {
         Some("--version") => {
@@ -90,6 +91,19 @@ fn start_detached() -> std::io::Result<()> {
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     command.spawn().map(drop)
+}
+
+/// Puts Epik's private tools first on this process's `PATH`, with the
+/// places installers put programs, so `gh`, `node` and `claude` are found
+/// even when the app is opened from the desktop, and the agents it starts
+/// find the same ones.
+fn find_epiks_tools() {
+    if let Some(root) = record::default_root() {
+        let path = epik_core::setup::search_path(&root, std::env::var_os("PATH"));
+        // SAFETY: called first in `main`, before any other thread exists
+        // to read the environment.
+        unsafe { std::env::set_var("PATH", path) };
+    }
 }
 
 /// Points `~/.epik/bin/epik-app` at this executable, where Claude Code and

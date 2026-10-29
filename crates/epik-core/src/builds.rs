@@ -102,8 +102,13 @@ impl Builds {
     /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`], checking the
     /// machine's setup before each.
     pub fn real(root: impl Into<PathBuf>) -> Self {
-        Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new()))
-            .check_setup(|root| setup::check_all(root, &setup::System))
+        Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new())).check_setup(|root| {
+            let latest = crate::install::Cached {
+                root: root.to_owned(),
+                sources: crate::install::Sources::default(),
+            };
+            setup::check_all(root, &setup::System, &latest)
+        })
     }
 
     /// Epik's root, where clones and records go.
@@ -439,7 +444,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let no_node = setup::tests::Recorded::complete().answer("node --version", false, "");
         let builds = builds(root.path(), fake_github())
-            .check_setup(move |root| setup::check_all(root, &no_node));
+            .check_setup(move |root| setup::check_all(root, &no_node, &setup::Unknown));
 
         let error = builds
             .start("owner/repo", 7, None, "/plugin".into())

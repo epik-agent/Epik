@@ -9,6 +9,7 @@ pub mod cleanup;
 pub mod comment;
 pub mod github;
 pub mod graph;
+pub mod install;
 pub mod ipc;
 pub mod mcp;
 pub mod reconcile;

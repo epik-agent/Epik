@@ -43,6 +43,32 @@ impl Runner for System {
     }
 }
 
+/// The latest release of a tool Epik keeps a private copy of.
+pub trait Latest: Send + Sync {
+    /// The latest version of `tool`, `gh` or `node`, if known.
+    fn version(&self, tool: Item) -> Option<String>;
+}
+
+/// Knows no releases, so no private copy is ever outdated.
+pub struct Unknown;
+
+impl Latest for Unknown {
+    fn version(&self, _tool: Item) -> Option<String> {
+        None
+    }
+}
+
+/// Whether dotted version `a` is older than `b`.
+pub fn older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    parts(a) < parts(b)
+}
+
 /// Where an item stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,16 +220,43 @@ pub fn claude(root: &Path) -> PathBuf {
     )
 }
 
-/// Every item's state under `root`, normally `~/.epik`.
-pub fn check_all(root: &Path, runner: &dyn Runner) -> Vec<Check> {
+/// Every item's state under `root`, normally `~/.epik`. A private copy
+/// older than `latest`'s release is outdated.
+pub fn check_all(root: &Path, runner: &dyn Runner, latest: &dyn Latest) -> Vec<Check> {
     Item::ALL
         .iter()
-        .map(|&item| check(root, runner, item))
+        .map(|&item| check(root, runner, latest, item))
         .collect()
 }
 
 /// One item's state.
-pub fn check(root: &Path, runner: &dyn Runner, item: Item) -> Check {
+pub fn check(root: &Path, runner: &dyn Runner, latest: &dyn Latest, item: Item) -> Check {
+    let check = check_found(root, runner, item);
+    let private = match item {
+        Item::Gh => private_gh(root),
+        Item::Node => private_node(root),
+        _ => return check,
+    };
+    if check.state != State::Done || !private.is_file() {
+        return check;
+    }
+    let found = check
+        .detail
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    match latest.version(item) {
+        Some(newest) if older(&found, &newest) => Check::new(
+            item,
+            State::Outdated,
+            format!("{}; {newest} is out", check.detail),
+        ),
+        _ => check,
+    }
+}
+
+fn check_found(root: &Path, runner: &dyn Runner, item: Item) -> Check {
     match item {
         Item::Gh => version(runner, item, &gh(root), &["--version"], |out| {
             // "gh version 2.63.0 (2024-11-27)"
@@ -354,6 +407,29 @@ fn plugin(root: &Path, runner: &dyn Runner) -> Check {
     }
 }
 
+/// `PATH` with Epik's private tools first, then the places installers put
+/// programs that an app opened from the desktop may not have on its
+/// `PATH`, then `current`. Programs Epik runs, and the agents it starts,
+/// find the same tools the checks do.
+pub fn search_path(root: &Path, current: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    let home = root.parent().unwrap_or(root);
+    let mut dirs = vec![
+        tools_dir(root).join("gh").join("bin"),
+        private_node_bin(root),
+        home.join(".local").join("bin"),
+    ];
+    if cfg!(unix) {
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+    let existing: Vec<PathBuf> = current
+        .as_deref()
+        .map(|path| std::env::split_paths(path).collect())
+        .unwrap_or_default();
+    dirs.retain(|dir| !existing.contains(dir));
+    dirs.extend(existing);
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
 /// Why a build can't start, if an item it needs isn't done: naming them,
 /// and saying where to fix it.
 pub fn refusal(checks: &[Check]) -> Option<String> {
@@ -412,7 +488,7 @@ pub(crate) mod tests {
 
     impl Runner for Recorded {
         fn run(&self, program: &Path, args: &[&str]) -> io::Result<Output> {
-            let name = program.file_name().unwrap_or_default().to_string_lossy();
+            let name = program.file_stem().unwrap_or_default().to_string_lossy();
             let command = std::iter::once(name.as_ref())
                 .chain(args.iter().copied())
                 .collect::<Vec<_>>()
@@ -431,14 +507,14 @@ pub(crate) mod tests {
 
     fn state(runner: &Recorded, item: Item) -> (State, String) {
         let root = tempfile::tempdir().unwrap();
-        let check = check(&root.path().join(".epik"), runner, item);
+        let check = check(&root.path().join(".epik"), runner, &Unknown, item);
         (check.state, check.detail)
     }
 
     #[test]
     fn on_a_complete_machine_every_item_is_done() {
         let root = tempfile::tempdir().unwrap();
-        let checks = check_all(&root.path().join(".epik"), &Recorded::complete());
+        let checks = check_all(&root.path().join(".epik"), &Recorded::complete(), &Unknown);
 
         let details: Vec<(&str, State, &str)> = checks
             .iter()
@@ -461,7 +537,7 @@ pub(crate) mod tests {
     #[test]
     fn on_an_empty_machine_every_item_is_missing() {
         let root = tempfile::tempdir().unwrap();
-        let checks = check_all(&root.path().join(".epik"), &Recorded::default());
+        let checks = check_all(&root.path().join(".epik"), &Recorded::default(), &Unknown);
 
         assert!(
             checks.iter().all(|c| c.state == State::Missing),
@@ -520,7 +596,7 @@ pub(crate) mod tests {
                 "Node 22.11.0; Epik needs 26 or later".into()
             )
         );
-        let checks = check_all(Path::new("/nowhere/.epik"), &old);
+        let checks = check_all(Path::new("/nowhere/.epik"), &old, &Unknown);
         assert_eq!(
             refusal(&checks).unwrap(),
             "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
@@ -547,7 +623,7 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let no_plugin = Recorded::complete().answer("claude plugin list --json", true, "[]");
 
-        assert_eq!(refusal(&check_all(root.path(), &no_plugin)), None);
+        assert_eq!(refusal(&check_all(root.path(), &no_plugin, &Unknown)), None);
     }
 
     #[test]
@@ -563,6 +639,81 @@ pub(crate) mod tests {
 
         assert_eq!(gh(root.path()), private_gh(root.path()));
         assert_eq!(node(root.path()), private_node(root.path()));
+    }
+
+    struct Newest;
+
+    impl Latest for Newest {
+        fn version(&self, tool: Item) -> Option<String> {
+            Some(
+                if tool == Item::Gh {
+                    "2.200.0"
+                } else {
+                    "26.10.0"
+                }
+                .to_owned(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_private_copy_older_than_the_latest_release_is_outdated() {
+        let root = tempfile::tempdir().unwrap();
+        let runner = Recorded::complete();
+
+        let path_gh = check(root.path(), &runner, &Newest, Item::Gh);
+        assert_eq!(
+            path_gh.state,
+            State::Done,
+            "only private copies are Epik's to update"
+        );
+
+        std::fs::create_dir_all(private_gh(root.path()).parent().unwrap()).unwrap();
+        std::fs::write(private_gh(root.path()), "").unwrap();
+        let private = check(root.path(), &runner, &Newest, Item::Gh);
+        assert_eq!(
+            (private.state, private.detail.as_str()),
+            (State::Outdated, "gh 2.102.0; 2.200.0 is out")
+        );
+        std::fs::create_dir_all(private_node(root.path()).parent().unwrap()).unwrap();
+        std::fs::write(private_node(root.path()), "").unwrap();
+        let node = check(root.path(), &runner, &Newest, Item::Node);
+        assert_eq!(node.state, State::Done, "26.10.0 is the latest");
+    }
+
+    #[test]
+    fn versions_compare_by_number() {
+        assert!(older("2.9.0", "2.10.0"));
+        assert!(older("v26.1.0", "26.10.0"));
+        assert!(!older("2.10.0", "2.9.0"));
+        assert!(!older("2.10.0", "2.10.0"));
+    }
+
+    #[test]
+    fn private_tools_come_first_on_the_path() {
+        let root = Path::new("/home/me/.epik");
+        let current = std::env::join_paths([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+        ])
+        .unwrap();
+
+        let path = search_path(root, Some(current));
+
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs[0], private_gh(root).parent().unwrap());
+        assert_eq!(dirs[1], private_node_bin(root));
+        assert_eq!(dirs[2], Path::new("/home/me/.local/bin"));
+        assert!(dirs.ends_with(&[
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/opt/homebrew/bin")
+        ]));
+        assert_eq!(
+            dirs.iter()
+                .filter(|dir| dir.ends_with("homebrew/bin"))
+                .count(),
+            1
+        );
     }
 
     #[test]
