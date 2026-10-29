@@ -188,6 +188,22 @@ confirmation.
 
 A run that is building or waiting for review is an error.
 
+### `setup`
+
+Whether everything Epik needs is in place.
+
+```json
+{"type": "setup"}
+```
+
+```json
+{"type": "setup", "items": [{"item": "gh", "title": "GitHub CLI", "state": "done", "detail": "gh 2.102.0"}, {"item": "gh-auth", "title": "GitHub sign-in", "state": "missing", "detail": "signed in without the project scope"}, ...]}
+```
+
+The items, in order, are `gh`, `gh-auth`, `claude`, `claude-auth`, `node` and `plugin`. Each one's `state` is `done`,
+`missing` or `outdated`, and `detail` says more in a line. A `build` or `rerun` is refused while any item but `plugin`
+isn't `done`, with an error naming them.
+
 ### `ping`
 
 Whether the app is there, and its version.

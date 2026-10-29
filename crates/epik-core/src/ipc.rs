@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
 use crate::run::{self, RunKey, RunState};
+use crate::setup;
 
 /// How many runs `list` returns when it isn't given a limit.
 pub const DEFAULT_LIMIT: usize = 20;
@@ -60,6 +61,8 @@ pub enum Request {
     Rerun { run: RunKey },
     /// Delete a run that needs attention: its builds' clones and records.
     Delete { run: RunKey },
+    /// Every setup item's state.
+    Setup,
     /// Whether the app is there, and its version.
     Ping,
 }
@@ -74,6 +77,10 @@ pub enum Response {
     Run(RunState),
     Runs {
         runs: Vec<RunState>,
+    },
+    /// Every setup item's state.
+    Setup {
+        items: Vec<setup::Check>,
     },
     /// The run is deleted.
     Deleted {
@@ -122,6 +129,9 @@ fn handle(builds: &Builds, request: Request) -> Response {
         Request::Delete { run } => match builds.delete(&run) {
             Ok(()) => Response::Deleted { run },
             Err(why) => Response::error(format!("couldn't delete {run}: {why}")),
+        },
+        Request::Setup => Response::Setup {
+            items: builds.setup(),
         },
         Request::Ping => Response::Pong {
             version: crate::version().to_owned(),
@@ -598,6 +608,19 @@ mod tests {
         assert_eq!(
             gone,
             json!({"type": "error", "message": "no run owner/repo#7"})
+        );
+    }
+
+    #[test]
+    fn setup_answers_with_every_items_state() {
+        let app = Running::new(fake_github());
+
+        let reply = app.send(r#"{"type": "setup"}"#);
+
+        assert_eq!(
+            reply,
+            json!({"type": "setup", "items": []}),
+            "no check in tests"
         );
     }
 

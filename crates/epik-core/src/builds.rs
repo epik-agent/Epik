@@ -22,6 +22,7 @@ use crate::reconcile;
 use crate::record::{self, Kind};
 use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
+use crate::setup;
 
 /// A build that has started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,7 +50,12 @@ pub struct Builds {
     on_active: Arc<dyn Fn(usize) + Send + Sync>,
     /// Every build's thread not yet known to have ended.
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Checks what Epik needs on the machine, under the root.
+    setup: Arc<SetupCheck>,
 }
+
+/// Checks Epik's setup under a root.
+type SetupCheck = dyn Fn(&Path) -> Vec<setup::Check> + Send + Sync;
 
 impl Builds {
     /// Builds under `root`, normally `~/.epik`, reaching GitHub through
@@ -67,7 +73,23 @@ impl Builds {
             active: Arc::default(),
             on_active: Arc::new(|_| {}),
             threads: Mutex::default(),
+            setup: Arc::new(|_| Vec::new()),
         }
+    }
+
+    /// Checks Epik's setup with `check` before each build, and for
+    /// [`Builds::setup`]. Without one, setup counts as complete.
+    pub fn check_setup(
+        mut self,
+        check: impl Fn(&Path) -> Vec<setup::Check> + Send + Sync + 'static,
+    ) -> Self {
+        self.setup = Arc::new(check);
+        self
+    }
+
+    /// Every setup item's state.
+    pub fn setup(&self) -> Vec<setup::Check> {
+        (self.setup)(&self.root)
     }
 
     /// Calls `observer` with how many builds are running each time that
@@ -77,9 +99,11 @@ impl Builds {
         self
     }
 
-    /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`].
+    /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`], checking the
+    /// machine's setup before each.
     pub fn real(root: impl Into<PathBuf>) -> Self {
         Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new()))
+            .check_setup(|root| setup::check_all(root, &setup::System))
     }
 
     /// Epik's root, where clones and records go.
@@ -106,6 +130,9 @@ impl Builds {
             root: self.root.clone(),
             plugin_dir,
         };
+        if let Some(refusal) = setup::refusal(&self.setup()) {
+            return Err(refusal);
+        }
         let key = RunKey::new(repo, number);
         let (started, starting) = mpsc::channel();
         {
@@ -405,6 +432,25 @@ mod tests {
         assert_eq!(monitored.len(), 1);
         assert_eq!(monitored[0].repo, "owner/repo");
         assert!(!monitored[0].added_by_user);
+    }
+
+    #[test]
+    fn a_build_is_refused_up_front_when_setup_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        let no_node = setup::tests::Recorded::complete().answer("node --version", false, "");
+        let builds = builds(root.path(), fake_github())
+            .check_setup(move |root| setup::check_all(root, &no_node));
+
+        let error = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
+        );
+        assert!(run::list(root.path()).unwrap().is_empty());
+        assert_eq!(builds.setup().len(), 6);
     }
 
     #[test]

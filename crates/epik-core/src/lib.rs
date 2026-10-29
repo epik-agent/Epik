@@ -16,6 +16,7 @@ pub mod record;
 pub mod repositories;
 pub mod run;
 pub mod self_link;
+pub mod setup;
 pub mod words;
 
 /// The version of Epik, which every crate in the workspace shares.
