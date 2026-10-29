@@ -44,15 +44,29 @@ pub fn list(root: &Path) -> io::Result<Vec<Repository>> {
     }
 }
 
-/// Writes the list whole, through a temporary file, so a reader never
-/// sees half of it.
-fn save(root: &Path, repositories: &[Repository]) -> io::Result<()> {
+/// Changes the list with `edit`, saving it when `edit` says it changed.
+/// The change holds an exclusive lock on `<root>/repositories.lock`, so
+/// changes made at once, by this process's threads or by `epik-app mcp`,
+/// each see the others'. The list is written whole, through a temporary
+/// file, so a reader never sees half of it.
+fn change<T>(root: &Path, edit: impl FnOnce(&mut Vec<Repository>) -> (bool, T)) -> io::Result<T> {
     fs::create_dir_all(root)?;
-    let mut json = serde_json::to_vec_pretty(repositories)?;
-    json.push(b'\n');
-    let temporary = root.join(format!("{FILE}.{}", std::process::id()));
-    fs::write(&temporary, json)?;
-    fs::rename(temporary, path(root))
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join("repositories.lock"))?;
+    lock.lock()?;
+    let mut repositories = list(root)?;
+    let (changed, result) = edit(&mut repositories);
+    if changed {
+        let mut json = serde_json::to_vec_pretty(&repositories)?;
+        json.push(b'\n');
+        let temporary = root.join(format!("{FILE}.{}", std::process::id()));
+        fs::write(&temporary, json)?;
+        fs::rename(temporary, path(root))?;
+    }
+    Ok(result)
 }
 
 /// Whether `repo` can be a repository's name, `owner/name`.
@@ -69,44 +83,43 @@ pub fn add(root: &Path, repo: &str, by_user: bool, now: DateTime<Utc>) -> io::Re
             format!("{repo:?} is not a repository: write owner/name"),
         ));
     }
-    let mut repositories = list(root)?;
-    if repositories
-        .iter()
-        .any(|r| r.repo.eq_ignore_ascii_case(repo))
-    {
-        return Ok(false);
-    }
-    repositories.push(Repository {
-        repo: repo.to_owned(),
-        added_at: now,
-        added_by_user: by_user,
-        missing: false,
-    });
-    save(root, &repositories)?;
-    Ok(true)
+    change(root, |repositories| {
+        if repositories
+            .iter()
+            .any(|r| r.repo.eq_ignore_ascii_case(repo))
+        {
+            return (false, false);
+        }
+        repositories.push(Repository {
+            repo: repo.to_owned(),
+            added_at: now,
+            added_by_user: by_user,
+            missing: false,
+        });
+        (true, true)
+    })
 }
 
 /// Stops monitoring `repo`. Its runs leave the window; their builds go on.
 pub fn remove(root: &Path, repo: &str) -> io::Result<()> {
-    let mut repositories = list(root)?;
-    repositories.retain(|r| !r.repo.eq_ignore_ascii_case(repo));
-    save(root, &repositories)
+    change(root, |repositories| {
+        repositories.retain(|r| !r.repo.eq_ignore_ascii_case(repo));
+        (true, ())
+    })
 }
 
 /// Records whether GitHub said `repo` was not found.
 pub fn set_missing(root: &Path, repo: &str, missing: bool) -> io::Result<()> {
-    let mut repositories = list(root)?;
-    let mut changed = false;
-    for r in &mut repositories {
-        if r.repo.eq_ignore_ascii_case(repo) && r.missing != missing {
-            r.missing = missing;
-            changed = true;
+    change(root, |repositories| {
+        let mut changed = false;
+        for r in repositories.iter_mut() {
+            if r.repo.eq_ignore_ascii_case(repo) && r.missing != missing {
+                r.missing = missing;
+                changed = true;
+            }
         }
-    }
-    if changed {
-        save(root, &repositories)?;
-    }
-    Ok(())
+        (changed, ())
+    })
 }
 
 /// The runs of `repo`: what would leave the window if it were no longer
@@ -183,6 +196,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn changes_made_at_once_are_all_kept() {
+        let root = tempfile::tempdir().unwrap();
+        std::thread::scope(|scope| {
+            for n in 0..16 {
+                let root = root.path();
+                scope.spawn(move || add(root, &format!("o/r{n}"), false, time(1)).unwrap());
+            }
+        });
+
+        assert_eq!(list(root.path()).unwrap().len(), 16);
     }
 
     #[test]
