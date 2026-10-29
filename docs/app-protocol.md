@@ -197,12 +197,13 @@ Whether everything Epik needs is in place.
 ```
 
 ```json
-{"type": "setup", "items": [{"item": "gh", "title": "GitHub CLI", "state": "done", "detail": "gh 2.102.0"}, {"item": "gh-auth", "title": "GitHub sign-in", "state": "missing", "detail": "signed in without the project scope"}, ...]}
+{"type": "setup", "items": [{"item": "gh", "title": "GitHub CLI", "state": "done", "detail": "gh 2.102.0", "usable": true}, {"item": "gh-auth", "title": "GitHub sign-in", "state": "missing", "detail": "signed in without the project scope", "usable": false}, ...]}
 ```
 
 The items, in order, are `gh`, `gh-auth`, `claude`, `claude-auth`, `node` and `plugin`. Each one's `state` is `done`,
-`missing` or `outdated`, and `detail` says more in a line. A `build` or `rerun` is refused while any item but `plugin`
-isn't `done`, with an error naming them.
+`missing` or `outdated`, and `detail` says more in a line. `usable` says whether Epik can use it as it is: a private
+copy behind the latest release is outdated but usable. A `build` or `rerun` is refused while any item but `plugin` isn't
+usable, with an error naming them.
 
 ### `ping`
 

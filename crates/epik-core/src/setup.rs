@@ -142,6 +142,9 @@ pub struct Check {
     pub title: String,
     pub state: State,
     pub detail: String,
+    /// Whether Epik can use it as it is. A private copy behind the latest
+    /// release is outdated but usable; Node older than Epik needs is not.
+    pub usable: bool,
 }
 
 impl Check {
@@ -151,6 +154,7 @@ impl Check {
             title: item.title().to_owned(),
             state,
             detail: detail.into(),
+            usable: state == State::Done,
         }
     }
 }
@@ -247,11 +251,14 @@ pub fn check(root: &Path, runner: &dyn Runner, latest: &dyn Latest, item: Item) 
         .unwrap_or_default()
         .to_owned();
     match latest.version(item) {
-        Some(newest) if older(&found, &newest) => Check::new(
-            item,
-            State::Outdated,
-            format!("{}; {newest} is out", check.detail),
-        ),
+        Some(newest) if older(&found, &newest) => Check {
+            usable: true,
+            ..Check::new(
+                item,
+                State::Outdated,
+                format!("{}; {newest} is out", check.detail),
+            )
+        },
         _ => check,
     }
 }
@@ -435,7 +442,7 @@ pub fn search_path(root: &Path, current: Option<std::ffi::OsString>) -> std::ffi
 pub fn refusal(checks: &[Check]) -> Option<String> {
     let missing: Vec<&str> = checks
         .iter()
-        .filter(|check| check.item.needed_to_build() && check.state != State::Done)
+        .filter(|check| check.item.needed_to_build() && !check.usable)
         .map(|check| check.title.as_str())
         .collect();
     (!missing.is_empty()).then(|| {
@@ -875,6 +882,8 @@ pub(crate) mod tests {
             (private.state, private.detail.as_str()),
             (State::Outdated, "gh 2.102.0; 2.200.0 is out")
         );
+        assert!(private.usable);
+        assert_eq!(refusal(&[private]), None, "a build can use it as it is");
         std::fs::create_dir_all(private_node(root.path()).parent().unwrap()).unwrap();
         std::fs::write(private_node(root.path()), "").unwrap();
         let node = check(root.path(), &runner, &Newest, Item::Node);
@@ -1082,6 +1091,7 @@ pub(crate) mod tests {
                 "title": "GitHub sign-in",
                 "state": "missing",
                 "detail": "not signed in",
+                "usable": false,
             })
         );
     }

@@ -176,6 +176,7 @@ mod tests {
             title: item.title().to_owned(),
             state,
             detail: detail.to_owned(),
+            usable: state == ItemState::Done,
         }
     }
 
