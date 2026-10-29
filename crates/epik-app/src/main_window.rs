@@ -133,15 +133,11 @@ pub fn open_log(path: String, window: State<'_, Window>) -> Result<(), String> {
     open::that_detached(&path).map_err(failed)
 }
 
-/// The route of a run's page.
-pub fn run_route(run: &str) -> String {
-    format!("run/{}", run.replace('#', "%23"))
-}
-
-/// Opens the main window at `route` (`""` for Home, [`run_route`] for a
-/// run's page), or brings it forward there.
+/// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
+/// for a run's page), or brings it forward there.
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
-    let hash = format!("#/{route}");
+    // A run's `#` would end the URL's fragment.
+    let hash = format!("#/{}", route.replace('#', "%23"));
     if let Some(window) = handle.get_webview_window(LABEL) {
         let script = format!(
             "window.location.hash = {};",

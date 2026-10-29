@@ -125,8 +125,10 @@ order. Keep the machine awake until the build finishes. GitHub is where the
 results land — branches, pull requests, CI runs, and closed issues.
 
 The app appears in the menu bar (macOS), the notification area (Windows) or
-the system tray (Linux). Its menu lists runs; choose one to open a window
-that shows the epic's issues live. A **run** is the work of finishing one
+the system tray (Linux). Click its icon for a summary of what's building and
+what's waiting for you; **Open Epik** opens its window, which lists every run
+and shows each one's issues live, with what each agent is doing. On Linux,
+where tray clicks aren't reported, its menu opens the window. A **run** is the work of finishing one
 epic or issue, and each attempt at it is a **build**: building an epic
 again after a failure or an interruption adds a build to the same run, and
 the run's time and cost add up across its builds. A run's record is in

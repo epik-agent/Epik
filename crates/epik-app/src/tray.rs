@@ -2,39 +2,34 @@
 //! tray (Linux).
 //!
 //! The tray runs the same socket and builds as `--headless`, with Tauri's
-//! event loop on the main thread. Its icon and menu are redrawn from
-//! [`menu::menu`] every two seconds, and whenever how many builds are
-//! running changes. Where there is no tray, the app runs headless and says
-//! so.
+//! event loop on the main thread. Clicking its icon opens the popover; its
+//! menu (a right click, or on Linux, where tray clicks aren't reported, any
+//! click) opens Epik's window, checks setup, or quits. The icon shows
+//! whether anything is building. Where there is no tray, the app runs
+//! headless and says so.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use epik_core::{record, run};
+use tauri::RunEvent;
 use tauri::image::Image;
-use tauri::menu::{IsMenuItem, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{AppHandle, RunEvent, Wry};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::App;
-use crate::menu::{self, Item, Menu};
-use crate::{main_window, setup_window};
+use crate::{main_window, popover, setup_window};
 
-/// How often the menu is redrawn from the run listing.
+/// How often the icon is checked against what is building, besides each
+/// time that changes.
 const REFRESH: Duration = Duration::from_secs(2);
 
 const QUIT: &str = "quit";
-const OPEN_RUNS_FOLDER: &str = "open-runs-folder";
 const CHECK_SETUP: &str = "check-setup";
 const OPEN_EPIK: &str = "open-epik";
-/// The prefix of a run's item's id; the run, `owner/name#number`, follows
-/// it.
-const RUN: &str = "run:";
 
 /// Runs the app in the tray until Quit, SIGINT or SIGTERM, or headless
 /// where there is no tray.
@@ -58,8 +53,8 @@ fn headless(app: App, reason: &str) -> ExitCode {
     app.serve()
 }
 
-/// Starts Tauri with no window, ready to open runs' windows, and puts the
-/// icon in the tray, or says why it can't.
+/// Starts Tauri with no window and puts the icon in the tray, or says why
+/// it can't.
 fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     if !has_display() {
         return Err("no display".to_owned());
@@ -75,6 +70,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             builds: app.builds.clone(),
             outputs: Default::default(),
         })
+        .manage(popover::Quit(app.stop.clone()))
         .invoke_handler(tauri::generate_handler![
             main_window::home,
             main_window::popover,
@@ -86,6 +82,8 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::stop_monitoring,
             main_window::open_github,
             main_window::open_log,
+            popover::open_main,
+            popover::quit,
             setup_window::setup_checklist,
             setup_window::setup_run,
             setup_window::setup_output,
@@ -96,36 +94,55 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     #[cfg(target_os = "macos")]
     tauri.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-    let shown = menu::menu(&[], &[]);
-    let root = app.root.clone();
+    let handle = tauri.handle();
+    let failed = |error: tauri::Error| error.to_string();
+    let menu = Menu::with_items(
+        handle,
+        &[
+            &MenuItem::with_id(handle, OPEN_EPIK, "Open Epik", true, None::<&str>)
+                .map_err(failed)?,
+            &MenuItem::with_id(handle, CHECK_SETUP, "Check setup", true, None::<&str>)
+                .map_err(failed)?,
+            &PredefinedMenuItem::separator(handle).map_err(failed)?,
+            &MenuItem::with_id(handle, QUIT, "Quit Epik", true, None::<&str>).map_err(failed)?,
+        ],
+    )
+    .map_err(failed)?;
     let stop = app.stop.clone();
     let tray = TrayIconBuilder::new()
-        .icon(icon(shown.building))
+        .icon(icon(false))
         .icon_as_template(TEMPLATE)
         .tooltip("Epik")
-        .menu(&native(tauri.handle(), &shown).map_err(|error| error.to_string())?)
+        .menu(&menu)
+        .show_menu_on_left_click(cfg!(target_os = "linux"))
         .on_menu_event(move |handle, event| {
-            let id = event.id().as_ref();
-            if id == QUIT {
-                stop.store(true, Ordering::SeqCst);
-            } else if id == CHECK_SETUP {
-                if let Err(error) = setup_window::open(handle) {
-                    eprintln!("epik-app: couldn't open the setup checklist: {error}");
+            let opened = match event.id().as_ref() {
+                QUIT => {
+                    stop.store(true, Ordering::SeqCst);
+                    Ok(())
                 }
-            } else if id == OPEN_RUNS_FOLDER {
-                reveal(&record::runs_dir(&root));
-            } else if id == OPEN_EPIK {
-                if let Err(error) = main_window::open(handle, "") {
-                    eprintln!("epik-app: couldn't open Epik's window: {error}");
-                }
-            } else if let Some(run) = id.strip_prefix(RUN)
-                && let Err(error) = main_window::open(handle, &main_window::run_route(run))
+                CHECK_SETUP => setup_window::open(handle),
+                OPEN_EPIK => main_window::open(handle, ""),
+                _ => Ok(()),
+            };
+            if let Err(error) = opened {
+                eprintln!("epik-app: couldn't open the window: {error}");
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                rect,
+                ..
+            } = event
+                && let Err(error) = popover::toggle(tray.app_handle(), rect)
             {
-                eprintln!("epik-app: couldn't open the page of run {run}: {error}");
+                eprintln!("epik-app: couldn't open the popover: {error}");
             }
         })
         .build(&tauri)
-        .map_err(|error| error.to_string())?;
+        .map_err(failed)?;
     Ok((tauri, tray))
 }
 
@@ -138,23 +155,24 @@ fn has_display() -> bool {
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
-/// Serves on one thread and redraws the tray on another while Tauri runs on
-/// this one. When serving stops, the builds are stopped, then Tauri.
+/// Serves on one thread and keeps the icon current on another while Tauri
+/// runs on this one. When serving stops, the builds are stopped, then
+/// Tauri.
 fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -> ExitCode {
-    let handle = tauri.handle().clone();
-    let root = app.root.clone();
     let builds = app.builds.clone();
     let stop = app.stop.clone();
     thread::spawn(move || {
-        let mut shown = None;
+        let mut shown = Some(false);
         while !stop.load(Ordering::SeqCst) {
-            let runs = run::list(&root).unwrap_or_default();
-            let wanted = menu::menu(&runs, &builds.active());
-            if shown.as_ref() != Some(&wanted) {
-                if let Err(error) = redraw(&handle, &tray, &wanted) {
+            let building = !builds.active().is_empty();
+            if shown != Some(building) {
+                let drawn = tray
+                    .set_icon(Some(icon(building)))
+                    .and_then(|()| tray.set_icon_as_template(TEMPLATE));
+                if let Err(error) = drawn {
                     eprintln!("epik-app: couldn't redraw the tray: {error}");
                 }
-                shown = Some(wanted);
+                shown = Some(building);
             }
             if let Err(RecvTimeoutError::Disconnected) = changes.recv_timeout(REFRESH) {
                 break;
@@ -194,12 +212,6 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
     server.join().unwrap_or(ExitCode::FAILURE)
 }
 
-fn redraw(handle: &AppHandle, tray: &TrayIcon, shown: &Menu) -> tauri::Result<()> {
-    tray.set_menu(Some(native(handle, shown)?))?;
-    tray.set_icon(Some(icon(shown.building)))?;
-    tray.set_icon_as_template(TEMPLATE)
-}
-
 /// Whether the icons are templates, which the menu bar tints: on macOS.
 const TEMPLATE: bool = cfg!(target_os = "macos");
 
@@ -215,60 +227,4 @@ fn icon(building: bool) -> Image<'static> {
         (false, true) => include_bytes!("../icons/building@2x.png"),
     };
     Image::from_bytes(png).expect("the tray icons are PNGs")
-}
-
-/// The menu Tauri draws for `shown`.
-fn native(handle: &AppHandle, shown: &Menu) -> tauri::Result<tauri::menu::Menu<Wry>> {
-    let items = shown
-        .items
-        .iter()
-        .map(|item| -> tauri::Result<Box<dyn IsMenuItem<Wry>>> {
-            Ok(match item {
-                Item::Run { run, label } => Box::new(MenuItem::with_id(
-                    handle,
-                    format!("{RUN}{run}"),
-                    label,
-                    true,
-                    None::<&str>,
-                )?),
-                Item::Note(text) => Box::new(MenuItem::new(handle, text, false, None::<&str>)?),
-                Item::Separator => Box::new(PredefinedMenuItem::separator(handle)?),
-                Item::OpenEpik => Box::new(MenuItem::with_id(
-                    handle,
-                    OPEN_EPIK,
-                    "Open Epik",
-                    true,
-                    None::<&str>,
-                )?),
-                Item::CheckSetup => Box::new(MenuItem::with_id(
-                    handle,
-                    CHECK_SETUP,
-                    "Check setup",
-                    true,
-                    None::<&str>,
-                )?),
-                Item::OpenRunsFolder => Box::new(MenuItem::with_id(
-                    handle,
-                    OPEN_RUNS_FOLDER,
-                    "Open runs folder",
-                    true,
-                    None::<&str>,
-                )?),
-                Item::Quit => {
-                    Box::new(MenuItem::with_id(handle, QUIT, "Quit", true, None::<&str>)?)
-                }
-            })
-        })
-        .collect::<tauri::Result<Vec<_>>>()?;
-    let items: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|item| item.as_ref()).collect();
-    tauri::menu::Menu::with_items(handle, &items)
-}
-
-/// Opens `dir` in the platform's file manager, creating it first so there
-/// is something to open.
-fn reveal(dir: &Path) {
-    let opened = std::fs::create_dir_all(dir).and_then(|()| open::that_detached(dir));
-    if let Err(error) = opened {
-        eprintln!("epik-app: couldn't open {}: {error}", dir.display());
-    }
 }
