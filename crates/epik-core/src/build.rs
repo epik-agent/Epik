@@ -165,7 +165,6 @@ pub fn start<'a>(
     };
 
     let at = Utc::now();
-    let run_id = record::run_id(repo, number, at);
     let mut problems = Vec::new();
     let members = match kind {
         Kind::Issue => vec![Member {
@@ -216,10 +215,17 @@ pub fn start<'a>(
         problems.push(format!("a dependency cycle: {}", issues(&cycle)));
     }
 
-    let clone = request.root.join("builds").join(&run_id);
-    github.clone(repo, &clone)?;
-    let writer = RunWriter::create(&request.root, &run_id)?;
+    // Creating the record first reserves the run's id, so no other run
+    // shares its record or its clone.
+    let writer = RunWriter::create_new(&request.root, repo, number, at)?;
+    let run_id = writer.run_id().to_owned();
     let dir = writer.dir().to_owned();
+    let clone = request.root.join("builds").join(&run_id);
+    if let Err(error) = github.clone(repo, &clone) {
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(error.into());
+    }
     let mut log = Log {
         writer,
         events: Vec::new(),
@@ -1193,6 +1199,30 @@ mod tests {
             ]
         );
         assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn a_failed_clone_leaves_no_record() {
+        let github = epic([(2, &[])]);
+        github.fail("clone", "gh: no space left");
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let error = start(&github, &agent, &request(root.path(), 1)).err();
+        assert!(matches!(error, Some(Error::GitHub(_))));
+        let runs = std::fs::read_dir(record::runs_dir(root.path())).unwrap();
+        assert_eq!(runs.count(), 0);
+    }
+
+    #[test]
+    fn two_builds_of_one_issue_get_their_own_records_and_clones() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, [(2, Act::Hang)]);
+        let root = tempfile::tempdir().unwrap();
+        let first = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        let second = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        assert_ne!(first.run_id(), second.run_id());
+        assert_ne!(first.dir(), second.dir());
+        assert_ne!(first.clone_dir(), second.clone_dir());
     }
 
     #[test]

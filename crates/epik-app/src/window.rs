@@ -94,8 +94,8 @@ mod tests {
     #[test]
     fn a_label_keeps_a_plain_run_id() {
         assert_eq!(
-            label("epik-agent-Epik-356-20261028T212859Z"),
-            "run-epik-agent-Epik-356-20261028T212859Z"
+            label("epik-agent-Epik-356-20261028T212859Z-k3f9"),
+            "run-epik-agent-Epik-356-20261028T212859Z-k3f9"
         );
     }
 

@@ -35,16 +35,39 @@ pub fn run_dir(root: &Path, run_id: &str) -> PathBuf {
     runs_dir(root).join(run_id)
 }
 
-/// A run's id, `<owner>-<name>-<number>-<UTC stamp>`, from a repository
-/// written `owner/name`, the number of the issue or epic built, and the time
-/// the run started.
+/// A run's id, `<owner>-<name>-<number>-<UTC stamp>-<suffix>`, from a
+/// repository written `owner/name`, the number of the issue or epic built,
+/// and the time the run started. The suffix is 4 random lowercase base-36
+/// characters, so runs started in the same second get ids of their own,
+/// and ids still sort by time.
 pub fn run_id(repo: &str, number: u64, at: DateTime<Utc>) -> String {
     format!(
-        "{}-{number}-{}",
+        "{}-{number}-{}-{}",
         repo.replace('/', "-"),
-        at.format("%Y%m%dT%H%M%SZ")
+        at.format("%Y%m%dT%H%M%SZ"),
+        suffix()
     )
 }
+
+/// 4 random lowercase base-36 characters.
+fn suffix() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    // Each `RandomState` is seeded afresh, which is random enough to keep
+    // ids apart; `RunWriter::create_new` retries on the rare collision.
+    let mut bits = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+    (0..4)
+        .map(|_| {
+            let digit = (bits % 36) as u32;
+            bits /= 36;
+            char::from_digit(digit, 36).expect("a base-36 digit")
+        })
+        .collect()
+}
+
+/// How many ids [`RunWriter::create_new`] tries before giving up.
+const NEW_RUN_ATTEMPTS: usize = 5;
 
 /// Whether a run builds an epic or a single issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,20 +162,48 @@ impl Event {
 
 /// Appends a run's events to its `events.jsonl`, one line per event.
 pub struct RunWriter {
+    run_id: String,
     dir: PathBuf,
     events: File,
 }
 
 impl RunWriter {
-    /// Opens a run's record for appending, creating its directory if needed.
+    /// Creates a run's record. Its directory must not exist yet: an
+    /// existing one is [`io::ErrorKind::AlreadyExists`], never reused.
     pub fn create(root: &Path, run_id: &str) -> io::Result<Self> {
         let dir = run_dir(root, run_id);
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(runs_dir(root))?;
+        fs::create_dir(&dir)?;
         let events = OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join(EVENTS_FILE))?;
-        Ok(RunWriter { dir, events })
+        Ok(RunWriter {
+            run_id: run_id.to_owned(),
+            dir,
+            events,
+        })
+    }
+
+    /// Creates the record of a new run of `number` in `repo` started `at`,
+    /// with a [`run_id`] no other run has, trying another when one is
+    /// taken.
+    pub fn create_new(root: &Path, repo: &str, number: u64, at: DateTime<Utc>) -> io::Result<Self> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match Self::create(root, &run_id(repo, number, at)) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && attempts < NEW_RUN_ATTEMPTS => {}
+                created => return created,
+            }
+        }
+    }
+
+    /// The run's id.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     /// The run's directory.
@@ -457,6 +508,7 @@ pub fn list_runs(root: &Path) -> io::Result<Vec<RunState>> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::collections::BTreeSet;
     use std::str::FromStr;
 
     fn time(seconds: u32) -> DateTime<Utc> {
@@ -534,12 +586,46 @@ mod tests {
     }
 
     #[test]
-    fn run_id_joins_repository_number_and_utc_stamp() {
+    fn run_id_joins_repository_number_utc_stamp_and_a_suffix() {
         let at = Utc.with_ymd_and_hms(2026, 10, 28, 17, 8, 39).unwrap();
-        assert_eq!(
-            run_id("epik-agent/Epik", 12, at),
-            "epik-agent-Epik-12-20261028T170839Z"
+        let id = run_id("epik-agent/Epik", 12, at);
+        let suffix = id
+            .strip_prefix("epik-agent-Epik-12-20261028T170839Z-")
+            .unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(suffix.len(), 4, "{id}");
+        assert!(
+            suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{id}"
         );
+        assert!(is_run_id(&id));
+    }
+
+    #[test]
+    fn run_ids_made_at_the_same_instant_differ() {
+        let at = time(0);
+        let ids: BTreeSet<String> = (0..100).map(|_| run_id("o/r", 1, at)).collect();
+        assert!(ids.len() > 90, "{ids:?}");
+    }
+
+    #[test]
+    fn a_new_run_never_reuses_an_existing_runs_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let first = RunWriter::create_new(root.path(), "o/r", 1, time(0)).unwrap();
+        let second = RunWriter::create_new(root.path(), "o/r", 1, time(0)).unwrap();
+        assert_ne!(first.run_id(), second.run_id());
+        assert_ne!(first.dir(), second.dir());
+        assert!(first.dir().is_dir() && second.dir().is_dir());
+        assert_eq!(first.dir(), run_dir(root.path(), first.run_id()));
+    }
+
+    #[test]
+    fn creating_a_record_refuses_an_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        RunWriter::create(root.path(), "run").unwrap();
+        let error = RunWriter::create(root.path(), "run").err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[test]

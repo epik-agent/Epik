@@ -198,7 +198,7 @@ mod tests {
 
     fn run(members: Vec<MemberState>) -> RunState {
         RunState {
-            run_id: "o-r-1-20261028T000000Z".to_owned(),
+            run_id: "o-r-1-20261028T000000Z-a1b2".to_owned(),
             repo: "o/r".to_owned(),
             number: 1,
             title: "The epic".to_owned(),

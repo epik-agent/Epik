@@ -45,7 +45,7 @@ The app replies once the run has started: the issue is read, the repository clon
 run's record. That can take as long as the clone. The build then goes on in the app.
 
 ```json
-{"type": "started", "run_id": "owner-name-356-20261028T212859Z", "kind": "epic", "branch": "daemon", "run_dir": "/Users/me/.epik/runs/owner-name-356-20261028T212859Z"}
+{"type": "started", "run_id": "owner-name-356-20261028T212859Z-k3f9", "kind": "epic", "branch": "daemon", "run_dir": "/Users/me/.epik/runs/owner-name-356-20261028T212859Z-k3f9"}
 ```
 
 - `kind`: `epic` or `issue`.
@@ -58,7 +58,7 @@ A pull request, a closed issue, or a failure before the run starts is an error, 
 A run's state.
 
 ```json
-{"type": "status", "run_id": "owner-name-356-20261028T212859Z"}
+{"type": "status", "run_id": "owner-name-356-20261028T212859Z-k3f9"}
 ```
 
 The reply is the run's state, folded from its events, with `"type": "status"`. It is what the run's `summary.json`
@@ -67,7 +67,7 @@ holds when the run ends.
 ```json
 {
   "type": "status",
-  "run_id": "owner-name-356-20261028T212859Z",
+  "run_id": "owner-name-356-20261028T212859Z-k3f9",
   "repo": "owner/name",
   "number": 356,
   "title": "The Epik app runs builds",
@@ -113,7 +113,7 @@ The latest runs, newest first.
 `limit` is optional and defaults to 20. The reply holds each run's state, as `status` gives it, without `type`:
 
 ```json
-{"type": "runs", "runs": [{"run_id": "owner-name-356-20261028T212859Z", "status": "running", ...}]}
+{"type": "runs", "runs": [{"run_id": "owner-name-356-20261028T212859Z-k3f9", "status": "running", ...}]}
 ```
 
 ### `ping`

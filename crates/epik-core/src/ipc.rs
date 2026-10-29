@@ -468,7 +468,7 @@ mod tests {
     fn status_of_an_unknown_run_is_an_error() {
         let app = Running::new(fake_github());
 
-        for run_id in ["owner-repo-9-20261028T000000Z", "../escape", ""] {
+        for run_id in ["owner-repo-9-20261028T000000Z-a1b2", "../escape", ""] {
             let reply = app.send(&json!({"type": "status", "run_id": run_id}).to_string());
 
             assert_eq!(
