@@ -55,6 +55,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Start a new build of a run that needs attention, as its last build
+    /// was started.
+    Rerun { run: RunKey },
+    /// Delete a run that needs attention: its builds' clones and records.
+    Delete { run: RunKey },
     /// Whether the app is there, and its version.
     Ping,
 }
@@ -69,6 +74,10 @@ pub enum Response {
     Run(RunState),
     Runs {
         runs: Vec<RunState>,
+    },
+    /// The run is deleted.
+    Deleted {
+        run: RunKey,
     },
     Pong {
         version: String,
@@ -105,6 +114,14 @@ fn handle(builds: &Builds, request: Request) -> Response {
                 Response::Runs { runs }
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
+        },
+        Request::Rerun { run } => match builds.rerun(&run) {
+            Ok(started) => Response::Started(started),
+            Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
+        },
+        Request::Delete { run } => match builds.delete(&run) {
+            Ok(()) => Response::Deleted { run },
+            Err(why) => Response::error(format!("couldn't delete {run}: {why}")),
         },
         Request::Ping => Response::Pong {
             version: crate::version().to_owned(),
@@ -379,13 +396,26 @@ mod tests {
         }
     }
 
-    impl Drop for Running {
-        fn drop(&mut self) {
+    impl Running {
+        /// Stops serving and hands back the root, for another server.
+        fn take_root(mut self) -> tempfile::TempDir {
+            self.stop();
+            let root = tempfile::tempdir().unwrap();
+            std::mem::replace(&mut self.root, root)
+        }
+
+        fn stop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
             if let Some(thread) = self.thread.take() {
                 thread.join().unwrap();
             }
             self.builds.shutdown();
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.stop();
         }
     }
 
@@ -540,6 +570,35 @@ mod tests {
                 plugin_dir: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_run_that_needs_attention_is_rerun_and_deleted() {
+        let app = Running::new(fake_github());
+        app.send(
+            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
+        );
+        let refused = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
+        assert_eq!(
+            refused,
+            json!({"type": "error", "message": "couldn't rerun owner/repo#7: a build of owner/repo#7 is running"})
+        );
+        app.builds.shutdown();
+        let app = Running::in_root(app.take_root(), fake_github());
+
+        let rerun = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
+        assert_eq!(rerun["type"], "started", "{rerun}");
+        assert_eq!(rerun["run"], "owner/repo#7");
+        app.builds.shutdown();
+        let app = Running::in_root(app.take_root(), fake_github());
+        let deleted = app.send(r#"{"type": "delete", "run": "owner/repo#7"}"#);
+
+        assert_eq!(deleted, json!({"type": "deleted", "run": "owner/repo#7"}));
+        let gone = app.send(r#"{"type": "status", "run": "owner/repo#7"}"#);
+        assert_eq!(
+            gone,
+            json!({"type": "error", "message": "no run owner/repo#7"})
+        );
     }
 
     #[test]
