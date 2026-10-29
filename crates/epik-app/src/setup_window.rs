@@ -2,7 +2,7 @@
 //!
 //! It shows each item from `epik_core::setup` with its state and detail,
 //! and for each item that isn't done the one button that does it. Nothing
-//! runs until the user presses a button. The page in `ui/setup.html` asks
+//! runs until the user presses a button. The `#/setup` window in `epik-ui` asks
 //! [`setup_checklist`] for the items, presses buttons through
 //! [`setup_run`], and polls [`setup_output`] for what the step prints.
 
@@ -151,7 +151,7 @@ pub fn open(handle: &AppHandle) -> tauri::Result<()> {
         window.show()?;
         return window.set_focus();
     }
-    WebviewWindowBuilder::new(handle, LABEL, WebviewUrl::App("setup.html".into()))
+    WebviewWindowBuilder::new(handle, LABEL, WebviewUrl::App("index.html#/setup".into()))
         .title("Set up Epik")
         .inner_size(640.0, 720.0)
         .build()?;
