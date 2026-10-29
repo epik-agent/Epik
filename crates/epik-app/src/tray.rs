@@ -90,7 +90,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     let stop = app.stop.clone();
     let tray = TrayIconBuilder::new()
         .icon(icon(shown.building))
-        .icon_as_template(true)
+        .icon_as_template(TEMPLATE)
         .tooltip("Epik")
         .menu(&native(tauri.handle(), &shown).map_err(|error| error.to_string())?)
         .on_menu_event(move |handle, event| {
@@ -183,16 +183,22 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
 fn redraw(handle: &AppHandle, tray: &TrayIcon, shown: &Menu) -> tauri::Result<()> {
     tray.set_menu(Some(native(handle, shown)?))?;
     tray.set_icon(Some(icon(shown.building)))?;
-    tray.set_icon_as_template(true)
+    tray.set_icon_as_template(TEMPLATE)
 }
 
-/// The idle or building icon: monochrome, so macOS can draw it as a
-/// template in the menu bar's colors.
+/// Whether the icons are templates, which the menu bar tints: on macOS.
+const TEMPLATE: bool = cfg!(target_os = "macos");
+
+/// The idle or building icon, at 2x, which the tray scales to its size. On
+/// macOS a one-color template, hollow nodes when idle and solid when
+/// building; elsewhere gray when idle and in the mark's colors when
+/// building. `icons/make-tray-icons.py` draws them.
 fn icon(building: bool) -> Image<'static> {
-    let png: &[u8] = if building {
-        include_bytes!("../icons/building.png")
-    } else {
-        include_bytes!("../icons/idle.png")
+    let png: &[u8] = match (TEMPLATE, building) {
+        (true, false) => include_bytes!("../icons/idle-template@2x.png"),
+        (true, true) => include_bytes!("../icons/building-template@2x.png"),
+        (false, false) => include_bytes!("../icons/idle@2x.png"),
+        (false, true) => include_bytes!("../icons/building@2x.png"),
     };
     Image::from_bytes(png).expect("the tray icons are PNGs")
 }
