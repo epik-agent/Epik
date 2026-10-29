@@ -26,7 +26,7 @@ The skills are **policy**; `gh` is **mechanism**. The plugin is skills and confi
 
 ## Install
 
-For normal installation — prerequisites, the Epik app, the two `/plugin` commands, verification, and troubleshooting — follow the [root README](../README.md#installing-and-uninstalling). The sections below only cover development setups.
+For normal installation — download Epik and follow its setup checklist, which installs this plugin — see the [root README](../README.md#installing-and-uninstalling). The sections below only cover development setups.
 
 ### Developing the plugin — quick local test (no marketplace)
 

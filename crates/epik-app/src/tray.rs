@@ -183,6 +183,16 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
         let handle = tauri.handle().clone();
         let (root, builds) = (app.root.clone(), app.builds.clone());
         move || {
+            // Not every Linux desktop shows tray icons, so there the
+            // window is the way in.
+            if cfg!(target_os = "linux") {
+                let opener = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if let Err(error) = main_window::open(&opener, "") {
+                        eprintln!("epik-app: couldn't open Epik's window: {error}");
+                    }
+                });
+            }
             if setup_window::opens_at_start(&root, &builds.setup()) {
                 let opener = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
