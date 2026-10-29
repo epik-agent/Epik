@@ -4,7 +4,9 @@
 //! need it, chiefly Claude Code running the plugin's MCP server, find it at
 //! one fixed path instead. The app refreshes the link every time it starts:
 //! a symbolic link on macOS and Linux; on Windows, where symbolic links
-//! need privileges, a hard link where possible and a copy otherwise.
+//! need privileges, a copy. Not a hard link: Claude Code runs the link, and
+//! a running hard link to the installed app would keep its installer from
+//! replacing it.
 
 use std::fs;
 use std::io;
@@ -49,7 +51,7 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
         if leads_to(&link, exe)? {
             return Ok(Refreshed::Kept);
         }
-        fs::remove_file(&link)?;
+        retire(&link)?;
     }
     make(&link, exe)?;
     Ok(if existed {
@@ -57,6 +59,30 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     } else {
         Refreshed::Made
     })
+}
+
+/// Moves an old link out of the way. On Windows a running program can't be
+/// deleted, as the link is while `epik-app mcp` runs, but it can be
+/// renamed; the renamed copies are deleted once nothing runs them.
+fn retire(link: &Path) -> io::Result<()> {
+    if cfg!(windows) {
+        let dir = link.parent().expect("the link is in a directory");
+        for entry in fs::read_dir(dir)?.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("epik-app.old-")
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let aside = dir.join(format!("epik-app.old-{}.exe", std::process::id()));
+        fs::rename(link, &aside)?;
+        let _ = fs::remove_file(aside);
+        Ok(())
+    } else {
+        fs::remove_file(link)
+    }
 }
 
 #[cfg(unix)]
@@ -69,8 +95,7 @@ fn make(link: &Path, exe: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(exe, link)
 }
 
-/// Whether the link is the app: the same bytes, as a hard link or a fresh
-/// copy has.
+/// Whether the link is the app: the same bytes, as a fresh copy has.
 #[cfg(not(unix))]
 fn leads_to(link: &Path, exe: &Path) -> io::Result<bool> {
     let (link_meta, exe_meta) = (fs::metadata(link)?, fs::metadata(exe)?);
@@ -82,7 +107,7 @@ fn leads_to(link: &Path, exe: &Path) -> io::Result<bool> {
 
 #[cfg(not(unix))]
 fn make(link: &Path, exe: &Path) -> io::Result<()> {
-    fs::hard_link(exe, link).or_else(|_| fs::copy(exe, link).map(|_| ()))
+    fs::copy(exe, link).map(drop)
 }
 
 #[cfg(test)]
