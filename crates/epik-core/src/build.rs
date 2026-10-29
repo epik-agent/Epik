@@ -230,6 +230,11 @@ pub fn start<'a>(
     if let Err(error) = github.clone(repo, &clone) {
         drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = cleanup::remove_clone(&clone);
+        // The run's record, if this was its first build, is now empty.
+        if record::list_builds(&request.root, &key).is_ok_and(|builds| builds.is_empty()) {
+            let _ = run::delete(&request.root, &key);
+        }
         return Err(error.into());
     }
     let mut log = Log {
@@ -1338,10 +1343,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let error = start(&github, &agent, &request(root.path(), 1)).err();
         assert!(matches!(error, Some(Error::GitHub(_))));
-        let key = RunKey::new(REPO, 1);
-        assert!(record::list_builds(root.path(), &key).unwrap().is_empty());
-        let builds = std::fs::read_dir(run::run_dir(root.path(), &key)).unwrap();
-        assert_eq!(builds.count(), 0);
+        assert!(run::list(root.path()).unwrap().is_empty());
+        let runs = std::fs::read_dir(record::runs_dir(root.path())).unwrap();
+        assert_eq!(runs.count(), 0, "nothing of the run is left");
     }
 
     #[test]

@@ -105,11 +105,10 @@ mod headless {
 
         let link = home.path().join(".epik").join("bin").join("epik-app");
         let target = std::fs::read_link(&link).unwrap();
-        assert_eq!(
-            target,
-            Path::new(env!("CARGO_BIN_EXE_epik-app")),
-            "{output:?}"
-        );
+        let app = Path::new(env!("CARGO_BIN_EXE_epik-app"))
+            .canonicalize()
+            .unwrap();
+        assert_eq!(target, app, "{output:?}");
     }
 
     #[test]
