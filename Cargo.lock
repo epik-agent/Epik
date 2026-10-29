@@ -1121,9 +1121,9 @@ dependencies = [
  "chrono",
  "ctrlc",
  "epik-core",
+ "epik-view",
  "open",
  "rust_decimal",
- "serde",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -1153,6 +1153,14 @@ dependencies = [
  "tokio",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "epik-view"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

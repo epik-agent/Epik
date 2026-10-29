@@ -1,0 +1,12 @@
+[package]
+name = "epik-view"
+description = "What the Epik app's windows show, shared by the app and its front end."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"

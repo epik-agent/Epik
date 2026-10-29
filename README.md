@@ -14,8 +14,9 @@ and opens a pull request for you to review.
 - [`crates/`](crates) — the **Epik app** (`epik-app`), Epik's only program: it
   runs builds and, as `epik-app mcp`, serves Epik's MCP tools, running its
   GitHub operations through the `gh` CLI. `epik-core` is the library it is
-  built on. [`docs/app-protocol.md`](docs/app-protocol.md) is how the MCP
-  server talks to the running app.
+  built on, and `epik-view` holds what its windows show.
+  [`docs/app-protocol.md`](docs/app-protocol.md) is how the MCP server talks
+  to the running app.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 

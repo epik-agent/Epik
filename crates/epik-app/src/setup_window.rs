@@ -12,30 +12,20 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use epik_core::builds::Builds;
-use epik_core::setup::{self, Check, Item, State as ItemState};
-use serde::Serialize;
+use epik_core::setup::{self, Check, Item};
+use epik_view::{Checklist, ItemState, Output, Row};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 /// The window's label.
 const LABEL: &str = "setup";
 
-/// One item as the checklist shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Row {
-    pub id: &'static str,
-    pub title: String,
-    pub state: ItemState,
-    pub detail: String,
-    /// The button's label, for an item that isn't done.
-    pub button: Option<String>,
-}
-
-/// The checklist.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Checklist {
-    pub rows: Vec<Row>,
-    /// Whether every item is done.
-    pub complete: bool,
+/// An item's state, as the checklist is given it.
+fn shown(state: setup::State) -> ItemState {
+    match state {
+        setup::State::Done => ItemState::Done,
+        setup::State::Missing => ItemState::Missing,
+        setup::State::Outdated => ItemState::Outdated,
+    }
 }
 
 /// The checklist for `checks`: each item's state, and the one button of
@@ -45,23 +35,15 @@ pub fn checklist(checks: &[Check]) -> Checklist {
         rows: checks
             .iter()
             .map(|check| Row {
-                id: check.item.id(),
+                id: check.item.id().to_owned(),
                 title: check.title.clone(),
-                state: check.state,
+                state: shown(check.state),
                 detail: check.detail.clone(),
                 button: setup::step(check).map(|step| step.label),
             })
             .collect(),
-        complete: !checks.is_empty() && checks.iter().all(|c| c.state == ItemState::Done),
+        complete: !checks.is_empty() && checks.iter().all(|c| c.state == setup::State::Done),
     }
-}
-
-/// What a pressed button has printed, and how it ended.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct Output {
-    pub lines: Vec<String>,
-    pub running: bool,
-    pub error: Option<String>,
 }
 
 /// What the window's commands reach.
@@ -187,30 +169,30 @@ pub fn opens_at_start(root: &Path, checks: &[Check]) -> bool {
 mod tests {
     use super::*;
 
-    fn check(item: Item, state: ItemState, detail: &str) -> Check {
+    fn check(item: Item, state: setup::State, detail: &str) -> Check {
         Check {
             item,
             title: item.title().to_owned(),
             state,
             detail: detail.to_owned(),
-            usable: state == ItemState::Done,
+            usable: state == setup::State::Done,
         }
     }
 
     fn all_done() -> Vec<Check> {
         Item::ALL
             .into_iter()
-            .map(|item| check(item, ItemState::Done, "fine"))
+            .map(|item| check(item, setup::State::Done, "fine"))
             .collect()
     }
 
     #[test]
     fn each_item_shows_its_state_and_detail_and_only_undone_ones_a_button() {
         let mut checks = all_done();
-        checks[1] = check(Item::GhAuth, ItemState::Missing, "not signed in");
+        checks[1] = check(Item::GhAuth, setup::State::Missing, "not signed in");
         checks[4] = check(
             Item::Node,
-            ItemState::Outdated,
+            setup::State::Outdated,
             "Node 22.1.0; Epik needs 26 or later",
         );
 
@@ -220,7 +202,7 @@ mod tests {
         let buttons: Vec<(&str, Option<&str>)> = list
             .rows
             .iter()
-            .map(|row| (row.id, row.button.as_deref()))
+            .map(|row| (row.id.as_str(), row.button.as_deref()))
             .collect();
         assert_eq!(
             buttons,
@@ -255,14 +237,14 @@ mod tests {
         assert!(!opens_at_start(root.path(), &all_done()));
 
         let mut no_plugin = all_done();
-        no_plugin[5] = check(Item::Plugin, ItemState::Missing, "not installed");
+        no_plugin[5] = check(Item::Plugin, setup::State::Missing, "not installed");
         assert!(
             !opens_at_start(root.path(), &no_plugin),
             "builds don't need it"
         );
 
         let mut signed_out = all_done();
-        signed_out[3] = check(Item::ClaudeAuth, ItemState::Missing, "not signed in");
+        signed_out[3] = check(Item::ClaudeAuth, setup::State::Missing, "not signed in");
         assert!(opens_at_start(root.path(), &signed_out));
     }
 }
