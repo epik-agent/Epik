@@ -16,7 +16,7 @@ use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
 use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
-use epik_core::{record, run};
+use epik_core::{record, run, self_link};
 
 /// How often the app checks GitHub for runs whose epic issue closed or
 /// whose pull request was closed. Modest to start with; tune it.
@@ -25,6 +25,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 const USAGE: &str = "usage: epik-app [--headless | --version]";
 
 fn main() -> ExitCode {
+    link_self();
     match std::env::args().nth(1).as_deref() {
         Some("--version") => {
             println!("epik-app {}", epik_core::version());
@@ -39,6 +40,20 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Points `~/.epik/bin/epik-app` at this executable, where Claude Code and
+/// other programs find the app. A failure is only reported.
+fn link_self() {
+    let (Some(root), Ok(exe)) = (record::default_root(), std::env::current_exe()) else {
+        return;
+    };
+    if let Err(error) = self_link::refresh(&root, &exe) {
+        eprintln!(
+            "epik-app: couldn't link {} to this app: {error}",
+            self_link::path(&root).display()
+        );
     }
 }
 

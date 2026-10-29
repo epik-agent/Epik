@@ -2,8 +2,11 @@ use std::process::Command;
 
 #[test]
 fn version_flag_prints_the_version_and_exits_zero() {
+    let home = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_epik-app"))
         .arg("--version")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .output()
         .expect("epik-app runs");
     assert!(output.status.success());
@@ -88,6 +91,25 @@ mod headless {
         assert!(stderr.contains("already running"), "{stderr}");
         assert!(ipc::running(&address(home.path())).is_some());
         terminate(first);
+    }
+
+    #[test]
+    fn it_links_itself_at_epik_bin() {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .arg("--version")
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+
+        let link = home.path().join(".epik").join("bin").join("epik-app");
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(
+            target,
+            Path::new(env!("CARGO_BIN_EXE_epik-app")),
+            "{output:?}"
+        );
     }
 
     #[test]
