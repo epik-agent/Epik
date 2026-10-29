@@ -8,3 +8,6 @@
 
 # Tauri
 /crates/epik-app/gen/
+
+# Node
+node_modules/
