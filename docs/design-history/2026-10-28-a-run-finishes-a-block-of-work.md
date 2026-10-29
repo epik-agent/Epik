@@ -1,6 +1,6 @@
 # A run is whatever it takes to finish a block of work, and the library owns its lifecycle
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-28
 - Builds on: [epik-runs-the-epic](2026-10-28-epik-runs-the-epic.md)
 - Supersedes: §5 ("Every run has a record") of that entry, and the
