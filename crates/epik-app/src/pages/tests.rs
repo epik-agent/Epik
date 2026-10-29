@@ -398,10 +398,8 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(plain(&detail.unblocks), "#18 and #19");
     assert_eq!(plain(&detail.pull_request), "Opens when the tests pass");
     assert_eq!(detail.recent, ["Reading src/eval.rs", "Running cargo test"]);
-    assert_eq!(
-        detail.log.as_deref(),
-        Some("/runs/wpm/epik-test/13/b0/16.jsonl")
-    );
+    let log = dir.join("16.jsonl").display().to_string();
+    assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
 }
