@@ -37,6 +37,12 @@ pub enum Refreshed {
 /// link that already does.
 pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     let link = path(root);
+    // An app started through the link may be told it is the link. Its
+    // real file is what the link must lead to, never the link itself.
+    let exe = &fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
+    if fs::canonicalize(&link).is_ok_and(|resolved| &resolved == exe) {
+        return Ok(Refreshed::Kept);
+    }
     fs::create_dir_all(link.parent().expect("the link is in a directory"))?;
     let existed = fs::symlink_metadata(&link).is_ok();
     if existed {
@@ -125,6 +131,19 @@ mod tests {
         assert_eq!(refresh(root.path(), &new).unwrap(), Refreshed::Replaced);
 
         assert_eq!(contents(&path(root.path())), "the new app");
+    }
+
+    #[test]
+    fn an_app_started_through_the_link_keeps_it() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = app(root.path(), "Epik", "the app");
+        refresh(root.path(), &exe).unwrap();
+
+        // Started as ~/.epik/bin/epik-app, the app may be told that is
+        // where it is.
+        assert_eq!(refresh(root.path(), &path(root.path())).unwrap(), Refreshed::Kept);
+
+        assert_eq!(contents(&path(root.path())), "the app");
     }
 
     #[test]
