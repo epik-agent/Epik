@@ -305,7 +305,9 @@ pub(crate) mod tests {
     /// A server with `gh`, whose app is at an address where nothing listens
     /// and that can't be started.
     pub(crate) fn server_with(gh: Gh) -> Server {
-        let root = std::env::temp_dir().join(format!("epik-mcp-{}", std::process::id()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("epik-mcp-{}-{n}", std::process::id()));
         Server::new(Context {
             gh,
             address: crate::ipc::Address::in_root(&root.join("nowhere")),

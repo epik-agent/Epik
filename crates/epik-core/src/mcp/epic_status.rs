@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use super::{Args, Context, Reply, integer, string};
 use crate::graph::Graph;
 use crate::mcp::gh::Gh;
+use crate::repositories;
 
 /// The most `gh` calls made at once, which keeps a large epic under
 /// GitHub's secondary rate limits.
@@ -243,6 +244,11 @@ pub fn run(context: &Context, args: &Args) -> Result<Reply, String> {
     for row in &mut rows {
         let url = row["url"].as_str().unwrap_or_default().to_owned();
         row["position"] = json!(positions.get(&url).copied().flatten());
+    }
+    // Epik checks every epic it writes with this tool, so a repository it
+    // plans in is one to monitor.
+    if let Err(error) = repositories::add(&context.root, repo, false, chrono::Utc::now()) {
+        eprintln!("epik-app mcp: couldn't monitor {repo}: {error}");
     }
     Ok(Reply::Json(json!({
         "epic": issue_url(repo, number as u64),
@@ -589,6 +595,23 @@ mod tests {
                 "cycles": [],
             })
         );
+    }
+
+    #[test]
+    fn the_epics_repository_is_monitored() {
+        let server = server(vec![(&pages("repos/o/r/issues/9/sub_issues"), json!([[]]))]);
+
+        server
+            .call(
+                "epic_status",
+                json!({"repo": "o/r", "epic_issue_number": 9}),
+            )
+            .unwrap();
+
+        let monitored = repositories::list(&server.context.root).unwrap();
+        assert_eq!(monitored.len(), 1);
+        assert_eq!(monitored[0].repo, "o/r");
+        assert!(!monitored[0].added_by_user);
     }
 
     #[test]
