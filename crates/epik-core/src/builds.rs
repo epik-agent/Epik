@@ -12,12 +12,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{Agent, ClaudeAcp};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
 use crate::record::{self, Kind};
+use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
 
 /// A build that has started.
@@ -150,6 +152,11 @@ impl Builds {
                             return;
                         }
                     };
+                    if let Err(error) =
+                        repositories::add(&request.root, &request.repo, false, Utc::now())
+                    {
+                        eprintln!("epik: couldn't monitor {}: {error}", request.repo);
+                    }
                     let _ = started.send(Ok(Started {
                         run: key.clone(),
                         build_id: build.build_id().to_owned(),
@@ -377,6 +384,21 @@ mod tests {
 
         assert_eq!(error, "it is closed");
         assert!(builds.active().is_empty());
+    }
+
+    #[test]
+    fn starting_a_build_in_an_unlisted_repository_monitors_it() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let monitored = repositories::list(root.path()).unwrap();
+        assert_eq!(monitored.len(), 1);
+        assert_eq!(monitored[0].repo, "owner/repo");
+        assert!(!monitored[0].added_by_user);
     }
 
     #[test]

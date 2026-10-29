@@ -10,6 +10,7 @@ pub mod github;
 pub mod graph;
 pub mod ipc;
 pub mod record;
+pub mod repositories;
 pub mod run;
 
 /// The version of Epik, which every crate in the workspace shares.
