@@ -58,8 +58,56 @@
       height: 3rem;
       width: 3rem;
     }
-    .soon {
+    .download {
+      margin-top: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+    .download h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+    .platforms {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.75rem;
+    }
+    .platforms a {
+      display: inline-block;
+      padding: 0.625rem 1.25rem;
+      border: 1px solid var(--faint);
+      border-radius: 0.5rem;
+      color: var(--fg);
+      font-weight: 500;
+      text-decoration: none;
+    }
+    .platforms a:hover,
+    .platforms a:focus-visible {
+      border-color: var(--accent);
+    }
+    .platforms a .file {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--muted);
+    }
+    .platforms a.yours {
+      border-color: var(--accent);
+      background-color: var(--accent);
+      color: var(--bg);
+    }
+    .platforms a.yours .file {
+      color: var(--bg);
+    }
+    .next,
+    .all {
       font-size: 0.875rem;
+      color: var(--muted);
+    }
+    .all a {
       color: var(--muted);
     }
     footer {
@@ -76,13 +124,33 @@
     <hr>
     <p class="tagline">You say it. We make it.</p>
     <img class="logo" src="brand/logo-mark-light.svg" alt="Epik logo">
-    <p class="soon">Coming soon</p>
+    <section class="download" id="download" aria-labelledby="download-heading">
+      <h2 id="download-heading">Download Epik</h2>
+      <!-- The file names are the ones .github/workflows/release.yml uploads. -->
+      <div class="platforms">
+        <a data-os="mac" href="https://github.com/epik-agent/Epik/releases/latest/download/Epik.dmg">macOS<span class="file">Epik.dmg</span></a>
+        <a data-os="windows" href="https://github.com/epik-agent/Epik/releases/latest/download/Epik.msi">Windows<span class="file">Epik.msi</span></a>
+        <a data-os="linux" href="https://github.com/epik-agent/Epik/releases/latest/download/Epik_amd64.AppImage">Linux<span class="file">AppImage</span></a>
+        <a data-os="linux" href="https://github.com/epik-agent/Epik/releases/latest/download/Epik_amd64.deb">Linux<span class="file">.deb (Debian, Ubuntu)</span></a>
+      </div>
+      <p class="next">Open it and follow the setup checklist.</p>
+      <p class="all"><a href="https://github.com/epik-agent/Epik/releases">All releases</a></p>
+    </section>
   </main>
   <footer>
     <p>&copy; <span id="year">2026</span> Epik</p>
   </footer>
   <script>
     document.getElementById("year").textContent = new Date().getFullYear();
+    // Highlight the visitor's platform. Every button works without this.
+    (function () {
+      var ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent;
+      var os = /mac/i.test(ua) ? "mac" : /win/i.test(ua) ? "windows" : /linux|x11/i.test(ua) && !/android/i.test(navigator.userAgent) ? "linux" : null;
+      if (!os) return;
+      document.querySelectorAll('.platforms a[data-os="' + os + '"]').forEach(function (a) {
+        a.classList.add("yours");
+      });
+    })();
   </script>
 </body>
 </html>
