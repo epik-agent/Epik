@@ -3,7 +3,7 @@
 //! branch, and open the epic's pull request, recording the run as it goes.
 //!
 //! [`start`] reads the issue, clones the repository and writes
-//! `run_started`; [`Build::run`] does the rest. [`run`] does both. A build
+//! `build_started`; [`Build::run`] does the rest. [`run`] does both. A build
 //! reaches GitHub only through [`GitHub`] and its agents only through
 //! [`Agent`], so it is tested with fakes of each.
 //!
@@ -28,9 +28,12 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 
 use crate::agent::{Agent, AgentOutcome, AgentRequest};
+use crate::cleanup;
+use crate::comment;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
-use crate::record::{self, Event, Kind, Member, Outcome, RunState, RunWriter};
+use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
+use crate::run::{self, RunKey};
 
 /// How often a pull request's checks are read while they are pending.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -93,8 +96,7 @@ impl From<io::Error> for Error {
     }
 }
 
-/// `title` made fit for a branch name, as `slug` in
-/// `plugin/server/src/tools/build_start.js` does it: lowercased, each run
+/// `title` made fit for a branch name: lowercased, each run
 /// of anything but ASCII letters and digits made one `-`, cut to 40
 /// characters, and trimmed of `-`.
 pub fn slug(title: &str) -> String {
@@ -126,16 +128,17 @@ pub fn run(
     agent: &(dyn Agent + Sync),
     request: &Request,
     cancel: &AtomicBool,
-) -> Result<RunState, Error> {
+) -> Result<BuildState, Error> {
     Ok(start(github, agent, request)?.run(cancel))
 }
 
 /// Starts a build: reads the issue, picks the branch, for an epic ensures
-/// its branch and label and reads its members and their blockers, and
-/// clones the repository into `<root>/builds/<run-id>`. Then writes
-/// `run_started`, whose members are the open issues the run builds.
+/// its branch and label and reads its issues and their blockers, and
+/// clones the repository into the build's clone directory. Then writes
+/// `build_started`, with every issue of the run and which are closed; the
+/// build works on the open ones.
 ///
-/// A pull request, a closed issue, or a failure before `run_started` is an
+/// A pull request, a closed issue, or a failure before `build_started` is an
 /// error, and leaves no record.
 pub fn start<'a>(
     github: &'a dyn GitHub,
@@ -165,10 +168,10 @@ pub fn start<'a>(
     };
 
     let at = Utc::now();
-    let run_id = record::run_id(repo, number, at);
     let mut problems = Vec::new();
-    let members = match kind {
-        Kind::Issue => vec![Member {
+    let mut closed = BTreeSet::new();
+    let issues = match kind {
+        Kind::Issue => vec![Issue {
             number,
             title: issue.title.clone(),
             blocked_by: Vec::new(),
@@ -183,19 +186,20 @@ pub fn start<'a>(
                     .map(|sub| format!("{}#{}", sub.repo, sub.number))
                     .collect();
                 problems.push(format!(
-                    "members in another repository: {}",
+                    "sub-issues in another repository: {}",
                     elsewhere.join(", ")
                 ));
             }
-            let open: Vec<_> = here
-                .into_iter()
-                .filter(|sub| sub.state == State::Open)
-                .collect();
-            let numbers: BTreeSet<u64> = open.iter().map(|sub| sub.number).collect();
-            open.into_iter()
+            let numbers: BTreeSet<u64> = here.iter().map(|sub| sub.number).collect();
+            closed.extend(
+                here.iter()
+                    .filter(|sub| sub.state == State::Closed)
+                    .map(|sub| sub.number),
+            );
+            here.into_iter()
                 .map(|sub| {
                     let blockers = github.blocked_by(repo, sub.number)?;
-                    Ok(Member {
+                    Ok(Issue {
                         number: sub.number,
                         title: sub.title.clone(),
                         blocked_by: blockers
@@ -208,46 +212,64 @@ pub fn start<'a>(
         }
     };
     let graph = Graph::new(
-        members
+        issues
             .iter()
-            .map(|member| (member.number, member.blocked_by.clone())),
+            .map(|issue| (issue.number, issue.blocked_by.clone())),
     );
     for cycle in graph.cycles() {
-        problems.push(format!("a dependency cycle: {}", issues(&cycle)));
+        problems.push(format!("a dependency cycle: {}", numbered(&cycle)));
     }
 
-    let clone = request.root.join("builds").join(&run_id);
-    github.clone(repo, &clone)?;
-    let writer = RunWriter::create(&request.root, &run_id)?;
+    // Creating the record first reserves the build's id, so no other build
+    // shares its record or its clone.
+    let key = RunKey::new(repo, number);
+    let writer = BuildWriter::create_new(&request.root, &key, at)?;
+    let build_id = writer.build_id().to_owned();
     let dir = writer.dir().to_owned();
+    let clone = run::clone_dir(&request.root, &key, &build_id);
+    if let Err(error) = github.clone(repo, &clone) {
+        drop(writer);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = cleanup::remove_clone(&clone);
+        // The run's record, if this was its first build, is now empty.
+        if record::list_builds(&request.root, &key).is_ok_and(|builds| builds.is_empty()) {
+            let _ = run::delete(&request.root, &key);
+        }
+        return Err(error.into());
+    }
     let mut log = Log {
         writer,
         events: Vec::new(),
     };
-    log.append(Event::RunStarted {
+    log.append(Event::BuildStarted {
         at,
-        run_id: run_id.clone(),
+        build_id: build_id.clone(),
         repo: repo.to_owned(),
         number,
         title: issue.title.clone(),
         kind,
         branch: branch.clone(),
-        members,
+        issues,
+        closed: closed.iter().copied().collect(),
+        plugin_dir: Some(request.plugin_dir.clone()),
     });
     Ok(Build {
         github,
         agent,
+        root: request.root.clone(),
+        key,
         repo: repo.to_owned(),
         number,
         title: issue.title,
         kind,
         branch,
         default_branch,
-        run_id,
+        build_id,
         clone,
         dir,
         plugin_dir: request.plugin_dir.clone(),
         graph,
+        closed,
         problems,
         check_interval: CHECK_INTERVAL,
         log: Mutex::new(log),
@@ -258,19 +280,24 @@ pub fn start<'a>(
 pub struct Build<'a> {
     github: &'a dyn GitHub,
     agent: &'a (dyn Agent + Sync),
+    /// Epik's root, holding the run's earlier builds.
+    root: PathBuf,
+    key: RunKey,
     repo: String,
     number: u64,
     title: String,
     kind: Kind,
     branch: String,
     default_branch: String,
-    run_id: String,
+    build_id: String,
     clone: PathBuf,
     /// The run's record directory.
     dir: PathBuf,
     plugin_dir: PathBuf,
-    /// The open members and the members blocking each.
+    /// The run's issues and the issues blocking each.
     graph: Graph,
+    /// The issues closed when the build started.
+    closed: BTreeSet<u64>,
     /// What stops the run before any agent starts.
     problems: Vec<String>,
     check_interval: Duration,
@@ -287,9 +314,14 @@ enum Finished {
 }
 
 impl Build<'_> {
-    /// The run's id.
-    pub fn run_id(&self) -> &str {
-        &self.run_id
+    /// The run the build belongs to.
+    pub fn run_key(&self) -> &RunKey {
+        &self.key
+    }
+
+    /// The build's id, unique within its run.
+    pub fn build_id(&self) -> &str {
+        &self.build_id
     }
 
     /// Whether the run builds an epic or a single issue.
@@ -325,10 +357,10 @@ impl Build<'_> {
     /// with the prompt `/epik:issue <number> <branch>`. As each finishes,
     /// its issue is finished, and for an epic merged and closed, and the
     /// issues it unblocks start. When nothing is running or ready, an epic
-    /// whose members are all closed gets its pull request into the default
+    /// whose issues are all closed gets its pull request into the default
     /// branch. Setting `cancel` stops every agent and ends the run with
-    /// `run_interrupted`.
-    pub fn run(self, cancel: &AtomicBool) -> RunState {
+    /// `build_interrupted`.
+    pub fn run(self, cancel: &AtomicBool) -> BuildState {
         if self.problems.is_empty() {
             self.orchestrate(cancel);
         } else {
@@ -339,11 +371,20 @@ impl Build<'_> {
         // The events are the record; a summary that can't be written is
         // rebuilt from them by anything that reads the run.
         let _ = log.writer.write_summary(&state);
+        // The clone is scratch space: what the run made is on GitHub or in
+        // its record. Failing to remove it doesn't change how the run went.
+        if let Err(error) = cleanup::remove_clone(&self.clone) {
+            eprintln!(
+                "epik: couldn't remove {}'s clone at {}: {error}",
+                self.build_id,
+                self.clone.display()
+            );
+        }
         state
     }
 
     fn orchestrate(&self, cancel: &AtomicBool) {
-        let mut closed = BTreeSet::new();
+        let mut closed = self.closed.clone();
         let mut running = BTreeSet::new();
         let mut failed = BTreeSet::new();
         let mut last_pull_request = None;
@@ -384,7 +425,7 @@ impl Build<'_> {
         });
 
         if cancel.load(Ordering::SeqCst) {
-            self.append(Event::RunInterrupted {
+            self.append(Event::BuildInterrupted {
                 at: Utc::now(),
                 reason: "cancelled".to_owned(),
             });
@@ -392,9 +433,9 @@ impl Build<'_> {
         }
         let stuck = self.graph.stuck(&closed, &failed);
         if !failed.is_empty() || !stuck.is_empty() {
-            let mut reason = format!("failed: {}", issues(&failed));
+            let mut reason = format!("failed: {}", numbered(&failed));
             if !stuck.is_empty() {
-                reason.push_str(&format!("; stuck: {}", issues(&stuck)));
+                reason.push_str(&format!("; stuck: {}", numbered(&stuck)));
             }
             self.finish(Err(reason));
             return;
@@ -433,6 +474,9 @@ impl Build<'_> {
         };
         let outcome = self.agent.run(&request, cancel);
         if cancel.load(Ordering::SeqCst) {
+            // What the agent spent before it was stopped still counts.
+            let reason = Some("interrupted".to_owned());
+            self.issue_finished(number, &outcome, Outcome::Failed, reason, None);
             return Finished::Cancelled;
         }
         let found = if outcome.exited_cleanly {
@@ -465,15 +509,17 @@ impl Build<'_> {
         if self.kind == Kind::Issue {
             return Finished::Done(pr.number);
         }
-        match self.merge(number, pr, cancel) {
-            Ok(()) => {
-                self.append(Event::IssueMerged {
-                    at: Utc::now(),
-                    number,
-                    pull_request: pr.number,
-                });
-                Finished::Done(pr.number)
-            }
+        let closed = self.merge(pr, cancel).and_then(|sha| {
+            self.append(Event::IssueMerged {
+                at: Utc::now(),
+                number,
+                pull_request: pr.number,
+                merge_commit: Some(sha),
+            });
+            self.close(number, pr.number)
+        });
+        match closed {
+            Ok(()) => Finished::Done(pr.number),
             Err(Stop::Cancelled) => Finished::Cancelled,
             Err(Stop::Failed(reason)) => {
                 // A second `issue_finished` records that the issue failed
@@ -490,21 +536,36 @@ impl Build<'_> {
         }
     }
 
-    /// Waits for `pr`'s checks, merges it, and closes issue `number`.
-    fn merge(&self, number: u64, pr: PullRequest, cancel: &AtomicBool) -> Result<(), Stop> {
+    /// Waits for `pr`'s checks, unless it has merged already, merges it,
+    /// and returns its merge commit.
+    fn merge(&self, pr: PullRequest, cancel: &AtomicBool) -> Result<String, Stop> {
         if !pr.merged {
             self.await_checks(pr.number, cancel)?;
-            self.github
-                .merge_pull_request(&self.repo, pr.number)
-                .map_err(|error| Stop::Failed(format!("couldn't merge #{}: {error}", pr.number)))?;
         }
-        let comment = format!("Merged into `{}` by #{}.", self.branch, pr.number);
+        self.github
+            .merge_pull_request(&self.repo, pr.number)
+            .map_err(|error| Stop::Failed(format!("couldn't merge #{}: {error}", pr.number)))
+    }
+
+    /// Closes issue `number`, merged by `pr`, with a comment of its time and
+    /// cost over every build of the run.
+    fn close(&self, number: u64, pr: u64) -> Result<(), Stop> {
+        let issue = run::read(&self.root, &self.key)
+            .ok()
+            .and_then(|run| run.issue(number).cloned())
+            .or_else(|| {
+                let log = self.log.lock().unwrap();
+                record::fold(&log.events).and_then(|build| build.issue(number).cloned())
+            });
+        let comment = match issue {
+            Some(issue) => comment::issue_merged(&self.branch, &issue),
+            None => format!("Merged into `{}` by #{pr}.", self.branch),
+        };
         self.github
             .close_issue(&self.repo, number, &comment)
             .map_err(|error| {
                 Stop::Failed(format!(
-                    "merged #{} but couldn't close the issue: {error}",
-                    pr.number
+                    "merged #{pr} but couldn't close the issue: {error}"
                 ))
             })
     }
@@ -559,7 +620,7 @@ impl Build<'_> {
             Ok(pull_request) => (Outcome::Succeeded, None, pull_request),
             Err(reason) => (Outcome::Failed, Some(reason), None),
         };
-        self.append(Event::RunFinished {
+        self.append(Event::BuildFinished {
             at: Utc::now(),
             outcome,
             reason,
@@ -580,7 +641,7 @@ enum Stop {
 
 /// A run's events, as written and as kept for the final fold.
 struct Log {
-    writer: RunWriter,
+    writer: BuildWriter,
     events: Vec<Event>,
 }
 
@@ -609,7 +670,7 @@ fn wait(interval: Duration, cancel: &AtomicBool) -> bool {
 }
 
 /// `#1, #2, #3`.
-fn issues<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
+fn numbered<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
     numbers
         .into_iter()
         .map(|number| format!("#{number}"))
@@ -621,7 +682,7 @@ fn issues<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
 mod tests {
     use super::*;
     use crate::github::{FakeGitHub, MergeMethods, PullState};
-    use crate::record::{MemberStatus, RunStatus};
+    use crate::record::{BuildStatus, IssueStatus};
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
@@ -729,12 +790,12 @@ mod tests {
     }
 
     /// A repository on `main` holding epic 1, "The epic", whose sub-issues
-    /// are `members`, each with its blockers.
-    fn epic<const N: usize>(members: [(u64, &[u64]); N]) -> FakeGitHub {
+    /// are `issues`, each with its blockers.
+    fn epic<const N: usize>(issues: [(u64, &[u64]); N]) -> FakeGitHub {
         let github = FakeGitHub::new();
         github.add_repo(REPO, "main");
         github.add_issue(REPO, 1, "The epic");
-        for (number, blockers) in members {
+        for (number, blockers) in issues {
             github.add_issue(REPO, number, &format!("Issue {number}"));
             github.add_sub_issue(REPO, 1, REPO, number);
             for &blocker in blockers {
@@ -756,7 +817,7 @@ mod tests {
 
     /// Builds `number` to its end, checking pending checks every
     /// millisecond.
-    fn build(github: &FakeGitHub, agent: &FakeAgent, root: &Path, number: u64) -> RunState {
+    fn build(github: &FakeGitHub, agent: &FakeAgent, root: &Path, number: u64) -> BuildState {
         let cancel = AtomicBool::new(false);
         start(github, agent, &request(root, number))
             .unwrap()
@@ -773,8 +834,8 @@ mod tests {
     }
 
     /// The run's events on disk, each written briefly, without its time.
-    fn events(root: &Path, state: &RunState) -> Vec<String> {
-        let events = record::read_events(root, &state.run_id).unwrap();
+    fn events(root: &Path, state: &BuildState) -> Vec<String> {
+        let events = record::read_events(root, &state.run(), &state.build_id).unwrap();
         events.iter().map(brief).collect()
     }
 
@@ -785,17 +846,21 @@ mod tests {
             None => String::new(),
         };
         match event {
-            Event::RunStarted {
+            Event::BuildStarted {
                 kind,
                 branch,
-                members,
+                issues,
+                closed,
                 ..
             } => {
-                let members: Vec<String> = members
+                let issues: Vec<String> = issues
                     .iter()
-                    .map(|m| format!("{}{:?}", m.number, m.blocked_by))
+                    .map(|m| {
+                        let mark = if closed.contains(&m.number) { "x" } else { "" };
+                        format!("{mark}{}{:?}", m.number, m.blocked_by)
+                    })
                     .collect();
-                format!("run_started {kind:?} {branch} {}", members.join(" "))
+                format!("build_started {kind:?} {branch} {}", issues.join(" "))
             }
             Event::IssueStarted { number, .. } => format!("issue_started {number}"),
             Event::IssueFinished {
@@ -814,17 +879,20 @@ mod tests {
                 pull_request,
                 ..
             } => format!("issue_merged {number} #{pull_request}"),
-            Event::RunFinished {
+            Event::BuildFinished {
                 outcome,
                 reason,
                 pull_request,
                 ..
             } => format!(
-                "run_finished {outcome:?}{}{}",
+                "build_finished {outcome:?}{}{}",
                 pr(pull_request),
                 why(reason)
             ),
-            Event::RunInterrupted { reason, .. } => format!("run_interrupted ({reason})"),
+            Event::BuildInterrupted { reason, .. } => format!("build_interrupted ({reason})"),
+            Event::PullRequestClosed { pull_request, .. } => {
+                format!("pull_request_closed #{pull_request}")
+            }
         }
     }
 
@@ -863,7 +931,7 @@ mod tests {
         assert_eq!(
             events[..3],
             [
-                format!("run_started Epic {EPIC_BRANCH} 2[] 3[] 4[2, 3] 5[4]"),
+                format!("build_started Epic {EPIC_BRANCH} 2[] 3[] 4[2, 3] 5[4]"),
                 "issue_started 2".to_owned(),
                 "issue_started 3".to_owned(),
             ]
@@ -886,7 +954,7 @@ mod tests {
                 "issue_started 5".to_owned(),
                 format!("issue_finished 5 Succeeded #{}", pr(5)),
                 format!("issue_merged 5 #{}", pr(5)),
-                format!("run_finished Succeeded #{epic_pr}"),
+                format!("build_finished Succeeded #{epic_pr}"),
             ]
         );
         assert_eq!(agent.most_running.load(Ordering::SeqCst), 2);
@@ -899,8 +967,16 @@ mod tests {
             assert_eq!(repo.pulls[&pr(n)].base, EPIC_BRANCH);
             let issue = &repo.issues[&n];
             assert_eq!(issue.state, State::Closed);
-            let comment = format!("Merged into `{EPIC_BRANCH}` by #{}.", pr(n));
-            assert_eq!(issue.comments, [comment]);
+            let [comment] = &issue.comments[..] else {
+                panic!("one comment on #{n}");
+            };
+            let sha = &FakeGitHub::merge_commit(pr(n))[..7];
+            let merged = format!(
+                "**Epik: 1s, $0.25.** Merged into `{EPIC_BRANCH}` by #{} ({sha}).",
+                pr(n)
+            );
+            assert!(comment.starts_with(&merged), "{comment}");
+            assert!(comment.contains("<!-- epik:cost {"), "{comment}");
         }
         let epic_pull = &repo.pulls[&epic_pr];
         assert_eq!(epic_pull.head, EPIC_BRANCH);
@@ -910,24 +986,24 @@ mod tests {
         assert_eq!(epic_pull.state, PullState::Open);
         assert_eq!(repo.issues[&1].state, State::Open);
 
-        assert_eq!(state.status, RunStatus::Succeeded);
+        assert_eq!(state.status, BuildStatus::Succeeded);
         assert_eq!(state.cost_usd, Decimal::from_str("1.00").unwrap());
     }
 
     #[test]
-    fn a_run_clones_the_repository_and_keeps_each_agents_logs() {
+    fn a_build_clones_the_repository_and_keeps_each_agents_logs() {
         let github = epic([(2, &[])]);
         let agent = FakeAgent::new(&github, []);
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
 
-        let clone = root.path().join("builds").join(&state.run_id);
+        let clone = run::clone_dir(root.path(), &state.run(), &state.build_id);
         assert_eq!(github.clones(), [(REPO.to_owned(), clone.clone())]);
         let requests = agent.requests.lock().unwrap();
         let [request] = &requests[..] else {
             panic!("one agent ran");
         };
-        let dir = record::run_dir(root.path(), &state.run_id);
+        let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
         assert_eq!(request.prompt, format!("/epik:issue 2 {EPIC_BRANCH}"));
         assert_eq!(request.cwd, clone);
         assert_eq!(request.plugin_dir, Path::new("/plugin"));
@@ -935,7 +1011,7 @@ mod tests {
         assert_eq!(request.err_path, dir.join("2.err"));
 
         let summary = std::fs::read_to_string(dir.join(record::SUMMARY_FILE)).unwrap();
-        let summary: RunState = serde_json::from_str(&summary).unwrap();
+        let summary: BuildState = serde_json::from_str(&summary).unwrap();
         assert_eq!(summary, state);
     }
 
@@ -965,7 +1041,7 @@ mod tests {
         assert_eq!(
             events[..3],
             [
-                format!("run_started Epic {EPIC_BRANCH} 2[] 3[2] 4[3] 5[]"),
+                format!("build_started Epic {EPIC_BRANCH} 2[] 3[2] 4[3] 5[]"),
                 "issue_started 2".to_owned(),
                 "issue_started 5".to_owned(),
             ]
@@ -980,14 +1056,14 @@ mod tests {
         );
         assert_eq!(
             events[6..],
-            ["run_finished Failed (failed: #2; stuck: #3, #4)"]
+            ["build_finished Failed (failed: #2; stuck: #3, #4)"]
         );
         assert_eq!(agent.prompts().len(), 2);
         let repo = github.repo(REPO);
         assert_eq!(repo.issues[&2].state, State::Open);
         assert_eq!(repo.issues[&5].state, State::Closed);
         assert!(repo.pulls.values().all(|pull| pull.base != "main"));
-        assert_eq!(state.member(3).unwrap().status, MemberStatus::Waiting);
+        assert_eq!(state.issue(3).unwrap().status, IssueStatus::Waiting);
     }
 
     #[test]
@@ -1001,7 +1077,7 @@ mod tests {
             [
                 "issue_started 2".to_owned(),
                 format!("issue_finished 2 Failed (no pull request into {EPIC_BRANCH} closes #2)"),
-                "run_finished Failed (failed: #2)".to_owned(),
+                "build_finished Failed (failed: #2)".to_owned(),
             ]
         );
     }
@@ -1020,15 +1096,15 @@ mod tests {
                 "issue_started 2".to_owned(),
                 format!("issue_finished 2 Succeeded #{pr}"),
                 format!("issue_finished 2 Failed #{pr} (checks failed on #{pr})"),
-                "run_finished Failed (failed: #2)".to_owned(),
+                "build_finished Failed (failed: #2)".to_owned(),
             ]
         );
         let repo = github.repo(REPO);
         assert_eq!(repo.pulls[&pr].state, PullState::Open);
         assert_eq!(repo.issues[&2].state, State::Open);
-        let member = state.member(2).unwrap();
-        assert_eq!(member.status, MemberStatus::Failed);
-        assert_eq!(member.pull_request, Some(pr));
+        let issue = state.issue(2).unwrap();
+        assert_eq!(issue.status, IssueStatus::Failed);
+        assert_eq!(issue.pull_request, Some(pr));
     }
 
     #[test]
@@ -1067,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_fails_the_run_before_any_agent_starts() {
+    fn a_cycle_fails_the_build_before_any_agent_starts() {
         let github = epic([(2, &[3]), (3, &[2]), (4, &[])]);
         let agent = FakeAgent::new(&github, []);
         let root = tempfile::tempdir().unwrap();
@@ -1075,15 +1151,15 @@ mod tests {
         assert_eq!(
             events(root.path(), &state),
             [
-                format!("run_started Epic {EPIC_BRANCH} 2[3] 3[2] 4[]"),
-                "run_finished Failed (a dependency cycle: #2, #3)".to_owned(),
+                format!("build_started Epic {EPIC_BRANCH} 2[3] 3[2] 4[]"),
+                "build_finished Failed (a dependency cycle: #2, #3)".to_owned(),
             ]
         );
         assert!(agent.prompts().is_empty());
     }
 
     #[test]
-    fn a_member_in_another_repository_fails_the_run() {
+    fn a_issue_in_another_repository_fails_the_build() {
         let github = epic([(2, &[])]);
         github.add_repo("other/repo", "main");
         github.add_issue("other/repo", 9, "Elsewhere");
@@ -1093,13 +1169,13 @@ mod tests {
         let state = build(&github, &agent, root.path(), 1);
         assert_eq!(
             events(root.path(), &state)[1..],
-            ["run_finished Failed (members in another repository: other/repo#9)"]
+            ["build_finished Failed (sub-issues in another repository: other/repo#9)"]
         );
         assert!(agent.prompts().is_empty());
     }
 
     #[test]
-    fn closed_members_are_skipped() {
+    fn closed_issues_are_skipped() {
         // Building again after 2 merged.
         let github = epic([(2, &[]), (3, &[2])]);
         github.set_state(REPO, 2, State::Closed);
@@ -1107,10 +1183,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
         let events = events(root.path(), &state);
-        assert_eq!(events[0], format!("run_started Epic {EPIC_BRANCH} 3[]"));
+        assert_eq!(
+            events[0],
+            format!("build_started Epic {EPIC_BRANCH} x2[] 3[2]")
+        );
         assert_eq!(events[1], "issue_started 3");
         assert_eq!(agent.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
-        assert_eq!(state.status, RunStatus::Succeeded);
+        assert_eq!(state.status, BuildStatus::Succeeded);
     }
 
     #[test]
@@ -1126,10 +1205,10 @@ mod tests {
         assert_eq!(
             events(root.path(), &state),
             [
-                "run_started Issue main 7[]".to_owned(),
+                "build_started Issue main 7[]".to_owned(),
                 "issue_started 7".to_owned(),
                 format!("issue_finished 7 Succeeded #{pr}"),
-                format!("run_finished Succeeded #{pr}"),
+                format!("build_finished Succeeded #{pr}"),
             ]
         );
         assert_eq!(agent.prompts(), ["/epik:issue 7 main"]);
@@ -1143,31 +1222,34 @@ mod tests {
             BTreeSet::from(["main".into(), "issue-7".into()])
         );
         assert_eq!(state.kind, Kind::Issue);
-        assert_eq!(state.member(7).unwrap().status, MemberStatus::Succeeded);
+        assert_eq!(state.issue(7).unwrap().status, IssueStatus::Succeeded);
     }
 
     #[test]
-    fn cancelling_stops_every_agent_and_interrupts_the_run() {
+    fn cancelling_stops_every_agent_and_interrupts_the_build() {
         // 2 is cancelled by the user mid-run while 3 is still working.
         let github = epic([(2, &[]), (3, &[]), (4, &[2])]);
         let agent = FakeAgent::new(&github, [(2, Act::Cancel), (3, Act::Hang)]);
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
+        let events = events(root.path(), &state);
+        assert_eq!(events[1..3], ["issue_started 2", "issue_started 3"]);
         assert_eq!(
-            events(root.path(), &state)[1..],
+            sorted(events[3..5].to_vec()),
             [
-                "issue_started 2".to_owned(),
-                "issue_started 3".to_owned(),
-                "run_interrupted (cancelled)".to_owned(),
+                "issue_finished 2 Failed (interrupted)",
+                "issue_finished 3 Failed (interrupted)",
             ]
         );
+        assert_eq!(events[5..], ["build_interrupted (cancelled)"]);
         assert_eq!(agent.prompts().len(), 2);
-        assert_eq!(state.status, RunStatus::Interrupted);
+        assert_eq!(state.status, BuildStatus::Interrupted);
+        assert_eq!(state.cost_usd, Decimal::from_str("0.50").unwrap());
         assert!(github.repo(REPO).pulls.is_empty());
     }
 
     #[test]
-    fn cancelling_while_checks_are_pending_interrupts_the_run() {
+    fn cancelling_while_checks_are_pending_interrupts_the_build() {
         let github = epic([(2, &[])]);
         let agent = FakeAgent::new(&github, [(2, Act::Pull(Checks::Pending))]);
         let root = tempfile::tempdir().unwrap();
@@ -1189,10 +1271,93 @@ mod tests {
             [
                 "issue_started 2".to_owned(),
                 format!("issue_finished 2 Succeeded #{pr}"),
-                "run_interrupted (cancelled)".to_owned(),
+                "build_interrupted (cancelled)".to_owned(),
             ]
         );
         assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn the_clone_is_removed_when_the_build_ends_and_the_record_kept() {
+        for act in [Act::Pull(Checks::Passing), Act::Crash, Act::Cancel] {
+            let github = epic([(2, &[])]);
+            let agent = FakeAgent::new(&github, [(2, act)]);
+            let root = tempfile::tempdir().unwrap();
+            let state = build(&github, &agent, root.path(), 1);
+            let clone = run::clone_dir(root.path(), &state.run(), &state.build_id);
+            assert!(!clone.exists(), "{:?}", state.status);
+            let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
+            assert!(dir.join(record::SUMMARY_FILE).is_file());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clone_that_cant_be_removed_leaves_the_outcome_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let build = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        let clone = build.clone_dir().to_owned();
+        let parent = clone.parent().unwrap().to_owned();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let state = build.check_interval(Duration::from_millis(1)).run(&cancel);
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(clone.exists());
+        assert_eq!(state.status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn building_an_interrupted_epic_again_adds_a_build_to_its_run() {
+        // 2 merges, then the user cancels while 3 runs; the second build
+        // finds 2 closed and builds only 3.
+        let github = epic([(2, &[]), (3, &[2])]);
+        let root = tempfile::tempdir().unwrap();
+        let first = FakeAgent::new(&github, [(3, Act::Cancel)]);
+        let interrupted = build(&github, &first, root.path(), 1);
+        assert_eq!(interrupted.status, BuildStatus::Interrupted);
+
+        let second = FakeAgent::new(&github, []);
+        let finished = build(&github, &second, root.path(), 1);
+
+        assert_eq!(second.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        let run = run::read(root.path(), &RunKey::new(REPO, 1)).unwrap();
+        assert_eq!(run.builds.len(), 2);
+        assert_eq!(run.disposition, run::Disposition::WaitingForReview);
+        assert_eq!(run.elapsed_ms, interrupted.elapsed_ms + finished.elapsed_ms);
+        assert_eq!(run.cost_usd, interrupted.cost_usd + finished.cost_usd);
+        assert_eq!(run.cost_usd, Decimal::from_str("0.75").unwrap());
+        assert_eq!(run.issue(2).unwrap().status, IssueStatus::Merged);
+        assert_eq!(run.issue(3).unwrap().status, IssueStatus::Merged);
+    }
+
+    #[test]
+    fn a_failed_clone_leaves_no_record() {
+        let github = epic([(2, &[])]);
+        github.fail("clone", "gh: no space left");
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let error = start(&github, &agent, &request(root.path(), 1)).err();
+        assert!(matches!(error, Some(Error::GitHub(_))));
+        assert!(run::list(root.path()).unwrap().is_empty());
+        let runs = std::fs::read_dir(record::runs_dir(root.path())).unwrap();
+        assert_eq!(runs.count(), 0, "nothing of the run is left");
+    }
+
+    #[test]
+    fn two_builds_of_one_issue_get_their_own_records_and_clones() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, [(2, Act::Hang)]);
+        let root = tempfile::tempdir().unwrap();
+        let first = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        let second = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        assert_ne!(first.build_id(), second.build_id());
+        assert_ne!(first.dir(), second.dir());
+        assert_ne!(first.clone_dir(), second.clone_dir());
     }
 
     #[test]
@@ -1210,6 +1375,6 @@ mod tests {
         let error = start(&github, &agent, &request(root.path(), 2)).err();
         assert!(matches!(error, Some(Error::Closed)));
         assert!(github.clones().is_empty());
-        assert!(record::list_runs(root.path()).unwrap().is_empty());
+        assert!(run::list(root.path()).unwrap().is_empty());
     }
 }

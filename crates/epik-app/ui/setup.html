@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- The setup checklist: each thing Epik needs, and a button for each that
+     isn't done. Nothing runs until its button is pressed. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Set up Epik</title>
+    <link rel="stylesheet" href="epik.css" />
+    <link rel="stylesheet" href="setup.css" />
+    <script src="setup.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <h1>Set up Epik</h1>
+      <p>Epik needs these on your Mac or PC. Each button says what it will do, and nothing happens until you press it.
+        Nothing is installed system-wide.</p>
+    </header>
+    <main>
+      <ol id="items"></ol>
+      <section id="complete" hidden>
+        <h2>Epik is set up.</h2>
+        <p>Start Claude Code and say “Hello, Epik.”</p>
+      </section>
+      <p id="error"></p>
+    </main>
+  </body>
+</html>

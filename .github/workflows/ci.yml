@@ -14,30 +14,18 @@ jobs:
     # clone this private repository.
     permissions:
       contents: read
-    defaults:
-      run:
-        working-directory: plugin/server
     steps:
       - uses: actions/checkout@v7
+      # Claude Code is a Node package.
       - uses: actions/setup-node@v7
         with:
           node-version: 26
-          cache: npm
-          cache-dependency-path: plugin/server/package-lock.json
-      - run: npm ci
-      - run: npm test
-      # The committed bundle is what the plugin runs, so it must match its
-      # source.
-      - run: npm run build
-      - run: git diff --exit-code dist
       # Validate the marketplace and plugin manifests the way Claude Code
       # reads them. Not --strict: plugin.json omits `version` on purpose so
       # each commit is a new version, and --strict fails on that warning.
       - run: npm install --global @anthropic-ai/claude-code@2.1.309
       - run: claude plugin validate .
-        working-directory: .
       - run: claude plugin validate ./plugin
-        working-directory: .
 
   rust:
     # The Epik app is cross-platform, so its workspace is checked on each

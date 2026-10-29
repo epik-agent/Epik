@@ -2,8 +2,11 @@ use std::process::Command;
 
 #[test]
 fn version_flag_prints_the_version_and_exits_zero() {
+    let home = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_epik-app"))
         .arg("--version")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .output()
         .expect("epik-app runs");
     assert!(output.status.success());
@@ -90,6 +93,52 @@ mod headless {
         terminate(first);
     }
 
+    #[test]
+    fn it_links_itself_at_epik_bin() {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .arg("--version")
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+
+        let link = home.path().join(".epik").join("bin").join("epik-app");
+        let target = std::fs::read_link(&link).unwrap();
+        let app = Path::new(env!("CARGO_BIN_EXE_epik-app"))
+            .canonicalize()
+            .unwrap();
+        assert_eq!(target, app, "{output:?}");
+    }
+
+    #[test]
+    fn it_removes_leftover_clones_before_serving() {
+        let home = tempfile::tempdir().unwrap();
+        let builds = home.path().join(".epik").join("builds");
+        std::fs::create_dir_all(builds.join("crashed-run").join("src")).unwrap();
+        let mut app = headless(home.path()).spawn().unwrap();
+
+        wait_for_ping(home.path(), &mut app);
+
+        assert_eq!(std::fs::read_dir(&builds).unwrap().count(), 0);
+        terminate(app);
+    }
+
+    #[test]
+    fn a_second_app_leaves_the_first_ones_clones_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut first = headless(home.path()).spawn().unwrap();
+        wait_for_ping(home.path(), &mut first);
+        let clone = home.path().join(".epik").join("builds").join("running");
+        std::fs::create_dir_all(&clone).unwrap();
+
+        let second = headless(home.path()).output().unwrap();
+
+        assert_eq!(second.status.code(), Some(1), "{second:?}");
+        assert!(clone.exists());
+        terminate(first);
+    }
+
     /// With no tray, as on Linux without a display, the app with no flags
     /// says so and runs headless.
     #[cfg(target_os = "linux")]
@@ -111,5 +160,75 @@ mod headless {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("there is no tray (no display)"), "{stderr}");
+    }
+}
+
+/// `epik-app mcp` over its real stdin and stdout.
+mod mcp {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    use serde_json::{Value, json};
+
+    /// Sends each of `messages` to a fresh `epik-app mcp` and returns the
+    /// replies to the ones with an id.
+    fn converse(messages: &[Value]) -> Vec<Value> {
+        let home = tempfile::tempdir().unwrap();
+        let mut server = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .arg("mcp")
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = server.stdin.take().unwrap();
+        let mut stdout = BufReader::new(server.stdout.take().unwrap());
+        let mut replies = Vec::new();
+        for message in messages {
+            writeln!(stdin, "{message}").unwrap();
+            if message.get("id").is_some() {
+                let mut line = String::new();
+                stdout.read_line(&mut line).unwrap();
+                replies.push(serde_json::from_str(&line).unwrap());
+            }
+        }
+        drop(stdin);
+        server.wait().unwrap();
+        replies
+    }
+
+    #[test]
+    fn it_answers_initialize_and_lists_the_tools() {
+        let replies = converse(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            }}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ]);
+
+        let info = &replies[0]["result"];
+        assert_eq!(info["serverInfo"]["name"], "epik", "{info}");
+        assert_eq!(info["instructions"], epik_core::mcp::INSTRUCTIONS);
+        assert!(info["capabilities"]["tools"].is_object(), "{info}");
+        let listed: Vec<Value> = replies[1]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "inputSchema": tool["inputSchema"],
+                })
+            })
+            .collect();
+        let expected: Value =
+            serde_json::from_str(include_str!("../../epik-core/src/mcp/tools.json")).unwrap();
+        assert_eq!(Value::from(listed), expected);
     }
 }

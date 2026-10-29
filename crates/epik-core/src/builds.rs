@@ -12,21 +12,29 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{Agent, ClaudeAcp};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
-use crate::record::Kind;
+use crate::reconcile;
+use crate::record::{self, Kind};
+use crate::repositories;
+use crate::run::{self, Disposition, RunKey, RunState};
+use crate::setup;
 
 /// A build that has started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Started {
-    pub run_id: String,
+    /// The run the build belongs to.
+    pub run: RunKey,
+    /// The build's id, unique within its run.
+    pub build_id: String,
     pub kind: Kind,
     pub branch: String,
-    /// The run's record directory, `<root>/runs/<run-id>`.
-    pub run_dir: PathBuf,
+    /// The build's record directory, inside its run's.
+    pub build_dir: PathBuf,
 }
 
 /// The builds the app is running, each on its own thread.
@@ -36,13 +44,18 @@ pub struct Builds {
     agent: Arc<dyn Agent + Send + Sync>,
     /// Set on shutdown: stops every build, and refuses new ones.
     cancel: Arc<AtomicBool>,
-    /// The run ids of the builds still running.
-    active: Arc<Mutex<BTreeSet<String>>>,
+    /// The runs with a build still running.
+    active: Arc<Mutex<BTreeSet<RunKey>>>,
     /// Told how many builds are running each time that changes.
     on_active: Arc<dyn Fn(usize) + Send + Sync>,
     /// Every build's thread not yet known to have ended.
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Checks what Epik needs on the machine, under the root.
+    setup: Arc<SetupCheck>,
 }
+
+/// Checks Epik's setup under a root.
+type SetupCheck = dyn Fn(&Path) -> Vec<setup::Check> + Send + Sync;
 
 impl Builds {
     /// Builds under `root`, normally `~/.epik`, reaching GitHub through
@@ -60,7 +73,23 @@ impl Builds {
             active: Arc::default(),
             on_active: Arc::new(|_| {}),
             threads: Mutex::default(),
+            setup: Arc::new(|_| Vec::new()),
         }
+    }
+
+    /// Checks Epik's setup with `check` before each build, and for
+    /// [`Builds::setup`]. Without one, setup counts as complete.
+    pub fn check_setup(
+        mut self,
+        check: impl Fn(&Path) -> Vec<setup::Check> + Send + Sync + 'static,
+    ) -> Self {
+        self.setup = Arc::new(check);
+        self
+    }
+
+    /// Every setup item's state.
+    pub fn setup(&self) -> Vec<setup::Check> {
+        (self.setup)(&self.root)
     }
 
     /// Calls `observer` with how many builds are running each time that
@@ -70,9 +99,16 @@ impl Builds {
         self
     }
 
-    /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`].
+    /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`], checking the
+    /// machine's setup before each.
     pub fn real(root: impl Into<PathBuf>) -> Self {
-        Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new()))
+        Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new())).check_setup(|root| {
+            let latest = crate::install::Cached {
+                root: root.to_owned(),
+                sources: crate::install::Sources::default(),
+            };
+            setup::check_all(root, &setup::System, &latest)
+        })
     }
 
     /// Epik's root, where clones and records go.
@@ -81,8 +117,10 @@ impl Builds {
     }
 
     /// Starts building `number` in `repo` on a thread of its own, and
-    /// returns once its run has written `run_started`, or with why it
-    /// couldn't start.
+    /// returns once the build has written `build_started`, or with why it
+    /// couldn't start. A build of an epic issue that already has a run adds
+    /// a build to it; while one of its builds is running, another is
+    /// refused.
     pub fn start(
         &self,
         repo: &str,
@@ -97,6 +135,13 @@ impl Builds {
             root: self.root.clone(),
             plugin_dir,
         };
+        if !repositories::is_repo(repo) {
+            return Err(format!("{repo:?} is not a repository: write owner/name"));
+        }
+        if let Some(refusal) = setup::refusal(&self.setup()) {
+            return Err(refusal);
+        }
+        let key = RunKey::new(repo, number);
         let (started, starting) = mpsc::channel();
         {
             // Holding the lock while spawning means a shutdown either
@@ -106,37 +151,64 @@ impl Builds {
                 return Err("the Epik app is shutting down".to_owned());
             }
             threads.retain(|thread| !thread.is_finished());
+            // Claimed under the threads' lock, so two requests for the same
+            // run can't both start.
+            {
+                let mut active = lock(&self.active);
+                if !active.insert(key.clone()) {
+                    return Err(format!("a build of {key} is already running"));
+                }
+                (self.on_active)(active.len());
+            }
             let github = self.github.clone();
             let agent = self.agent.clone();
             let cancel = self.cancel.clone();
             let active = self.active.clone();
             let on_active = self.on_active.clone();
+            let unclaim = {
+                let key = key.clone();
+                let active = self.active.clone();
+                let on_active = self.on_active.clone();
+                move || {
+                    change(&active, &*on_active, |active| {
+                        active.remove(&key);
+                    })
+                }
+            };
             let thread = thread::Builder::new()
                 .name(format!("build {repo}#{number}"))
                 .spawn(move || {
                     let build = match build::start(&*github, &*agent, &request) {
                         Ok(build) => build,
                         Err(error) => {
+                            change(&active, &*on_active, |active| {
+                                active.remove(&key);
+                            });
                             let _ = started.send(Err(error.to_string()));
                             return;
                         }
                     };
-                    let run_id = build.run_id().to_owned();
-                    change(&active, &*on_active, |active| {
-                        active.insert(run_id.clone());
-                    });
+                    if let Err(error) =
+                        repositories::add(&request.root, &request.repo, false, Utc::now())
+                    {
+                        eprintln!("epik: couldn't monitor {}: {error}", request.repo);
+                    }
                     let _ = started.send(Ok(Started {
-                        run_id: run_id.clone(),
+                        run: key.clone(),
+                        build_id: build.build_id().to_owned(),
                         kind: build.kind(),
                         branch: build.branch().to_owned(),
-                        run_dir: build.dir().to_owned(),
+                        build_dir: build.dir().to_owned(),
                     }));
                     build.run(&cancel);
                     change(&active, &*on_active, |active| {
-                        active.remove(&run_id);
+                        active.remove(&key);
                     });
                 })
-                .map_err(|error| format!("couldn't start a thread for the build: {error}"))?;
+                .map_err(|error| {
+                    unclaim();
+                    format!("couldn't start a thread for the build: {error}")
+                })?;
             threads.push(thread);
         }
         starting
@@ -144,8 +216,55 @@ impl Builds {
             .unwrap_or_else(|_| Err("the build stopped before it started".to_owned()))
     }
 
-    /// The run ids of the builds still running.
-    pub fn active(&self) -> Vec<String> {
+    /// Starts a new build of `run`, which needs attention, as its last
+    /// build was started: with the same branch and plugin. Like any build,
+    /// it skips the issues already closed.
+    pub fn rerun(&self, run: &RunKey) -> Result<Started, String> {
+        let state = self.needing_attention(run)?;
+        let latest = record::list_builds(&self.root, run)
+            .ok()
+            .and_then(|builds| builds.into_iter().last())
+            .ok_or_else(|| format!("couldn't read {run}'s builds"))?;
+        let plugin_dir = latest
+            .plugin_dir
+            .ok_or_else(|| format!("{run}'s last build didn't record Epik's plugin"))?;
+        self.start(&state.repo, state.number, Some(latest.branch), plugin_dir)
+    }
+
+    /// Deletes `run`, which needs attention: every build's clone and
+    /// record. Refused while one of its builds is running.
+    pub fn delete(&self, run: &RunKey) -> Result<(), String> {
+        // Held so that no build of the run starts while it is deleted.
+        let _threads = lock(&self.threads);
+        if lock(&self.active).contains(run) {
+            return Err(format!("a build of {run} is running"));
+        }
+        self.needing_attention(run)?;
+        run::delete(&self.root, run).map_err(|error| format!("couldn't delete {run}: {error}"))
+    }
+
+    /// `run`'s state, if it needs attention; else why not.
+    fn needing_attention(&self, run: &RunKey) -> Result<RunState, String> {
+        let state = run::read(&self.root, run).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => format!("no run {run}"),
+            _ => format!("couldn't read {run}: {error}"),
+        })?;
+        match state.disposition {
+            Disposition::NeedsAttention => Ok(state),
+            Disposition::Building => Err(format!("a build of {run} is running")),
+            Disposition::WaitingForReview => Err(format!(
+                "{run} is waiting for review, and leaves by itself when its issue closes"
+            )),
+        }
+    }
+
+    /// Checks GitHub for every run not building: see [`reconcile`].
+    pub fn reconcile(&self) -> reconcile::Report {
+        reconcile::reconcile(&self.root, &*self.github, &self.active())
+    }
+
+    /// The runs with a build still running.
+    pub fn active(&self) -> Vec<RunKey> {
         lock(&self.active).iter().cloned().collect()
     }
 
@@ -172,9 +291,9 @@ impl Drop for Builds {
 /// there now are. The lock is held while it's told, so it hears of the
 /// changes in order.
 fn change(
-    active: &Mutex<BTreeSet<String>>,
+    active: &Mutex<BTreeSet<RunKey>>,
     observer: &(dyn Fn(usize) + Send + Sync),
-    edit: impl FnOnce(&mut BTreeSet<String>),
+    edit: impl FnOnce(&mut BTreeSet<RunKey>),
 ) {
     let mut active = lock(active);
     edit(&mut active);
@@ -223,14 +342,14 @@ pub(crate) fn fake_github() -> crate::github::FakeGitHub {
 mod tests {
     use super::*;
     use crate::github::State;
-    use crate::record::{self, RunStatus};
+    use crate::record::{self, BuildStatus};
 
     fn builds(root: &Path, github: crate::github::FakeGitHub) -> Builds {
         Builds::new(root, Arc::new(github), Arc::new(HangingAgent))
     }
 
     #[test]
-    fn start_returns_once_the_run_has_started_and_shutdown_cancels_it() {
+    fn start_returns_once_the_build_has_started_and_shutdown_cancels_it() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
@@ -238,23 +357,24 @@ mod tests {
             .start("owner/repo", 7, None, PathBuf::from("/plugin"))
             .unwrap();
 
-        assert!(started.run_id.starts_with("owner-repo-7-"), "{started:?}");
+        assert_eq!(started.run, RunKey::new("owner/repo", 7));
+        assert!(started.build_id.starts_with("20"), "{started:?}");
         assert_eq!(started.kind, Kind::Issue);
         assert_eq!(started.branch, "main");
         assert_eq!(
-            started.run_dir,
-            record::run_dir(root.path(), &started.run_id)
+            started.build_dir,
+            record::build_dir(root.path(), &started.run, &started.build_id)
         );
-        let events = record::read_events(root.path(), &started.run_id).unwrap();
-        assert!(matches!(events[0], record::Event::RunStarted { .. }));
-        assert_eq!(builds.active(), vec![started.run_id.clone()]);
+        let events = record::read_events(root.path(), &started.run, &started.build_id).unwrap();
+        assert!(matches!(events[0], record::Event::BuildStarted { .. }));
+        assert_eq!(builds.active(), vec![started.run.clone()]);
 
         builds.shutdown();
 
         assert!(builds.active().is_empty());
-        let events = record::read_events(root.path(), &started.run_id).unwrap();
+        let events = record::read_events(root.path(), &started.run, &started.build_id).unwrap();
         let state = record::fold(&events).unwrap();
-        assert_eq!(state.status, RunStatus::Interrupted);
+        assert_eq!(state.status, BuildStatus::Interrupted);
     }
 
     #[test]
@@ -305,6 +425,195 @@ mod tests {
 
         assert_eq!(error, "it is closed");
         assert!(builds.active().is_empty());
+    }
+
+    #[test]
+    fn starting_a_build_in_an_unlisted_repository_monitors_it() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let monitored = repositories::list(root.path()).unwrap();
+        assert_eq!(monitored.len(), 1);
+        assert_eq!(monitored[0].repo, "owner/repo");
+        assert!(!monitored[0].added_by_user);
+    }
+
+    #[test]
+    fn a_build_is_refused_up_front_when_setup_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        let no_node = setup::tests::Recorded::complete().answer("node --version", false, "");
+        let builds = builds(root.path(), fake_github())
+            .check_setup(move |root| setup::check_all(root, &no_node, &setup::Unknown));
+
+        let error = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
+        );
+        assert!(run::list(root.path()).unwrap().is_empty());
+        assert_eq!(builds.setup().len(), 6);
+    }
+
+    #[test]
+    fn a_repository_that_isnt_owner_slash_name_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+
+        for bad in ["github.com/owner/repo", "owner", "../owner/repo"] {
+            let error = builds.start(bad, 7, None, "/plugin".into()).unwrap_err();
+            assert!(
+                error.ends_with("is not a repository: write owner/name"),
+                "{error}"
+            );
+        }
+        assert!(run::list(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_epic_spelled_two_ways_is_one_run() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let error = builds
+            .start("Owner/Repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(error, "a build of owner/repo#7 is already running");
+    }
+
+    #[test]
+    fn a_second_build_of_a_running_run_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let error = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(error, "a build of owner/repo#7 is already running");
+        assert_eq!(builds.active().len(), 1);
+    }
+
+    #[test]
+    fn building_a_run_again_adds_a_build_to_it() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        let first = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+        builds.shutdown();
+        let builds =
+            super::Builds::new(root.path(), Arc::new(fake_github()), Arc::new(HangingAgent));
+
+        let second = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        assert_eq!(first.run, second.run);
+        assert_ne!(first.build_id, second.build_id);
+        let run = crate::run::read(root.path(), &first.run).unwrap();
+        let ids: Vec<&str> = run.builds.iter().map(|b| b.build_id.as_str()).collect();
+        assert_eq!(ids, [first.build_id.as_str(), second.build_id.as_str()]);
+        assert_eq!(run.disposition, crate::run::Disposition::Building);
+    }
+
+    /// A build of `owner/repo#7` that was interrupted, under `root`.
+    fn interrupted(root: &Path) -> Started {
+        let builds = builds(root, fake_github());
+        let started = builds
+            .start("owner/repo", 7, Some("topic".to_owned()), "/plugin".into())
+            .unwrap();
+        builds.shutdown();
+        started
+    }
+
+    #[test]
+    fn rerunning_adds_a_build_with_the_same_branch_and_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let first = interrupted(root.path());
+        let builds = builds(root.path(), fake_github());
+
+        let second = builds.rerun(&first.run).unwrap();
+
+        assert_eq!(second.run, first.run);
+        assert_eq!(second.branch, "topic");
+        let latest = record::list_builds(root.path(), &first.run).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[1].plugin_dir, Some(PathBuf::from("/plugin")));
+        assert_eq!(builds.active(), std::slice::from_ref(&first.run));
+    }
+
+    #[test]
+    fn rerunning_an_interrupted_epic_skips_its_merged_issues() {
+        let root = tempfile::tempdir().unwrap();
+        let github = || {
+            let github = fake_github();
+            github.add_issue("owner/repo", 1, "The epic");
+            for sub in [2, 3] {
+                github.add_issue("owner/repo", sub, "A sub-issue");
+                github.add_sub_issue("owner/repo", 1, "owner/repo", sub);
+            }
+            github.set_state("owner/repo", 2, State::Closed);
+            github
+        };
+        let first = builds(root.path(), github());
+        let started = first
+            .start("owner/repo", 1, None, "/plugin".into())
+            .unwrap();
+        first.shutdown();
+
+        let second = builds(root.path(), github());
+        second.rerun(&started.run).unwrap();
+
+        let run = run::read(root.path(), &started.run).unwrap();
+        assert_eq!(run.builds.len(), 2);
+        assert_eq!(run.issue(2).unwrap().status, record::IssueStatus::Closed);
+        assert_eq!(run.issue(3).unwrap().status, record::IssueStatus::Running);
+    }
+
+    #[test]
+    fn a_running_or_unknown_run_is_not_rerun_or_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        let started = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let rerun = builds.rerun(&started.run).unwrap_err();
+        let delete = builds.delete(&started.run).unwrap_err();
+
+        assert_eq!(rerun, "a build of owner/repo#7 is running");
+        assert_eq!(delete, "a build of owner/repo#7 is running");
+        let unknown = RunKey::new("owner/repo", 9);
+        assert_eq!(builds.rerun(&unknown).unwrap_err(), "no run owner/repo#9");
+        assert_eq!(builds.delete(&unknown).unwrap_err(), "no run owner/repo#9");
+    }
+
+    #[test]
+    fn deleting_a_run_that_needs_attention_leaves_nothing_of_it() {
+        let root = tempfile::tempdir().unwrap();
+        let started = interrupted(root.path());
+        let builds = builds(root.path(), fake_github());
+
+        builds.delete(&started.run).unwrap();
+
+        assert!(run::list(root.path()).unwrap().is_empty());
+        assert!(!run::run_dir(root.path(), &started.run).exists());
+        let clones = crate::cleanup::builds_dir(root.path());
+        assert!(!clones.exists() || std::fs::read_dir(clones).unwrap().count() == 0);
     }
 
     #[test]

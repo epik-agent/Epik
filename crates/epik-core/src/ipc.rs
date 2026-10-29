@@ -22,7 +22,8 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
-use crate::record::{self, RunState};
+use crate::run::{self, RunKey, RunState};
+use crate::setup;
 
 /// How many runs `list` returns when it isn't given a limit.
 pub const DEFAULT_LIMIT: usize = 20;
@@ -49,12 +50,19 @@ pub enum Request {
         plugin_dir: PathBuf,
     },
     /// A run's state.
-    Status { run_id: String },
-    /// The latest runs, newest first.
+    Status { run: RunKey },
+    /// The runs, newest activity first.
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Start a new build of a run that needs attention, as its last build
+    /// was started.
+    Rerun { run: RunKey },
+    /// Delete a run that needs attention: its builds' clones and records.
+    Delete { run: RunKey },
+    /// Every setup item's state.
+    Setup,
     /// Whether the app is there, and its version.
     Ping,
 }
@@ -63,12 +71,20 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    /// The build has started: its run has written `run_started`.
+    /// The build has started: its run has written `build_started`.
     Started(Started),
-    /// A run's state, folded from its events.
-    Status(RunState),
+    /// A run's state, folded from its builds.
+    Run(RunState),
     Runs {
         runs: Vec<RunState>,
+    },
+    /// Every setup item's state.
+    Setup {
+        items: Vec<setup::Check>,
+    },
+    /// The run is deleted.
+    Deleted {
+        run: RunKey,
     },
     Pong {
         version: String,
@@ -98,13 +114,24 @@ fn handle(builds: &Builds, request: Request) -> Response {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
         },
-        Request::Status { run_id } => status(builds.root(), &run_id),
-        Request::List { limit } => match record::list_runs(builds.root()) {
+        Request::Status { run } => status(builds.root(), &run),
+        Request::List { limit } => match run::list(builds.root()) {
             Ok(mut runs) => {
                 runs.truncate(limit.unwrap_or(DEFAULT_LIMIT));
                 Response::Runs { runs }
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
+        },
+        Request::Rerun { run } => match builds.rerun(&run) {
+            Ok(started) => Response::Started(started),
+            Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
+        },
+        Request::Delete { run } => match builds.delete(&run) {
+            Ok(()) => Response::Deleted { run },
+            Err(why) => Response::error(format!("couldn't delete {run}: {why}")),
+        },
+        Request::Setup => Response::Setup {
+            items: builds.setup(),
         },
         Request::Ping => Response::Pong {
             version: crate::version().to_owned(),
@@ -120,16 +147,13 @@ fn respond(builds: &Builds, line: &str) -> Response {
     }
 }
 
-fn status(root: &Path, run_id: &str) -> Response {
-    match record::read_events(root, run_id) {
-        Ok(events) => match record::fold(&events) {
-            Some(state) => Response::Status(state),
-            None => Response::error(format!("run {run_id} hasn't started")),
-        },
+fn status(root: &Path, key: &RunKey) -> Response {
+    match run::read(root, key) {
+        Ok(state) => Response::Run(state),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Response::error(format!("no run {run_id:?}"))
+            Response::error(format!("no run {key}"))
         }
-        Err(error) => Response::error(format!("couldn't read run {run_id}: {error}")),
+        Err(error) => Response::error(format!("couldn't read run {key}: {error}")),
     }
 }
 
@@ -282,6 +306,9 @@ fn listen(address: &Address) -> io::Result<Listener> {
 
 /// Reads one request from `stream` and writes its answer.
 fn converse(builds: &Builds, mut stream: Stream) -> io::Result<()> {
+    // On macOS a socket accepted from a nonblocking listener is itself
+    // nonblocking, and a long reply would stop when its buffer fills.
+    stream.set_nonblocking(false)?;
     // Not every platform supports a timeout; without one, a silent client
     // only holds its own thread.
     let _ = stream.set_recv_timeout(Some(READ_TIMEOUT));
@@ -312,7 +339,7 @@ mod tests {
     use super::*;
     use crate::builds::{HangingAgent, fake_github};
     use crate::github::FakeGitHub;
-    use crate::record::Kind;
+    use crate::record::{self, Kind};
     use serde_json::{Value, json};
     use std::sync::atomic::AtomicUsize;
 
@@ -379,13 +406,26 @@ mod tests {
         }
     }
 
-    impl Drop for Running {
-        fn drop(&mut self) {
+    impl Running {
+        /// Stops serving and hands back the root, for another server.
+        fn take_root(mut self) -> tempfile::TempDir {
+            self.stop();
+            let root = tempfile::tempdir().unwrap();
+            std::mem::replace(&mut self.root, root)
+        }
+
+        fn stop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
             if let Some(thread) = self.thread.take() {
                 thread.join().unwrap();
             }
             self.builds.shutdown();
+        }
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.stop();
         }
     }
 
@@ -399,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn build_answers_once_the_run_has_started() {
+    fn build_answers_once_the_build_has_started() {
         let app = Running::new(fake_github());
 
         let reply = app.send(
@@ -407,14 +447,18 @@ mod tests {
         );
 
         assert_eq!(reply["type"], "started", "{reply}");
+        assert_eq!(reply["run"], "owner/repo#7");
         assert_eq!(reply["kind"], "issue");
         assert_eq!(reply["branch"], "main");
-        let run_id = reply["run_id"].as_str().unwrap();
-        assert!(run_id.starts_with("owner-repo-7-"), "{run_id}");
-        let run_dir = PathBuf::from(reply["run_dir"].as_str().unwrap());
-        assert_eq!(run_dir, record::run_dir(app.root.path(), run_id));
-        assert!(run_dir.join(record::EVENTS_FILE).is_file());
-        assert_eq!(app.builds.active(), vec![run_id.to_owned()]);
+        let key = RunKey::new("owner/repo", 7);
+        let build_id = reply["build_id"].as_str().unwrap();
+        let build_dir = PathBuf::from(reply["build_dir"].as_str().unwrap());
+        assert_eq!(
+            build_dir,
+            record::build_dir(app.root.path(), &key, build_id)
+        );
+        assert!(build_dir.join(record::EVENTS_FILE).is_file());
+        assert_eq!(app.builds.active(), vec![key]);
     }
 
     #[test]
@@ -448,33 +492,35 @@ mod tests {
     #[test]
     fn status_answers_with_the_runs_folded_state() {
         let app = Running::new(fake_github());
-        let started = app.send(
+        app.send(
             r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
         );
-        let run_id = started["run_id"].as_str().unwrap();
 
-        let reply = app.send(&json!({"type": "status", "run_id": run_id}).to_string());
+        let reply = app.send(r#"{"type": "status", "run": "owner/repo#7"}"#);
 
-        let events = record::read_events(app.root.path(), run_id).unwrap();
-        let mut expected = serde_json::to_value(record::fold(&events).unwrap()).unwrap();
-        expected["type"] = json!("status");
+        let key = RunKey::new("owner/repo", 7);
+        let mut expected = serde_json::to_value(run::read(app.root.path(), &key).unwrap()).unwrap();
+        expected["type"] = json!("run");
         assert_eq!(reply, expected);
-        assert_eq!(reply["status"], "running");
+        assert_eq!(reply["disposition"], "building");
         let parsed: Response = serde_json::from_value(reply).unwrap();
-        assert!(matches!(parsed, Response::Status(state) if state.run_id == run_id));
+        assert!(matches!(parsed, Response::Run(state) if state.run == key));
     }
 
     #[test]
     fn status_of_an_unknown_run_is_an_error() {
         let app = Running::new(fake_github());
 
-        for run_id in ["owner-repo-9-20261028T000000Z", "../escape", ""] {
-            let reply = app.send(&json!({"type": "status", "run_id": run_id}).to_string());
+        let reply = app.send(r#"{"type": "status", "run": "owner/repo#9"}"#);
 
-            assert_eq!(
-                reply,
-                json!({"type": "error", "message": format!("no run {run_id:?}")})
-            );
+        assert_eq!(
+            reply,
+            json!({"type": "error", "message": "no run owner/repo#9"})
+        );
+        for bad in ["../escape#1", "owner/repo", ""] {
+            let reply = app.send(&json!({"type": "status", "run": bad}).to_string());
+            let message = reply["message"].as_str().unwrap();
+            assert!(message.starts_with("bad request: "), "{message}");
         }
     }
 
@@ -483,7 +529,7 @@ mod tests {
         let app = Running::new(fake_github());
         let root = app.root.path();
         for (n, stamp) in [(1, 1), (2, 3), (3, 2)] {
-            write_run(root, n, stamp);
+            write_build(root, n, stamp);
         }
 
         let all = app.send(r#"{"type": "list"}"#);
@@ -504,7 +550,7 @@ mod tests {
     fn list_returns_twenty_runs_by_default() {
         let app = Running::new(fake_github());
         for n in 1..=DEFAULT_LIMIT as u64 + 1 {
-            write_run(app.root.path(), n, n as u32);
+            write_build(app.root.path(), n, n as u32);
         }
 
         let reply = app.send(r#"{"type": "list"}"#);
@@ -513,25 +559,69 @@ mod tests {
         assert_eq!(reply["runs"][0]["number"], DEFAULT_LIMIT as u64 + 1);
     }
 
-    /// Records a run of issue `number` started `seconds` into the day.
-    fn write_run(root: &Path, number: u64, seconds: u32) {
+    /// Records a build of issue `number` started `seconds` into the day.
+    fn write_build(root: &Path, number: u64, seconds: u32) {
         use chrono::TimeZone;
         let at = chrono::Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap()
             + chrono::Duration::seconds(seconds.into());
-        let run_id = record::run_id("owner/repo", number, at);
-        let mut writer = record::RunWriter::create(root, &run_id).unwrap();
+        let key = RunKey::new("owner/repo", number);
+        let mut writer = record::BuildWriter::create_new(root, &key, at).unwrap();
         writer
-            .append(&record::Event::RunStarted {
+            .append(&record::Event::BuildStarted {
                 at,
-                run_id: run_id.clone(),
+                build_id: writer.build_id().to_owned(),
                 repo: "owner/repo".to_owned(),
                 number,
                 title: format!("Issue {number}"),
                 kind: Kind::Issue,
                 branch: "main".to_owned(),
-                members: Vec::new(),
+                issues: Vec::new(),
+                closed: Vec::new(),
+                plugin_dir: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_run_that_needs_attention_is_rerun_and_deleted() {
+        let app = Running::new(fake_github());
+        app.send(
+            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
+        );
+        let refused = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
+        assert_eq!(
+            refused,
+            json!({"type": "error", "message": "couldn't rerun owner/repo#7: a build of owner/repo#7 is running"})
+        );
+        app.builds.shutdown();
+        let app = Running::in_root(app.take_root(), fake_github());
+
+        let rerun = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
+        assert_eq!(rerun["type"], "started", "{rerun}");
+        assert_eq!(rerun["run"], "owner/repo#7");
+        app.builds.shutdown();
+        let app = Running::in_root(app.take_root(), fake_github());
+        let deleted = app.send(r#"{"type": "delete", "run": "owner/repo#7"}"#);
+
+        assert_eq!(deleted, json!({"type": "deleted", "run": "owner/repo#7"}));
+        let gone = app.send(r#"{"type": "status", "run": "owner/repo#7"}"#);
+        assert_eq!(
+            gone,
+            json!({"type": "error", "message": "no run owner/repo#7"})
+        );
+    }
+
+    #[test]
+    fn setup_answers_with_every_items_state() {
+        let app = Running::new(fake_github());
+
+        let reply = app.send(r#"{"type": "setup"}"#);
+
+        assert_eq!(
+            reply,
+            json!({"type": "setup", "items": []}),
+            "no check in tests"
+        );
     }
 
     #[test]
@@ -681,14 +771,15 @@ mod tests {
             json!({"type": "list"})
         );
         let started = Response::Started(Started {
-            run_id: "r".to_owned(),
+            run: RunKey::new("o/r", 1),
+            build_id: "b".to_owned(),
             kind: Kind::Epic,
             branch: "epic/1".to_owned(),
-            run_dir: "/runs/r".into(),
+            build_dir: "/runs/o/r/1/b".into(),
         });
         assert_eq!(
             serde_json::to_value(&started).unwrap(),
-            json!({"type": "started", "run_id": "r", "kind": "epic", "branch": "epic/1", "run_dir": "/runs/r"})
+            json!({"type": "started", "run": "o/r#1", "build_id": "b", "kind": "epic", "branch": "epic/1", "build_dir": "/runs/o/r/1/b"})
         );
     }
 }

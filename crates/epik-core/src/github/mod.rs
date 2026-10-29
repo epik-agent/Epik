@@ -17,6 +17,11 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+/// The `gh` program to run.
+pub fn gh_program() -> std::path::PathBuf {
+    std::path::PathBuf::from("gh")
+}
+
 /// The name of the label an epic carries.
 pub const EPIC_LABEL: &str = "epic";
 /// The color [`EPIC_LABEL`] is created with.
@@ -107,6 +112,13 @@ pub fn closing_pull_request<'a>(
             })
     };
     first(PullState::Merged).or_else(|| first(PullState::Open))
+}
+
+/// A pull request's state, and its merge commit once it has merged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullStatus {
+    pub state: PullState,
+    pub merge_commit: Option<String>,
 }
 
 /// How a pull request is merged.
@@ -214,8 +226,20 @@ pub trait GitHub: Send + Sync {
 
     /// Merges pull request `pr` with the first method the repository
     /// allows of merge commit, squash and rebase, failing when it allows
-    /// none. An already-merged pull request is success.
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()>;
+    /// none, and returns the merge commit's SHA. An already-merged pull
+    /// request is success.
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
+
+    /// Comments `body` on issue `number`.
+    fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()>;
+
+    /// Pull request `pr`'s state and merge commit.
+    fn pull_request(&self, repo: &str, pr: u64) -> Result<PullStatus>;
+
+    /// Whether the repository exists for the user. GitHub answers "not
+    /// found" both for a repository that is gone and for one the user can
+    /// no longer reach, so this can't tell them apart.
+    fn repo_exists(&self, repo: &str) -> Result<bool>;
 
     /// Comments `comment` on issue `number` and closes it.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()>;

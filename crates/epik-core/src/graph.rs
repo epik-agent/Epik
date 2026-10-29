@@ -1,7 +1,7 @@
 //! The dependency graph of an epic's issues: what can run now, and what
 //! never can.
 //!
-//! A [`Graph`] is built from each member issue's blockers. It is pure and
+//! A [`Graph`] is built from each issue's blockers. It is pure and
 //! synchronous: it reads nothing from GitHub, and the caller says which
 //! issues are closed, running, or failed.
 
@@ -10,15 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 /// An issue's number.
 pub type Issue = u64;
 
-/// An epic's member issues and the members blocking each.
+/// An epic's issues and the issues blocking each.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Graph {
     blockers: BTreeMap<Issue, BTreeSet<Issue>>,
 }
 
 impl Graph {
-    /// The graph of `blockers`, each member issue with the issues blocking
-    /// it. Blockers that are not members are ignored, as `epic_status`
+    /// The graph of `blockers`, each issue with the issues blocking
+    /// it. Blockers outside the graph are ignored, as `epic_status`
     /// ignores them.
     pub fn new<B>(blockers: impl IntoIterator<Item = (Issue, B)>) -> Self
     where
@@ -31,20 +31,20 @@ impl Graph {
         let blockers = given
             .iter()
             .map(|(&issue, blockers)| {
-                let members = blockers.iter().copied().filter(|b| given.contains_key(b));
-                (issue, members.collect())
+                let inside = blockers.iter().copied().filter(|b| given.contains_key(b));
+                (issue, inside.collect())
             })
             .collect();
         Self { blockers }
     }
 
-    /// Each cycle's members, sorted, the cycles in order of their least
-    /// member. An issue blocking itself is a cycle.
+    /// Each cycle's issues, sorted, the cycles in order of their least
+    /// issue. An issue blocking itself is a cycle.
     pub fn cycles(&self) -> Vec<Vec<Issue>> {
         Tarjan::run(self).cycles
     }
 
-    /// Each member's level: 0 with no blockers, else one more than its
+    /// Each issue's level: 0 with no blockers, else one more than its
     /// deepest blocker's. `None` for an issue on a cycle or behind one.
     pub fn levels(&self) -> BTreeMap<Issue, Option<usize>> {
         Tarjan::run(self).levels
@@ -89,8 +89,7 @@ impl Graph {
     }
 }
 
-/// Tarjan's algorithm over a [`Graph`], ported from `levels` in
-/// `plugin/server/src/graph.js`. It emits each strongly connected component
+/// Tarjan's algorithm over a [`Graph`]. It emits each strongly connected component
 /// after every component it can reach, so an issue's blockers are leveled
 /// before it is.
 struct Tarjan<'g> {
@@ -145,17 +144,17 @@ impl<'g> Tarjan<'g> {
         if self.low[&issue] != self.index[&issue] {
             return;
         }
-        let at = self.stack.iter().rposition(|&member| member == issue);
+        let at = self.stack.iter().rposition(|&on| on == issue);
         let mut component = self
             .stack
             .split_off(at.expect("an issue being visited is on the stack"));
-        for member in &component {
-            self.on_stack.remove(member);
+        for node in &component {
+            self.on_stack.remove(node);
         }
         if component.len() > 1 || blockers.contains(&issue) {
             component.sort();
-            for &member in &component {
-                self.levels.insert(member, None);
+            for &node in &component {
+                self.levels.insert(node, None);
             }
             self.cycles.push(component);
         } else {
@@ -257,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn cycles_are_ordered_by_their_least_member() {
+    fn cycles_are_ordered_by_their_least_issue() {
         let cyclic = graph([(9, &[8]), (8, &[9]), (5, &[2]), (2, &[5])]);
         assert_eq!(cyclic.cycles(), [vec![2, 5], vec![8, 9]]);
     }

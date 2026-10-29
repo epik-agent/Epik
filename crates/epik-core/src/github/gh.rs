@@ -14,7 +14,8 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethods, PullRequest, PullState, Result, State, SubIssue, closing_pull_request,
+    MergeMethods, PullRequest, PullState, PullStatus, Result, State, SubIssue,
+    closing_pull_request,
 };
 
 /// Runs `gh` with some arguments and returns its stdout.
@@ -175,13 +176,15 @@ impl GitHub for GhCli {
         Ok(rollup.checks())
     }
 
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()> {
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String> {
         let pull: RawPull = self.json(["api", &format!("repos/{repo}/pulls/{pr}")])?;
         if pull.state() == PullState::Merged {
-            return Ok(());
+            return pull
+                .merge_commit_sha
+                .ok_or_else(|| Error::new(format!("#{pr} is merged but has no merge commit")));
         }
         let method = self.repo(repo)?.merge_methods().choose(repo)?;
-        self.gh([
+        let merged: Merged = self.json([
             "api",
             "-X",
             "PUT",
@@ -189,7 +192,35 @@ impl GitHub for GhCli {
             "-f",
             &format!("merge_method={}", method.as_str()),
         ])?;
+        Ok(merged.sha)
+    }
+
+    fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()> {
+        self.gh([
+            "api",
+            "-X",
+            "POST",
+            &format!("repos/{repo}/issues/{number}/comments"),
+            "-f",
+            &format!("body={body}"),
+        ])?;
         Ok(())
+    }
+
+    fn pull_request(&self, repo: &str, pr: u64) -> Result<PullStatus> {
+        let pull: RawPull = self.json(["api", &format!("repos/{repo}/pulls/{pr}")])?;
+        Ok(PullStatus {
+            state: pull.state(),
+            merge_commit: pull.merge_commit_sha.filter(|_| pull.merged_at.is_some()),
+        })
+    }
+
+    fn repo_exists(&self, repo: &str) -> Result<bool> {
+        match self.repo(repo) {
+            Ok(_) => Ok(true),
+            Err(error) if error.message.contains("(HTTP 404)") => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()> {
@@ -248,13 +279,16 @@ impl GitHub for GhCli {
 
 /// Runs the `gh` on the `PATH`, failing with its stderr.
 fn run_gh(args: &[&str]) -> Result<String> {
-    let output = Command::new("gh").args(args).output().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Error::new("gh is not installed. Install it from https://cli.github.com/")
-        } else {
-            Error::new(format!("gh could not start: {error}"))
-        }
-    })?;
+    let output = Command::new(super::gh_program())
+        .args(args)
+        .output()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::new("gh is not installed. Install it from https://cli.github.com/")
+            } else {
+                Error::new(format!("gh could not start: {error}"))
+            }
+        })?;
     if output.status.success() {
         return String::from_utf8(output.stdout)
             .map_err(|_| Error::new(format!("gh {} printed non-UTF-8", args.join(" "))));
@@ -284,6 +318,12 @@ fn head_among(refs: Vec<RawRef>, branch: &str) -> Option<String> {
     refs.into_iter()
         .find(|found| found.name == wanted)
         .map(|found| found.object.sha)
+}
+
+/// What merging a pull request answers.
+#[derive(Deserialize)]
+struct Merged {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +421,8 @@ struct RawPull {
     state: State,
     /// Set only once the pull request is merged.
     merged_at: Option<IgnoredAny>,
+    #[serde(default)]
+    merge_commit_sha: Option<String>,
     body: Option<String>,
 }
 
@@ -794,8 +836,67 @@ mod tests {
             vec!["api", "repos/epik-agent/Epik/pulls/367"],
             ok(&fixture("pull.json")),
         )]);
-        gh.merge_pull_request(REPO, 367).unwrap();
+        let sha = gh.merge_pull_request(REPO, 367).unwrap();
+        assert_eq!(sha, "dd1288cc693368c025b69618edc4bc603c07d301");
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reads_a_pull_requests_state_and_merge_commit() {
+        let (gh, _) = scripted(vec![
+            (
+                vec!["api", "repos/epik-agent/Epik/pulls/367"],
+                ok(&fixture("pull.json")),
+            ),
+            (
+                vec!["api", "repos/epik-agent/Epik/pulls/367"],
+                ok(&open_pull()),
+            ),
+        ]);
+        let merged = gh.pull_request(REPO, 367).unwrap();
+        assert_eq!(merged.state, PullState::Merged);
+        assert_eq!(
+            merged.merge_commit.as_deref(),
+            Some("dd1288cc693368c025b69618edc4bc603c07d301")
+        );
+        let open = gh.pull_request(REPO, 367).unwrap();
+        assert_eq!(open.state, PullState::Open);
+        assert_eq!(open.merge_commit, None);
+    }
+
+    #[test]
+    fn comments_on_an_issue() {
+        let (gh, _) = scripted(vec![(
+            vec![
+                "api",
+                "-X",
+                "POST",
+                "repos/epik-agent/Epik/issues/13/comments",
+                "-f",
+                "body=**Epik**",
+            ],
+            ok("{}"),
+        )]);
+        gh.comment(REPO, 13, "**Epik**").unwrap();
+    }
+
+    #[test]
+    fn a_repository_not_found_doesnt_exist() {
+        let not_found = || Err(Error::new("gh: Not Found (HTTP 404)"));
+        let (gh, _) = scripted(vec![
+            (
+                vec!["api", "repos/epik-agent/Epik"],
+                ok(&fixture("repo.json")),
+            ),
+            (vec!["api", "repos/epik-agent/Epik"], not_found()),
+            (
+                vec!["api", "repos/epik-agent/Epik"],
+                Err(Error::new("gh: error connecting to api.github.com")),
+            ),
+        ]);
+        assert_eq!(gh.repo_exists(REPO), Ok(true));
+        assert_eq!(gh.repo_exists(REPO), Ok(false));
+        assert!(gh.repo_exists(REPO).is_err());
     }
 
     fn open_pull() -> String {
@@ -843,10 +944,11 @@ mod tests {
                     "-f",
                     "merge_method=squash",
                 ],
-                ok(r#"{"merged": true}"#),
+                ok(r#"{"sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "merged": true}"#),
             ),
         ]);
-        gh.merge_pull_request(REPO, 367).unwrap();
+        let sha = gh.merge_pull_request(REPO, 367).unwrap();
+        assert_eq!(sha, "6dcb09b5b57875f334f61aebed695e2e4193db5e");
     }
 
     #[test]

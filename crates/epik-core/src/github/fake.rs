@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethod, MergeMethods, PullRequest, PullState, Result, State, SubIssue,
+    MergeMethod, MergeMethods, PullRequest, PullState, PullStatus, Result, State, SubIssue,
     closing_pull_request,
 };
 
@@ -45,6 +45,8 @@ pub struct FakePull {
     pub checks: Checks,
     /// How it was merged, once it is.
     pub merged_with: Option<MergeMethod>,
+    /// Its merge commit, once it is merged: see [`FakeGitHub::merge_commit`].
+    pub merge_commit: Option<String>,
 }
 
 /// A repository the fake holds.
@@ -110,7 +112,7 @@ fn not_found() -> Error {
 
 /// The name of each [`GitHub`] operation, which [`FakeGitHub::fail`]
 /// takes.
-const OPERATIONS: [&str; 12] = [
+const OPERATIONS: [&str; 15] = [
     "issue",
     "sub_issues",
     "blocked_by",
@@ -123,6 +125,9 @@ const OPERATIONS: [&str; 12] = [
     "merge_pull_request",
     "close_issue",
     "open_pull_request",
+    "comment",
+    "pull_request",
+    "repo_exists",
 ];
 
 /// [`GitHub`] in memory.
@@ -203,9 +208,23 @@ impl FakeGitHub {
         self.arrange_pull(repo, pr, |pull| pull.checks = checks);
     }
 
-    /// Sets pull request `pr`'s state.
+    /// The merge commit the fake gives pull request `pr` when it merges
+    /// it: 40 hex digits whose first 7 are `a` and `pr` in hex.
+    pub fn merge_commit(pr: u64) -> String {
+        format!("{:07x}{}", 0xa00_0000 + pr, "0".repeat(33))
+    }
+
+    /// Removes `repo`, as when it is deleted or the user loses access.
+    pub fn remove_repo(&self, repo: &str) {
+        self.world().repos.remove(repo);
+    }
+
+    /// Sets pull request `pr`'s state, with a merge commit when merged.
     pub fn set_pull_state(&self, repo: &str, pr: u64, state: PullState) {
-        self.arrange_pull(repo, pr, |pull| pull.state = state);
+        self.arrange_pull(repo, pr, |pull| {
+            pull.state = state;
+            pull.merge_commit = (state == PullState::Merged).then(|| Self::merge_commit(pr));
+        });
     }
 
     /// Makes `operation`, named as the [`GitHub`] method is, fail with
@@ -354,20 +373,43 @@ impl GitHub for FakeGitHub {
         Ok(pull.checks)
     }
 
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()> {
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String> {
         let mut world = self.enter("merge_pull_request")?;
         let fake = world.repo_mut(repo)?;
         let methods = fake.merge_methods;
         let pull = fake.pull_mut(pr)?;
         match pull.state {
             PullState::Closed => Err(Error::new("gh: Pull Request is not mergeable (HTTP 405)")),
-            PullState::Merged => Ok(()),
+            PullState::Merged => Ok(pull.merge_commit.clone().unwrap_or_default()),
             PullState::Open => {
                 pull.merged_with = Some(methods.choose(repo)?);
                 pull.state = PullState::Merged;
-                Ok(())
+                let sha = FakeGitHub::merge_commit(pr);
+                pull.merge_commit = Some(sha.clone());
+                Ok(sha)
             }
         }
+    }
+
+    fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()> {
+        let mut world = self.enter("comment")?;
+        let issue = world.repo_mut(repo)?.issue_mut(number)?;
+        issue.comments.push(body.to_owned());
+        Ok(())
+    }
+
+    fn pull_request(&self, repo: &str, pr: u64) -> Result<PullStatus> {
+        let world = self.enter("pull_request")?;
+        let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
+        Ok(PullStatus {
+            state: pull.state,
+            merge_commit: pull.merge_commit.clone(),
+        })
+    }
+
+    fn repo_exists(&self, repo: &str) -> Result<bool> {
+        let world = self.enter("repo_exists")?;
+        Ok(world.repos.contains_key(repo))
     }
 
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()> {
@@ -406,6 +448,7 @@ impl GitHub for FakeGitHub {
             state: PullState::Open,
             checks: Checks::None,
             merged_with: None,
+            merge_commit: None,
         };
         fake.pulls.insert(number, pull);
         Ok(number)

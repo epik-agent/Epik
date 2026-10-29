@@ -9,102 +9,106 @@ and opens a pull request for you to review.
 
 ## Layout
 
-- [`plugin/`](plugin/README.md) — the **epik** plugin: skills, and the Node
-  server that runs Epik's GitHub operations through the `gh` CLI.
-- [`crates/`](crates) — the **Epik app** (`epik-app`), which runs builds, and
-  `epik-core`, the library it is built on. [`docs/app-protocol.md`](docs/app-protocol.md)
-  is how the plugin talks to it.
+- [`plugin/`](plugin/README.md) — the **epik** plugin: skills and
+  configuration. Its tools come from the Epik app.
+- [`crates/`](crates) — the **Epik app** (`epik-app`), Epik's only program: it
+  runs builds and, as `epik-app mcp`, serves Epik's MCP tools, running its
+  GitHub operations through the `gh` CLI. `epik-core` is the library it is
+  built on. [`docs/app-protocol.md`](docs/app-protocol.md) is how the MCP
+  server talks to the running app.
 - [`website/`](website/README.md) — the static Epik website, deployed to
   GitHub Pages on every push to `main` that passes CI.
 
 ## Installing and uninstalling
 
-Epik is a plugin for Claude Code, used in the terminal or in Claude
-Desktop's Code tab, installed from this repository's marketplace, and the
-Epik app, which runs builds on your machine.
+Epik is the Epik app, which runs builds on your machine and serves Epik's
+tools, and a plugin for Claude Code, which you talk to Epik in: in the
+terminal or in Claude Desktop's Code tab.
 
-You need:
+The one thing to have beforehand is a GitHub account.
 
-- A GitHub account.
-- [Node](https://nodejs.org/) 26 or later, which runs Epik's server and
-  the app's coding agents.
-- [Rust](https://www.rust-lang.org/), stable, installed with
-  [rustup](https://rustup.rs/), which builds the Epik app.
-- The [`gh` CLI](https://cli.github.com/), signed in with
-  `gh auth login -s project`, with `gh auth setup-git` run so builds can push.
-  Already signed in to `gh`? Run `gh auth refresh -s project` instead of
-  logging in again. That is how Epik acts on GitHub as you.
-- [Claude Code](https://claude.com/claude-code), installed and signed in
-  with your claude.ai account, on the machine that runs Epik. You talk to Epik
-  in it, and Epik runs every build with it.
+### Install
 
-### Install the Epik app
+1. Download Epik for your computer from
+   [epik-agent.dev](https://www.epik-agent.dev/#download), or from the
+   [releases](https://github.com/epik-agent/Epik/releases): `Epik.dmg` for
+   macOS, `Epik.msi` for Windows, and `Epik_amd64.AppImage` or
+   `Epik_amd64.deb` for Linux.
+2. Open it, and install the app as your computer installs apps.
+3. Open Epik. The **Set up Epik** checklist opens and walks you through
+   the rest:
+   - **The GitHub CLI (`gh`):** uses the one on your computer, or installs
+     a private copy for Epik.
+   - **GitHub sign-in:** signs `gh` in, in your browser, with the `project`
+     scope Epik needs, and lets `git` push with it. That is how Epik acts on
+     GitHub as you.
+   - **Claude Code:** runs Anthropic's installer if it isn't installed.
+   - **Claude sign-in:** signs Claude Code in, in your browser.
+   - **Node:** uses Node 26 or later from your computer, or installs a
+     private copy. It runs the app's coding agents.
+   - **The Epik plugin:** adds Epik's marketplace to Claude Code and
+     installs the plugin for your user.
 
-In a terminal:
+   Each step waits until you press its button, and says what it will do
+   first. Private copies go in `~/.epik/tools/`, checked against their
+   published checksums; nothing is installed system-wide, and nothing asks
+   for an administrator's password.
+4. When every item is done, start Claude Code and say "Hello, Epik."
 
-```
-cargo install --git https://github.com/epik-agent/Epik epik-app
-```
+The checklist opens by itself until setup is complete, and whenever
+something a build needs has gone missing. **Check setup** in Epik's menu
+opens it any time. Epik also checks before every build, and a build that
+would fail for want of a tool or a sign-in fails at once and says which.
 
-That puts `epik-app` in `~/.cargo/bin`, which rustup adds to your `PATH`.
-You don't need to start it: Epik starts it the first time you build. On
-Linux, the app needs the system packages Tauri needs; see Tauri's
-[Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
-Where there is no tray, such as a server without a desktop, the app runs
-without one and builds the same.
+On Windows the installer isn't signed yet, so SmartScreen warns the first
+time you open it. On Linux, Epik opens its window when it starts, since
+not every desktop shows tray icons.
 
-To update the app later, run the same command again.
-
-### Install the plugin
-
-In Claude Code, enter the following commands one at a time:
-
-```
-/plugin marketplace add epik-agent/Epik
-```
-
-```
-/plugin install epik@epik
-```
-
-The install command opens a details view asking you to choose an
-installation scope. Choose **user**, so Epik loads in every folder you start
-Claude Code from, then reload:
-
-```
-/reload-plugins
-```
-
-(`epik-agent/Epik` is this repository; the doubled `epik@epik` is
-`plugin@marketplace`, both named in [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).)
-
-Once Epik is installed, Claude asks you to approve Epik's actions as it works.
-That is intended — Epik never acts without your say-so. If a chat ever seems
-hung, it usually isn't: look for an approval prompt waiting on your screen.
-
-To update later, again one command at a time:
-
-```
-/plugin marketplace update epik
-```
-
-```
-/reload-plugins
-```
+Once Epik is installed, Claude asks you to approve Epik's actions as it
+works. That is intended — Epik never acts without your say-so. If a chat
+ever seems hung, it usually isn't: look for an approval prompt waiting on
+your screen.
 
 ### Claude Desktop
 
-Install Epik as above, in a Claude Code terminal. Desktop's Code tab loads
-user-scope plugins, so it then has Epik too. Use Epik in Desktop's **Code**
-tab with the **My Computer** environment selected. The Code tab's cloud
+Desktop's Code tab loads user-scope plugins, so once the checklist has
+installed the plugin, it has Epik too. Use Epik in Desktop's **Code** tab
+with the **My Computer** environment selected. The Code tab's cloud
 environment doesn't load Epik, because cloud sessions don't have locally
 installed plugins. Desktop's chat doesn't run Epik either.
 
 ### Uninstalling
 
-Run `/plugin uninstall epik@epik`, then
-`/plugin marketplace remove epik`. Quit the Epik app from its menu, then run
-`cargo uninstall epik-app`.
+1. Quit Epik from its menu, and delete the app.
+2. Delete `~/.epik`, which holds its runs, its private tools and its link
+   to itself.
+3. Remove the plugin:
+
+   ```
+   claude plugin uninstall epik@epik
+   ```
+
+   ```
+   claude plugin marketplace remove epik
+   ```
+
+### Building from source
+
+For contributors. You need [Rust](https://www.rust-lang.org/), stable,
+installed with [rustup](https://rustup.rs/), and Node 26 or later for the
+ACP adapter the app runs. On Linux, the app also needs the system packages
+Tauri needs; see Tauri's
+[Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
+
+```
+cargo install --path crates/epik-app
+```
+
+Run it once (`epik-app --version` will do): each time it runs it links
+itself at `~/.epik/bin/epik-app`, which is where the plugin finds Epik's
+tools. Where there is no tray, such as a server without a desktop, the app
+runs without one and builds the same. To try the plugin from a clone, see
+[`plugin/README.md`](plugin/README.md).
 
 ## How it works
 
@@ -120,12 +124,20 @@ order. Keep the machine awake until the build finishes. GitHub is where the
 results land — branches, pull requests, CI runs, and closed issues.
 
 The app appears in the menu bar (macOS), the notification area (Windows) or
-the system tray (Linux). Its menu lists runs; choose one to open a window
-that shows the epic's issues live. Each run's record is in
-`~/.epik/runs/<run-id>/`: `events.jsonl`, what happened in the run; each
-issue's agent log, `<issue>.jsonl` and `<issue>.err`; and `summary.json`,
-with the run's cost and duration, once it ends. You can also ask Epik how a
-build is going.
+the system tray (Linux). Click its icon for a summary of what's building and
+what's waiting for you; **Open Epik** opens its window, which lists every run
+and shows each one's issues live, with what each agent is doing. On Linux,
+where tray clicks aren't reported, its menu opens the window. A **run** is the work of finishing one
+epic or issue, and each attempt at it is a **build**: building an epic
+again after a failure or an interruption adds a build to the same run, and
+the run's time and cost add up across its builds. A run's record is in
+`~/.epik/runs/<owner>/<name>/<number>/`, with a directory per build holding
+`events.jsonl`, what happened in the build; each issue's agent log,
+`<issue>.jsonl` and `<issue>.err`; and `summary.json`, with the build's cost
+and duration, once it ends. You can also ask Epik how a build is going. A
+build's clone is temporary: the app removes it, and the worktrees its
+agents made, when the build ends, and removes any left over when it starts.
+The record stays.
 
 Builds never merge into the default branch. A single issue's build stops at
 an open pull request into it. For an epic, the app merges each issue's pull
@@ -138,11 +150,16 @@ folder and say, "Hello, Epik."
 
 ## Troubleshooting the install
 
-**`/plugin marketplace add` fails with `JSON Parse error`**
+**Start with Check setup**
+Choose **Check setup** in Epik's menu. The checklist says what is missing
+or out of date, and offers to fix it.
+
+**Installing the plugin fails with `JSON Parse error`**
 Claude Code's marketplace registry is corrupt (often a stray trailing
 comma). Check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the
 syntax it points at. If it says the name `epik` is already in use,
-`/plugin marketplace remove epik` and add it again.
+run `claude plugin marketplace remove epik` and press the checklist's
+button again.
 
 **A build's agent stops at once: it "can't run in auto mode"**
 The Epik app runs its agents in Claude Code's auto mode, so they can work
@@ -152,3 +169,9 @@ Auto mode needs a recent model, so choose one with `/model`. On a Team or
 Enterprise plan, an admin can turn auto mode off for the organization. Claude
 Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes)
 lists the models that support it.
+
+**On Windows, Epik's tools don't appear in Claude Code**
+The plugin runs Epik's tools as `${HOME}/.epik/bin/epik-app mcp`. Claude
+Code expands `${HOME}` on macOS; that it does on Windows is not yet
+checked. If it doesn't, this is a known limitation, to be fixed in a later
+release.

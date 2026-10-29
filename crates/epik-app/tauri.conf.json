@@ -13,6 +13,23 @@
     }
   },
   "bundle": {
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "active": true,
+    "targets": ["dmg", "msi", "appimage", "deb"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "category": "DeveloperTool",
+    "shortDescription": "The Epik app, which runs Epik's builds.",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1 | libappindicator3-1",
+          "librsvg2-2"
+        ]
+      }
+    }
   }
 }
