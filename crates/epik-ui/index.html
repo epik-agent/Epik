@@ -8,16 +8,16 @@
     <title>Epik</title>
     <link data-trunk rel="rust" data-cargo-features="csr" />
     <link data-trunk rel="css" href="epik.css" />
-    <link data-trunk rel="css" href="popover.css" />
+    <!-- Each window's own stylesheet, which it loads itself: they style the
+         page's body, header and main differently. -->
+    <link data-trunk rel="copy-file" href="popover.css" />
+    <link data-trunk rel="copy-file" href="setup.css" />
     <!-- The windows not yet ported, which keep their own pages. -->
     <link data-trunk rel="copy-file" href="epik.css" />
     <link data-trunk rel="copy-file" href="../epik-app/ui/common.js" />
     <link data-trunk rel="copy-file" href="../epik-app/ui/app.html" />
     <link data-trunk rel="copy-file" href="../epik-app/ui/app.js" />
     <link data-trunk rel="copy-file" href="../epik-app/ui/app.css" />
-    <link data-trunk rel="copy-file" href="../epik-app/ui/setup.html" />
-    <link data-trunk rel="copy-file" href="../epik-app/ui/setup.js" />
-    <link data-trunk rel="copy-file" href="../epik-app/ui/setup.css" />
   </head>
   <body></body>
 </html>
