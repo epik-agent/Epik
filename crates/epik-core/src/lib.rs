@@ -4,6 +4,7 @@ pub mod agent;
 pub mod awake;
 pub mod build;
 pub mod builds;
+pub mod cleanup;
 pub mod github;
 pub mod graph;
 pub mod ipc;

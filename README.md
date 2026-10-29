@@ -125,7 +125,9 @@ that shows the epic's issues live. Each run's record is in
 `~/.epik/runs/<run-id>/`: `events.jsonl`, what happened in the run; each
 issue's agent log, `<issue>.jsonl` and `<issue>.err`; and `summary.json`,
 with the run's cost and duration, once it ends. You can also ask Epik how a
-build is going.
+build is going. A run's clone is temporary: the app removes it, and the
+worktrees its agents made, when the run ends, and removes any left over
+when it starts. The record in `~/.epik/runs/<run-id>/` stays.
 
 Builds never merge into the default branch. A single issue's build stops at
 an open pull request into it. For an epic, the app merges each issue's pull

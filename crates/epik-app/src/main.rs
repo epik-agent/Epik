@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
+use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
 use epik_core::record;
 
@@ -67,6 +68,11 @@ impl App {
                 return Err(ExitCode::FAILURE);
             }
         };
+        // Only now that this app holds the socket is no other app building,
+        // so every clone left is from a run that never ended.
+        if let Err(error) = cleanup::sweep_builds(&root) {
+            eprintln!("epik-app: couldn't remove leftover builds: {error}");
+        }
         let stop = Arc::new(AtomicBool::new(false));
         if let Err(error) = ctrlc::set_handler({
             let stop = stop.clone();

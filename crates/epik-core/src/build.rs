@@ -28,6 +28,7 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 
 use crate::agent::{Agent, AgentOutcome, AgentRequest};
+use crate::cleanup;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
 use crate::record::{self, Event, Kind, Member, Outcome, RunState, RunWriter};
@@ -220,7 +221,7 @@ pub fn start<'a>(
     let writer = RunWriter::create_new(&request.root, repo, number, at)?;
     let run_id = writer.run_id().to_owned();
     let dir = writer.dir().to_owned();
-    let clone = request.root.join("builds").join(&run_id);
+    let clone = cleanup::builds_dir(&request.root).join(&run_id);
     if let Err(error) = github.clone(repo, &clone) {
         drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
@@ -345,6 +346,15 @@ impl Build<'_> {
         // The events are the record; a summary that can't be written is
         // rebuilt from them by anything that reads the run.
         let _ = log.writer.write_summary(&state);
+        // The clone is scratch space: what the run made is on GitHub or in
+        // its record. Failing to remove it doesn't change how the run went.
+        if let Err(error) = cleanup::remove_clone(&self.clone) {
+            eprintln!(
+                "epik: couldn't remove {}'s clone at {}: {error}",
+                self.run_id,
+                self.clone.display()
+            );
+        }
         state
     }
 
@@ -1199,6 +1209,40 @@ mod tests {
             ]
         );
         assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn the_clone_is_removed_when_the_run_ends_and_the_record_kept() {
+        for act in [Act::Pull(Checks::Passing), Act::Crash, Act::Cancel] {
+            let github = epic([(2, &[])]);
+            let agent = FakeAgent::new(&github, [(2, act)]);
+            let root = tempfile::tempdir().unwrap();
+            let state = build(&github, &agent, root.path(), 1);
+            let clone = cleanup::builds_dir(root.path()).join(&state.run_id);
+            assert!(!clone.exists(), "{:?}", state.status);
+            let dir = record::run_dir(root.path(), &state.run_id);
+            assert!(dir.join(record::SUMMARY_FILE).is_file());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clone_that_cant_be_removed_leaves_the_outcome_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let build = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        let clone = build.clone_dir().to_owned();
+        let builds = cleanup::builds_dir(root.path());
+        std::fs::set_permissions(&builds, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let state = build.check_interval(Duration::from_millis(1)).run(&cancel);
+
+        std::fs::set_permissions(&builds, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(clone.exists());
+        assert_eq!(state.status, RunStatus::Succeeded);
     }
 
     #[test]

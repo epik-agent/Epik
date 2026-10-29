@@ -90,6 +90,34 @@ mod headless {
         terminate(first);
     }
 
+    #[test]
+    fn it_removes_leftover_clones_before_serving() {
+        let home = tempfile::tempdir().unwrap();
+        let builds = home.path().join(".epik").join("builds");
+        std::fs::create_dir_all(builds.join("crashed-run").join("src")).unwrap();
+        let mut app = headless(home.path()).spawn().unwrap();
+
+        wait_for_ping(home.path(), &mut app);
+
+        assert_eq!(std::fs::read_dir(&builds).unwrap().count(), 0);
+        terminate(app);
+    }
+
+    #[test]
+    fn a_second_app_leaves_the_first_ones_clones_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut first = headless(home.path()).spawn().unwrap();
+        wait_for_ping(home.path(), &mut first);
+        let clone = home.path().join(".epik").join("builds").join("running");
+        std::fs::create_dir_all(&clone).unwrap();
+
+        let second = headless(home.path()).output().unwrap();
+
+        assert_eq!(second.status.code(), Some(1), "{second:?}");
+        assert!(clone.exists());
+        terminate(first);
+    }
+
     /// With no tray, as on Linux without a display, the app with no flags
     /// says so and runs headless.
     #[cfg(target_os = "linux")]
