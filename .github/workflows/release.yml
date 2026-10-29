@@ -98,8 +98,25 @@ jobs:
         with:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
+      # Tauri's prebuilt CLI for the runner, from Tauri's own release:
+      # compiling it took 6 to 11 minutes a job. The archive holds
+      # cargo-tauri, or cargo-tauri.exe, at its root; on Linux it's a tgz,
+      # elsewhere a zip, and each runner's tar unpacks its own.
       - name: Install the Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAURI_CLI: 2.12.4
+        run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          dir="$RUNNER_TEMP/tauri-cli"
+          gh release download "tauri-cli-v$TAURI_CLI" --repo tauri-apps/tauri \
+            --pattern "cargo-tauri-$target.*" --dir "$dir"
+          tar -xf "$dir"/cargo-tauri-"$target".* -C "$dir"
+          bin=cargo-tauri
+          if [ "$RUNNER_OS" = Windows ]; then bin=cargo-tauri.exe; fi
+          cp "$dir/$bin" "$HOME/.cargo/bin/"
+          cargo tauri --version
 
       - name: Arm code signing
         if: runner.os == 'macOS'
@@ -190,7 +207,7 @@ jobs:
           esac
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installers-${{ runner.os }}
           path: dist/*
@@ -201,7 +218,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: installers-*
           path: dist
