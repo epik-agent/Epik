@@ -22,7 +22,7 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
-use crate::record::{self, RunState};
+use crate::record::{self, BuildState};
 
 /// How many runs `list` returns when it isn't given a limit.
 pub const DEFAULT_LIMIT: usize = 20;
@@ -49,7 +49,7 @@ pub enum Request {
         plugin_dir: PathBuf,
     },
     /// A run's state.
-    Status { run_id: String },
+    Status { build_id: String },
     /// The latest runs, newest first.
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,12 +63,12 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    /// The build has started: its run has written `run_started`.
+    /// The build has started: its run has written `build_started`.
     Started(Started),
     /// A run's state, folded from its events.
-    Status(RunState),
-    Runs {
-        runs: Vec<RunState>,
+    Status(BuildState),
+    Builds {
+        builds: Vec<BuildState>,
     },
     Pong {
         version: String,
@@ -98,11 +98,11 @@ fn handle(builds: &Builds, request: Request) -> Response {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
         },
-        Request::Status { run_id } => status(builds.root(), &run_id),
-        Request::List { limit } => match record::list_runs(builds.root()) {
-            Ok(mut runs) => {
-                runs.truncate(limit.unwrap_or(DEFAULT_LIMIT));
-                Response::Runs { runs }
+        Request::Status { build_id } => status(builds.root(), &build_id),
+        Request::List { limit } => match record::list_builds(builds.root()) {
+            Ok(mut builds) => {
+                builds.truncate(limit.unwrap_or(DEFAULT_LIMIT));
+                Response::Builds { builds }
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
         },
@@ -120,16 +120,16 @@ fn respond(builds: &Builds, line: &str) -> Response {
     }
 }
 
-fn status(root: &Path, run_id: &str) -> Response {
-    match record::read_events(root, run_id) {
+fn status(root: &Path, build_id: &str) -> Response {
+    match record::read_events(root, build_id) {
         Ok(events) => match record::fold(&events) {
             Some(state) => Response::Status(state),
-            None => Response::error(format!("run {run_id} hasn't started")),
+            None => Response::error(format!("run {build_id} hasn't started")),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Response::error(format!("no run {run_id:?}"))
+            Response::error(format!("no run {build_id:?}"))
         }
-        Err(error) => Response::error(format!("couldn't read run {run_id}: {error}")),
+        Err(error) => Response::error(format!("couldn't read run {build_id}: {error}")),
     }
 }
 
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn build_answers_once_the_run_has_started() {
+    fn build_answers_once_the_build_has_started() {
         let app = Running::new(fake_github());
 
         let reply = app.send(
@@ -409,12 +409,12 @@ mod tests {
         assert_eq!(reply["type"], "started", "{reply}");
         assert_eq!(reply["kind"], "issue");
         assert_eq!(reply["branch"], "main");
-        let run_id = reply["run_id"].as_str().unwrap();
-        assert!(run_id.starts_with("owner-repo-7-"), "{run_id}");
-        let run_dir = PathBuf::from(reply["run_dir"].as_str().unwrap());
-        assert_eq!(run_dir, record::run_dir(app.root.path(), run_id));
-        assert!(run_dir.join(record::EVENTS_FILE).is_file());
-        assert_eq!(app.builds.active(), vec![run_id.to_owned()]);
+        let build_id = reply["build_id"].as_str().unwrap();
+        assert!(build_id.starts_with("owner-repo-7-"), "{build_id}");
+        let build_dir = PathBuf::from(reply["build_dir"].as_str().unwrap());
+        assert_eq!(build_dir, record::build_dir(app.root.path(), build_id));
+        assert!(build_dir.join(record::EVENTS_FILE).is_file());
+        assert_eq!(app.builds.active(), vec![build_id.to_owned()]);
     }
 
     #[test]
@@ -446,52 +446,52 @@ mod tests {
     }
 
     #[test]
-    fn status_answers_with_the_runs_folded_state() {
+    fn status_answers_with_the_builds_folded_state() {
         let app = Running::new(fake_github());
         let started = app.send(
             r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
         );
-        let run_id = started["run_id"].as_str().unwrap();
+        let build_id = started["build_id"].as_str().unwrap();
 
-        let reply = app.send(&json!({"type": "status", "run_id": run_id}).to_string());
+        let reply = app.send(&json!({"type": "status", "build_id": build_id}).to_string());
 
-        let events = record::read_events(app.root.path(), run_id).unwrap();
+        let events = record::read_events(app.root.path(), build_id).unwrap();
         let mut expected = serde_json::to_value(record::fold(&events).unwrap()).unwrap();
         expected["type"] = json!("status");
         assert_eq!(reply, expected);
         assert_eq!(reply["status"], "running");
         let parsed: Response = serde_json::from_value(reply).unwrap();
-        assert!(matches!(parsed, Response::Status(state) if state.run_id == run_id));
+        assert!(matches!(parsed, Response::Status(state) if state.build_id == build_id));
     }
 
     #[test]
-    fn status_of_an_unknown_run_is_an_error() {
+    fn status_of_an_unknown_build_is_an_error() {
         let app = Running::new(fake_github());
 
-        for run_id in ["owner-repo-9-20261028T000000Z-a1b2", "../escape", ""] {
-            let reply = app.send(&json!({"type": "status", "run_id": run_id}).to_string());
+        for build_id in ["owner-repo-9-20261028T000000Z-a1b2", "../escape", ""] {
+            let reply = app.send(&json!({"type": "status", "build_id": build_id}).to_string());
 
             assert_eq!(
                 reply,
-                json!({"type": "error", "message": format!("no run {run_id:?}")})
+                json!({"type": "error", "message": format!("no run {build_id:?}")})
             );
         }
     }
 
     #[test]
-    fn list_answers_with_the_runs_newest_first() {
+    fn list_answers_with_the_builds_newest_first() {
         let app = Running::new(fake_github());
         let root = app.root.path();
         for (n, stamp) in [(1, 1), (2, 3), (3, 2)] {
-            write_run(root, n, stamp);
+            write_build(root, n, stamp);
         }
 
         let all = app.send(r#"{"type": "list"}"#);
         let two = app.send(r#"{"type": "list", "limit": 2}"#);
 
         let numbers = |reply: &Value| -> Vec<u64> {
-            assert_eq!(reply["type"], "runs", "{reply}");
-            let runs = reply["runs"].as_array().unwrap();
+            assert_eq!(reply["type"], "builds", "{reply}");
+            let runs = reply["builds"].as_array().unwrap();
             runs.iter()
                 .map(|run| run["number"].as_u64().unwrap())
                 .collect()
@@ -501,35 +501,35 @@ mod tests {
     }
 
     #[test]
-    fn list_returns_twenty_runs_by_default() {
+    fn list_returns_twenty_builds_by_default() {
         let app = Running::new(fake_github());
         for n in 1..=DEFAULT_LIMIT as u64 + 1 {
-            write_run(app.root.path(), n, n as u32);
+            write_build(app.root.path(), n, n as u32);
         }
 
         let reply = app.send(r#"{"type": "list"}"#);
 
-        assert_eq!(reply["runs"].as_array().unwrap().len(), DEFAULT_LIMIT);
-        assert_eq!(reply["runs"][0]["number"], DEFAULT_LIMIT as u64 + 1);
+        assert_eq!(reply["builds"].as_array().unwrap().len(), DEFAULT_LIMIT);
+        assert_eq!(reply["builds"][0]["number"], DEFAULT_LIMIT as u64 + 1);
     }
 
     /// Records a run of issue `number` started `seconds` into the day.
-    fn write_run(root: &Path, number: u64, seconds: u32) {
+    fn write_build(root: &Path, number: u64, seconds: u32) {
         use chrono::TimeZone;
         let at = chrono::Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap()
             + chrono::Duration::seconds(seconds.into());
-        let run_id = record::run_id("owner/repo", number, at);
-        let mut writer = record::RunWriter::create(root, &run_id).unwrap();
+        let build_id = record::build_id("owner/repo", number, at);
+        let mut writer = record::BuildWriter::create(root, &build_id).unwrap();
         writer
-            .append(&record::Event::RunStarted {
+            .append(&record::Event::BuildStarted {
                 at,
-                run_id: run_id.clone(),
+                build_id: build_id.clone(),
                 repo: "owner/repo".to_owned(),
                 number,
                 title: format!("Issue {number}"),
                 kind: Kind::Issue,
                 branch: "main".to_owned(),
-                members: Vec::new(),
+                issues: Vec::new(),
             })
             .unwrap();
     }
@@ -681,14 +681,14 @@ mod tests {
             json!({"type": "list"})
         );
         let started = Response::Started(Started {
-            run_id: "r".to_owned(),
+            build_id: "r".to_owned(),
             kind: Kind::Epic,
             branch: "epic/1".to_owned(),
-            run_dir: "/runs/r".into(),
+            build_dir: "/runs/r".into(),
         });
         assert_eq!(
             serde_json::to_value(&started).unwrap(),
-            json!({"type": "started", "run_id": "r", "kind": "epic", "branch": "epic/1", "run_dir": "/runs/r"})
+            json!({"type": "started", "build_id": "r", "kind": "epic", "branch": "epic/1", "build_dir": "/runs/r"})
         );
     }
 }

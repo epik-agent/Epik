@@ -88,10 +88,10 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
                 stop.store(true, Ordering::SeqCst);
             } else if id == OPEN_RUNS_FOLDER {
                 reveal(&record::runs_dir(&root));
-            } else if let Some(run_id) = id.strip_prefix(RUN)
-                && let Err(error) = window::open(handle, run_id)
+            } else if let Some(build_id) = id.strip_prefix(RUN)
+                && let Err(error) = window::open(handle, build_id)
             {
-                eprintln!("epik-app: couldn't open the window of run {run_id}: {error}");
+                eprintln!("epik-app: couldn't open the window of run {build_id}: {error}");
             }
         })
         .build(&tauri)
@@ -118,7 +118,7 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
     thread::spawn(move || {
         let mut shown = None;
         while !stop.load(Ordering::SeqCst) {
-            let runs = record::list_runs(&root).unwrap_or_default();
+            let runs = record::list_builds(&root).unwrap_or_default();
             let wanted = menu::menu(&runs, &builds.active());
             if shown.as_ref() != Some(&wanted) {
                 if let Err(error) = redraw(&handle, &tray, &wanted) {
@@ -174,9 +174,9 @@ fn native(handle: &AppHandle, shown: &Menu) -> tauri::Result<tauri::menu::Menu<W
         .iter()
         .map(|item| -> tauri::Result<Box<dyn IsMenuItem<Wry>>> {
             Ok(match item {
-                Item::Run { run_id, label } => Box::new(MenuItem::with_id(
+                Item::Run { build_id, label } => Box::new(MenuItem::with_id(
                     handle,
-                    format!("{RUN}{run_id}"),
+                    format!("{RUN}{build_id}"),
                     label,
                     true,
                     None::<&str>,

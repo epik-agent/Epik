@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use epik_core::graph::Graph;
-use epik_core::record::{MemberStatus, RunState, RunStatus};
+use epik_core::record::{BuildState, BuildStatus, IssueStatus};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 
@@ -18,7 +18,7 @@ pub struct View {
     pub repo: String,
     pub number: u64,
     pub title: String,
-    pub status: RunStatus,
+    pub status: BuildStatus,
     pub reason: Option<String>,
     /// The epic's pull request.
     pub pull_request: Option<u64>,
@@ -28,9 +28,9 @@ pub struct View {
     pub columns: usize,
     /// How many rows its tallest column has.
     pub rows: usize,
-    /// In the order of the run's members.
+    /// In the order of the run's issues.
     pub nodes: Vec<Node>,
-    /// In the order of the members blocked, then of their blockers.
+    /// In the order of the issues blocked, then of their blockers.
     pub edges: Vec<Edge>,
 }
 
@@ -39,7 +39,7 @@ pub struct View {
 pub struct Node {
     pub number: u64,
     pub title: String,
-    pub status: MemberStatus,
+    pub status: IssueStatus,
     pub reason: Option<String>,
     pub pull_request: Option<u64>,
     pub duration: Option<String>,
@@ -48,7 +48,7 @@ pub struct Node {
     /// blocker's. Issues on or behind a cycle go in a column after the
     /// rest.
     pub column: usize,
-    /// Its place in its column, in the order of the run's members.
+    /// Its place in its column, in the order of the run's issues.
     pub row: usize,
 }
 
@@ -65,35 +65,35 @@ pub struct Edge {
 /// A run whose record says it is running but which isn't active is one an
 /// earlier app was running when it stopped, so it shows as interrupted, as
 /// the tray lists it.
-pub fn view(run: &RunState, active: bool, now: DateTime<Utc>) -> View {
+pub fn view(run: &BuildState, active: bool, now: DateTime<Utc>) -> View {
     let graph = Graph::new(
-        run.members
+        run.issues
             .iter()
-            .map(|m| (m.member.number, m.member.blocked_by.iter().copied())),
+            .map(|m| (m.issue.number, m.issue.blocked_by.iter().copied())),
     );
     let levels = graph.levels();
     let level = |number: u64| levels.get(&number).copied().flatten();
     let after = run
-        .members
+        .issues
         .iter()
-        .filter_map(|m| level(m.member.number))
+        .filter_map(|m| level(m.issue.number))
         .max()
         .map_or(0, |deepest| deepest + 1);
 
     let mut heights: Vec<usize> = Vec::new();
     let nodes: Vec<Node> = run
-        .members
+        .issues
         .iter()
         .map(|m| {
-            let column = level(m.member.number).unwrap_or(after);
+            let column = level(m.issue.number).unwrap_or(after);
             if heights.len() <= column {
                 heights.resize(column + 1, 0);
             }
             let row = heights[column];
             heights[column] += 1;
             Node {
-                number: m.member.number,
-                title: m.member.title.clone(),
+                number: m.issue.number,
+                title: m.issue.title.clone(),
                 status: m.status,
                 reason: m.reason.clone(),
                 pull_request: m.pull_request,
@@ -105,25 +105,25 @@ pub fn view(run: &RunState, active: bool, now: DateTime<Utc>) -> View {
         })
         .collect();
 
-    let is_member = |number: u64| run.member(number).is_some();
+    let is_issue = |number: u64| run.issue(number).is_some();
     let edges = run
-        .members
+        .issues
         .iter()
         .flat_map(|m| {
-            m.member
+            m.issue
                 .blocked_by
                 .iter()
-                .filter(|&&blocker| is_member(blocker))
+                .filter(|&&blocker| is_issue(blocker))
                 .map(|&blocker| Edge {
                     from: blocker,
-                    to: m.member.number,
+                    to: m.issue.number,
                 })
         })
         .collect();
 
-    let running = run.status == RunStatus::Running;
+    let running = run.status == BuildStatus::Running;
     let status = if running && !active {
-        RunStatus::Interrupted
+        BuildStatus::Interrupted
     } else {
         run.status
     };
@@ -174,21 +174,21 @@ pub fn dollars(amount: Decimal) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use epik_core::record::{Kind, Member, MemberState};
+    use epik_core::record::{Issue, IssueState, Kind};
     use std::str::FromStr;
 
     fn time(seconds: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap() + chrono::Duration::seconds(seconds)
     }
 
-    fn member(number: u64, blocked_by: &[u64]) -> MemberState {
-        MemberState {
-            member: Member {
+    fn issue(number: u64, blocked_by: &[u64]) -> IssueState {
+        IssueState {
+            issue: Issue {
                 number,
                 title: format!("Issue {number}"),
                 blocked_by: blocked_by.to_vec(),
             },
-            status: MemberStatus::Waiting,
+            status: IssueStatus::Waiting,
             reason: None,
             pull_request: None,
             duration_ms: None,
@@ -196,18 +196,18 @@ mod tests {
         }
     }
 
-    fn run(members: Vec<MemberState>) -> RunState {
-        RunState {
-            run_id: "o-r-1-20261028T000000Z-a1b2".to_owned(),
+    fn run(issues: Vec<IssueState>) -> BuildState {
+        BuildState {
+            build_id: "o-r-1-20261028T000000Z-a1b2".to_owned(),
             repo: "o/r".to_owned(),
             number: 1,
             title: "The epic".to_owned(),
             kind: Kind::Epic,
             branch: "epic".to_owned(),
-            status: RunStatus::Running,
+            status: BuildStatus::Running,
             reason: None,
             pull_request: None,
-            members,
+            issues,
             started_at: time(0),
             ended_at: None,
             elapsed_ms: 10_000,
@@ -228,14 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn issues_go_in_columns_by_level_and_rows_in_member_order() {
+    fn issues_go_in_columns_by_level_and_rows_in_issue_order() {
         // 2 and 3 need nothing; 4 needs 2; 5 needs 2 and 4; 6 needs 3.
         let run = run(vec![
-            member(2, &[]),
-            member(3, &[]),
-            member(4, &[2]),
-            member(5, &[4, 2]),
-            member(6, &[3]),
+            issue(2, &[]),
+            issue(3, &[]),
+            issue(4, &[2]),
+            issue(5, &[4, 2]),
+            issue(6, &[3]),
         ]);
 
         let view = view(&run, true, time(10));
@@ -249,8 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn blockers_that_arent_members_are_ignored() {
-        let view = view(&run(vec![member(2, &[99]), member(3, &[2])]), true, time(0));
+    fn blockers_that_arent_issues_are_ignored() {
+        let view = view(&run(vec![issue(2, &[99]), issue(3, &[2])]), true, time(0));
 
         assert_eq!(places(&view), [(2, 0, 0), (3, 1, 0)]);
         assert_eq!(view.edges, [edge(2, 3)]);
@@ -259,10 +259,10 @@ mod tests {
     #[test]
     fn issues_on_or_behind_a_cycle_go_in_a_column_after_the_rest() {
         let run = run(vec![
-            member(2, &[]),
-            member(3, &[4]),
-            member(4, &[3]),
-            member(5, &[3]),
+            issue(2, &[]),
+            issue(3, &[4]),
+            issue(4, &[3]),
+            issue(5, &[3]),
         ]);
 
         let view = view(&run, true, time(0));
@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn a_run_with_no_members_has_an_empty_graph() {
+    fn a_run_with_no_issues_has_an_empty_graph() {
         let view = view(&run(vec![]), true, time(0));
 
         assert_eq!((view.columns, view.rows), (0, 0));
@@ -281,23 +281,23 @@ mod tests {
 
     #[test]
     fn a_node_shows_its_state_pull_request_duration_and_cost_once_known() {
-        let mut done = member(2, &[]);
-        done.status = MemberStatus::Merged;
+        let mut done = issue(2, &[]);
+        done.status = IssueStatus::Merged;
         done.pull_request = Some(102);
         done.duration_ms = Some(185_000);
         done.cost_usd = Some(Decimal::from_str("1.5").unwrap());
-        let run = run(vec![done, member(3, &[2])]);
+        let run = run(vec![done, issue(3, &[2])]);
 
         let view = view(&run, true, time(0));
 
         let [merged, waiting] = &view.nodes[..] else {
             panic!("two nodes");
         };
-        assert_eq!(merged.status, MemberStatus::Merged);
+        assert_eq!(merged.status, IssueStatus::Merged);
         assert_eq!(merged.pull_request, Some(102));
         assert_eq!(merged.duration.as_deref(), Some("3m 05s"));
         assert_eq!(merged.cost.as_deref(), Some("$1.50"));
-        assert_eq!(waiting.status, MemberStatus::Waiting);
+        assert_eq!(waiting.status, IssueStatus::Waiting);
         assert_eq!(
             (waiting.duration.as_ref(), waiting.cost.as_ref()),
             (None, None)
@@ -315,7 +315,7 @@ mod tests {
             (view.repo.as_str(), view.number, view.title.as_str()),
             ("o/r", 1, "The epic")
         );
-        assert_eq!(view.status, RunStatus::Running);
+        assert_eq!(view.status, BuildStatus::Running);
         assert_eq!(view.elapsed, "1m 15s");
         assert_eq!(view.cost, "$0.13");
     }
@@ -323,13 +323,13 @@ mod tests {
     #[test]
     fn a_finished_run_shows_its_recorded_time() {
         let mut run = run(vec![]);
-        run.status = RunStatus::Succeeded;
+        run.status = BuildStatus::Succeeded;
         run.pull_request = Some(50);
         run.ended_at = Some(time(10));
 
         let view = view(&run, false, time(1000));
 
-        assert_eq!(view.status, RunStatus::Succeeded);
+        assert_eq!(view.status, BuildStatus::Succeeded);
         assert_eq!(view.pull_request, Some(50));
         assert_eq!(view.elapsed, "10s");
     }
@@ -338,7 +338,7 @@ mod tests {
     fn a_running_run_that_isnt_active_was_interrupted() {
         let view = view(&run(vec![]), false, time(1000));
 
-        assert_eq!(view.status, RunStatus::Interrupted);
+        assert_eq!(view.status, BuildStatus::Interrupted);
         assert_eq!(view.elapsed, "10s");
     }
 

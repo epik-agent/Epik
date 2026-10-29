@@ -22,11 +22,11 @@ use crate::record::Kind;
 /// A build that has started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Started {
-    pub run_id: String,
+    pub build_id: String,
     pub kind: Kind,
     pub branch: String,
     /// The run's record directory, `<root>/runs/<run-id>`.
-    pub run_dir: PathBuf,
+    pub build_dir: PathBuf,
 }
 
 /// The builds the app is running, each on its own thread.
@@ -81,7 +81,7 @@ impl Builds {
     }
 
     /// Starts building `number` in `repo` on a thread of its own, and
-    /// returns once its run has written `run_started`, or with why it
+    /// returns once its run has written `build_started`, or with why it
     /// couldn't start.
     pub fn start(
         &self,
@@ -121,19 +121,19 @@ impl Builds {
                             return;
                         }
                     };
-                    let run_id = build.run_id().to_owned();
+                    let build_id = build.build_id().to_owned();
                     change(&active, &*on_active, |active| {
-                        active.insert(run_id.clone());
+                        active.insert(build_id.clone());
                     });
                     let _ = started.send(Ok(Started {
-                        run_id: run_id.clone(),
+                        build_id: build_id.clone(),
                         kind: build.kind(),
                         branch: build.branch().to_owned(),
-                        run_dir: build.dir().to_owned(),
+                        build_dir: build.dir().to_owned(),
                     }));
                     build.run(&cancel);
                     change(&active, &*on_active, |active| {
-                        active.remove(&run_id);
+                        active.remove(&build_id);
                     });
                 })
                 .map_err(|error| format!("couldn't start a thread for the build: {error}"))?;
@@ -223,14 +223,14 @@ pub(crate) fn fake_github() -> crate::github::FakeGitHub {
 mod tests {
     use super::*;
     use crate::github::State;
-    use crate::record::{self, RunStatus};
+    use crate::record::{self, BuildStatus};
 
     fn builds(root: &Path, github: crate::github::FakeGitHub) -> Builds {
         Builds::new(root, Arc::new(github), Arc::new(HangingAgent))
     }
 
     #[test]
-    fn start_returns_once_the_run_has_started_and_shutdown_cancels_it() {
+    fn start_returns_once_the_build_has_started_and_shutdown_cancels_it() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
@@ -238,23 +238,23 @@ mod tests {
             .start("owner/repo", 7, None, PathBuf::from("/plugin"))
             .unwrap();
 
-        assert!(started.run_id.starts_with("owner-repo-7-"), "{started:?}");
+        assert!(started.build_id.starts_with("owner-repo-7-"), "{started:?}");
         assert_eq!(started.kind, Kind::Issue);
         assert_eq!(started.branch, "main");
         assert_eq!(
-            started.run_dir,
-            record::run_dir(root.path(), &started.run_id)
+            started.build_dir,
+            record::build_dir(root.path(), &started.build_id)
         );
-        let events = record::read_events(root.path(), &started.run_id).unwrap();
-        assert!(matches!(events[0], record::Event::RunStarted { .. }));
-        assert_eq!(builds.active(), vec![started.run_id.clone()]);
+        let events = record::read_events(root.path(), &started.build_id).unwrap();
+        assert!(matches!(events[0], record::Event::BuildStarted { .. }));
+        assert_eq!(builds.active(), vec![started.build_id.clone()]);
 
         builds.shutdown();
 
         assert!(builds.active().is_empty());
-        let events = record::read_events(root.path(), &started.run_id).unwrap();
+        let events = record::read_events(root.path(), &started.build_id).unwrap();
         let state = record::fold(&events).unwrap();
-        assert_eq!(state.status, RunStatus::Interrupted);
+        assert_eq!(state.status, BuildStatus::Interrupted);
     }
 
     #[test]

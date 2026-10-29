@@ -4,7 +4,7 @@
 //! under `~/.epik/runs` and the builds the app is running. The tray only
 //! draws what it says.
 
-use epik_core::record::{RunState, RunStatus};
+use epik_core::record::{BuildState, BuildStatus};
 
 /// How many finished runs the menu lists.
 pub const RECENT: usize = 10;
@@ -22,7 +22,7 @@ pub struct Menu {
 pub enum Item {
     /// A run; choosing it opens the run.
     Run {
-        run_id: String,
+        build_id: String,
         label: String,
     },
     /// Text that can't be chosen.
@@ -32,15 +32,15 @@ pub enum Item {
     Quit,
 }
 
-/// The tray for `runs`, newest first as [`epik_core::record::list_runs`]
+/// The tray for `runs`, newest first as [`epik_core::record::list_builds`]
 /// gives them, while the builds `active` are running: the active runs, then
 /// the [`RECENT`] most recent finished ones, then "Open runs folder" and
 /// "Quit".
 ///
 /// A run whose record says it is running but which isn't active is one an
 /// earlier app was running when it stopped, so it is listed as interrupted.
-pub fn menu(runs: &[RunState], active: &[String]) -> Menu {
-    let is_active = |run: &RunState| active.contains(&run.run_id);
+pub fn menu(runs: &[BuildState], active: &[String]) -> Menu {
+    let is_active = |run: &BuildState| active.contains(&run.build_id);
     let mut items: Vec<Item> = runs
         .iter()
         .filter(|run| is_active(run))
@@ -73,18 +73,18 @@ pub fn menu(runs: &[RunState], active: &[String]) -> Menu {
     }
 }
 
-fn run_item(run: &RunState, state: &str) -> Item {
+fn run_item(run: &BuildState, state: &str) -> Item {
     Item::Run {
-        run_id: run.run_id.clone(),
+        build_id: run.build_id.clone(),
         label: format!("{}#{} {} ({state})", run.repo, run.number, run.title),
     }
 }
 
-fn finished_state(status: RunStatus) -> &'static str {
+fn finished_state(status: BuildStatus) -> &'static str {
     match status {
-        RunStatus::Succeeded => "succeeded",
-        RunStatus::Failed => "failed",
-        RunStatus::Running | RunStatus::Interrupted => "interrupted",
+        BuildStatus::Succeeded => "succeeded",
+        BuildStatus::Failed => "failed",
+        BuildStatus::Running | BuildStatus::Interrupted => "interrupted",
     }
 }
 
@@ -95,9 +95,9 @@ mod tests {
     use epik_core::record::Kind;
     use rust_decimal::Decimal;
 
-    fn run(number: u64, status: RunStatus) -> RunState {
-        RunState {
-            run_id: format!("o-r-{number}"),
+    fn run(number: u64, status: BuildStatus) -> BuildState {
+        BuildState {
+            build_id: format!("o-r-{number}"),
             repo: "o/r".to_owned(),
             number,
             title: format!("Issue {number}"),
@@ -106,7 +106,7 @@ mod tests {
             status,
             reason: None,
             pull_request: None,
-            members: Vec::new(),
+            issues: Vec::new(),
             started_at: Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap(),
             ended_at: None,
             elapsed_ms: 0,
@@ -116,7 +116,7 @@ mod tests {
 
     fn item(number: u64, state: &str) -> Item {
         Item::Run {
-            run_id: format!("o-r-{number}"),
+            build_id: format!("o-r-{number}"),
             label: format!("o/r#{number} Issue {number} ({state})"),
         }
     }
@@ -144,10 +144,10 @@ mod tests {
     #[test]
     fn it_lists_active_runs_then_finished_ones_with_their_states() {
         let runs = [
-            run(4, RunStatus::Running),
-            run(3, RunStatus::Succeeded),
-            run(2, RunStatus::Failed),
-            run(1, RunStatus::Interrupted),
+            run(4, BuildStatus::Running),
+            run(3, BuildStatus::Succeeded),
+            run(2, BuildStatus::Failed),
+            run(1, BuildStatus::Interrupted),
         ];
 
         assert_eq!(
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn an_active_run_comes_first_wherever_it_is_listed() {
-        let runs = [run(2, RunStatus::Succeeded), run(1, RunStatus::Running)];
+        let runs = [run(2, BuildStatus::Succeeded), run(1, BuildStatus::Running)];
 
         let items = menu(&runs, &["o-r-1".to_owned()]).items;
 
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn a_run_recorded_as_running_that_isnt_active_was_interrupted() {
-        let items = menu(&[run(1, RunStatus::Running)], &[]).items;
+        let items = menu(&[run(1, BuildStatus::Running)], &[]).items;
 
         assert_eq!(
             items[..3],
@@ -196,9 +196,9 @@ mod tests {
 
     #[test]
     fn it_lists_only_the_ten_most_recent_finished_runs() {
-        let runs: Vec<RunState> = (1..=12)
+        let runs: Vec<BuildState> = (1..=12)
             .rev()
-            .map(|number| run(number, RunStatus::Succeeded))
+            .map(|number| run(number, BuildStatus::Succeeded))
             .collect();
 
         let items = menu(&runs, &[]).items;
