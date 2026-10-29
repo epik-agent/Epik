@@ -11,3 +11,6 @@
 
 # Node
 node_modules/
+
+# The front end trunk builds
+/crates/epik-ui/dist/

@@ -76,13 +76,13 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
             args: --target universal-apple-darwin --bundles dmg
           - os: windows-latest
-            targets: ""
+            targets: wasm32-unknown-unknown
             args: --bundles msi
           - os: ubuntu-latest
-            targets: ""
+            targets: wasm32-unknown-unknown
             args: --bundles appimage,deb
     runs-on: ${{ matrix.os }}
     steps:
@@ -98,6 +98,14 @@ jobs:
         with:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
+      # The windows are Rust compiled to WebAssembly by trunk, which the
+      # Tauri CLI runs as the beforeBuildCommand. The same version as
+      # ci.yml.
+      - name: Install trunk
+        shell: bash
+        run: |
+          trunk --version 2>/dev/null | grep -qx 'trunk 0.21.14' \
+            || cargo install trunk --locked --version 0.21.14
       # Tauri's prebuilt CLI for the runner, from Tauri's own release:
       # compiling it took 6 to 11 minutes a job. The archive holds
       # cargo-tauri, or cargo-tauri.exe, at its root: a tgz on Linux, a zip

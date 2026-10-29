@@ -101,9 +101,20 @@ ACP adapter the app runs. On Linux, the app also needs the system packages
 Tauri needs; see Tauri's
 [Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux).
 
+The app's windows are Rust compiled to WebAssembly by
+[trunk](https://trunkrs.dev), and the app embeds them when it compiles, so
+build them first:
+
 ```
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+(cd crates/epik-ui && trunk build --release)
 cargo install --path crates/epik-app
 ```
+
+Build them again with `trunk build` after changing `crates/epik-ui`, before
+`cargo build`, or let `cargo tauri dev`, run in `crates/epik-app`, build
+them.
 
 Run it once (`epik-app --version` will do): each time it runs it links
 itself at `~/.epik/bin/epik-app`, which is where the plugin finds Epik's
