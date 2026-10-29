@@ -13,9 +13,10 @@ use epik_core::builds::Builds;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
+use epik_view::{Home, Popover, RunPage, Settings};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
-use crate::pages::{self, Home, Popover, RunPage, Settings};
+use crate::pages;
 
 /// What the window's commands reach.
 pub struct Window {
