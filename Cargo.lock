@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "epik-app"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "ctrlc",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "epik-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
  "async-io",

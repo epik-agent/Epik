@@ -1,0 +1,227 @@
+# Build Epik's installers when a version tag is pushed, and attach them to
+# a draft GitHub Release for a person to publish.
+#
+# The tag must be `v<version>` or `v<version>-<suffix>`, where <version> is
+# epik-app's version (the workspace version in the root Cargo.toml). A tag
+# with a suffix, such as `v0.3.0-test`, makes a pre-release.
+#
+# Every file is uploaded under a name without the version, so the website's
+# download buttons can link to
+# https://github.com/epik-agent/Epik/releases/latest/download/<file>:
+#
+#   Epik.dmg              macOS, universal (Apple Silicon and Intel)
+#   Epik.msi              Windows, x64
+#   Epik_amd64.AppImage   Linux, x86-64
+#   Epik_amd64.deb        Linux, x86-64 (Debian, Ubuntu)
+#
+# The app is built with Tauri's bundler through the Tauri CLI, so every
+# step is visible here.
+#
+# macOS signing is armed by secrets and skipped without them: without them
+# the workflow still runs and produces an unsigned .dmg.
+#
+#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD  the .p12's password
+#   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID                    the Apple ID that notarizes the app
+#   APPLE_PASSWORD              an app-specific password for that Apple ID
+#   APPLE_TEAM_ID               the Developer team's ID
+#
+# The first three sign the app; the last three, when all are present,
+# notarize and staple it. The Tauri CLI reads all of these from the
+# environment itself: it imports the certificate into a temporary keychain
+# for the build and removes it afterwards.
+#
+# Windows is unsigned for now, so SmartScreen warns on first run.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Creating the release and uploading its files.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Tag matches the app's version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "epik-app") | .version')
+          echo "epik-app is version $version; the tag is $TAG."
+          case "$TAG" in
+            "v$version" | "v$version-"?*) ;;
+            *)
+              echo "::error::The tag $TAG is not v$version or v$version-<suffix>. Bump the workspace version in Cargo.toml, or tag v$version."
+              exit 1
+              ;;
+          esac
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles dmg
+          - os: windows-latest
+            targets: ""
+            args: --bundles msi
+          - os: ubuntu-latest
+            targets: ""
+            args: --bundles appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # The tray is Tauri, which builds against GTK and WebKitGTK on Linux.
+      # The same packages as ci.yml.
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Arm code signing
+        if: runner.os == 'macOS'
+        # Secrets reach the Tauri CLI only when they exist: an empty
+        # APPLE_SIGNING_IDENTITY would be taken as an identity and fail.
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$IDENTITY" ]; then
+            echo "::notice::No signing secrets; the .dmg will be unsigned."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"; echo "$CERT"; echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_PASSWORD" ] && [ -n "$NOTARY_TEAM" ]; then
+            {
+              echo "APPLE_ID=$NOTARY_ID"
+              echo "APPLE_PASSWORD=$NOTARY_PASSWORD"
+              echo "APPLE_TEAM_ID=$NOTARY_TEAM"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::notice::No notarization secrets; the .dmg will be signed but not notarized."
+          fi
+
+      - name: Bundle
+        working-directory: crates/epik-app
+        env:
+          # The AppImage tool is itself an AppImage, and the runner has no
+          # FUSE to mount it: unpack it instead.
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          # linuxdeploy's own strip fails on newer Ubuntu libraries.
+          NO_STRIP: true
+        run: cargo tauri build ${{ matrix.args }}
+
+      # With only the dmg bundle asked for, the bundler deletes the .app it
+      # put in the .dmg, so the app is checked inside the .dmg.
+      - name: Signature and architectures
+        if: runner.os == 'macOS'
+        run: |
+          dmg=$(echo target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          hdiutil attach -nobrowse -readonly -mountpoint /tmp/epik "$dmg"
+          app=/tmp/epik/Epik.app
+          codesign --verify --deep --strict --verbose=2 "$app" || echo "::notice::unsigned bundle"
+          codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)' || true
+          archs=$(lipo -archs "$app/Contents/MacOS/epik-app")
+          hdiutil detach /tmp/epik
+          echo "Architectures: $archs"
+          case "$archs" in
+            *x86_64*arm64* | *arm64*x86_64*) ;;
+            *) echo "::error::The app is not universal: $archs"; exit 1 ;;
+          esac
+
+      # Version-free names, so the latest release's download links never
+      # change. Each glob must match exactly one file.
+      - name: Name the installers
+        shell: bash
+        run: |
+          mkdir dist
+          one() {
+            # Unquoted on purpose: the shell expands the glob.
+            # shellcheck disable=SC2086
+            set -- $1
+            if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+              echo "::error::Expected one file, found: $*"
+              exit 1
+            fi
+            echo "$1"
+          }
+          case "$RUNNER_OS" in
+            macOS)
+              cp "$(one 'target/universal-apple-darwin/release/bundle/dmg/*.dmg')" dist/Epik.dmg
+              ;;
+            Windows)
+              cp "$(one 'target/release/bundle/msi/*.msi')" dist/Epik.msi
+              ;;
+            Linux)
+              cp "$(one 'target/release/bundle/appimage/*.AppImage')" dist/Epik_amd64.AppImage
+              cp "$(one 'target/release/bundle/deb/*.deb')" dist/Epik_amd64.deb
+              ;;
+          esac
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: dist
+          merge-multiple: true
+      - name: Attach the installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          for f in Epik.dmg Epik.msi Epik_amd64.AppImage Epik_amd64.deb; do
+            test -f "dist/$f" || { echo "::error::dist/$f is missing"; exit 1; }
+          done
+          # A rerun replaces the files on the release it already made.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            prerelease=""
+            case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+            gh release create "$TAG" dist/* --draft $prerelease \
+              --verify-tag --title "Epik ${TAG#v}" --generate-notes
+          fi

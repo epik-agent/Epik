@@ -213,5 +213,5 @@ Whether the app is there, and its version.
 ```
 
 ```json
-{"type": "pong", "version": "0.1.0"}
+{"type": "pong", "version": "0.3.0"}
 ```
