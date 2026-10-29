@@ -100,8 +100,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Tauri's prebuilt CLI for the runner, from Tauri's own release:
       # compiling it took 6 to 11 minutes a job. The archive holds
-      # cargo-tauri, or cargo-tauri.exe, at its root; on Linux it's a tgz,
-      # elsewhere a zip, and each runner's tar unpacks its own.
+      # cargo-tauri, or cargo-tauri.exe, at its root: a tgz on Linux, a zip
+      # elsewhere. Git Bash's tar can't unpack a zip, so zips go to unzip.
+      # Not every runner has ~/.cargo/bin, so the CLI gets its own
+      # directory on the PATH.
       - name: Install the Tauri CLI
         shell: bash
         env:
@@ -112,11 +114,13 @@ jobs:
           dir="$RUNNER_TEMP/tauri-cli"
           gh release download "tauri-cli-v$TAURI_CLI" --repo tauri-apps/tauri \
             --pattern "cargo-tauri-$target.*" --dir "$dir"
-          tar -xf "$dir"/cargo-tauri-"$target".* -C "$dir"
-          bin=cargo-tauri
-          if [ "$RUNNER_OS" = Windows ]; then bin=cargo-tauri.exe; fi
-          cp "$dir/$bin" "$HOME/.cargo/bin/"
-          cargo tauri --version
+          cd "$dir"
+          case "$target" in
+            *linux*) tar -xzf "cargo-tauri-$target.tgz" ;;
+            *) unzip -q "cargo-tauri-$target.zip" ;;
+          esac
+          ./cargo-tauri --version
+          echo "$dir" >> "$GITHUB_PATH"
 
       - name: Arm code signing
         if: runner.os == 'macOS'
