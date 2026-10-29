@@ -5,6 +5,7 @@
   "title": "build: add the Rust workspace and its CI for the Epik app",
   "merged": true,
   "merged_at": "2026-10-28T21:00:43Z",
+  "merge_commit_sha": "dd1288cc693368c025b69618edc4bc603c07d301",
   "head": {
     "ref": "issue-357-rust-workspace",
     "sha": "edbb8412fc97b3483af130acc955209d7f90ca7f"

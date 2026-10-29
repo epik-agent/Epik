@@ -29,6 +29,7 @@ use rust_decimal::Decimal;
 
 use crate::agent::{Agent, AgentOutcome, AgentRequest};
 use crate::cleanup;
+use crate::comment;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
 use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
@@ -251,6 +252,7 @@ pub fn start<'a>(
     Ok(Build {
         github,
         agent,
+        root: request.root.clone(),
         key,
         repo: repo.to_owned(),
         number,
@@ -274,6 +276,8 @@ pub fn start<'a>(
 pub struct Build<'a> {
     github: &'a dyn GitHub,
     agent: &'a (dyn Agent + Sync),
+    /// Epik's root, holding the run's earlier builds.
+    root: PathBuf,
     key: RunKey,
     repo: String,
     number: u64,
@@ -501,15 +505,17 @@ impl Build<'_> {
         if self.kind == Kind::Issue {
             return Finished::Done(pr.number);
         }
-        match self.merge(number, pr, cancel) {
-            Ok(()) => {
-                self.append(Event::IssueMerged {
-                    at: Utc::now(),
-                    number,
-                    pull_request: pr.number,
-                });
-                Finished::Done(pr.number)
-            }
+        let closed = self.merge(pr, cancel).and_then(|sha| {
+            self.append(Event::IssueMerged {
+                at: Utc::now(),
+                number,
+                pull_request: pr.number,
+                merge_commit: Some(sha),
+            });
+            self.close(number, pr.number)
+        });
+        match closed {
+            Ok(()) => Finished::Done(pr.number),
             Err(Stop::Cancelled) => Finished::Cancelled,
             Err(Stop::Failed(reason)) => {
                 // A second `issue_finished` records that the issue failed
@@ -526,21 +532,36 @@ impl Build<'_> {
         }
     }
 
-    /// Waits for `pr`'s checks, merges it, and closes issue `number`.
-    fn merge(&self, number: u64, pr: PullRequest, cancel: &AtomicBool) -> Result<(), Stop> {
+    /// Waits for `pr`'s checks, unless it has merged already, merges it,
+    /// and returns its merge commit.
+    fn merge(&self, pr: PullRequest, cancel: &AtomicBool) -> Result<String, Stop> {
         if !pr.merged {
             self.await_checks(pr.number, cancel)?;
-            self.github
-                .merge_pull_request(&self.repo, pr.number)
-                .map_err(|error| Stop::Failed(format!("couldn't merge #{}: {error}", pr.number)))?;
         }
-        let comment = format!("Merged into `{}` by #{}.", self.branch, pr.number);
+        self.github
+            .merge_pull_request(&self.repo, pr.number)
+            .map_err(|error| Stop::Failed(format!("couldn't merge #{}: {error}", pr.number)))
+    }
+
+    /// Closes issue `number`, merged by `pr`, with a comment of its time and
+    /// cost over every build of the run.
+    fn close(&self, number: u64, pr: u64) -> Result<(), Stop> {
+        let issue = run::read(&self.root, &self.key)
+            .ok()
+            .and_then(|run| run.issue(number).cloned())
+            .or_else(|| {
+                let log = self.log.lock().unwrap();
+                record::fold(&log.events).and_then(|build| build.issue(number).cloned())
+            });
+        let comment = match issue {
+            Some(issue) => comment::issue_merged(&self.branch, &issue),
+            None => format!("Merged into `{}` by #{pr}.", self.branch),
+        };
         self.github
             .close_issue(&self.repo, number, &comment)
             .map_err(|error| {
                 Stop::Failed(format!(
-                    "merged #{} but couldn't close the issue: {error}",
-                    pr.number
+                    "merged #{pr} but couldn't close the issue: {error}"
                 ))
             })
     }
@@ -942,8 +963,16 @@ mod tests {
             assert_eq!(repo.pulls[&pr(n)].base, EPIC_BRANCH);
             let issue = &repo.issues[&n];
             assert_eq!(issue.state, State::Closed);
-            let comment = format!("Merged into `{EPIC_BRANCH}` by #{}.", pr(n));
-            assert_eq!(issue.comments, [comment]);
+            let [comment] = &issue.comments[..] else {
+                panic!("one comment on #{n}");
+            };
+            let sha = &FakeGitHub::merge_commit(pr(n))[..7];
+            let merged = format!(
+                "**Epik: 1s, $0.25.** Merged into `{EPIC_BRANCH}` by #{} ({sha}).",
+                pr(n)
+            );
+            assert!(comment.starts_with(&merged), "{comment}");
+            assert!(comment.contains("<!-- epik:cost {"), "{comment}");
         }
         let epic_pull = &repo.pulls[&epic_pr];
         assert_eq!(epic_pull.head, EPIC_BRANCH);

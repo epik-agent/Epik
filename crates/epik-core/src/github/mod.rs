@@ -214,8 +214,9 @@ pub trait GitHub: Send + Sync {
 
     /// Merges pull request `pr` with the first method the repository
     /// allows of merge commit, squash and rebase, failing when it allows
-    /// none. An already-merged pull request is success.
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()>;
+    /// none, and returns the merge commit's SHA. An already-merged pull
+    /// request is success.
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
 
     /// Comments `comment` on issue `number` and closes it.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()>;

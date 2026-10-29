@@ -45,6 +45,8 @@ pub struct FakePull {
     pub checks: Checks,
     /// How it was merged, once it is.
     pub merged_with: Option<MergeMethod>,
+    /// Its merge commit, once it is merged: see [`FakeGitHub::merge_commit`].
+    pub merge_commit: Option<String>,
 }
 
 /// A repository the fake holds.
@@ -203,6 +205,12 @@ impl FakeGitHub {
         self.arrange_pull(repo, pr, |pull| pull.checks = checks);
     }
 
+    /// The merge commit the fake gives pull request `pr` when it merges
+    /// it: 40 hex digits whose first 7 are `a` and `pr` in hex.
+    pub fn merge_commit(pr: u64) -> String {
+        format!("{:07x}{}", 0xa00_0000 + pr, "0".repeat(33))
+    }
+
     /// Sets pull request `pr`'s state.
     pub fn set_pull_state(&self, repo: &str, pr: u64, state: PullState) {
         self.arrange_pull(repo, pr, |pull| pull.state = state);
@@ -354,18 +362,20 @@ impl GitHub for FakeGitHub {
         Ok(pull.checks)
     }
 
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()> {
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String> {
         let mut world = self.enter("merge_pull_request")?;
         let fake = world.repo_mut(repo)?;
         let methods = fake.merge_methods;
         let pull = fake.pull_mut(pr)?;
         match pull.state {
             PullState::Closed => Err(Error::new("gh: Pull Request is not mergeable (HTTP 405)")),
-            PullState::Merged => Ok(()),
+            PullState::Merged => Ok(pull.merge_commit.clone().unwrap_or_default()),
             PullState::Open => {
                 pull.merged_with = Some(methods.choose(repo)?);
                 pull.state = PullState::Merged;
-                Ok(())
+                let sha = FakeGitHub::merge_commit(pr);
+                pull.merge_commit = Some(sha.clone());
+                Ok(sha)
             }
         }
     }
@@ -406,6 +416,7 @@ impl GitHub for FakeGitHub {
             state: PullState::Open,
             checks: Checks::None,
             merged_with: None,
+            merge_commit: None,
         };
         fake.pulls.insert(number, pull);
         Ok(number)

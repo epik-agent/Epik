@@ -137,6 +137,9 @@ pub enum Event {
         at: DateTime<Utc>,
         number: u64,
         pull_request: u64,
+        /// The merge commit's SHA.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_commit: Option<String>,
     },
     BuildFinished {
         at: DateTime<Utc>,
@@ -352,6 +355,9 @@ pub struct IssueState {
     pub status: IssueStatus,
     pub reason: Option<String>,
     pub pull_request: Option<u64>,
+    /// Its pull request's merge commit, once Epik has merged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit: Option<String>,
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<Decimal>,
     /// What its agent is doing, while it runs. Read from the agent's log
@@ -457,6 +463,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 },
                 reason: None,
                 pull_request: None,
+                merge_commit: None,
                 duration_ms: None,
                 cost_usd: None,
                 activity: None,
@@ -497,11 +504,13 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
             Event::IssueMerged {
                 number,
                 pull_request,
+                merge_commit,
                 ..
             } => {
                 if let Some(issue) = state.issue_mut(*number) {
                     issue.status = IssueStatus::Merged;
                     issue.pull_request = Some(*pull_request);
+                    issue.merge_commit = merge_commit.clone();
                 }
             }
             Event::BuildFinished {
@@ -635,6 +644,7 @@ mod tests {
                 at: time(11),
                 number: 13,
                 pull_request: 113,
+                merge_commit: None,
             },
             Event::IssueStarted {
                 at: time(12),
@@ -645,6 +655,7 @@ mod tests {
                 at: time(21),
                 number: 14,
                 pull_request: 114,
+                merge_commit: None,
             },
             Event::BuildFinished {
                 at: time(30),

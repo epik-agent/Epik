@@ -215,6 +215,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
                 issue.status = now.status;
                 issue.reason = now.reason.clone();
                 issue.pull_request = now.pull_request;
+                issue.merge_commit = now.merge_commit.clone();
             }
             issue.duration_ms = add(issue.duration_ms, now.duration_ms);
             issue.cost_usd = add(issue.cost_usd, now.cost_usd);
@@ -493,6 +494,7 @@ mod tests {
             at: time(at),
             number,
             pull_request: number + 100,
+            merge_commit: None,
         }
     }
 

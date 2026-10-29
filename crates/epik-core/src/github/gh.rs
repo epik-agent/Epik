@@ -175,13 +175,15 @@ impl GitHub for GhCli {
         Ok(rollup.checks())
     }
 
-    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<()> {
+    fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String> {
         let pull: RawPull = self.json(["api", &format!("repos/{repo}/pulls/{pr}")])?;
         if pull.state() == PullState::Merged {
-            return Ok(());
+            return pull
+                .merge_commit_sha
+                .ok_or_else(|| Error::new(format!("#{pr} is merged but has no merge commit")));
         }
         let method = self.repo(repo)?.merge_methods().choose(repo)?;
-        self.gh([
+        let merged: Merged = self.json([
             "api",
             "-X",
             "PUT",
@@ -189,7 +191,7 @@ impl GitHub for GhCli {
             "-f",
             &format!("merge_method={}", method.as_str()),
         ])?;
-        Ok(())
+        Ok(merged.sha)
     }
 
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> Result<()> {
@@ -284,6 +286,12 @@ fn head_among(refs: Vec<RawRef>, branch: &str) -> Option<String> {
     refs.into_iter()
         .find(|found| found.name == wanted)
         .map(|found| found.object.sha)
+}
+
+/// What merging a pull request answers.
+#[derive(Deserialize)]
+struct Merged {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +389,8 @@ struct RawPull {
     state: State,
     /// Set only once the pull request is merged.
     merged_at: Option<IgnoredAny>,
+    #[serde(default)]
+    merge_commit_sha: Option<String>,
     body: Option<String>,
 }
 
@@ -794,7 +804,8 @@ mod tests {
             vec!["api", "repos/epik-agent/Epik/pulls/367"],
             ok(&fixture("pull.json")),
         )]);
-        gh.merge_pull_request(REPO, 367).unwrap();
+        let sha = gh.merge_pull_request(REPO, 367).unwrap();
+        assert_eq!(sha, "dd1288cc693368c025b69618edc4bc603c07d301");
         assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
@@ -843,10 +854,11 @@ mod tests {
                     "-f",
                     "merge_method=squash",
                 ],
-                ok(r#"{"merged": true}"#),
+                ok(r#"{"sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "merged": true}"#),
             ),
         ]);
-        gh.merge_pull_request(REPO, 367).unwrap();
+        let sha = gh.merge_pull_request(REPO, 367).unwrap();
+        assert_eq!(sha, "6dcb09b5b57875f334f61aebed695e2e4193db5e");
     }
 
     #[test]

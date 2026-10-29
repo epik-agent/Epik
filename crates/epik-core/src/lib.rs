@@ -6,12 +6,14 @@ pub mod awake;
 pub mod build;
 pub mod builds;
 pub mod cleanup;
+pub mod comment;
 pub mod github;
 pub mod graph;
 pub mod ipc;
 pub mod record;
 pub mod repositories;
 pub mod run;
+pub mod words;
 
 /// The version of Epik, which every crate in the workspace shares.
 pub fn version() -> &'static str {
