@@ -1,0 +1,447 @@
+[
+  {
+    "name": "gh_raw",
+    "description": "Run an arbitrary gh command and return its result without raising.\n\nEscape hatch for gh operations without a dedicated tool (e.g.\n[\"release\", \"list\", \"--repo\", \"epik-agent/Epik\"]). Pass arguments as a list\nto avoid shell-quoting bugs; do not pass a single command string.\n\nArgs:\n    args: The list of arguments passed to gh, excluding the leading \"gh\".",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "args"
+      ]
+    }
+  },
+  {
+    "name": "label_list",
+    "description": "List every label in a repository with its color and description.\n\nArgs:\n    repo: Repository in owner/name format.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo"
+      ]
+    }
+  },
+  {
+    "name": "label_create",
+    "description": "Create a label in a repository, or with force update an existing one.\n\nArgs:\n    repo: Repository in owner/name format.\n    name: Label name.\n    color: Hex color without the leading '#' (e.g. 'ff0000').\n    description: Description of the label. Default \"\".\n    force: Update the label if it already exists. Default false.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{6}$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "name",
+        "color"
+      ]
+    }
+  },
+  {
+    "name": "label_delete",
+    "description": "Delete a label from a repository.\n\nArgs:\n    repo: Repository in owner/name format.\n    name: Label name.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "run_list",
+    "description": "List a repository's GitHub Actions runs, newest first.\n\nArgs:\n    repo: Repository in owner/name format.\n    workflow: Only runs of this workflow, by name or filename.\n    branch: Only runs on this branch.\n    status: Only runs with this status or conclusion (e.g. in_progress, failure).\n    limit: Maximum number of runs. Default 20.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "repo"
+      ]
+    }
+  },
+  {
+    "name": "run_get",
+    "description": "Get one GitHub Actions run, with its event, head SHA and timestamps.\n\nArgs:\n    repo: Repository in owner/name format.\n    run_id: The run's database ID.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "repo",
+        "run_id"
+      ]
+    }
+  },
+  {
+    "name": "run_logs",
+    "description": "Get the logs of a GitHub Actions run, of one of its jobs, or of only its failed steps.\n\nArgs:\n    repo: Repository in owner/name format.\n    run_id: The run's database ID.\n    job_id: Only this job's logs.\n    failed_only: Only the failed steps' logs. Default false.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "job_id": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "failed_only": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "run_id"
+      ]
+    }
+  },
+  {
+    "name": "project_list",
+    "description": "List a GitHub user's or organization's open Projects.\n\nUse this to find a project's number for the other project tools.\n\nArgs:\n    owner: The user or organization login that owns the projects.\n\nReturns a list of { number, title, url }.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner"
+      ]
+    }
+  },
+  {
+    "name": "project_list_items",
+    "description": "List the issues in a GitHub Project, optionally only those with one status.\n\nArgs:\n    owner: The user or organization login that owns the project.\n    number: The project number, from its URL or project_list.\n    status_filter: If given, only items whose Status is this.\n\nReturns a list of { issue_number, title, url, repo, status }.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "status_filter": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner",
+        "number"
+      ]
+    }
+  },
+  {
+    "name": "project_get_item",
+    "description": "Get an issue's item in a GitHub Project, with its field values.\n\nArgs:\n    owner: The user or organization login that owns the project.\n    number: The project number, from its URL or project_list.\n    repo: The issue's repository, as owner/name.\n    issue_number: The issue number.\n\nReturns { found: true, item_id, fields: { field name: value } }, or\n{ found: false } when the issue is not in the project.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/]+\\/[^/]+$"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "owner",
+        "number",
+        "repo",
+        "issue_number"
+      ]
+    }
+  },
+  {
+    "name": "project_set_status",
+    "description": "Set an issue's Status in a GitHub Project, adding the issue to the project if it is not in it.\n\nArgs:\n    owner: The user or organization login that owns the project.\n    number: The project number, from its URL or project_list.\n    repo: The issue's repository, as owner/name.\n    issue_number: The issue number.\n    status_name: The Status option, e.g. \"In Progress\" or \"Done\".\n\nReturns { item_id, status }.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/]+\\/[^/]+$"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "status_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "owner",
+        "number",
+        "repo",
+        "issue_number",
+        "status_name"
+      ]
+    }
+  },
+  {
+    "name": "issue_set_blocked_by",
+    "description": "Mark an issue as blocked by another issue.\n\nArgs:\n    repo: Repository of the blocked issue, in owner/name format.\n    issue_number: The issue that is blocked.\n    blocked_by_number: The issue that blocks it.\n    blocked_by_repo: Repository of the blocking issue. Defaults to repo.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "blocked_by_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "blocked_by_repo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "issue_number",
+        "blocked_by_number"
+      ]
+    }
+  },
+  {
+    "name": "issue_remove_blocked_by",
+    "description": "Remove a blocked-by relationship between two issues.\n\nArgs:\n    repo: Repository of the blocked issue, in owner/name format.\n    issue_number: The issue that is blocked.\n    blocked_by_number: The issue that blocks it.\n    blocked_by_repo: Repository of the blocking issue. Defaults to repo.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "blocked_by_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "blocked_by_repo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "issue_number",
+        "blocked_by_number"
+      ]
+    }
+  },
+  {
+    "name": "issue_list_blocked_by",
+    "description": "List the issues blocking an issue.\n\nReturns each blocking issue's url, number, title, state and repository.\n\nArgs:\n    repo: Repository in owner/name format.\n    issue_number: The blocked issue.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "repo",
+        "issue_number"
+      ]
+    }
+  },
+  {
+    "name": "epic_status",
+    "description": "Report the status of each sub-issue of an epic.\n\nIssues and pull requests are named by URL, which holds their repository as\nwell as their number; sub-issues may be in other repositories.\n\nFor each sub-issue: url, number, title, state; linked_pr, the pull request in\nits repository that references it (number, state, url); ci, the combined\ncheck-run result on that pull request's head commit (failure, pending,\nsuccess, or null); blocked_by, the URLs of its blocking issues that are\nsub-issues of the epic; and position, its level in the dependency graph (0\nwith no blockers, else one more than its deepest blocker). Issues on a\ndependency cycle have position null, and each cycle is listed under the\ntop-level cycles key. When a read fails, its sub-issue has degraded: true and\nerrors, the failures, and the fields the read would fill are null or empty.\n\nArgs:\n    repo: Repository in owner/name format.\n    epic_issue_number: The epic issue.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "epic_issue_number": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "repo",
+        "epic_issue_number"
+      ]
+    }
+  },
+  {
+    "name": "build_start",
+    "description": "Ask the Epik app to build a GitHub issue or epic, and return once the build has started.\n\nThis is how to implement an issue or an epic. Never implement one in this\nconversation: when the user asks to build, implement or work on an issue or\nan epic, call this tool.\n\nThe Epik app runs the build, and is started first if it isn't running. An\nissue with sub-issues is built as an epic: the app runs its issues in\ndependency order, one coding agent each, and merges each issue's pull\nrequest into the epic branch itself; the epic's pull request into the\nrepository's default branch waits for the user to review and merge it. Any\nother issue is built alone, and its pull request into the default branch\nwaits for the user. The user can watch the build from the Epik app's tray\nicon, or with `tail -f` on the events log this returns.\n\nArgs:\n    repo: Repository in owner/name format.\n    number: The issue or epic issue to build.\n    branch: The branch the pull requests merge into. Default\n        epic/<number>-<slug of its title> for an epic, and the repository's\n        default branch for an issue.\n\nReturns run_id (the run, owner/name#number: the epic issue), build_id (this\nbuild, one attempt at the run), kind (epic or issue), branch, build_dir (the\nbuild's record) and events (the build's events log, in build_dir). Building\nan epic again after a failure or an interruption adds a build to its run, and\nthe run's time and cost add up across its builds.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "number": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "repo",
+        "number"
+      ]
+    }
+  },
+  {
+    "name": "build_status",
+    "description": "Ask the Epik app where a run is: its state, its builds, and each of its issues'.\n\nThe app isn't started: when it isn't running, this says so.\n\nArgs:\n    run_id: The run, owner/name#number, as build_start or build_list gives it.\n\nReturns the run's repo, number, title, kind (epic or issue), branch,\ndisposition (building, waiting_for_review or needs_attention), reason (why it\nneeds attention), pull_request, started_at, latest_at, and elapsed_ms and\ncost_usd summed over its builds; its builds, oldest first, each with\nbuild_id, status (running, succeeded, failed or interrupted), reason,\npull_request, started_at, ended_at, elapsed_ms and cost_usd; and its issues:\neach issue's number, title, blocked_by, status (waiting, running, succeeded,\nmerged, failed or closed), reason, pull_request, merge_commit, and\nduration_ms and cost_usd summed over its builds, and for a running issue its\nactivity: last_action, last_test, last_event and its recent actions.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "run_id"
+      ]
+    }
+  },
+  {
+    "name": "build_list",
+    "description": "List the Epik app's runs, newest activity first.\n\nThe app isn't started: when it isn't running, this says so.\n\nArgs:\n    limit: Maximum number of runs. Default 20.\n\nReturns each run's state, as build_status gives it.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+]

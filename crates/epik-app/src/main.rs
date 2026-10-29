@@ -22,7 +22,7 @@ use epik_core::{record, run, self_link};
 /// whose pull request was closed. Modest to start with; tune it.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 
-const USAGE: &str = "usage: epik-app [--headless | --version]";
+const USAGE: &str = "usage: epik-app [--headless | --version | mcp]";
 
 fn main() -> ExitCode {
     link_self();
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
             println!("epik-app {}", epik_core::version());
             ExitCode::SUCCESS
         }
+        Some("mcp") => mcp(),
         Some("--headless") => match App::start(|_| {}) {
             Ok(app) => app.serve(),
             Err(code) => code,
@@ -41,6 +42,54 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Serves Epik's MCP tools over stdin and stdout. Stdout is the protocol,
+/// so everything else goes to stderr.
+fn mcp() -> ExitCode {
+    let Some(root) = record::default_root() else {
+        eprintln!("epik-app: there is no home directory to keep Epik's runs in");
+        return ExitCode::FAILURE;
+    };
+    let server = epik_core::mcp::Server::new(epik_core::mcp::Context {
+        gh: epik_core::mcp::gh::Gh::new(),
+        address: Address::in_root(&root),
+        root,
+        start_app: Box::new(start_detached),
+        start_timeout: Duration::from_secs(15),
+        plugin_dir: std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from),
+    });
+    match server.serve_stdio() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("epik-app mcp: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Starts this executable with no arguments, in the tray or headless,
+/// detached so that it outlives the MCP server that started it.
+fn start_detached() -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    command.spawn().map(drop)
 }
 
 /// Points `~/.epik/bin/epik-app` at this executable, where Claude Code and

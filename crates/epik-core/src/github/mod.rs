@@ -17,6 +17,11 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+/// The `gh` program to run.
+pub fn gh_program() -> std::path::PathBuf {
+    std::path::PathBuf::from("gh")
+}
+
 /// The name of the label an epic carries.
 pub const EPIC_LABEL: &str = "epic";
 /// The color [`EPIC_LABEL`] is created with.

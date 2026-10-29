@@ -279,13 +279,16 @@ impl GitHub for GhCli {
 
 /// Runs the `gh` on the `PATH`, failing with its stderr.
 fn run_gh(args: &[&str]) -> Result<String> {
-    let output = Command::new("gh").args(args).output().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Error::new("gh is not installed. Install it from https://cli.github.com/")
-        } else {
-            Error::new(format!("gh could not start: {error}"))
-        }
-    })?;
+    let output = Command::new(super::gh_program())
+        .args(args)
+        .output()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::new("gh is not installed. Install it from https://cli.github.com/")
+            } else {
+                Error::new(format!("gh could not start: {error}"))
+            }
+        })?;
     if output.status.success() {
         return String::from_utf8(output.stdout)
             .map_err(|_| Error::new(format!("gh {} printed non-UTF-8", args.join(" "))));

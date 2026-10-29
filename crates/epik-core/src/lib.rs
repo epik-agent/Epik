@@ -10,6 +10,7 @@ pub mod comment;
 pub mod github;
 pub mod graph;
 pub mod ipc;
+pub mod mcp;
 pub mod reconcile;
 pub mod record;
 pub mod repositories;
