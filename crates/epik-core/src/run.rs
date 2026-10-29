@@ -194,8 +194,8 @@ impl RunState {
 /// with no builds.
 ///
 /// Each issue takes its status from the latest build, except that an
-/// issue a build found already closed keeps what an earlier build left it
-/// at: merged in build 1 stays merged in build 2.
+/// issue a build found already closed and an earlier build merged stays
+/// merged.
 pub fn fold(builds: &[BuildState]) -> Option<RunState> {
     let first = builds.first()?;
     let latest = builds.last()?;
@@ -210,8 +210,10 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
                     ..now.clone()
                 });
             issue.issue = now.issue.clone();
-            let earlier = !matches!(issue.status, IssueStatus::Waiting | IssueStatus::Closed);
-            if now.status != IssueStatus::Closed || !earlier {
+            // Only a merge is worth keeping over a later build's "closed":
+            // an issue that failed and was then closed by hand is closed.
+            let merged_before = issue.status == IssueStatus::Merged;
+            if now.status != IssueStatus::Closed || !merged_before {
                 issue.status = now.status;
                 issue.reason = now.reason.clone();
                 issue.pull_request = now.pull_request;
@@ -413,12 +415,29 @@ pub fn interrupt_unfinished(root: &Path) -> io::Result<()> {
     for key in keys(root)? {
         for build in record::list_builds(root, &key)? {
             if build.status == BuildStatus::Running {
-                BuildWriter::open(root, &key, &build.build_id)?.append(
-                    &Event::BuildInterrupted {
-                        at: Utc::now(),
-                        reason: "the Epik app stopped before the build ended".to_owned(),
-                    },
-                )?;
+                let mut writer = BuildWriter::open(root, &key, &build.build_id)?;
+                let now = Utc::now();
+                // Their agents stopped with the app.
+                for issue in &build.issues {
+                    if issue.status == IssueStatus::Running {
+                        let ran = issue
+                            .started_at
+                            .map_or(0, |at| (now - at).num_milliseconds());
+                        writer.append(&Event::IssueFinished {
+                            at: now,
+                            number: issue.issue.number,
+                            outcome: crate::record::Outcome::Failed,
+                            reason: Some("interrupted".to_owned()),
+                            pull_request: None,
+                            duration_ms: u64::try_from(ran).unwrap_or(0),
+                            cost_usd: None,
+                        })?;
+                    }
+                }
+                writer.append(&Event::BuildInterrupted {
+                    at: now,
+                    reason: "the Epik app stopped before the build ended".to_owned(),
+                })?;
             }
         }
     }
@@ -657,6 +676,32 @@ mod tests {
     }
 
     #[test]
+    fn an_issue_closed_by_hand_after_failing_is_closed() {
+        let mut first = interrupted();
+        first.truncate(5);
+        first.push(issue_finished(90, 15, Outcome::Failed, "0.50"));
+        first.push(Event::BuildFinished {
+            at: time(100),
+            outcome: Outcome::Failed,
+            reason: Some("failed: #15".to_owned()),
+            pull_request: None,
+        });
+        let mut second = finished();
+        second.truncate(1);
+        let Event::BuildStarted { closed, .. } = &mut second[0] else {
+            unreachable!()
+        };
+        closed.push(15);
+        let builds = [build(&first), build(&second)];
+
+        let run = fold(&builds).unwrap();
+
+        assert_eq!(run.issue(15).unwrap().status, IssueStatus::Closed);
+        assert_eq!(run.issue(15).unwrap().cost_usd, Some(dollars("0.50")));
+        assert_eq!(run.issue(14).unwrap().status, IssueStatus::Merged);
+    }
+
+    #[test]
     fn a_running_build_makes_the_run_building() {
         let builds = [build(&interrupted()), build(&finished()[..2])];
 
@@ -793,6 +838,13 @@ mod tests {
             run.reason.as_deref(),
             Some("the Epik app stopped before the build ended")
         );
+        let issue = run.issue(15).unwrap();
+        assert_eq!(
+            issue.status,
+            IssueStatus::Failed,
+            "its agent stopped with the app"
+        );
+        assert_eq!(issue.reason.as_deref(), Some("interrupted"));
         assert_eq!(run.builds[0].reason.as_deref(), Some("the app quit"));
     }
 }
