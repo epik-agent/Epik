@@ -14,7 +14,7 @@ use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
 use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
-use epik_core::record;
+use epik_core::{record, run};
 
 const USAGE: &str = "usage: epik-app [--headless | --version]";
 
@@ -69,9 +69,13 @@ impl App {
             }
         };
         // Only now that this app holds the socket is no other app building,
-        // so every clone left is from a run that never ended.
+        // so every clone left, and every build recorded as running, is
+        // from a build that never ended.
         if let Err(error) = cleanup::sweep_builds(&root) {
             eprintln!("epik-app: couldn't remove leftover builds: {error}");
+        }
+        if let Err(error) = run::interrupt_unfinished(&root) {
+            eprintln!("epik-app: couldn't record unfinished builds as interrupted: {error}");
         }
         let stop = Arc::new(AtomicBool::new(false));
         if let Err(error) = ctrlc::set_handler({

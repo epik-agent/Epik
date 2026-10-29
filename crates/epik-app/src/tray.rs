@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use epik_core::record;
+use epik_core::{record, run};
 use tauri::image::Image;
 use tauri::menu::{IsMenuItem, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
@@ -30,7 +30,8 @@ const REFRESH: Duration = Duration::from_secs(2);
 
 const QUIT: &str = "quit";
 const OPEN_RUNS_FOLDER: &str = "open-runs-folder";
-/// The prefix of a run's item's id; the run's id follows it.
+/// The prefix of a run's item's id; the run, `owner/name#number`, follows
+/// it.
 const RUN: &str = "run:";
 
 /// Runs the app in the tray until Quit, SIGINT or SIGTERM, or headless
@@ -65,7 +66,6 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     let mut tauri = tauri::Builder::default()
         .manage(window::Runs {
             root: app.root.clone(),
-            builds: app.builds.clone(),
         })
         .invoke_handler(tauri::generate_handler![window::run_view])
         .build(tauri::generate_context!())
@@ -88,10 +88,11 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
                 stop.store(true, Ordering::SeqCst);
             } else if id == OPEN_RUNS_FOLDER {
                 reveal(&record::runs_dir(&root));
-            } else if let Some(build_id) = id.strip_prefix(RUN)
-                && let Err(error) = window::open(handle, build_id)
+            } else if let Some(run) = id.strip_prefix(RUN)
+                && let Ok(key) = run.parse()
+                && let Err(error) = window::open(handle, &key)
             {
-                eprintln!("epik-app: couldn't open the window of run {build_id}: {error}");
+                eprintln!("epik-app: couldn't open the window of run {run}: {error}");
             }
         })
         .build(&tauri)
@@ -118,7 +119,7 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
     thread::spawn(move || {
         let mut shown = None;
         while !stop.load(Ordering::SeqCst) {
-            let runs = record::list_builds(&root).unwrap_or_default();
+            let runs = run::list(&root).unwrap_or_default();
             let wanted = menu::menu(&runs, &builds.active());
             if shown.as_ref() != Some(&wanted) {
                 if let Err(error) = redraw(&handle, &tray, &wanted) {
@@ -174,9 +175,9 @@ fn native(handle: &AppHandle, shown: &Menu) -> tauri::Result<tauri::menu::Menu<W
         .iter()
         .map(|item| -> tauri::Result<Box<dyn IsMenuItem<Wry>>> {
             Ok(match item {
-                Item::Run { build_id, label } => Box::new(MenuItem::with_id(
+                Item::Run { run, label } => Box::new(MenuItem::with_id(
                     handle,
-                    format!("{RUN}{build_id}"),
+                    format!("{RUN}{run}"),
                     label,
                     true,
                     None::<&str>,

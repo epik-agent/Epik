@@ -8,7 +8,8 @@
 
 use chrono::{DateTime, Utc};
 use epik_core::graph::Graph;
-use epik_core::record::{BuildState, BuildStatus, IssueStatus};
+use epik_core::record::IssueStatus;
+use epik_core::run::{Disposition, RunState};
 use rust_decimal::{Decimal, RoundingStrategy};
 use serde::Serialize;
 
@@ -18,7 +19,7 @@ pub struct View {
     pub repo: String,
     pub number: u64,
     pub title: String,
-    pub status: BuildStatus,
+    pub status: Disposition,
     pub reason: Option<String>,
     /// The epic's pull request.
     pub pull_request: Option<u64>,
@@ -59,13 +60,8 @@ pub struct Edge {
     pub to: u64,
 }
 
-/// The window for `run` at `now`, while the run is `active` in this app
-/// or not.
-///
-/// A run whose record says it is running but which isn't active is one an
-/// earlier app was running when it stopped, so it shows as interrupted, as
-/// the tray lists it.
-pub fn view(run: &BuildState, active: bool, now: DateTime<Utc>) -> View {
+/// The window for `run` at `now`.
+pub fn view(run: &RunState, now: DateTime<Utc>) -> View {
     let graph = Graph::new(
         run.issues
             .iter()
@@ -121,22 +117,12 @@ pub fn view(run: &BuildState, active: bool, now: DateTime<Utc>) -> View {
         })
         .collect();
 
-    let running = run.status == BuildStatus::Running;
-    let status = if running && !active {
-        BuildStatus::Interrupted
-    } else {
-        run.status
-    };
-    let elapsed_ms = if running && active {
-        u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0)
-    } else {
-        run.elapsed_ms
-    };
+    let elapsed_ms = u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0);
     View {
         repo: run.repo.clone(),
         number: run.number,
         title: run.title.clone(),
-        status,
+        status: run.disposition,
         reason: run.reason.clone(),
         pull_request: run.pull_request,
         elapsed: duration(elapsed_ms),
@@ -174,7 +160,8 @@ pub fn dollars(amount: Decimal) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use epik_core::record::{Issue, IssueState, Kind};
+    use epik_core::record::{BuildStatus, Issue, IssueState, Kind};
+    use epik_core::run::{BuildSummary, RunKey};
     use std::str::FromStr;
 
     fn time(seconds: i64) -> DateTime<Utc> {
@@ -196,20 +183,32 @@ mod tests {
         }
     }
 
-    fn run(issues: Vec<IssueState>) -> BuildState {
-        BuildState {
-            build_id: "o-r-1-20261028T000000Z-a1b2".to_owned(),
+    /// A run of epic 1 whose one build is running, 10 seconds in.
+    fn run(issues: Vec<IssueState>) -> RunState {
+        RunState {
+            run: RunKey::new("o/r", 1),
             repo: "o/r".to_owned(),
             number: 1,
             title: "The epic".to_owned(),
             kind: Kind::Epic,
             branch: "epic".to_owned(),
-            status: BuildStatus::Running,
+            disposition: Disposition::Building,
             reason: None,
             pull_request: None,
             issues,
+            builds: vec![BuildSummary {
+                build_id: "20261028T000000Z-a1b2".to_owned(),
+                status: BuildStatus::Running,
+                reason: None,
+                pull_request: None,
+                started_at: time(0),
+                ended_at: None,
+                elapsed_ms: 10_000,
+                cost_usd: Decimal::ZERO,
+            }],
+            running_build: Some("20261028T000000Z-a1b2".to_owned()),
             started_at: time(0),
-            ended_at: None,
+            latest_at: time(10),
             elapsed_ms: 10_000,
             cost_usd: Decimal::ZERO,
         }
@@ -238,7 +237,7 @@ mod tests {
             issue(6, &[3]),
         ]);
 
-        let view = view(&run, true, time(10));
+        let view = view(&run, time(10));
 
         assert_eq!(
             places(&view),
@@ -250,7 +249,7 @@ mod tests {
 
     #[test]
     fn blockers_that_arent_issues_are_ignored() {
-        let view = view(&run(vec![issue(2, &[99]), issue(3, &[2])]), true, time(0));
+        let view = view(&run(vec![issue(2, &[99]), issue(3, &[2])]), time(0));
 
         assert_eq!(places(&view), [(2, 0, 0), (3, 1, 0)]);
         assert_eq!(view.edges, [edge(2, 3)]);
@@ -265,7 +264,7 @@ mod tests {
             issue(5, &[3]),
         ]);
 
-        let view = view(&run, true, time(0));
+        let view = view(&run, time(0));
 
         assert_eq!(places(&view), [(2, 0, 0), (3, 1, 0), (4, 1, 1), (5, 1, 2)]);
         assert_eq!((view.columns, view.rows), (2, 3));
@@ -273,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_run_with_no_issues_has_an_empty_graph() {
-        let view = view(&run(vec![]), true, time(0));
+        let view = view(&run(vec![]), time(0));
 
         assert_eq!((view.columns, view.rows), (0, 0));
         assert!(view.nodes.is_empty());
@@ -288,7 +287,7 @@ mod tests {
         done.cost_usd = Some(Decimal::from_str("1.5").unwrap());
         let run = run(vec![done, issue(3, &[2])]);
 
-        let view = view(&run, true, time(0));
+        let view = view(&run, time(0));
 
         let [merged, waiting] = &view.nodes[..] else {
             panic!("two nodes");
@@ -309,13 +308,13 @@ mod tests {
         let mut run = run(vec![]);
         run.cost_usd = Decimal::from_str("0.125").unwrap();
 
-        let view = view(&run, true, time(75));
+        let view = view(&run, time(75));
 
         assert_eq!(
             (view.repo.as_str(), view.number, view.title.as_str()),
             ("o/r", 1, "The epic")
         );
-        assert_eq!(view.status, BuildStatus::Running);
+        assert_eq!(view.status, Disposition::Building);
         assert_eq!(view.elapsed, "1m 15s");
         assert_eq!(view.cost, "$0.13");
     }
@@ -323,22 +322,15 @@ mod tests {
     #[test]
     fn a_finished_run_shows_its_recorded_time() {
         let mut run = run(vec![]);
-        run.status = BuildStatus::Succeeded;
+        run.disposition = Disposition::WaitingForReview;
         run.pull_request = Some(50);
-        run.ended_at = Some(time(10));
+        run.builds[0].status = BuildStatus::Succeeded;
+        run.builds[0].ended_at = Some(time(10));
 
-        let view = view(&run, false, time(1000));
+        let view = view(&run, time(1000));
 
-        assert_eq!(view.status, BuildStatus::Succeeded);
+        assert_eq!(view.status, Disposition::WaitingForReview);
         assert_eq!(view.pull_request, Some(50));
-        assert_eq!(view.elapsed, "10s");
-    }
-
-    #[test]
-    fn a_running_run_that_isnt_active_was_interrupted() {
-        let view = view(&run(vec![]), false, time(1000));
-
-        assert_eq!(view.status, BuildStatus::Interrupted);
         assert_eq!(view.elapsed, "10s");
     }
 

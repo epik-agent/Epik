@@ -32,6 +32,7 @@ use crate::cleanup;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
 use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
+use crate::run::{self, RunKey};
 
 /// How often a pull request's checks are read while they are pending.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -133,8 +134,9 @@ pub fn run(
 
 /// Starts a build: reads the issue, picks the branch, for an epic ensures
 /// its branch and label and reads its issues and their blockers, and
-/// clones the repository into `<root>/builds/<run-id>`. Then writes
-/// `build_started`, whose issues are the open issues the run builds.
+/// clones the repository into the build's clone directory. Then writes
+/// `build_started`, with every issue of the run and which are closed; the
+/// build works on the open ones.
 ///
 /// A pull request, a closed issue, or a failure before `build_started` is an
 /// error, and leaves no record.
@@ -167,6 +169,7 @@ pub fn start<'a>(
 
     let at = Utc::now();
     let mut problems = Vec::new();
+    let mut closed = BTreeSet::new();
     let issues = match kind {
         Kind::Issue => vec![Issue {
             number,
@@ -187,12 +190,13 @@ pub fn start<'a>(
                     elsewhere.join(", ")
                 ));
             }
-            let open: Vec<_> = here
-                .into_iter()
-                .filter(|sub| sub.state == State::Open)
-                .collect();
-            let numbers: BTreeSet<u64> = open.iter().map(|sub| sub.number).collect();
-            open.into_iter()
+            let numbers: BTreeSet<u64> = here.iter().map(|sub| sub.number).collect();
+            closed.extend(
+                here.iter()
+                    .filter(|sub| sub.state == State::Closed)
+                    .map(|sub| sub.number),
+            );
+            here.into_iter()
                 .map(|sub| {
                     let blockers = github.blocked_by(repo, sub.number)?;
                     Ok(Issue {
@@ -216,12 +220,13 @@ pub fn start<'a>(
         problems.push(format!("a dependency cycle: {}", numbered(&cycle)));
     }
 
-    // Creating the record first reserves the run's id, so no other run
+    // Creating the record first reserves the build's id, so no other build
     // shares its record or its clone.
-    let writer = BuildWriter::create_new(&request.root, repo, number, at)?;
+    let key = RunKey::new(repo, number);
+    let writer = BuildWriter::create_new(&request.root, &key, at)?;
     let build_id = writer.build_id().to_owned();
     let dir = writer.dir().to_owned();
-    let clone = cleanup::builds_dir(&request.root).join(&build_id);
+    let clone = run::clone_dir(&request.root, &key, &build_id);
     if let Err(error) = github.clone(repo, &clone) {
         drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
@@ -240,10 +245,12 @@ pub fn start<'a>(
         kind,
         branch: branch.clone(),
         issues,
+        closed: closed.iter().copied().collect(),
     });
     Ok(Build {
         github,
         agent,
+        key,
         repo: repo.to_owned(),
         number,
         title: issue.title,
@@ -255,6 +262,7 @@ pub fn start<'a>(
         dir,
         plugin_dir: request.plugin_dir.clone(),
         graph,
+        closed,
         problems,
         check_interval: CHECK_INTERVAL,
         log: Mutex::new(log),
@@ -265,6 +273,7 @@ pub fn start<'a>(
 pub struct Build<'a> {
     github: &'a dyn GitHub,
     agent: &'a (dyn Agent + Sync),
+    key: RunKey,
     repo: String,
     number: u64,
     title: String,
@@ -276,8 +285,10 @@ pub struct Build<'a> {
     /// The run's record directory.
     dir: PathBuf,
     plugin_dir: PathBuf,
-    /// The open issues and the issues blocking each.
+    /// The run's issues and the issues blocking each.
     graph: Graph,
+    /// The issues closed when the build started.
+    closed: BTreeSet<u64>,
     /// What stops the run before any agent starts.
     problems: Vec<String>,
     check_interval: Duration,
@@ -294,7 +305,12 @@ enum Finished {
 }
 
 impl Build<'_> {
-    /// The run's id.
+    /// The run the build belongs to.
+    pub fn run_key(&self) -> &RunKey {
+        &self.key
+    }
+
+    /// The build's id, unique within its run.
     pub fn build_id(&self) -> &str {
         &self.build_id
     }
@@ -359,7 +375,7 @@ impl Build<'_> {
     }
 
     fn orchestrate(&self, cancel: &AtomicBool) {
-        let mut closed = BTreeSet::new();
+        let mut closed = self.closed.clone();
         let mut running = BTreeSet::new();
         let mut failed = BTreeSet::new();
         let mut last_pull_request = None;
@@ -449,6 +465,9 @@ impl Build<'_> {
         };
         let outcome = self.agent.run(&request, cancel);
         if cancel.load(Ordering::SeqCst) {
+            // What the agent spent before it was stopped still counts.
+            let reason = Some("interrupted".to_owned());
+            self.issue_finished(number, &outcome, Outcome::Failed, reason, None);
             return Finished::Cancelled;
         }
         let found = if outcome.exited_cleanly {
@@ -790,7 +809,7 @@ mod tests {
 
     /// The run's events on disk, each written briefly, without its time.
     fn events(root: &Path, state: &BuildState) -> Vec<String> {
-        let events = record::read_events(root, &state.build_id).unwrap();
+        let events = record::read_events(root, &state.run(), &state.build_id).unwrap();
         events.iter().map(brief).collect()
     }
 
@@ -805,11 +824,15 @@ mod tests {
                 kind,
                 branch,
                 issues,
+                closed,
                 ..
             } => {
                 let issues: Vec<String> = issues
                     .iter()
-                    .map(|m| format!("{}{:?}", m.number, m.blocked_by))
+                    .map(|m| {
+                        let mark = if closed.contains(&m.number) { "x" } else { "" };
+                        format!("{mark}{}{:?}", m.number, m.blocked_by)
+                    })
                     .collect();
                 format!("build_started {kind:?} {branch} {}", issues.join(" "))
             }
@@ -841,6 +864,9 @@ mod tests {
                 why(reason)
             ),
             Event::BuildInterrupted { reason, .. } => format!("build_interrupted ({reason})"),
+            Event::PullRequestClosed { pull_request, .. } => {
+                format!("pull_request_closed #{pull_request}")
+            }
         }
     }
 
@@ -937,13 +963,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
 
-        let clone = root.path().join("builds").join(&state.build_id);
+        let clone = run::clone_dir(root.path(), &state.run(), &state.build_id);
         assert_eq!(github.clones(), [(REPO.to_owned(), clone.clone())]);
         let requests = agent.requests.lock().unwrap();
         let [request] = &requests[..] else {
             panic!("one agent ran");
         };
-        let dir = record::build_dir(root.path(), &state.build_id);
+        let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
         assert_eq!(request.prompt, format!("/epik:issue 2 {EPIC_BRANCH}"));
         assert_eq!(request.cwd, clone);
         assert_eq!(request.plugin_dir, Path::new("/plugin"));
@@ -1123,7 +1149,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
         let events = events(root.path(), &state);
-        assert_eq!(events[0], format!("build_started Epic {EPIC_BRANCH} 3[]"));
+        assert_eq!(
+            events[0],
+            format!("build_started Epic {EPIC_BRANCH} x2[] 3[2]")
+        );
         assert_eq!(events[1], "issue_started 3");
         assert_eq!(agent.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
         assert_eq!(state.status, BuildStatus::Succeeded);
@@ -1169,16 +1198,19 @@ mod tests {
         let agent = FakeAgent::new(&github, [(2, Act::Cancel), (3, Act::Hang)]);
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
+        let events = events(root.path(), &state);
+        assert_eq!(events[1..3], ["issue_started 2", "issue_started 3"]);
         assert_eq!(
-            events(root.path(), &state)[1..],
+            sorted(events[3..5].to_vec()),
             [
-                "issue_started 2".to_owned(),
-                "issue_started 3".to_owned(),
-                "build_interrupted (cancelled)".to_owned(),
+                "issue_finished 2 Failed (interrupted)",
+                "issue_finished 3 Failed (interrupted)",
             ]
         );
+        assert_eq!(events[5..], ["build_interrupted (cancelled)"]);
         assert_eq!(agent.prompts().len(), 2);
         assert_eq!(state.status, BuildStatus::Interrupted);
+        assert_eq!(state.cost_usd, Decimal::from_str("0.50").unwrap());
         assert!(github.repo(REPO).pulls.is_empty());
     }
 
@@ -1218,9 +1250,9 @@ mod tests {
             let agent = FakeAgent::new(&github, [(2, act)]);
             let root = tempfile::tempdir().unwrap();
             let state = build(&github, &agent, root.path(), 1);
-            let clone = cleanup::builds_dir(root.path()).join(&state.build_id);
+            let clone = run::clone_dir(root.path(), &state.run(), &state.build_id);
             assert!(!clone.exists(), "{:?}", state.status);
-            let dir = record::build_dir(root.path(), &state.build_id);
+            let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
             assert!(dir.join(record::SUMMARY_FILE).is_file());
         }
     }
@@ -1235,14 +1267,38 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let build = start(&github, &agent, &request(root.path(), 1)).unwrap();
         let clone = build.clone_dir().to_owned();
-        let builds = cleanup::builds_dir(root.path());
-        std::fs::set_permissions(&builds, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let parent = clone.parent().unwrap().to_owned();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let state = build.check_interval(Duration::from_millis(1)).run(&cancel);
 
-        std::fs::set_permissions(&builds, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(clone.exists());
         assert_eq!(state.status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn building_an_interrupted_epic_again_adds_a_build_to_its_run() {
+        // 2 merges, then the user cancels while 3 runs; the second build
+        // finds 2 closed and builds only 3.
+        let github = epic([(2, &[]), (3, &[2])]);
+        let root = tempfile::tempdir().unwrap();
+        let first = FakeAgent::new(&github, [(3, Act::Cancel)]);
+        let interrupted = build(&github, &first, root.path(), 1);
+        assert_eq!(interrupted.status, BuildStatus::Interrupted);
+
+        let second = FakeAgent::new(&github, []);
+        let finished = build(&github, &second, root.path(), 1);
+
+        assert_eq!(second.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        let run = run::read(root.path(), &RunKey::new(REPO, 1)).unwrap();
+        assert_eq!(run.builds.len(), 2);
+        assert_eq!(run.disposition, run::Disposition::WaitingForReview);
+        assert_eq!(run.elapsed_ms, interrupted.elapsed_ms + finished.elapsed_ms);
+        assert_eq!(run.cost_usd, interrupted.cost_usd + finished.cost_usd);
+        assert_eq!(run.cost_usd, Decimal::from_str("0.75").unwrap());
+        assert_eq!(run.issue(2).unwrap().status, IssueStatus::Merged);
+        assert_eq!(run.issue(3).unwrap().status, IssueStatus::Merged);
     }
 
     #[test]
@@ -1253,8 +1309,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let error = start(&github, &agent, &request(root.path(), 1)).err();
         assert!(matches!(error, Some(Error::GitHub(_))));
-        let runs = std::fs::read_dir(record::runs_dir(root.path())).unwrap();
-        assert_eq!(runs.count(), 0);
+        let key = RunKey::new(REPO, 1);
+        assert!(record::list_builds(root.path(), &key).unwrap().is_empty());
+        let builds = std::fs::read_dir(run::run_dir(root.path(), &key)).unwrap();
+        assert_eq!(builds.count(), 0);
     }
 
     #[test]
@@ -1284,6 +1342,6 @@ mod tests {
         let error = start(&github, &agent, &request(root.path(), 2)).err();
         assert!(matches!(error, Some(Error::Closed)));
         assert!(github.clones().is_empty());
-        assert!(record::list_builds(root.path()).unwrap().is_empty());
+        assert!(run::list(root.path()).unwrap().is_empty());
     }
 }

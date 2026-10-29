@@ -8,11 +8,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use chrono::Utc;
-use epik_core::builds::Builds;
-use epik_core::record;
+use epik_core::run::{self, RunKey};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::view::{self, View};
@@ -20,42 +18,33 @@ use crate::view::{self, View};
 /// What the run windows' command reads.
 pub struct Runs {
     pub root: PathBuf,
-    pub builds: Arc<Builds>,
 }
 
 /// The run's view, as the page asks for it.
 #[tauri::command]
-pub fn run_view(build_id: String, runs: State<'_, Runs>) -> Result<View, String> {
-    let active = runs.builds.active().contains(&build_id);
-    load(&runs.root, &build_id, active).map_err(|error| error.to_string())
+pub fn run_view(run: String, runs: State<'_, Runs>) -> Result<View, String> {
+    let key: RunKey = run.parse()?;
+    load(&runs.root, &key).map_err(|error| error.to_string())
 }
 
-/// The view of the run `build_id` under `root` now, while it is `active` in
-/// this app or not.
-fn load(root: &Path, build_id: &str, active: bool) -> io::Result<View> {
-    let events = record::read_events(root, build_id)?;
-    let run = record::fold(&events).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("run {build_id} doesn't start with build_started"),
-        )
-    })?;
-    Ok(view::view(&run, active, Utc::now()))
+/// The view of the run `key` under `root` now.
+fn load(root: &Path, key: &RunKey) -> io::Result<View> {
+    Ok(view::view(&run::read(root, key)?, Utc::now()))
 }
 
 /// Opens the run's window, or focuses it if it is open.
-pub fn open(handle: &AppHandle, build_id: &str) -> tauri::Result<()> {
-    let label = label(build_id);
+pub fn open(handle: &AppHandle, key: &RunKey) -> tauri::Result<()> {
+    let label = label(&key.to_string());
     if let Some(window) = handle.get_webview_window(&label) {
         window.unminimize()?;
         window.show()?;
         return window.set_focus();
     }
-    let id = serde_json::to_string(build_id).expect("a string serializes");
+    let id = serde_json::to_string(&key.to_string()).expect("a string serializes");
     WebviewWindowBuilder::new(handle, label, WebviewUrl::App("index.html".into()))
-        .title(build_id)
+        .title(key.to_string())
         .inner_size(960.0, 600.0)
-        .initialization_script(format!("window.EPIK_RUN_ID = {id};"))
+        .initialization_script(format!("window.EPIK_RUN = {id};"))
         .build()?;
     Ok(())
 }
@@ -63,9 +52,9 @@ pub fn open(handle: &AppHandle, build_id: &str) -> tauri::Result<()> {
 /// The run's window's label. Labels may hold only ASCII letters, digits,
 /// `-`, `/`, `:` and `_`, so every other character, and `_` itself, is
 /// written `_` and its code in hex, keeping each run's label its own.
-fn label(build_id: &str) -> String {
+fn label(run: &str) -> String {
     let mut label = String::from("run-");
-    for c in build_id.chars() {
+    for c in run.chars() {
         if c.is_ascii_alphanumeric() || c == '-' {
             label.push(c);
         } else {
@@ -79,7 +68,8 @@ fn label(build_id: &str) -> String {
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone};
-    use epik_core::record::{BuildStatus, BuildWriter, Event, Issue, Kind};
+    use epik_core::record::{BuildWriter, Event, Issue, Kind};
+    use epik_core::run::Disposition;
 
     fn at() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap()
@@ -92,10 +82,11 @@ mod tests {
     }
 
     #[test]
-    fn a_label_keeps_a_plain_run_id() {
+    fn a_label_keeps_what_labels_can_hold() {
+        assert_eq!(label("epik-agent-Epik-356"), "run-epik-agent-Epik-356");
         assert_eq!(
-            label("epik-agent-Epik-356-20261028T212859Z-k3f9"),
-            "run-epik-agent-Epik-356-20261028T212859Z-k3f9"
+            label("epik-agent/Epik#356"),
+            "run-epik-agent_2f_Epik_23_356"
         );
     }
 
@@ -115,11 +106,12 @@ mod tests {
     #[test]
     fn it_loads_a_recorded_run() {
         let root = tempfile::tempdir().unwrap();
-        let mut writer = BuildWriter::create(root.path(), "o-r-1").unwrap();
+        let key = RunKey::new("o/r", 1);
+        let mut writer = BuildWriter::create(root.path(), &key, "b").unwrap();
         writer
             .append(&Event::BuildStarted {
                 at: at(),
-                build_id: "o-r-1".to_owned(),
+                build_id: "b".to_owned(),
                 repo: "o/r".to_owned(),
                 number: 1,
                 title: "The epic".to_owned(),
@@ -137,13 +129,14 @@ mod tests {
                         blocked_by: vec![2],
                     },
                 ],
+                closed: vec![],
             })
             .unwrap();
 
-        let view = load(root.path(), "o-r-1", false).unwrap();
+        let view = load(root.path(), &key).unwrap();
 
         assert_eq!(view.title, "The epic");
-        assert_eq!(view.status, BuildStatus::Interrupted);
+        assert_eq!(view.status, Disposition::Building);
         assert_eq!(view.nodes.len(), 2);
         assert_eq!(view.columns, 2);
     }
@@ -152,7 +145,6 @@ mod tests {
     fn a_run_that_doesnt_exist_is_an_error() {
         let root = tempfile::tempdir().unwrap();
 
-        assert!(load(root.path(), "o-r-1", false).is_err());
-        assert!(load(root.path(), "../x", false).is_err());
+        assert!(load(root.path(), &RunKey::new("o/r", 1)).is_err());
     }
 }

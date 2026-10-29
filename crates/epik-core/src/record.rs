@@ -1,11 +1,11 @@
 //! A build's record: the one place that says how a build went.
 //!
-//! Each build has a directory, `<root>/runs/<build-id>/`, where the root is
+//! Each build has a directory inside its run's,
+//! `<root>/runs/<owner>/<name>/<number>/<build-id>/`, where the root is
 //! normally `~/.epik`. The app appends Epik's own events to `events.jsonl`
-//! as they happen, and writes `summary.json` when the build ends.
-//! Everything that shows a build (the tray, the run window, the socket)
-//! folds the events into a [`BuildState`], so the fold is the one place
-//! that decides what a build looks like.
+//! as they happen, and writes `summary.json` when the build ends. A build's
+//! state is the fold of its events, [`BuildState`]; a run's is the fold of
+//! its builds' states, in [`crate::run`].
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+use crate::run::{self, RunKey};
 
 /// The file a build's events are appended to.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -25,28 +27,21 @@ pub fn default_root() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".epik"))
 }
 
-/// The directory holding every record, `<root>/runs`.
+/// The directory holding every run's record, `<root>/runs`.
 pub fn runs_dir(root: &Path) -> PathBuf {
     root.join("runs")
 }
 
-/// A build's directory, `<root>/runs/<build-id>`.
-pub fn build_dir(root: &Path, build_id: &str) -> PathBuf {
-    runs_dir(root).join(build_id)
+/// A build's directory, inside its run's.
+pub fn build_dir(root: &Path, run: &RunKey, build_id: &str) -> PathBuf {
+    run::run_dir(root, run).join(build_id)
 }
 
-/// A build's id, `<owner>-<name>-<number>-<UTC stamp>-<suffix>`, from a
-/// repository written `owner/name`, the number of the issue or epic built,
-/// and the time the build started. The suffix is 4 random lowercase base-36
-/// characters, so builds started in the same second get ids of their own,
-/// and ids still sort by time.
-pub fn build_id(repo: &str, number: u64, at: DateTime<Utc>) -> String {
-    format!(
-        "{}-{number}-{}-{}",
-        repo.replace('/', "-"),
-        at.format("%Y%m%dT%H%M%SZ"),
-        suffix()
-    )
+/// A build's id, `<UTC stamp>-<suffix>`, from the time the build started.
+/// The suffix is 4 random lowercase base-36 characters, so builds started
+/// in the same second get ids of their own, and ids still sort by time.
+pub fn build_id(at: DateTime<Utc>) -> String {
+    format!("{}-{}", at.format("%Y%m%dT%H%M%SZ"), suffix())
 }
 
 /// 4 random lowercase base-36 characters.
@@ -69,7 +64,9 @@ fn suffix() -> String {
 /// How many ids [`BuildWriter::create_new`] tries before giving up.
 const NEW_BUILD_ATTEMPTS: usize = 5;
 
-/// Whether a build is of an epic or a single issue.
+/// Whether a build is of an epic or a single issue. An epic's build creates
+/// its epic branch and merges each issue into it; a single issue's stops at
+/// its pull request into the default branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -85,8 +82,8 @@ pub enum Outcome {
     Failed,
 }
 
-/// An issue a build works on. A single issue is a build of
-/// itself.
+/// An issue of a run: an epic sub-issue, or the epic issue of an epic
+/// with none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
@@ -107,7 +104,12 @@ pub enum Event {
         kind: Kind,
         /// The branch the issues' pull requests merge into.
         branch: String,
+        /// Every issue of the run, closed or not.
         issues: Vec<Issue>,
+        /// The issues already closed when the build started, which it
+        /// skips.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        closed: Vec<u64>,
     },
     IssueStarted {
         at: DateTime<Utc>,
@@ -136,13 +138,20 @@ pub enum Event {
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        /// The epic's pull request.
+        /// The pull request into the default branch: the epic's, or a
+        /// single issue's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull_request: Option<u64>,
     },
     BuildInterrupted {
         at: DateTime<Utc>,
         reason: String,
+    },
+    /// The build's pull request into the default branch was closed without
+    /// merging, as GitHub said after the build ended.
+    PullRequestClosed {
+        at: DateTime<Utc>,
+        pull_request: u64,
     },
 }
 
@@ -155,7 +164,8 @@ impl Event {
             | Event::IssueFinished { at, .. }
             | Event::IssueMerged { at, .. }
             | Event::BuildFinished { at, .. }
-            | Event::BuildInterrupted { at, .. } => *at,
+            | Event::BuildInterrupted { at, .. }
+            | Event::PullRequestClosed { at, .. } => *at,
         }
     }
 }
@@ -168,12 +178,41 @@ pub struct BuildWriter {
 }
 
 impl BuildWriter {
-    /// Creates a build's record. Its directory must not exist yet: an
-    /// existing one is [`io::ErrorKind::AlreadyExists`], never reused.
-    pub fn create(root: &Path, build_id: &str) -> io::Result<Self> {
-        let dir = build_dir(root, build_id);
-        fs::create_dir_all(runs_dir(root))?;
+    /// Creates a build's record in its run's directory. The build's
+    /// directory must not exist yet: an existing one is
+    /// [`io::ErrorKind::AlreadyExists`], never reused.
+    pub fn create(root: &Path, run: &RunKey, build_id: &str) -> io::Result<Self> {
+        let dir = build_dir(root, run, build_id);
+        fs::create_dir_all(run::run_dir(root, run))?;
         fs::create_dir(&dir)?;
+        Self::open_in(dir, build_id)
+    }
+
+    /// Creates the record of a new build of `run` started `at`, with a
+    /// [`build_id`] no other build has, trying another when one is taken.
+    pub fn create_new(root: &Path, run: &RunKey, at: DateTime<Utc>) -> io::Result<Self> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match Self::create(root, run, &build_id(at)) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && attempts < NEW_BUILD_ATTEMPTS => {}
+                created => return created,
+            }
+        }
+    }
+
+    /// Opens an existing build's record to append to it.
+    pub fn open(root: &Path, run: &RunKey, build_id: &str) -> io::Result<Self> {
+        let dir = build_dir(root, run, build_id);
+        if !is_build_id(build_id) || !dir.join(EVENTS_FILE).is_file() {
+            return Err(no_build(build_id));
+        }
+        Self::open_in(dir, build_id)
+    }
+
+    fn open_in(dir: PathBuf, build_id: &str) -> io::Result<Self> {
         let events = OpenOptions::new()
             .create(true)
             .append(true)
@@ -183,22 +222,6 @@ impl BuildWriter {
             dir,
             events,
         })
-    }
-
-    /// Creates the record of a new build of `number` in `repo` started `at`,
-    /// with a [`build_id`] no other build has, trying another when one is
-    /// taken.
-    pub fn create_new(root: &Path, repo: &str, number: u64, at: DateTime<Utc>) -> io::Result<Self> {
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match Self::create(root, &build_id(repo, number, at)) {
-                Err(error)
-                    if error.kind() == io::ErrorKind::AlreadyExists
-                        && attempts < NEW_BUILD_ATTEMPTS => {}
-                created => return created,
-            }
-        }
     }
 
     /// The build's id.
@@ -228,23 +251,24 @@ impl BuildWriter {
     }
 }
 
+fn no_build(build_id: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, format!("no build {build_id:?}"))
+}
+
 /// Reads a build's events. A final line without its newline is one still
 /// being written, and is skipped unless it is already a whole event.
 ///
-/// An id that could name anything but a directory in `<root>/runs`, such as
+/// An id that could name anything but a directory in its run's, such as
 /// `../x`, is a build that doesn't exist: [`io::ErrorKind::NotFound`].
-pub fn read_events(root: &Path, build_id: &str) -> io::Result<Vec<Event>> {
+pub fn read_events(root: &Path, run: &RunKey, build_id: &str) -> io::Result<Vec<Event>> {
     if !is_build_id(build_id) {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no run {build_id:?}"),
-        ));
+        return Err(no_build(build_id));
     }
-    read_events_in(&build_dir(root, build_id))
+    read_events_in(&build_dir(root, run, build_id))
 }
 
-/// Whether `build_id` can be a build's id: ASCII letters, digits, `-`, `_` and
-/// `.`, not starting with `.`.
+/// Whether `build_id` can be a build's id: ASCII letters, digits, `-`, `_`
+/// and `.`, not starting with `.`.
 fn is_build_id(build_id: &str) -> bool {
     !build_id.is_empty()
         && !build_id.starts_with('.')
@@ -273,15 +297,18 @@ fn parse_events(text: &str) -> io::Result<Vec<Event>> {
     Ok(events)
 }
 
-/// Where an issue in a build stands.
+/// Where an issue stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueStatus {
     Waiting,
     Running,
+    /// Its agent opened a pull request.
     Succeeded,
     Merged,
     Failed,
+    /// Closed before the build started, by an earlier build or by hand.
+    Closed,
 }
 
 /// Where a build stands.
@@ -312,7 +339,7 @@ impl From<Outcome> for BuildStatus {
     }
 }
 
-/// An issue in a build, as its events leave it.
+/// An issue, as a build's events leave it, or as a run's builds do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueState {
     #[serde(flatten)]
@@ -335,12 +362,18 @@ pub struct BuildState {
     pub branch: String,
     pub status: BuildStatus,
     pub reason: Option<String>,
-    /// The epic's pull request.
+    /// The pull request into the default branch: the epic's, or a single
+    /// issue's.
     pub pull_request: Option<u64>,
+    /// Whether that pull request was closed without merging.
+    #[serde(default)]
+    pub pull_request_closed: bool,
     pub issues: Vec<IssueState>,
     pub started_at: DateTime<Utc>,
     /// When the build finished or was interrupted.
     pub ended_at: Option<DateTime<Utc>>,
+    /// The time of its latest event.
+    pub latest_at: DateTime<Utc>,
     /// From the start to the end, or to the latest event while running. For
     /// a clock that keeps going between events, use [`BuildState::elapsed`].
     pub elapsed_ms: u64,
@@ -358,14 +391,20 @@ impl BuildState {
         self.issues.iter_mut().find(|m| m.issue.number == number)
     }
 
-    /// How long the build has taken: to its end, or to `now` while it builds.
+    /// The run the build belongs to.
+    pub fn run(&self) -> RunKey {
+        RunKey::new(&self.repo, self.number)
+    }
+
+    /// How long the build has taken: to its end, or to `now` while it runs.
     pub fn elapsed(&self, now: DateTime<Utc>) -> chrono::Duration {
         self.ended_at.unwrap_or(now) - self.started_at
     }
 }
 
-/// Folds a build's events into its state, or `None` if they don't start with
-/// `build_started`. Events about issues that aren't issues are ignored.
+/// Folds a build's events into its state, or `None` if they don't start
+/// with `build_started`. Events about issues the build doesn't have are
+/// ignored.
 pub fn fold(events: &[Event]) -> Option<BuildState> {
     let (first, rest) = events.split_first()?;
     let Event::BuildStarted {
@@ -377,6 +416,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         kind,
         branch,
         issues,
+        closed,
     } = first
     else {
         return None;
@@ -391,11 +431,16 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         status: BuildStatus::Running,
         reason: None,
         pull_request: None,
+        pull_request_closed: false,
         issues: issues
             .iter()
             .map(|issue| IssueState {
                 issue: issue.clone(),
-                status: IssueStatus::Waiting,
+                status: if closed.contains(&issue.number) {
+                    IssueStatus::Closed
+                } else {
+                    IssueStatus::Waiting
+                },
                 reason: None,
                 pull_request: None,
                 duration_ms: None,
@@ -404,12 +449,12 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
             .collect(),
         started_at: *at,
         ended_at: None,
+        latest_at: *at,
         elapsed_ms: 0,
         cost_usd: Decimal::ZERO,
     };
-    let mut latest = *at;
     for event in rest {
-        latest = latest.max(event.at());
+        state.latest_at = state.latest_at.max(event.at());
         match event {
             Event::BuildStarted { .. } => {}
             Event::IssueStarted { number, .. } => {
@@ -460,30 +505,34 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 state.reason = Some(reason.clone());
                 state.ended_at = Some(*at);
             }
+            Event::PullRequestClosed { pull_request, .. } => {
+                if state.pull_request == Some(*pull_request) {
+                    state.pull_request_closed = true;
+                }
+            }
         }
     }
-    let end = state.ended_at.unwrap_or(latest);
+    let end = state.ended_at.unwrap_or(state.latest_at);
     state.elapsed_ms = u64::try_from((end - state.started_at).num_milliseconds()).unwrap_or(0);
     state.cost_usd = state.issues.iter().filter_map(|m| m.cost_usd).sum();
     Some(state)
 }
 
-/// Every build under the root whose events can be read and folded, newest
-/// first. A build that can't be read is skipped, so one bad build doesn't hide
+/// Every build of `run` whose events can be read and folded, oldest first.
+/// A build that can't be read is skipped, so one bad build doesn't hide
 /// the rest.
 ///
-/// Known cost, left for now: this reads and folds every build's events on each
-/// call, and the tray calls it every two seconds, so the work grows with
-/// every build ever kept. Builds' events are small, so it doesn't matter yet.
-/// When it does, read `summary.json` for builds that have ended and fold
-/// only the rest; cleanup of old builds also bounds it.
-pub fn list_builds(root: &Path) -> io::Result<Vec<BuildState>> {
-    let entries = match fs::read_dir(runs_dir(root)) {
+/// Known cost, left for now: this reads and folds every build's events on
+/// each call, and the app calls it every few seconds. Builds' events are
+/// small and finished runs are deleted, so it doesn't matter yet. When it
+/// does, read `summary.json` for builds that have ended.
+pub fn list_builds(root: &Path, run: &RunKey) -> io::Result<Vec<BuildState>> {
+    let entries = match fs::read_dir(run::run_dir(root, run)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    let mut runs = Vec::new();
+    let mut builds = Vec::new();
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -493,15 +542,15 @@ pub fn list_builds(root: &Path) -> io::Result<Vec<BuildState>> {
             .ok()
             .and_then(|events| fold(&events))
         {
-            runs.push(state);
+            builds.push(state);
         }
     }
-    runs.sort_by(|a, b| {
-        b.started_at
-            .cmp(&a.started_at)
-            .then_with(|| b.build_id.cmp(&a.build_id))
+    builds.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.build_id.cmp(&b.build_id))
     });
-    Ok(runs)
+    Ok(builds)
 }
 
 #[cfg(test)]
@@ -518,6 +567,10 @@ mod tests {
 
     fn dollars(text: &str) -> Decimal {
         Decimal::from_str(text).unwrap()
+    }
+
+    fn run() -> RunKey {
+        RunKey::new("epik-agent/Epik", 12)
     }
 
     fn issue(number: u64, blocked_by: &[u64]) -> Issue {
@@ -538,6 +591,7 @@ mod tests {
             kind: Kind::Epic,
             branch: "epic-12".to_owned(),
             issues: vec![issue(13, &[]), issue(14, &[13])],
+            closed: Vec::new(),
         }
     }
 
@@ -555,7 +609,7 @@ mod tests {
 
     fn successful_epic() -> Vec<Event> {
         vec![
-            epic_started("run", time(0)),
+            epic_started("build", time(0)),
             Event::IssueStarted {
                 at: time(1),
                 number: 13,
@@ -586,11 +640,11 @@ mod tests {
     }
 
     #[test]
-    fn build_id_joins_repository_number_utc_stamp_and_a_suffix() {
+    fn build_id_joins_a_utc_stamp_and_a_suffix() {
         let at = Utc.with_ymd_and_hms(2026, 10, 28, 17, 8, 39).unwrap();
-        let id = build_id("epik-agent/Epik", 12, at);
+        let id = build_id(at);
         let suffix = id
-            .strip_prefix("epik-agent-Epik-12-20261028T170839Z-")
+            .strip_prefix("20261028T170839Z-")
             .unwrap_or_else(|| panic!("{id}"));
         assert_eq!(suffix.len(), 4, "{id}");
         assert!(
@@ -605,35 +659,44 @@ mod tests {
     #[test]
     fn build_ids_made_at_the_same_instant_differ() {
         let at = time(0);
-        let ids: BTreeSet<String> = (0..100).map(|_| build_id("o/r", 1, at)).collect();
+        let ids: BTreeSet<String> = (0..100).map(|_| build_id(at)).collect();
         assert!(ids.len() > 90, "{ids:?}");
     }
 
     #[test]
     fn a_new_build_never_reuses_an_existing_builds_directory() {
         let root = tempfile::tempdir().unwrap();
-        let first = BuildWriter::create_new(root.path(), "o/r", 1, time(0)).unwrap();
-        let second = BuildWriter::create_new(root.path(), "o/r", 1, time(0)).unwrap();
+        let first = BuildWriter::create_new(root.path(), &run(), time(0)).unwrap();
+        let second = BuildWriter::create_new(root.path(), &run(), time(0)).unwrap();
         assert_ne!(first.build_id(), second.build_id());
         assert_ne!(first.dir(), second.dir());
         assert!(first.dir().is_dir() && second.dir().is_dir());
-        assert_eq!(first.dir(), build_dir(root.path(), first.build_id()));
+        assert_eq!(
+            first.dir(),
+            build_dir(root.path(), &run(), first.build_id())
+        );
     }
 
     #[test]
     fn creating_a_record_refuses_an_existing_directory() {
         let root = tempfile::tempdir().unwrap();
-        BuildWriter::create(root.path(), "run").unwrap();
-        let error = BuildWriter::create(root.path(), "run").err().unwrap();
+        BuildWriter::create(root.path(), &run(), "build").unwrap();
+        let error = BuildWriter::create(root.path(), &run(), "build")
+            .err()
+            .unwrap();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[test]
-    fn build_directory_is_under_the_root() {
+    fn a_build_directory_is_inside_its_runs() {
         let root = Path::new("/home/someone/.epik");
         assert_eq!(
-            build_dir(root, "a-b-1-20261028T170839Z"),
-            root.join("runs").join("a-b-1-20261028T170839Z")
+            build_dir(root, &run(), "20261028T170839Z-k3f9"),
+            root.join("runs")
+                .join("epik-agent")
+                .join("Epik")
+                .join("12")
+                .join("20261028T170839Z-k3f9")
         );
     }
 
@@ -658,18 +721,39 @@ mod tests {
     fn events_round_trip_through_the_record() {
         let root = tempfile::tempdir().unwrap();
         let events = successful_epic();
-        let mut writer = BuildWriter::create(root.path(), "run").unwrap();
+        let mut writer = BuildWriter::create(root.path(), &run(), "build").unwrap();
         for event in &events {
             writer.append(event).unwrap();
         }
-        assert_eq!(read_events(root.path(), "run").unwrap(), events);
+        assert_eq!(read_events(root.path(), &run(), "build").unwrap(), events);
+    }
+
+    #[test]
+    fn an_existing_build_can_be_appended_to() {
+        let root = tempfile::tempdir().unwrap();
+        let events = successful_epic();
+        let mut writer = BuildWriter::create(root.path(), &run(), "build").unwrap();
+        writer.append(&events[0]).unwrap();
+        drop(writer);
+
+        let mut writer = BuildWriter::open(root.path(), &run(), "build").unwrap();
+        writer.append(&events[1]).unwrap();
+
+        assert_eq!(
+            read_events(root.path(), &run(), "build").unwrap(),
+            events[..2]
+        );
+        for missing in ["other", "../build", ""] {
+            let error = BuildWriter::open(root.path(), &run(), missing).err();
+            assert_eq!(error.unwrap().kind(), io::ErrorKind::NotFound, "{missing}");
+        }
     }
 
     #[test]
     fn each_appended_event_is_a_whole_line_on_disk() {
         let root = tempfile::tempdir().unwrap();
-        let mut writer = BuildWriter::create(root.path(), "run").unwrap();
-        writer.append(&epic_started("run", time(0))).unwrap();
+        let mut writer = BuildWriter::create(root.path(), &run(), "build").unwrap();
+        writer.append(&epic_started("build", time(0))).unwrap();
         let text = fs::read_to_string(writer.dir().join(EVENTS_FILE)).unwrap();
         assert!(text.ends_with('\n'));
         assert_eq!(text.lines().count(), 1);
@@ -678,8 +762,8 @@ mod tests {
     #[test]
     fn reader_skips_a_final_partial_line() {
         let root = tempfile::tempdir().unwrap();
-        let mut writer = BuildWriter::create(root.path(), "run").unwrap();
-        writer.append(&epic_started("run", time(0))).unwrap();
+        let mut writer = BuildWriter::create(root.path(), &run(), "build").unwrap();
+        writer.append(&epic_started("build", time(0))).unwrap();
         let mut file = OpenOptions::new()
             .append(true)
             .open(writer.dir().join(EVENTS_FILE))
@@ -687,8 +771,8 @@ mod tests {
         file.write_all(br#"{"type":"issue_started","at":"2026-10"#)
             .unwrap();
         assert_eq!(
-            read_events(root.path(), "run").unwrap(),
-            vec![epic_started("run", time(0))]
+            read_events(root.path(), &run(), "build").unwrap(),
+            vec![epic_started("build", time(0))]
         );
     }
 
@@ -700,7 +784,7 @@ mod tests {
 
     #[test]
     fn fold_of_a_build_just_started_has_every_issue_waiting() {
-        let state = fold(&[epic_started("run", time(0))]).unwrap();
+        let state = fold(&[epic_started("build", time(0))]).unwrap();
         assert_eq!(state.status, BuildStatus::Running);
         assert!(
             state
@@ -710,6 +794,39 @@ mod tests {
         );
         assert_eq!(state.cost_usd, Decimal::ZERO);
         assert_eq!(state.elapsed_ms, 0);
+        assert_eq!(state.run(), run());
+    }
+
+    #[test]
+    fn fold_marks_the_issues_closed_when_the_build_started() {
+        let Event::BuildStarted {
+            at,
+            build_id,
+            repo,
+            number,
+            title,
+            kind,
+            branch,
+            issues,
+            ..
+        } = epic_started("build", time(0))
+        else {
+            unreachable!()
+        };
+        let started = Event::BuildStarted {
+            at,
+            build_id,
+            repo,
+            number,
+            title,
+            kind,
+            branch,
+            issues,
+            closed: vec![13],
+        };
+        let state = fold(&[started]).unwrap();
+        assert_eq!(state.issue(13).unwrap().status, IssueStatus::Closed);
+        assert_eq!(state.issue(14).unwrap().status, IssueStatus::Waiting);
     }
 
     #[test]
@@ -722,6 +839,7 @@ mod tests {
         assert_eq!(state.cost_usd, dollars("0.10"));
         assert_eq!(state.elapsed_ms, 12_000);
         assert_eq!(state.ended_at, None);
+        assert_eq!(state.latest_at, time(12));
     }
 
     #[test]
@@ -729,6 +847,7 @@ mod tests {
         let state = fold(&successful_epic()).unwrap();
         assert_eq!(state.status, BuildStatus::Succeeded);
         assert_eq!(state.pull_request, Some(200));
+        assert!(!state.pull_request_closed);
         assert_eq!(state.kind, Kind::Epic);
         assert_eq!(state.branch, "epic-12");
         let issue = state.issue(14).unwrap();
@@ -743,9 +862,22 @@ mod tests {
     }
 
     #[test]
+    fn fold_notes_a_pull_request_closed_without_merging() {
+        let mut events = successful_epic();
+        events.push(Event::PullRequestClosed {
+            at: time(100),
+            pull_request: 200,
+        });
+        let state = fold(&events).unwrap();
+        assert!(state.pull_request_closed);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.elapsed_ms, 30_000, "the build itself ended at 30s");
+    }
+
+    #[test]
     fn fold_of_an_epic_with_a_failed_issue() {
         let events = vec![
-            epic_started("run", time(0)),
+            epic_started("build", time(0)),
             Event::IssueStarted {
                 at: time(1),
                 number: 13,
@@ -771,7 +903,7 @@ mod tests {
     #[test]
     fn fold_of_an_interrupted_build() {
         let events = vec![
-            epic_started("run", time(0)),
+            epic_started("build", time(0)),
             Event::IssueStarted {
                 at: time(1),
                 number: 13,
@@ -800,13 +932,14 @@ mod tests {
     fn fold_of_a_single_issue_build() {
         let events = vec![Event::BuildStarted {
             at: time(0),
-            build_id: "run".to_owned(),
+            build_id: "build".to_owned(),
             repo: "epik-agent/Epik".to_owned(),
             number: 7,
             title: "One issue".to_owned(),
             kind: Kind::Issue,
             branch: "main".to_owned(),
             issues: vec![issue(7, &[])],
+            closed: Vec::new(),
         }];
         let state = fold(&events).unwrap();
         assert_eq!(state.kind, Kind::Issue);
@@ -830,11 +963,12 @@ mod tests {
     fn summary_is_the_fold_serialized() {
         let root = tempfile::tempdir().unwrap();
         let state = fold(&successful_epic()).unwrap();
-        BuildWriter::create(root.path(), "run")
+        BuildWriter::create(root.path(), &run(), "build")
             .unwrap()
             .write_summary(&state)
             .unwrap();
-        let text = fs::read_to_string(build_dir(root.path(), "run").join(SUMMARY_FILE)).unwrap();
+        let path = build_dir(root.path(), &run(), "build").join(SUMMARY_FILE);
+        let text = fs::read_to_string(path).unwrap();
         let read: BuildState = serde_json::from_str(&text).unwrap();
         assert_eq!(read, state);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -846,43 +980,44 @@ mod tests {
     }
 
     #[test]
-    fn listing_shows_builds_newest_first() {
+    fn a_runs_builds_are_listed_oldest_first() {
         let root = tempfile::tempdir().unwrap();
-        for (id, at) in [
-            ("older", time(0)),
-            ("newest", time(120)),
-            ("middle", time(60)),
-        ] {
-            let mut writer = BuildWriter::create(root.path(), id).unwrap();
+        for (id, at) in [("b", time(60)), ("c", time(120)), ("a", time(0))] {
+            let mut writer = BuildWriter::create(root.path(), &run(), id).unwrap();
             writer.append(&epic_started(id, at)).unwrap();
         }
-        fs::create_dir_all(build_dir(root.path(), "empty")).unwrap();
-        let corrupt = build_dir(root.path(), "corrupt");
+        fs::create_dir_all(build_dir(root.path(), &run(), "empty")).unwrap();
+        let corrupt = build_dir(root.path(), &run(), "corrupt");
         fs::create_dir_all(&corrupt).unwrap();
         fs::write(corrupt.join(EVENTS_FILE), "not json\n").unwrap();
-        let ids: Vec<String> = list_builds(root.path())
+        let other = RunKey::new("epik-agent/Epik", 13);
+        let mut writer = BuildWriter::create(root.path(), &other, "d").unwrap();
+        writer.append(&epic_started("d", time(5))).unwrap();
+
+        let ids: Vec<String> = list_builds(root.path(), &run())
             .unwrap()
             .into_iter()
-            .map(|run| run.build_id)
+            .map(|build| build.build_id)
             .collect();
-        assert_eq!(ids, ["newest", "middle", "older"]);
+
+        assert_eq!(ids, ["a", "b", "c"]);
     }
 
     #[test]
-    fn listing_an_empty_root_is_empty() {
+    fn a_run_with_no_record_has_no_builds() {
         let root = tempfile::tempdir().unwrap();
-        assert!(list_builds(root.path()).unwrap().is_empty());
+        assert!(list_builds(root.path(), &run()).unwrap().is_empty());
     }
 
     #[test]
-    fn an_id_that_leaves_the_builds_directory_is_no_build() {
+    fn an_id_that_leaves_its_runs_directory_is_no_build() {
         let root = tempfile::tempdir().unwrap();
-        // `../x` would reach this run outside `runs`.
-        fs::create_dir(root.path().join("x")).unwrap();
-        fs::write(root.path().join("x").join(EVENTS_FILE), "").unwrap();
+        // `../13/x` would reach a build of another run.
+        let other = RunKey::new("epik-agent/Epik", 13);
+        BuildWriter::create(root.path(), &other, "x").unwrap();
 
-        for build_id in ["..", "../x", "a/b", "a\\b", ".hidden", ""] {
-            let error = read_events(root.path(), build_id).unwrap_err();
+        for build_id in ["..", "../13/x", "a/b", "a\\b", ".hidden", ""] {
+            let error = read_events(root.path(), &run(), build_id).unwrap_err();
 
             assert_eq!(error.kind(), io::ErrorKind::NotFound, "{build_id}");
         }

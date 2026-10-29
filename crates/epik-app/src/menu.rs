@@ -1,12 +1,12 @@
 //! What the tray shows, as a pure function of the run listing.
 //!
 //! [`menu`] decides the tray's icon and the items of its menu from the runs
-//! under `~/.epik/runs` and the builds the app is running. The tray only
+//! under `~/.epik/runs` and the runs the app is building. The tray only
 //! draws what it says.
 
-use epik_core::record::{BuildState, BuildStatus};
+use epik_core::run::{Disposition, RunKey, RunState};
 
-/// How many finished runs the menu lists.
+/// How many runs not building the menu lists.
 pub const RECENT: usize = 10;
 
 /// What the tray shows.
@@ -22,7 +22,7 @@ pub struct Menu {
 pub enum Item {
     /// A run; choosing it opens the run.
     Run {
-        build_id: String,
+        run: RunKey,
         label: String,
     },
     /// Text that can't be chosen.
@@ -32,19 +32,16 @@ pub enum Item {
     Quit,
 }
 
-/// The tray for `runs`, newest first as [`epik_core::record::list_builds`]
-/// gives them, while the builds `active` are running: the active runs, then
-/// the [`RECENT`] most recent finished ones, then "Open runs folder" and
-/// "Quit".
-///
-/// A run whose record says it is running but which isn't active is one an
-/// earlier app was running when it stopped, so it is listed as interrupted.
-pub fn menu(runs: &[BuildState], active: &[String]) -> Menu {
-    let is_active = |run: &BuildState| active.contains(&run.build_id);
+/// The tray for `runs`, newest activity first as
+/// [`epik_core::run::list`] gives them, while the runs `active` are
+/// building: the building runs, then the [`RECENT`] most recent others,
+/// then "Open runs folder" and "Quit".
+pub fn menu(runs: &[RunState], active: &[RunKey]) -> Menu {
+    let building = |run: &RunState| run.disposition == Disposition::Building;
     let mut items: Vec<Item> = runs
         .iter()
-        .filter(|run| is_active(run))
-        .map(|run| run_item(run, "running"))
+        .filter(|run| building(run))
+        .map(run_item)
         .collect();
     if items.is_empty() {
         // A build is active before its run is recorded.
@@ -56,14 +53,14 @@ pub fn menu(runs: &[BuildState], active: &[String]) -> Menu {
         items.push(Item::Note(note.to_owned()));
     }
     items.push(Item::Separator);
-    let finished: Vec<Item> = runs
+    let others: Vec<Item> = runs
         .iter()
-        .filter(|run| !is_active(run))
+        .filter(|run| !building(run))
         .take(RECENT)
-        .map(|run| run_item(run, finished_state(run.status)))
+        .map(run_item)
         .collect();
-    if !finished.is_empty() {
-        items.extend(finished);
+    if !others.is_empty() {
+        items.extend(others);
         items.push(Item::Separator);
     }
     items.extend([Item::OpenRunsFolder, Item::Quit]);
@@ -73,18 +70,15 @@ pub fn menu(runs: &[BuildState], active: &[String]) -> Menu {
     }
 }
 
-fn run_item(run: &BuildState, state: &str) -> Item {
+fn run_item(run: &RunState) -> Item {
+    let state = match run.disposition {
+        Disposition::Building => "building",
+        Disposition::WaitingForReview => "waiting for review",
+        Disposition::NeedsAttention => "needs attention",
+    };
     Item::Run {
-        build_id: run.build_id.clone(),
-        label: format!("{}#{} {} ({state})", run.repo, run.number, run.title),
-    }
-}
-
-fn finished_state(status: BuildStatus) -> &'static str {
-    match status {
-        BuildStatus::Succeeded => "succeeded",
-        BuildStatus::Failed => "failed",
-        BuildStatus::Running | BuildStatus::Interrupted => "interrupted",
+        run: run.run.clone(),
+        label: format!("{} {} ({state})", run.run, run.title),
     }
 }
 
@@ -95,20 +89,27 @@ mod tests {
     use epik_core::record::Kind;
     use rust_decimal::Decimal;
 
-    fn run(number: u64, status: BuildStatus) -> BuildState {
-        BuildState {
-            build_id: format!("o-r-{number}"),
+    fn key(number: u64) -> RunKey {
+        RunKey::new("o/r", number)
+    }
+
+    fn run(number: u64, disposition: Disposition) -> RunState {
+        let at = Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap();
+        RunState {
+            run: key(number),
             repo: "o/r".to_owned(),
             number,
             title: format!("Issue {number}"),
             kind: Kind::Epic,
             branch: format!("epic-{number}"),
-            status,
+            disposition,
             reason: None,
             pull_request: None,
             issues: Vec::new(),
-            started_at: Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap(),
-            ended_at: None,
+            builds: Vec::new(),
+            running_build: None,
+            started_at: at,
+            latest_at: at,
             elapsed_ms: 0,
             cost_usd: Decimal::ZERO,
         }
@@ -116,7 +117,7 @@ mod tests {
 
     fn item(number: u64, state: &str) -> Item {
         Item::Run {
-            build_id: format!("o-r-{number}"),
+            run: key(number),
             label: format!("o/r#{number} Issue {number} ({state})"),
         }
     }
@@ -142,24 +143,22 @@ mod tests {
     }
 
     #[test]
-    fn it_lists_active_runs_then_finished_ones_with_their_states() {
+    fn it_lists_building_runs_then_the_others_with_their_states() {
         let runs = [
-            run(4, BuildStatus::Running),
-            run(3, BuildStatus::Succeeded),
-            run(2, BuildStatus::Failed),
-            run(1, BuildStatus::Interrupted),
+            run(3, Disposition::WaitingForReview),
+            run(4, Disposition::Building),
+            run(2, Disposition::NeedsAttention),
         ];
 
         assert_eq!(
-            menu(&runs, &["o-r-4".to_owned()]),
+            menu(&runs, &[key(4)]),
             Menu {
                 building: true,
                 items: vec![
-                    item(4, "running"),
+                    item(4, "building"),
                     Item::Separator,
-                    item(3, "succeeded"),
-                    item(2, "failed"),
-                    item(1, "interrupted"),
+                    item(3, "waiting for review"),
+                    item(2, "needs attention"),
                     Item::Separator,
                     Item::OpenRunsFolder,
                     Item::Quit,
@@ -169,36 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn an_active_run_comes_first_wherever_it_is_listed() {
-        let runs = [run(2, BuildStatus::Succeeded), run(1, BuildStatus::Running)];
-
-        let items = menu(&runs, &["o-r-1".to_owned()]).items;
-
-        assert_eq!(
-            items[..3],
-            [item(1, "running"), Item::Separator, item(2, "succeeded")]
-        );
-    }
-
-    #[test]
-    fn a_run_recorded_as_running_that_isnt_active_was_interrupted() {
-        let items = menu(&[run(1, BuildStatus::Running)], &[]).items;
-
-        assert_eq!(
-            items[..3],
-            [
-                note("Nothing is building"),
-                Item::Separator,
-                item(1, "interrupted")
-            ]
-        );
-    }
-
-    #[test]
-    fn it_lists_only_the_ten_most_recent_finished_runs() {
-        let runs: Vec<BuildState> = (1..=12)
+    fn it_lists_only_the_ten_most_recent_other_runs() {
+        let runs: Vec<RunState> = (1..=12)
             .rev()
-            .map(|number| run(number, BuildStatus::Succeeded))
+            .map(|number| run(number, Disposition::WaitingForReview))
             .collect();
 
         let items = menu(&runs, &[]).items;
@@ -208,13 +181,13 @@ mod tests {
             .filter(|item| matches!(item, Item::Run { .. }))
             .collect();
         assert_eq!(listed.len(), RECENT);
-        assert_eq!(listed[0], &item(12, "succeeded"));
-        assert_eq!(listed[9], &item(3, "succeeded"));
+        assert_eq!(listed[0], &item(12, "waiting for review"));
+        assert_eq!(listed[9], &item(3, "waiting for review"));
     }
 
     #[test]
     fn a_build_not_yet_in_the_listing_still_shows_as_building() {
-        let menu = menu(&[], &["o-r-1".to_owned()]);
+        let menu = menu(&[], &[key(1)]);
 
         assert!(menu.building);
         assert_eq!(menu.items[0], note("Starting a build…"));

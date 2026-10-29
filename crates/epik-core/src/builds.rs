@@ -18,14 +18,18 @@ use crate::agent::{Agent, ClaudeAcp};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
 use crate::record::Kind;
+use crate::run::RunKey;
 
 /// A build that has started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Started {
+    /// The run the build belongs to.
+    pub run: RunKey,
+    /// The build's id, unique within its run.
     pub build_id: String,
     pub kind: Kind,
     pub branch: String,
-    /// The run's record directory, `<root>/runs/<run-id>`.
+    /// The build's record directory, inside its run's.
     pub build_dir: PathBuf,
 }
 
@@ -36,8 +40,8 @@ pub struct Builds {
     agent: Arc<dyn Agent + Send + Sync>,
     /// Set on shutdown: stops every build, and refuses new ones.
     cancel: Arc<AtomicBool>,
-    /// The run ids of the builds still running.
-    active: Arc<Mutex<BTreeSet<String>>>,
+    /// The runs with a build still running.
+    active: Arc<Mutex<BTreeSet<RunKey>>>,
     /// Told how many builds are running each time that changes.
     on_active: Arc<dyn Fn(usize) + Send + Sync>,
     /// Every build's thread not yet known to have ended.
@@ -81,8 +85,10 @@ impl Builds {
     }
 
     /// Starts building `number` in `repo` on a thread of its own, and
-    /// returns once its run has written `build_started`, or with why it
-    /// couldn't start.
+    /// returns once the build has written `build_started`, or with why it
+    /// couldn't start. A build of an epic issue that already has a run adds
+    /// a build to it; while one of its builds is running, another is
+    /// refused.
     pub fn start(
         &self,
         repo: &str,
@@ -97,6 +103,7 @@ impl Builds {
             root: self.root.clone(),
             plugin_dir,
         };
+        let key = RunKey::new(repo, number);
         let (started, starting) = mpsc::channel();
         {
             // Holding the lock while spawning means a shutdown either
@@ -106,37 +113,59 @@ impl Builds {
                 return Err("the Epik app is shutting down".to_owned());
             }
             threads.retain(|thread| !thread.is_finished());
+            // Claimed under the threads' lock, so two requests for the same
+            // run can't both start.
+            {
+                let mut active = lock(&self.active);
+                if !active.insert(key.clone()) {
+                    return Err(format!("a build of {key} is already running"));
+                }
+                (self.on_active)(active.len());
+            }
             let github = self.github.clone();
             let agent = self.agent.clone();
             let cancel = self.cancel.clone();
             let active = self.active.clone();
             let on_active = self.on_active.clone();
+            let unclaim = {
+                let key = key.clone();
+                let active = self.active.clone();
+                let on_active = self.on_active.clone();
+                move || {
+                    change(&active, &*on_active, |active| {
+                        active.remove(&key);
+                    })
+                }
+            };
             let thread = thread::Builder::new()
                 .name(format!("build {repo}#{number}"))
                 .spawn(move || {
                     let build = match build::start(&*github, &*agent, &request) {
                         Ok(build) => build,
                         Err(error) => {
+                            change(&active, &*on_active, |active| {
+                                active.remove(&key);
+                            });
                             let _ = started.send(Err(error.to_string()));
                             return;
                         }
                     };
-                    let build_id = build.build_id().to_owned();
-                    change(&active, &*on_active, |active| {
-                        active.insert(build_id.clone());
-                    });
                     let _ = started.send(Ok(Started {
-                        build_id: build_id.clone(),
+                        run: key.clone(),
+                        build_id: build.build_id().to_owned(),
                         kind: build.kind(),
                         branch: build.branch().to_owned(),
                         build_dir: build.dir().to_owned(),
                     }));
                     build.run(&cancel);
                     change(&active, &*on_active, |active| {
-                        active.remove(&build_id);
+                        active.remove(&key);
                     });
                 })
-                .map_err(|error| format!("couldn't start a thread for the build: {error}"))?;
+                .map_err(|error| {
+                    unclaim();
+                    format!("couldn't start a thread for the build: {error}")
+                })?;
             threads.push(thread);
         }
         starting
@@ -144,8 +173,8 @@ impl Builds {
             .unwrap_or_else(|_| Err("the build stopped before it started".to_owned()))
     }
 
-    /// The run ids of the builds still running.
-    pub fn active(&self) -> Vec<String> {
+    /// The runs with a build still running.
+    pub fn active(&self) -> Vec<RunKey> {
         lock(&self.active).iter().cloned().collect()
     }
 
@@ -172,9 +201,9 @@ impl Drop for Builds {
 /// there now are. The lock is held while it's told, so it hears of the
 /// changes in order.
 fn change(
-    active: &Mutex<BTreeSet<String>>,
+    active: &Mutex<BTreeSet<RunKey>>,
     observer: &(dyn Fn(usize) + Send + Sync),
-    edit: impl FnOnce(&mut BTreeSet<String>),
+    edit: impl FnOnce(&mut BTreeSet<RunKey>),
 ) {
     let mut active = lock(active);
     edit(&mut active);
@@ -238,21 +267,22 @@ mod tests {
             .start("owner/repo", 7, None, PathBuf::from("/plugin"))
             .unwrap();
 
-        assert!(started.build_id.starts_with("owner-repo-7-"), "{started:?}");
+        assert_eq!(started.run, RunKey::new("owner/repo", 7));
+        assert!(started.build_id.starts_with("20"), "{started:?}");
         assert_eq!(started.kind, Kind::Issue);
         assert_eq!(started.branch, "main");
         assert_eq!(
             started.build_dir,
-            record::build_dir(root.path(), &started.build_id)
+            record::build_dir(root.path(), &started.run, &started.build_id)
         );
-        let events = record::read_events(root.path(), &started.build_id).unwrap();
+        let events = record::read_events(root.path(), &started.run, &started.build_id).unwrap();
         assert!(matches!(events[0], record::Event::BuildStarted { .. }));
-        assert_eq!(builds.active(), vec![started.build_id.clone()]);
+        assert_eq!(builds.active(), vec![started.run.clone()]);
 
         builds.shutdown();
 
         assert!(builds.active().is_empty());
-        let events = record::read_events(root.path(), &started.build_id).unwrap();
+        let events = record::read_events(root.path(), &started.run, &started.build_id).unwrap();
         let state = record::fold(&events).unwrap();
         assert_eq!(state.status, BuildStatus::Interrupted);
     }
@@ -305,6 +335,45 @@ mod tests {
 
         assert_eq!(error, "it is closed");
         assert!(builds.active().is_empty());
+    }
+
+    #[test]
+    fn a_second_build_of_a_running_run_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        let error = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap_err();
+
+        assert_eq!(error, "a build of owner/repo#7 is already running");
+        assert_eq!(builds.active().len(), 1);
+    }
+
+    #[test]
+    fn building_a_run_again_adds_a_build_to_it() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = builds(root.path(), fake_github());
+        let first = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+        builds.shutdown();
+        let builds =
+            super::Builds::new(root.path(), Arc::new(fake_github()), Arc::new(HangingAgent));
+
+        let second = builds
+            .start("owner/repo", 7, None, "/plugin".into())
+            .unwrap();
+
+        assert_eq!(first.run, second.run);
+        assert_ne!(first.build_id, second.build_id);
+        let run = crate::run::read(root.path(), &first.run).unwrap();
+        let ids: Vec<&str> = run.builds.iter().map(|b| b.build_id.as_str()).collect();
+        assert_eq!(ids, [first.build_id.as_str(), second.build_id.as_str()]);
+        assert_eq!(run.disposition, crate::run::Disposition::Building);
     }
 
     #[test]

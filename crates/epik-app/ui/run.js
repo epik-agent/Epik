@@ -9,7 +9,7 @@ const ROW_GAP = 20;
 const SVG = "http://www.w3.org/2000/svg";
 
 const { invoke } = window.__TAURI__.core;
-const runId = window.EPIK_RUN_ID;
+const run = window.EPIK_RUN;
 
 function text(id, value) {
   document.getElementById(id).textContent = value ?? "";
@@ -38,9 +38,10 @@ function drawHeader(view) {
   text("repo", `${view.repo}#${view.number}`);
   text("title", view.title);
   const status = document.getElementById("status");
+  const words = view.status.replaceAll("_", " ");
   status.textContent = view.pull_request
-    ? `${view.status} (PR #${view.pull_request})`
-    : view.status;
+    ? `${words} (PR #${view.pull_request})`
+    : words;
   status.className = `status ${view.status}`;
   text("elapsed", view.elapsed);
   text("cost", view.cost);
@@ -115,7 +116,7 @@ function draw(view) {
 
 async function refresh() {
   try {
-    draw(await invoke("run_view", { runId }));
+    draw(await invoke("run_view", { run }));
     text("error", "");
   } catch (error) {
     text("error", `Couldn't read the run: ${error}`);

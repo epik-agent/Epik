@@ -121,13 +121,17 @@ results land — branches, pull requests, CI runs, and closed issues.
 
 The app appears in the menu bar (macOS), the notification area (Windows) or
 the system tray (Linux). Its menu lists runs; choose one to open a window
-that shows the epic's issues live. Each run's record is in
-`~/.epik/runs/<run-id>/`: `events.jsonl`, what happened in the run; each
-issue's agent log, `<issue>.jsonl` and `<issue>.err`; and `summary.json`,
-with the run's cost and duration, once it ends. You can also ask Epik how a
-build is going. A run's clone is temporary: the app removes it, and the
-worktrees its agents made, when the run ends, and removes any left over
-when it starts. The record in `~/.epik/runs/<run-id>/` stays.
+that shows the epic's issues live. A **run** is the work of finishing one
+epic or issue, and each attempt at it is a **build**: building an epic
+again after a failure or an interruption adds a build to the same run, and
+the run's time and cost add up across its builds. A run's record is in
+`~/.epik/runs/<owner>/<name>/<number>/`, with a directory per build holding
+`events.jsonl`, what happened in the build; each issue's agent log,
+`<issue>.jsonl` and `<issue>.err`; and `summary.json`, with the build's cost
+and duration, once it ends. You can also ask Epik how a build is going. A
+build's clone is temporary: the app removes it, and the worktrees its
+agents made, when the build ends, and removes any left over when it starts.
+The record stays.
 
 Builds never merge into the default branch. A single issue's build stops at
 an open pull request into it. For an epic, the app merges each issue's pull
