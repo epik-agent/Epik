@@ -24,9 +24,12 @@ use crate::record::{BuildWriter, Event};
 use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
 
-/// The file in a run's record that says its closing comment is posted, so
-/// a run whose delete failed isn't commented on twice.
-const COMMENTED: &str = "closing-comment-posted";
+/// The file beside a run's record that says its closing comment is posted
+/// or being posted, so a run whose delete failed isn't commented on twice.
+/// It is outside the record, which the delete removes.
+fn commented(root: &Path, run: &RunKey) -> std::path::PathBuf {
+    run::run_dir(root, run).with_extension("closing-comment-posted")
+}
 
 /// What a check did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -132,7 +135,7 @@ fn check(
 /// Posts the run's closing comment on its epic issue, then deletes the
 /// run. If the comment can't be posted, the run stays.
 pub fn finish(root: &Path, github: &dyn GitHub, state: &RunState) -> Result<(), String> {
-    let marker = run::run_dir(root, &state.run).join(COMMENTED);
+    let marker = commented(root, &state.run);
     if !marker.exists() {
         let merge = match state.pull_request {
             Some(pr) => {
@@ -147,12 +150,19 @@ pub fn finish(root: &Path, github: &dyn GitHub, state: &RunState) -> Result<(), 
             None => None,
         };
         let body = comment::closing(state, merge.as_ref());
-        github
-            .comment(&state.repo, state.number, &body)
-            .map_err(|error| format!("couldn't post the closing comment: {error}"))?;
-        let _ = fs::write(&marker, "");
+        // Marked first: a comment that can't be marked isn't posted.
+        fs::write(&marker, "")
+            .map_err(|error| format!("couldn't mark the closing comment: {error}"))?;
+        if let Err(error) = github.comment(&state.repo, state.number, &body) {
+            let _ = fs::remove_file(&marker);
+            return Err(format!("couldn't post the closing comment: {error}"));
+        }
     }
-    run::delete(root, &state.run).map_err(|error| format!("couldn't delete the run: {error}"))
+    run::delete(root, &state.run).map_err(|error| format!("couldn't delete the run: {error}"))?;
+    let _ = fs::remove_file(&marker);
+    // Prunes the directories the marker kept.
+    let _ = run::delete(root, &state.run);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -363,6 +373,36 @@ mod tests {
         github.succeed("comment");
         assert_eq!(reconcile(root.path(), &github, &[]).finished, [key()]);
         assert_eq!(github.repo(REPO).issues[&1].comments.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_whose_delete_fails_isnt_commented_on_twice() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        record(root.path(), true);
+        let github = github();
+        github.set_state(REPO, 1, State::Closed);
+        let parent = run::run_dir(root.path(), &key())
+            .parent()
+            .unwrap()
+            .to_owned();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let failed = reconcile(root.path(), &github, &[]);
+
+        assert!(failed.finished.is_empty(), "{failed:?}");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let finished = reconcile(root.path(), &github, &[]);
+        assert_eq!(finished.finished, [key()]);
+        assert_eq!(github.repo(REPO).issues[&1].comments.len(), 1);
+        assert!(!commented(root.path(), &key()).exists());
+        assert_eq!(
+            fs::read_dir(crate::record::runs_dir(root.path()))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
