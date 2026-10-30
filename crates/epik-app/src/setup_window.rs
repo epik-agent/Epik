@@ -17,7 +17,7 @@ use epik_view::{Checklist, ItemState, Output, Row};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 /// The window's label.
-const LABEL: &str = "setup";
+pub(crate) const LABEL: &str = "setup";
 
 /// An item's state, as the checklist is given it.
 fn shown(state: setup::State) -> ItemState {
