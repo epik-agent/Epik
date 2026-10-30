@@ -1,198 +1,276 @@
-//! The tray's popover: each building run, the runs waiting for the user,
-//! and a way into Epik's window. It updates every second while open.
+//! The tray menu: whether Epik is running, each active run with its
+//! progress, and the way into Epik's window. It updates every second while
+//! open, and its shortcuts work while it has focus.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
-use epik_view::{Disposition, NowLine, Popover, RunCard};
+use epik_view::{NodeState, Popover, TrayRun};
 use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 use serde::Serialize;
+use wasm_bindgen::prelude::*;
 
-use crate::flash::Flashes;
-use crate::graph::{MiniGraph, ProgressBar};
 use crate::tauri;
-use crate::words::Words;
 
 const REFRESH: Duration = Duration::from_secs(1);
+
+/// What choosing something in the menu asks the app to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    /// Open the main window at a route.
+    OpenMain(String),
+    /// Run a Tauri command that takes nothing.
+    Run(&'static str),
+}
 
 #[derive(Serialize)]
 struct OpenMain {
     route: String,
 }
 
-/// Opens the main window at `route`.
-fn open_main(route: String) {
-    tauri::run("open_main", OpenMain { route });
+impl Command {
+    /// Opens `run`'s page in the main window.
+    pub fn open_run(run: &str) -> Command {
+        Command::OpenMain(format!("run/{run}"))
+    }
+
+    fn send(self) {
+        match self {
+            Command::OpenMain(route) => tauri::run("open_main", OpenMain { route }),
+            Command::Run(command) => tauri::run(command, ()),
+        }
+    }
 }
 
-/// The running issue whose agent logged most recently: the first with the
-/// greatest `last_event`, once one has logged.
-pub fn latest(now: &[NowLine]) -> Option<&NowLine> {
-    now.iter().fold(None, |latest, line| {
-        let at = |line: Option<&NowLine>| line.and_then(|line| line.last_event).unwrap_or(0);
-        if at(Some(line)) > at(latest) {
-            Some(line)
-        } else {
-            latest
+/// An item of the menu, below the runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    OpenDashboard,
+    Restart,
+    Settings,
+    CheckSetup,
+    CheckForUpdates,
+    Quit,
+}
+
+impl Item {
+    /// Every item, top to bottom.
+    pub const ALL: [Item; 6] = [
+        Item::OpenDashboard,
+        Item::Restart,
+        Item::Settings,
+        Item::CheckSetup,
+        Item::CheckForUpdates,
+        Item::Quit,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Item::OpenDashboard => "Open Dashboard",
+            Item::Restart => "Restart",
+            Item::Settings => "Settings…",
+            Item::CheckSetup => "Check setup…",
+            Item::CheckForUpdates => "Check for updates…",
+            Item::Quit => "Quit Epik",
+        }
+    }
+
+    /// Its element's id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Item::OpenDashboard => "open-dashboard",
+            Item::Restart => "restart",
+            Item::Settings => "settings",
+            Item::CheckSetup => "check-setup",
+            Item::CheckForUpdates => "check-for-updates",
+            Item::Quit => "quit",
+        }
+    }
+
+    /// The key that, with Cmd (or Ctrl, off a Mac), chooses it.
+    pub fn key(self) -> Option<char> {
+        match self {
+            Item::OpenDashboard => Some('D'),
+            Item::Settings => Some(','),
+            Item::Quit => Some('Q'),
+            _ => None,
+        }
+    }
+
+    pub fn command(self) -> Command {
+        match self {
+            Item::OpenDashboard => Command::OpenMain(String::new()),
+            Item::Restart => Command::Run("restart"),
+            Item::Settings => Command::OpenMain("settings".into()),
+            Item::CheckSetup => Command::Run("check_setup"),
+            Item::CheckForUpdates => Command::Run("check_for_updates"),
+            Item::Quit => Command::Run("quit"),
+        }
+    }
+}
+
+/// The item a key pressed with Cmd or Ctrl chooses, if any.
+pub fn shortcut(key: &str) -> Option<Item> {
+    let mut chars = key.chars();
+    let (Some(key), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    Item::ALL
+        .into_iter()
+        .find(|item| item.key() == Some(key.to_ascii_uppercase()))
+}
+
+/// That Epik is running, and its runs, agents and time up.
+#[component]
+pub fn Header(about: String) -> impl IntoView {
+    view! {
+        <header>
+            <div class="running">
+                <span class="dot"></span>
+                <span class="name">"Epik is running"</span>
+            </div>
+            <div class="about">{about}</div>
+        </header>
+    }
+}
+
+/// A run's progress: a segment for each issue, in its state.
+#[component]
+pub fn Segments(segments: Vec<NodeState>) -> impl IntoView {
+    let segments = segments
+        .into_iter()
+        .map(|state| {
+            let class = match state {
+                NodeState::Merged => "merged",
+                NodeState::Running => "running",
+                NodeState::NotStarted => "not_started",
+                NodeState::Failed => "failed",
+            };
+            view! { <span class=class></span> }
+        })
+        .collect_view();
+    view! { <div class="segments">{segments}</div> }
+}
+
+/// An active run, which opens its page.
+#[component]
+pub fn RunRow(run: TrayRun) -> impl IntoView {
+    let command = Command::open_run(&run.run);
+    view! {
+        <button type="button" class="run" on:click=move |_| command.clone().send()>
+            <div class="head">
+                <span class="title">{run.title}</span>
+                <span class="count">{run.count}</span>
+            </div>
+            <Segments segments=run.segments/>
+            <div class="line">{run.line}</div>
+        </button>
+    }
+}
+
+/// The active runs under their heading; nothing when none is building.
+#[component]
+pub fn Runs(runs: Vec<TrayRun>) -> impl IntoView {
+    (!runs.is_empty()).then(|| {
+        let rows = runs
+            .into_iter()
+            .map(|run| view! { <RunRow run/> })
+            .collect_view();
+        view! {
+            <section class="runs">
+                <h2>"Active runs"</h2>
+                {rows}
+            </section>
         }
     })
 }
 
-/// The building runs whose cards flash: those whose latest agent's last
-/// event changed.
-fn flashing(flashes: &mut Flashes, popover: &Popover) -> HashSet<String> {
-    popover
-        .building
-        .iter()
-        .filter(|run| match latest(&run.now) {
-            Some(line) if line.life.is_some() => flashes.changed(&run.run, line.last_event),
-            _ => false,
-        })
-        .map(|run| run.run.clone())
-        .collect()
-}
-
-/// A building run: its graph, title, time and summary, its latest agent's
-/// life line, and its progress.
+/// An item, with its shortcut if it has one.
 #[component]
-pub fn Card(run: RunCard, flash: bool) -> impl IntoView {
-    let route = format!("run/{}", run.run);
-    let open = move |event: MouseEvent| {
-        event.prevent_default();
-        open_main(route.clone());
-    };
-    let life = latest(&run.now)
-        .and_then(|line| line.life.clone())
-        .map(|life| {
-            let class = if life.starts_with("quiet") {
-                "life quiet"
-            } else {
-                "life"
-            };
-            view! { <div class=class>{life}</div> }
-        });
-    let progress =
-        (run.graph.layout.places.len() > 1).then(|| view! { <ProgressBar progress=run.progress/> });
-    view! {
-        <article class=if flash { "card flash" } else { "card" }>
-            <div class="head">
-                <MiniGraph graph=run.graph/>
-                <a class="title" href="#" on:click=open>{run.title}</a>
-                <span class="time">{run.elapsed}</span>
-            </div>
-            <Words spans=run.summary.unwrap_or_default() class="summary"/>
-            {life}
-            {progress}
-        </article>
-    }
-}
-
-/// What the popover lists: a card for each building run, then the runs
-/// waiting for the user; or that nothing is building.
-#[component]
-pub fn Runs(popover: Popover, #[prop(optional)] flashing: HashSet<String>) -> impl IntoView {
-    if popover.building.is_empty() && popover.waiting.is_empty() {
-        return view! { <p class="quiet-note">"Nothing is building."</p> }.into_any();
-    }
-    let cards = popover
-        .building
-        .into_iter()
-        .map(|run| {
-            let flash = flashing.contains(&run.run);
-            view! { <Card run flash/> }
-        })
-        .collect_view();
-    let waiting = (!popover.waiting.is_empty()).then(|| {
-        let items = popover
-            .waiting
-            .into_iter()
-            .map(|(disposition, _, sentence)| {
-                view! {
-                    <li class=disposition_class(disposition)>
-                        <span class="marker"></span>
-                        <Words spans=sentence/>
-                    </li>
-                }
-            })
-            .collect_view();
-        view! {
-            <h2>"Waiting for you"</h2>
-            <ul class="waiting">{items}</ul>
-        }
+fn ItemButton(item: Item, mac: bool) -> impl IntoView {
+    let shortcut = item.key().map(|key| {
+        let shown = if mac {
+            format!("⌘{key}")
+        } else {
+            format!("Ctrl+{key}")
+        };
+        view! { <span class="shortcut">{shown}</span> }
     });
-    view! { {cards} {waiting} }.into_any()
-}
-
-fn disposition_class(disposition: Disposition) -> &'static str {
-    match disposition {
-        Disposition::Building => "building",
-        Disposition::WaitingForReview => "waiting_for_review",
-        Disposition::NeedsAttention => "needs_attention",
+    let choose = move |event: MouseEvent| {
+        event.prevent_default();
+        item.command().send();
+    };
+    view! {
+        <button type="button" class="item" id=item.id() on:click=choose>
+            <span class="label">{item.label()}</span>
+            {shortcut}
+        </button>
     }
 }
 
-/// Epik's mark, set as the span's HTML, as it is drawn everywhere else:
-/// Leptos would wrap the static SVG's children in groups.
-const MARK: &str = r##"<svg viewBox="0 0 64 64" width="18" height="18" aria-hidden="true"><g stroke="#171717" stroke-width="3" opacity="0.3"><line x1="16" y1="16" x2="48" y2="24"/><line x1="16" y1="16" x2="24" y2="48"/><line x1="48" y1="24" x2="40" y2="48"/><line x1="24" y1="48" x2="40" y2="48"/></g><circle cx="16" cy="16" r="7" fill="#00c07a"/><circle cx="48" cy="24" r="6" fill="#171717"/><circle cx="24" cy="48" r="6" fill="#171717"/><circle cx="40" cy="48" r="5" fill="#00c07a" opacity="0.7"/></svg>"##;
-
-/// What a refresh drew: the popover and the cards that flash, or why it
-/// couldn't be had. Each refresh is drawn afresh, as its own generation, so
-/// a card that flashes again starts its flash over.
-#[derive(Clone)]
-struct Drawn {
-    generation: u64,
-    runs: Result<(Popover, HashSet<String>), String>,
+/// The items, grouped: the dashboard, Restart, then the rest. Shortcuts
+/// are drawn with Cmd on a Mac and Ctrl elsewhere.
+#[component]
+pub fn Items(mac: bool) -> impl IntoView {
+    let button = move |item| view! { <ItemButton item mac/> };
+    let rest = Item::ALL[2..]
+        .iter()
+        .map(|&item| button(item))
+        .collect_view();
+    view! {
+        <nav class="items">
+            {button(Item::OpenDashboard)}
+            <hr/>
+            {button(Item::Restart)}
+            <hr/>
+            {rest}
+        </nav>
+    }
 }
 
-/// The popover's window, refreshed from the app every second.
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(thread_local_v2, js_namespace = navigator, js_name = userAgent)]
+    static USER_AGENT: String;
+}
+
+/// Whether the window is on a Mac, as its user agent says.
+fn on_a_mac() -> bool {
+    USER_AGENT.with(|agent| agent.contains("Mac"))
+}
+
+/// The menu's window, refreshed from the app every second.
 #[component]
 pub fn PopoverWindow() -> impl IntoView {
-    let headline = RwSignal::new(String::new());
-    let drawn = RwSignal::new(None::<Drawn>);
-    let flashes = StoredValue::new_local(Flashes::default());
+    let drawn = RwSignal::new(None::<Result<Popover, String>>);
     let refresh = move || {
         leptos::task::spawn_local(async move {
-            let runs = match tauri::invoke::<_, Popover>("popover", &()).await {
-                Ok(popover) => {
-                    headline.set(popover.headline.clone());
-                    let flashing = flashes.try_update_value(|flashes| flashing(flashes, &popover));
-                    Ok((popover, flashing.unwrap_or_default()))
-                }
-                Err(reason) => Err(reason),
-            };
-            let generation = drawn
-                .with_untracked(|drawn| drawn.as_ref().map_or(0, |drawn| drawn.generation + 1));
-            drawn.set(Some(Drawn { generation, runs }));
+            drawn.set(Some(tauri::invoke::<_, Popover>("popover", &()).await));
         });
     };
     refresh();
     set_interval(refresh, REFRESH);
-    let open = |event: MouseEvent| {
-        event.prevent_default();
-        open_main(String::new());
-    };
-    let quit = |event: MouseEvent| {
-        event.prevent_default();
-        tauri::run("quit", ());
-    };
+    let keys = window_event_listener(leptos::ev::keydown, |event| {
+        if !(event.meta_key() || event.ctrl_key()) {
+            return;
+        }
+        if let Some(item) = shortcut(&event.key()) {
+            event.prevent_default();
+            item.command().send();
+        }
+    });
+    on_cleanup(move || keys.remove());
+    let mac = on_a_mac();
     view! {
-        <header>
-            <span id="mark" inner_html=MARK></span>
-            <span class="name">"Epik"</span>
-            <span id="headline">{headline}</span>
-        </header>
-        <main id="runs">
-            <For each=move || drawn.get() key=|drawn| drawn.generation let(drawn)>
-                {match drawn.runs {
-                    Ok((popover, flashing)) => view! { <Runs popover flashing/> }.into_any(),
-                    Err(reason) => view! { <p class="error">{reason}</p> }.into_any(),
-                }}
-            </For>
-        </main>
-        <footer>
-            <a href="#" id="open" on:click=open>"Open Epik"</a>
-            <a href="#" id="quit" on:click=quit>"Quit Epik"</a>
-        </footer>
+        {move || match drawn.get() {
+            Some(Ok(popover)) => view! {
+                <Header about=popover.about/>
+                <Runs runs=popover.runs/>
+            }
+            .into_any(),
+            Some(Err(reason)) => view! { <p class="error">{reason}</p> }.into_any(),
+            None => ().into_any(),
+        }}
+        <Items mac/>
     }
 }

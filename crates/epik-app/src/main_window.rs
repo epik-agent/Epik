@@ -25,7 +25,8 @@ use crate::{navigation, pages};
 pub struct Window {
     pub root: PathBuf,
     pub builds: Arc<Builds>,
-    /// When this Epik started, for the sidebar's status line.
+    /// When this Epik started, for the sidebar's status line and the tray
+    /// menu.
     pub started: DateTime<Utc>,
 }
 
@@ -61,7 +62,7 @@ pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
 #[tauri::command]
 pub fn popover(window: State<'_, Window>) -> Result<Popover, String> {
     let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
-    Ok(pages::popover(&runs, Utc::now()))
+    Ok(pages::popover(&runs, window.started, Utc::now()))
 }
 
 #[tauri::command]

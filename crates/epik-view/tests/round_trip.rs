@@ -101,13 +101,14 @@ fn sidebar() {
 #[test]
 fn popover() {
     round_trip(Popover {
-        headline: "One run building".to_owned(),
-        building: vec![card(Disposition::Building)],
-        waiting: vec![(
-            Disposition::NeedsAttention,
-            "o/r#13".to_owned(),
-            vec![text("Exponentiation failed.")],
-        )],
+        about: "1 run · 2 agents · up 4h 12m".to_owned(),
+        runs: vec![TrayRun {
+            run: "o/r#13".to_owned(),
+            title: "Exponentiation".to_owned(),
+            count: "1/3".to_owned(),
+            segments: vec![NodeState::Merged, NodeState::Running, NodeState::Failed],
+            line: "building #2 · 2m 00s · o/r#13".to_owned(),
+        }],
     });
 }
 

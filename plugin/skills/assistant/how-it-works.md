@@ -17,7 +17,7 @@ When the user opens the app, its **Set up Epik** checklist walks them through:
 
 Each step waits until the user presses its button, and says what it will do first. Private copies go in `~/.epik/tools/`, checked against their published checksums; nothing is installed system-wide, and nothing asks for an administrator's password.
 
-The checklist opens by itself until setup is complete, and whenever something a build needs has gone missing. **Check setup** in Epik's menu opens it any time. Epik also checks before every build, and a build that would fail for want of a tool or a sign-in fails at once and says which.
+The checklist opens by itself until setup is complete, and whenever something a build needs has gone missing. **Check setup…** in Epik's tray menu opens it any time. Epik also checks before every build, and a build that would fail for want of a tool or a sign-in fails at once and says which.
 
 ## Planning
 
@@ -31,7 +31,7 @@ Builds never merge into the default branch. A single issue's build stops at an o
 
 ## The app
 
-The app appears in the menu bar (macOS), the notification area (Windows) or the system tray (Linux). Clicking its icon shows a summary of what's building and what's waiting for the user. **Open Epik** opens its window, which lists every run and shows each one's issues live, with what each agent is doing. On Linux, where tray clicks aren't reported, its menu opens the window, and Epik opens its window when it starts, since not every desktop shows tray icons.
+The app appears in the menu bar (macOS), the notification area (Windows) or the system tray (Linux). Clicking its icon opens Epik's tray menu: whether Epik is running, each active run with its progress, and **Open Dashboard**, **Restart**, **Settings…**, **Check setup…**, **Check for updates…** (which opens Epik's releases on GitHub) and **Quit Epik**. **Open Dashboard** opens its window, which lists every run and shows each one's issues live, with what each agent is doing. On Linux, where tray clicks aren't reported, the tray has a native menu of the same items, without the runs, and Epik opens its window when it starts, since not every desktop shows tray icons.
 
 ## Runs, builds and their records
 
@@ -53,7 +53,7 @@ Desktop's Code tab loads user-scope plugins, so once the setup checklist has ins
 
 **A chat seems hung.** It usually isn't. Claude asks the user to approve Epik's actions as it works; that is intended, since Epik never acts without the user's say-so. Tell the user to look for an approval prompt waiting on their screen.
 
-**Start with Check setup.** For any install problem, have the user choose **Check setup** in Epik's menu. The checklist says what is missing or out of date, and offers to fix it.
+**Start with Check setup.** For any install problem, have the user choose **Check setup…** in Epik's tray menu. The checklist says what is missing or out of date, and offers to fix it.
 
 **Installing the plugin fails with `JSON Parse error`.** Claude Code's marketplace registry is corrupt, often from a stray trailing comma. Have the user check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the syntax it points at. If it says the name `epik` is already in use, they run `claude plugin marketplace remove epik` and press the checklist's button again.
 
