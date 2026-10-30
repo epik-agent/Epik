@@ -123,7 +123,6 @@ fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
     assert!(
         html.ends_with(concat!(
             r#"</form></section><section class="uninstall"><h3>Uninstall</h3>"#,
-            r#"<p class="muted">Remove what Epik put on this computer. You delete the app yourself afterward.</p>"#,
             r#"<button class="danger-outline">Uninstall Epik…</button></section></div>"#,
         )),
         "{html}"

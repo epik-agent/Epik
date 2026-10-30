@@ -171,7 +171,6 @@ pub fn UninstallButton(#[prop(optional_no_strip)] on_open: Option<Callback<()>>)
     view! {
         <section class="uninstall">
             <h3>"Uninstall"</h3>
-            <p class="muted">"Remove what Epik put on this computer. You delete the app yourself afterward."</p>
             <button class="danger-outline" on:click=open>"Uninstall Epik…"</button>
         </section>
     }
@@ -188,8 +187,8 @@ pub enum Uninstalling {
     Done(Vec<UninstallStep>),
 }
 
-/// The dialog that uninstalls Epik: what goes and what stays, then how
-/// each step went, then Quit. Uninstall is disabled while a build runs.
+/// The dialog that uninstalls Epik: what goes, what stays, and that you
+/// delete the app yourself, then how each step went, then Quit. Uninstall is disabled while a build runs.
 #[component]
 pub fn UninstallBody(
     plan: Uninstall,
@@ -237,6 +236,7 @@ pub fn UninstallBody(
                     <li>"Claude Code, and your sign-in to it"</li>
                     <li>"gh on your PATH, your sign-in to GitHub, and git pushing with gh"</li>
                 </ul>
+                <p>"Afterward, quit Epik and delete the app yourself."</p>
                 {history}
                 {building}
                 {error}
