@@ -1,7 +1,7 @@
 //! The tray's popover: each building run, the runs waiting for the user,
 //! and a way into Epik's window. It updates every second while open.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use epik_view::{Disposition, NowLine, Popover, RunCard};
@@ -9,6 +9,7 @@ use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 use serde::Serialize;
 
+use crate::flash::Flashes;
 use crate::graph::{MiniGraph, ProgressBar};
 use crate::tauri;
 use crate::words::Words;
@@ -38,29 +39,18 @@ pub fn latest(now: &[NowLine]) -> Option<&NowLine> {
     })
 }
 
-/// Remembers each run's last event, and says whether it changed since the
-/// last time it was seen, so its card can flash.
-#[derive(Debug, Default)]
-pub struct Flashes(HashMap<String, Option<i64>>);
-
-impl Flashes {
-    pub fn changed(&mut self, run: &str, last_event: Option<i64>) -> bool {
-        let before = self.0.insert(run.to_owned(), last_event);
-        matches!(before, Some(before) if last_event.is_some() && before != last_event)
-    }
-
-    /// The building runs whose cards flash.
-    fn flashing(&mut self, popover: &Popover) -> HashSet<String> {
-        popover
-            .building
-            .iter()
-            .filter(|run| match latest(&run.now) {
-                Some(line) if line.life.is_some() => self.changed(&run.run, line.last_event),
-                _ => false,
-            })
-            .map(|run| run.run.clone())
-            .collect()
-    }
+/// The building runs whose cards flash: those whose latest agent's last
+/// event changed.
+fn flashing(flashes: &mut Flashes, popover: &Popover) -> HashSet<String> {
+    popover
+        .building
+        .iter()
+        .filter(|run| match latest(&run.now) {
+            Some(line) if line.life.is_some() => flashes.changed(&run.run, line.last_event),
+            _ => false,
+        })
+        .map(|run| run.run.clone())
+        .collect()
 }
 
 /// A building run: its graph, title, time and summary, its latest agent's
@@ -166,7 +156,7 @@ pub fn PopoverWindow() -> impl IntoView {
             let runs = match tauri::invoke::<_, Popover>("popover", &()).await {
                 Ok(popover) => {
                     headline.set(popover.headline.clone());
-                    let flashing = flashes.try_update_value(|flashes| flashes.flashing(&popover));
+                    let flashing = flashes.try_update_value(|flashes| flashing(flashes, &popover));
                     Ok((popover, flashing.unwrap_or_default()))
                 }
                 Err(reason) => Err(reason),

@@ -31,7 +31,7 @@ fn checklist(rows: Vec<Row>, complete: bool) -> Checklist {
 
 #[test]
 fn a_done_row_has_its_mark_title_and_detail_and_no_button() {
-    let html = render(view! { <Item row=row("gh", ItemState::Done, None) busy=false/> });
+    let html = render(|| view! { <Item row=row("gh", ItemState::Done, None) busy=false/> });
     assert_eq!(
         html,
         r#"<li data-id="gh" class="item done"><span class="mark">✓</span><span class="title">GitHub CLI</span><span class="detail">gh 2.80.0</span></li>"#
@@ -41,7 +41,7 @@ fn a_done_row_has_its_mark_title_and_detail_and_no_button() {
 #[test]
 fn a_missing_row_has_its_button() {
     let html = render(
-        view! { <Item row=row("gh", ItemState::Missing, Some("Install a private copy")) busy=false/> },
+        || view! { <Item row=row("gh", ItemState::Missing, Some("Install a private copy")) busy=false/> },
     );
     assert_eq!(
         html,
@@ -52,7 +52,7 @@ fn a_missing_row_has_its_button() {
 #[test]
 fn an_outdated_row_has_its_mark() {
     let html = render(
-        view! { <Item row=row("node", ItemState::Outdated, Some("Update the private copy")) busy=false/> },
+        || view! { <Item row=row("node", ItemState::Outdated, Some("Update the private copy")) busy=false/> },
     );
     assert!(
         html.starts_with(r#"<li data-id="node" class="item outdated"><span class="mark">!</span>"#),
@@ -71,8 +71,10 @@ fn a_row_shows_its_kept_output_and_failure_after_its_detail() {
         false,
         Some("gh exited with 1"),
     );
-    let html = render(view! {
-        <Item row=row("gh", ItemState::Missing, Some("Install")) busy=false output=Some(kept)/>
+    let html = render(|| {
+        view! {
+            <Item row=row("gh", ItemState::Missing, Some("Install")) busy=false output=Some(kept)/>
+        }
     });
     assert!(
         html.ends_with(
@@ -86,7 +88,7 @@ fn a_row_shows_its_kept_output_and_failure_after_its_detail() {
 fn a_row_whose_step_succeeded_keeps_its_output_without_a_failure() {
     let kept = output(&["Signed in"], false, None);
     let html = render(
-        view! { <Item row=row("gh-auth", ItemState::Done, None) busy=false output=Some(kept)/> },
+        || view! { <Item row=row("gh-auth", ItemState::Done, None) busy=false output=Some(kept)/> },
     );
     assert!(
         html.contains(r#"<pre class="log">Signed in</pre>"#),
@@ -98,7 +100,7 @@ fn a_row_whose_step_succeeded_keeps_its_output_without_a_failure() {
 #[test]
 fn a_busy_rows_button_is_disabled() {
     let html =
-        render(view! { <Item row=row("gh", ItemState::Missing, Some("Install")) busy=true/> });
+        render(|| view! { <Item row=row("gh", ItemState::Missing, Some("Install")) busy=true/> });
     assert!(
         html.contains(r#"<button disabled class="primary">Install</button>"#),
         "{html}"
@@ -116,7 +118,7 @@ fn while_a_step_runs_every_button_is_disabled() {
         false,
     )));
     setup.started("gh");
-    let html = render(view! { <Items setup/> });
+    let html = render(|| view! { <Items setup/> });
     assert_eq!(html.matches("<button").count(), 2, "{html}");
     assert_eq!(html.matches("<button disabled").count(), 2, "{html}");
     // The running step's log, empty until it prints.
@@ -127,7 +129,7 @@ fn while_a_step_runs_every_button_is_disabled() {
 fn the_complete_message_shows_when_the_checklist_is_complete() {
     let mut setup = Setup::default();
     setup.fetched(Ok(checklist(vec![row("gh", ItemState::Done, None)], true)));
-    let html = render(view! { <Items setup/> });
+    let html = render(|| view! { <Items setup/> });
     assert!(
         html.contains("<section id=\"complete\"><h2>Epik is set up.</h2><p>Start Claude Code and say “Hello, Epik.”</p></section>"),
         "{html}"
@@ -136,14 +138,14 @@ fn the_complete_message_shows_when_the_checklist_is_complete() {
 
 #[test]
 fn the_complete_message_is_hidden_until_then() {
-    let html = render(view! { <Items setup=Setup::default()/> });
+    let html = render(|| view! { <Items setup=Setup::default()/> });
     assert!(html.contains(r#"<section id="complete" hidden>"#), "{html}");
     let mut setup = Setup::default();
     setup.fetched(Ok(checklist(
         vec![row("gh", ItemState::Missing, None)],
         false,
     )));
-    let html = render(view! { <Items setup/> });
+    let html = render(|| view! { <Items setup/> });
     assert!(html.contains(r#"<section id="complete" hidden>"#), "{html}");
 }
 
@@ -151,7 +153,7 @@ fn the_complete_message_is_hidden_until_then() {
 fn a_failed_fetch_is_shown_in_the_error_line() {
     let mut setup = Setup::default();
     setup.fetched(Err("gh: command not found".into()));
-    let html = render(view! { <Items setup/> });
+    let html = render(|| view! { <Items setup/> });
     assert!(
         html.ends_with(r#"<p id="error">Couldn't check setup: gh: command not found</p>"#),
         "{html}"

@@ -1,7 +1,7 @@
 //! The Epik app's main window: Home, a run's page, and Settings.
 //!
-//! The page in `ui/app.html` asks these commands for what to show every
-//! second, and draws it. The window notifies; its only controls are Rerun
+//! The window, drawn by `epik-ui` at `index.html#/`, asks these commands
+//! for what to show every second, and draws it. The window notifies; its only controls are Rerun
 //! and Delete on a run that needs attention, and Settings. Every command
 //! goes through `epik-core`; nothing here touches `~/.epik` itself.
 
@@ -166,7 +166,7 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     WebviewWindowBuilder::new(
         handle,
         LABEL,
-        WebviewUrl::App(format!("app.html{hash}").into()),
+        WebviewUrl::App(format!("index.html{hash}").into()),
     )
     .title("Epik")
     .inner_size(1120.0, 780.0)

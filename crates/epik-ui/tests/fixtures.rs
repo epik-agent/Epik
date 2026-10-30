@@ -2,10 +2,11 @@
 
 #![allow(dead_code)]
 
-use leptos::prelude::RenderHtml;
+use leptos::prelude::{Owner, RenderHtml};
 
 use epik_view::{
-    Disposition, Layout, MiniGraph, NodeState, NowLine, Popover, Progress, RunCard, Span,
+    Disposition, Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
+    RepositoryRow, RunCard, RunPage, Span,
 };
 
 pub fn text(text: &str) -> Span {
@@ -93,7 +94,101 @@ pub fn popover(building: Vec<RunCard>, waiting: Vec<(Disposition, String, Vec<Sp
     }
 }
 
-/// The HTML of `view`, without the markers Leptos leaves for hydration.
-pub fn render(view: impl RenderHtml) -> String {
-    view.to_html().replace("<!>", "")
+/// A run that has ended, waiting for review or needing attention.
+pub fn ended(run: &str, disposition: Disposition) -> RunCard {
+    RunCard {
+        run: run.into(),
+        disposition,
+        sentence: Some(vec![
+            text("Merged into "),
+            link("PR #30", "https://github.com/acme/widgets/pull/30"),
+        ]),
+        ..card(vec![])
+    }
+}
+
+pub fn home(building: Vec<RunCard>, waiting: Vec<RunCard>, attention: Vec<RunCard>) -> Home {
+    Home {
+        headline: "One run building".into(),
+        missing_repository: false,
+        building,
+        waiting,
+        attention,
+    }
+}
+
+/// Issue `number` of acme/widgets, in `state`, at `column` and `row`.
+pub fn issue(number: u64, state: NodeState, column: usize, row: usize) -> IssueCard {
+    IssueCard {
+        number,
+        url: format!("https://github.com/acme/widgets/issues/{number}"),
+        title: "Add a power operator".into(),
+        state,
+        column,
+        row,
+        figures: None,
+        line: vec![
+            text("Starts when "),
+            link("#1", "https://github.com/acme/widgets/issues/1"),
+            text(" is merged"),
+        ],
+        life: None,
+        last_event: None,
+        sentence: vec![text("Waiting for #1")],
+        worked: None,
+        depends_on: vec![link("#1", "https://github.com/acme/widgets/issues/1")],
+        unblocks: vec![text("nothing")],
+        pull_request: vec![text("none yet")],
+        recent: vec![],
+        log: None,
+    }
+}
+
+/// A run of three issues: #1 blocks #2 and #3.
+pub fn run_page() -> RunPage {
+    RunPage {
+        run: "acme/widgets#13".into(),
+        title: "Exponentiation".into(),
+        epic: link(
+            "acme/widgets#13",
+            "https://github.com/acme/widgets/issues/13",
+        ),
+        about: vec![
+            text("3 issues · merging into "),
+            code("epic/13-exponentiation"),
+        ],
+        sentence: "First build running. 1 of 3 issues merged, 1 agent working.".into(),
+        disposition: Disposition::Building,
+        elapsed: "4m 12s".into(),
+        cost: "$1.20".into(),
+        also_building: vec![],
+        builds: vec!["First build, started 10:02".into()],
+        columns: 2,
+        rows: 2,
+        issues: vec![
+            issue(1, NodeState::Merged, 0, 0),
+            issue(2, NodeState::Running, 1, 0),
+            issue(3, NodeState::NotStarted, 1, 1),
+        ],
+        edges: vec![(1, 2), (1, 3)],
+    }
+}
+
+pub fn repository(repo: &str, runs: Vec<(&str, &str)>, missing: bool) -> RepositoryRow {
+    RepositoryRow {
+        repo: repo.into(),
+        url: format!("https://github.com/{repo}"),
+        about: "2 runs · added Oct 20".into(),
+        runs: runs
+            .into_iter()
+            .map(|(run, title)| (run.into(), title.into()))
+            .collect(),
+        missing,
+    }
+}
+
+/// The HTML of the view `draw` draws, without the markers Leptos leaves
+/// for hydration. It draws under a reactive owner, as in a window.
+pub fn render<V: RenderHtml>(draw: impl FnOnce() -> V) -> String {
+    Owner::new().with(|| draw().to_html().replace("<!>", ""))
 }
