@@ -8,6 +8,10 @@ times larger and then scaled down for smooth edges.
   light and dark. Idle has hollow nodes; building has solid ones.
 - Windows and Linux: in color. Idle is gray; building has the mark's
   colors.
+- Needing attention: a red dot at the top right. On Windows and Linux it
+  is added to the idle and building icons. On macOS a template can't be
+  red, so the "-gray" icons draw the template marks in a gray that reads
+  on light and dark menu bars, with the dot.
 
 Run it from this directory with Pillow installed: python3 make-tray-icons.py
 """
@@ -26,9 +30,13 @@ EDGE_BLACK = (0, 0, 0, 150)
 GRAY = (140, 140, 140, 255)
 EDGE_GRAY = (140, 140, 140, 150)
 GREEN = (0, 192, 122, 255)
+RED = (215, 58, 74, 255)
+# The dot's center and radius, and the clear gap around it.
+DOT = ((55.5, 8.5), 8.5)
+DOT_GAP = 2.5
 
 
-def draw(size, node_colors, edge_color, hollow):
+def draw(size, node_colors, edge_color, hollow, dot):
     big = size * SUPER
     scale = big / 64
     image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
@@ -45,16 +53,26 @@ def draw(size, node_colors, edge_color, hollow):
             pen.ellipse(box, outline=color, width=round(RING_WIDTH * scale))
         else:
             pen.ellipse(box, fill=color)
+    if dot:
+        (x, y), r = DOT
+        gap = r + DOT_GAP
+        # Clear around the dot, so it stands apart from the mark.
+        pen.ellipse([(x - gap) * scale, (y - gap) * scale, (x + gap) * scale, (y + gap) * scale], fill=(0, 0, 0, 0))
+        pen.ellipse([(x - r) * scale, (y - r) * scale, (x + r) * scale, (y + r) * scale], fill=RED)
     return image.resize((size, size), Image.LANCZOS)
 
 
 ICONS = {
-    "idle-template": ([BLACK] * 4, EDGE_BLACK, True),
-    "building-template": ([BLACK] * 4, EDGE_BLACK, False),
-    "idle": ([GRAY] * 4, EDGE_GRAY, False),
-    "building": ([GREEN, GRAY, GRAY, GREEN], EDGE_GRAY, False),
+    "idle-template": ([BLACK] * 4, EDGE_BLACK, True, False),
+    "building-template": ([BLACK] * 4, EDGE_BLACK, False, False),
+    "idle": ([GRAY] * 4, EDGE_GRAY, False, False),
+    "building": ([GREEN, GRAY, GRAY, GREEN], EDGE_GRAY, False, False),
+    "idle-attention": ([GRAY] * 4, EDGE_GRAY, False, True),
+    "building-attention": ([GREEN, GRAY, GRAY, GREEN], EDGE_GRAY, False, True),
+    "idle-attention-gray": ([GRAY] * 4, EDGE_GRAY, True, True),
+    "building-attention-gray": ([GRAY] * 4, EDGE_GRAY, False, True),
 }
 
-for name, (nodes, edges, hollow) in ICONS.items():
+for name, (nodes, edges, hollow, dot) in ICONS.items():
     for suffix, size in (("", 18), ("@2x", 36)):
-        draw(size, nodes, edges, hollow).save(f"{name}{suffix}.png")
+        draw(size, nodes, edges, hollow, dot).save(f"{name}{suffix}.png")
