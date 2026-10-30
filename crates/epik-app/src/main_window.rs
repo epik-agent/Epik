@@ -193,7 +193,7 @@ pub fn open_log(path: String, window: State<'_, Window>) -> Result<(), String> {
 }
 
 /// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
-/// for a run's page), or brings it forward there.
+/// for a run's page, `settings` for Settings), or brings it forward there.
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     // A run's `#` would end the URL's fragment.
     let hash = format!("#/{}", route.replace('#', "%23"));

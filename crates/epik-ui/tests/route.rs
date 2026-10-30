@@ -53,3 +53,10 @@ fn a_href_escapes_a_runs_hash() {
     assert_eq!(href("run/acme/widgets#13"), "#/run/acme/widgets%2313");
     assert_eq!(href(""), "#/");
 }
+
+#[test]
+fn settings_is_a_page_of_the_main_window() {
+    assert_eq!(Route::from_hash("#/settings"), Route::Main);
+    assert_eq!(Page::from_hash("#/settings"), Page::Settings);
+    assert_eq!(href("settings"), "#/settings");
+}

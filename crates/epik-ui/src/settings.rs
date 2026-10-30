@@ -1,5 +1,5 @@
-//! Settings, a dialog over Home: the monitored repositories, a form to
-//! monitor another, and a button to uninstall Epik.
+//! Settings, a page of the main window: the monitored repositories, a form
+//! to monitor another, and a button to uninstall Epik.
 
 use epik_view::{RepositoryRow, Settings, Uninstall, UninstallStep};
 use leptos::ev::SubmitEvent;
@@ -9,6 +9,37 @@ use serde::Serialize;
 
 use crate::tauri;
 use crate::words::GithubLink;
+
+/// The Settings page: the monitored repositories, each with its button,
+/// the form to monitor another, and the button that opens the confirmation
+/// to uninstall Epik. The list is redrawn only when `settings` changes, so
+/// the form keeps what is typed in it.
+#[component]
+pub fn SettingsPage(
+    #[prop(into)] settings: Signal<Result<Settings, String>>,
+    error: RwSignal<String>,
+    #[prop(optional_no_strip)] on_stop: Option<Callback<RepositoryRow>>,
+    #[prop(optional_no_strip)] on_monitored: Option<Callback<()>>,
+    #[prop(optional_no_strip)] on_open_uninstall: Option<Callback<()>>,
+) -> impl IntoView {
+    let settings = Memo::new(move |_| settings.get());
+    view! {
+        <h1 class="page-title">"Settings"</h1>
+        <div class="card settings">
+            <section>
+                <h3>"Monitored repositories"</h3>
+                <p class="muted">
+                    "Epik monitors these repositories. When Epik creates an epic or starts a build in a repository that isn't listed, it adds that repository here."
+                </p>
+                <ul id="repositories">
+                    {move || view! { <Repositories settings=settings.get() on_stop/> }}
+                </ul>
+                <MonitorForm error on_monitored/>
+            </section>
+            <UninstallButton on_open=on_open_uninstall/>
+        </div>
+    }
+}
 
 /// The monitored repositories' rows, each with its button, or why they
 /// couldn't be read. A missing repository's button removes it; another's

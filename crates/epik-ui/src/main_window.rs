@@ -1,7 +1,8 @@
-//! The main window: a sidebar beside Home (`#/`) or a run's page
-//! (`#/run/<owner/name%23n>`), and Settings over them. It asks the app what to show every second and
-//! draws it. Its only controls are Rerun and Delete on a run that needs
-//! attention, and Settings, which can also uninstall Epik.
+//! The main window: a sidebar beside Home (`#/`), a run's page
+//! (`#/run/<owner/name%23n>`), or Settings (`#/settings`). It asks the app
+//! what to show every second and draws it. Its only controls are Rerun and
+//! Delete on a run that needs attention, and Settings, which can also
+//! uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -20,9 +21,7 @@ use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::{kept, keyed, part};
 use crate::run_page::RunView;
-use crate::settings::{
-    ConfirmBody, MonitorForm, Repositories, UninstallBody, UninstallButton, Uninstalling,
-};
+use crate::settings::{ConfirmBody, SettingsPage, UninstallBody, Uninstalling};
 use crate::tauri;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -30,10 +29,12 @@ const REFRESH: Duration = Duration::from_secs(1);
 /// A page of the main window, as its URL's hash names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
-    /// `#/`, and any hash that isn't a run's page.
+    /// `#/`, and any hash that isn't another page's.
     Home,
     /// `#/run/<owner/name%23n>`: the run's page.
     Run(String),
+    /// `#/settings`.
+    Settings,
 }
 
 impl Page {
@@ -42,6 +43,7 @@ impl Page {
         let path = decode(path.strip_prefix('/').unwrap_or(path));
         match path.strip_prefix("run/") {
             Some(run) => Page::Run(run.to_owned()),
+            None if path == "settings" => Page::Settings,
             None => Page::Home,
         }
     }
@@ -72,7 +74,8 @@ fn decode(text: &str) -> String {
 }
 
 /// The hash for `path`: `""` for Home, `run/<owner/name#n>` for a run's
-/// page. A run's `#` would end the URL's fragment, so it is escaped.
+/// page, `settings` for Settings. A run's `#` would end the URL's
+/// fragment, so it is escaped.
 pub fn href(path: &str) -> String {
     format!("#/{}", path.replace('#', "%23"))
 }
@@ -96,15 +99,14 @@ fn sidebar_key(run: &SidebarRun) -> String {
 
 /// The sidebar beside every page: the mark and name; Runs, which opens
 /// Home, with a foldable list of the runs, each opening its page; and at
-/// the bottom Settings, marked when a monitored repository is no longer on
-/// GitHub, and how long Epik has been running. The current page is
-/// highlighted.
+/// the bottom Settings, which opens its page, marked when a monitored
+/// repository is no longer on GitHub, and how long Epik has been running.
+/// The current page is highlighted.
 #[component]
 pub fn Sidebar(
     #[prop(into)] sidebar: Signal<SidebarView>,
     #[prop(into)] page: Signal<Page>,
     #[prop(optional)] folded: bool,
-    #[prop(optional)] on_settings: Option<Callback<()>>,
 ) -> impl IntoView {
     let folded = RwSignal::new(folded);
     let runs = part(sidebar, |sidebar| sidebar.runs.clone());
@@ -112,12 +114,8 @@ pub fn Sidebar(
     let missing = part(sidebar, |sidebar| sidebar.missing_repository);
     let status = part(sidebar, |sidebar| sidebar.status.clone());
     let at_home = Memo::new(move |_| page.with(|page| *page == Page::Home));
+    let at_settings = Memo::new(move |_| page.with(|page| *page == Page::Settings));
     let fold = move |_: MouseEvent| folded.update(|folded| *folded = !*folded);
-    let settings = move |_: MouseEvent| {
-        if let Some(on_settings) = on_settings {
-            on_settings.run(());
-        }
-    };
     let run_item = move |run: Signal<SidebarRun>| {
         let key = part(run, |run| run.run.clone());
         let class = Memo::new(move |_| {
@@ -164,10 +162,13 @@ pub fn Sidebar(
                 .then(|| view! { <ul class="run-list">{keyed(runs.into(), sidebar_key, run_item)}</ul> })
         }}
         <div class="foot">
-            <button class="item settings" on:click=settings>
+            <a
+                href=href("settings")
+                class=move || if at_settings.get() { "item settings current" } else { "item settings" }
+            >
                 "Settings"
                 {move || missing.get().then(|| view! { <span class="badge">"✕"</span> })}
-            </button>
+            </a>
             <div class="status">
                 <span class="dot"></span>
                 {status}
@@ -209,6 +210,9 @@ pub fn RunBar(title: String, also_building: Vec<(String, String)>) -> impl IntoV
 enum Shown {
     Home(Home),
     Run(Box<RunPage>),
+    /// Settings, or why they couldn't be read, which the page shows in
+    /// place of the repositories.
+    Settings(Result<Settings, String>),
     Failed(String),
 }
 
@@ -219,6 +223,7 @@ enum Which {
     Nothing,
     Home,
     Run(String),
+    Settings,
     Failed(String),
 }
 
@@ -247,7 +252,7 @@ fn flashed(flashes: &mut Flashes, shown: &Shown) -> Vec<String> {
             .iter()
             .map(|issue| (format!("{}#{}", page.run, issue.number), issue.last_event))
             .collect(),
-        Shown::Failed(_) => vec![],
+        Shown::Settings(_) | Shown::Failed(_) => vec![],
     };
     seen.into_iter()
         .filter(|(key, last_event)| flashes.changed(key, *last_event))
@@ -272,11 +277,6 @@ struct Log {
 
 fn current_page() -> Page {
     Page::from_hash(&window().location().hash().unwrap_or_default())
-}
-
-/// Fetches Settings again.
-async fn fetch_settings(settings: RwSignal<Option<Result<Settings, String>>>) {
-    settings.set(Some(tauri::invoke::<_, Settings>("settings", &()).await));
 }
 
 /// Fetches what the confirmation to uninstall Epik says, or shows why it
@@ -325,11 +325,15 @@ pub fn MainWindow() -> impl IntoView {
                         .await
                         .map(|page| Shown::Run(Box::new(page)))
                 }
+                Page::Settings => Ok(Shown::Settings(
+                    tauri::invoke::<_, Settings>("settings", &()).await,
+                )),
             };
             match fetched {
                 Ok(fetched) => {
                     let title = match &fetched {
                         Shown::Run(page) => format!("{} · Epik", page.title),
+                        Shown::Settings(_) => "Settings · Epik".to_owned(),
                         _ => "Epik".to_owned(),
                     };
                     document().set_title(&title);
@@ -374,28 +378,17 @@ pub fn MainWindow() -> impl IntoView {
         });
     });
 
-    // Settings, and the dialog that confirms no longer monitoring a
+    // The dialog on the Settings page that confirms no longer monitoring a
     // repository.
-    let settings = RwSignal::new(None::<Result<Settings, String>>);
     let monitor_error = RwSignal::new(String::new());
-    let settings_dialog = NodeRef::<Dialog>::new();
     let confirm_dialog = NodeRef::<Dialog>::new();
     let cancel = NodeRef::<Button>::new();
     let confirming = RwSignal::new(None::<RepositoryRow>);
-    let on_settings = Callback::new(move |()| {
-        spawn_local(async move {
-            fetch_settings(settings).await;
-            if let Some(dialog) = settings_dialog.get_untracked() {
-                let _ = dialog.show_modal();
-            }
-        });
-    });
     let stop_monitoring = move |repo: String| {
         spawn_local(async move {
             if let Err(reason) = tauri::invoke::<_, ()>("stop_monitoring", &Repo { repo }).await {
                 error.set(reason);
             }
-            fetch_settings(settings).await;
             refresh();
         });
     };
@@ -421,7 +414,7 @@ pub fn MainWindow() -> impl IntoView {
             stop_monitoring(repository.repo);
         }
     };
-    let on_monitored = Callback::new(move |()| spawn_local(fetch_settings(settings)));
+    let on_monitored = Callback::new(move |()| refresh());
 
     // The dialog that uninstalls Epik. While it asks, it follows whether a
     // build is running.
@@ -478,7 +471,7 @@ pub fn MainWindow() -> impl IntoView {
 
     let bar = Memo::new(move |before: Option<&Bar>| {
         shown.with(|shown| match shown {
-            Some(Shown::Home(_)) => Bar::Nothing,
+            Some(Shown::Home(_) | Shown::Settings(_)) => Bar::Nothing,
             Some(Shown::Run(page)) => Bar::Run(page.title.clone(), page.also_building.clone()),
             _ => before.cloned().unwrap_or(Bar::Nothing),
         })
@@ -495,6 +488,7 @@ pub fn MainWindow() -> impl IntoView {
             None => Which::Nothing,
             Some(Shown::Home(_)) => Which::Home,
             Some(Shown::Run(page)) => Which::Run(page.run.clone()),
+            Some(Shown::Settings(_)) => Which::Settings,
             Some(Shown::Failed(reason)) => Which::Failed(reason.clone()),
         })
     });
@@ -504,6 +498,10 @@ pub fn MainWindow() -> impl IntoView {
     };
     let run_page = move || match shown.get() {
         Some(Shown::Run(page)) => Some(*page),
+        _ => None,
+    };
+    let settings = move || match shown.get() {
+        Some(Shown::Settings(settings)) => Some(settings),
         _ => None,
     };
     let error_line = move || {
@@ -550,31 +548,30 @@ pub fn MainWindow() -> impl IntoView {
             }
             .into_any()
         }
+        Which::Settings => {
+            let settings = untrack(settings).map(|initial| kept(initial, settings));
+            view! {
+                {error_line}
+                {settings.map(|settings| view! {
+                    <SettingsPage
+                        settings
+                        error=monitor_error
+                        on_stop=Some(on_stop)
+                        on_monitored=Some(on_monitored)
+                        on_open_uninstall=Some(on_open_uninstall)
+                    />
+                })}
+            }
+            .into_any()
+        }
     };
 
     view! {
-        <nav id="sidebar"><Sidebar sidebar page on_settings/></nav>
+        <nav id="sidebar"><Sidebar sidebar page/></nav>
         <div id="content">
             {bar}
             <main id="page">{body}</main>
         </div>
-        <dialog id="settings" node_ref=settings_dialog>
-            <form method="dialog" class="dialog-head">
-                <h2>"Settings"</h2>
-                <button class="close" aria-label="Close">"✕"</button>
-            </form>
-            <section>
-                <h3>"Monitored repositories"</h3>
-                <p class="muted">
-                    "Epik monitors these repositories. When Epik creates an epic or starts a build in a repository that isn't listed, it adds that repository here."
-                </p>
-                <ul id="repositories">
-                    {move || settings.get().map(|settings| view! { <Repositories settings on_stop=Some(on_stop)/> })}
-                </ul>
-                <MonitorForm error=monitor_error on_monitored=Some(on_monitored)/>
-            </section>
-            <UninstallButton on_open=Some(on_open_uninstall)/>
-        </dialog>
         <dialog id="confirm" node_ref=confirm_dialog on:close=confirmed>
             {move || confirming.get().map(|repository| view! { <ConfirmBody repository/> })}
             <form method="dialog" class="buttons">

@@ -521,6 +521,38 @@ fn settings_lists_each_repository_with_its_runs_and_when_it_was_added() {
 }
 
 #[test]
+fn stopping_monitoring_a_repository_lists_only_its_runs() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let repository = |repo: &str| Repository {
+        repo: repo.to_owned(),
+        added_at: time(0),
+        added_by_user: false,
+        missing: false,
+    };
+    let mut elsewhere = failed_run();
+    elsewhere.run = RunKey::new("wpm/calc", 7);
+    elsewhere.repo = "wpm/calc".to_owned();
+
+    let settings = settings(
+        &[repository("wpm/epik-test"), repository("wpm/calc")],
+        &[exponentiation(), elsewhere, waiting_run()],
+        &zone,
+    );
+
+    assert_eq!(
+        settings.repositories[0].runs,
+        [
+            ("wpm/epik-test#13".to_owned(), "Exponentiation".to_owned()),
+            ("wpm/epik-test#9".to_owned(), "Calculator REPL".to_owned()),
+        ]
+    );
+    assert_eq!(
+        settings.repositories[1].runs,
+        [("wpm/calc#7".to_owned(), "Division by zero".to_owned())]
+    );
+}
+
+#[test]
 fn uninstalling_reports_each_step_by_its_title_with_any_error() {
     use epik_core::uninstall::{Outcome, Step};
     let outcomes = [
