@@ -1319,6 +1319,7 @@ dependencies = [
  "async-io",
  "chrono",
  "dirs",
+ "epik-view",
  "flate2",
  "futures",
  "interprocess",

@@ -3,7 +3,8 @@
 //!
 //! Only types live here, with no dependency but `serde`, so a front end
 //! compiled to WebAssembly can deserialize what the app serializes. The
-//! functions that build them are in `epik-app`.
+//! functions that build them are in `epik-app`, and in `epik-core` for
+//! [`Stream`].
 
 use serde::{Deserialize, Serialize};
 
@@ -262,4 +263,90 @@ pub struct UninstallStep {
     pub title: String,
     /// Why it couldn't, if it couldn't.
     pub error: Option<String>,
+}
+
+/// An agent's log as people read it: what it said and did, in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stream {
+    pub entries: Vec<StreamEntry>,
+    /// Whether its last tool call hasn't completed, so the agent is still
+    /// at work.
+    pub working: bool,
+}
+
+/// One thing an agent said or did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamEntry {
+    /// When it began, in milliseconds since the Unix epoch. None in a log
+    /// written before Epik recorded times.
+    pub at: Option<i64>,
+    pub what: Entry,
+}
+
+/// What an agent said or did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Entry {
+    /// The agent's own words.
+    Narration { text: String },
+    /// A command line and what it printed.
+    Command { command: String, output: Excerpt },
+    /// A file read, and which of its lines, if not all of them.
+    Read {
+        path: String,
+        lines: Option<LineRange>,
+    },
+    /// A search: its pattern, where it looked, how many matches it found,
+    /// and where they are, as `file:line` or a file.
+    Search {
+        pattern: String,
+        within: Option<String>,
+        matches: usize,
+        hits: Excerpt,
+    },
+    /// A file changed: the lines it removed and added.
+    Edit {
+        path: String,
+        changes: Excerpt<Change>,
+    },
+    /// A file written whole.
+    NewFile { path: String, content: Excerpt },
+    /// Any other tool call, in words: "Updating its plan".
+    Other { text: String },
+}
+
+/// Lines of a file, counted from 1. `to` is None when the range runs to
+/// the end of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineRange {
+    pub from: u64,
+    pub to: Option<u64>,
+}
+
+/// A line an edit removed or added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Change {
+    Removed(String),
+    Added(String),
+}
+
+/// Lines cut down to fit: all of them if there are few, else the first
+/// and last, with "… N more lines" between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Excerpt<T = String> {
+    pub head: Vec<T>,
+    /// How many lines are left out between `head` and `tail`.
+    pub more: usize,
+    pub tail: Vec<T>,
+}
+
+impl<T> Default for Excerpt<T> {
+    fn default() -> Self {
+        Self {
+            head: Vec::new(),
+            more: 0,
+            tail: Vec::new(),
+        }
+    }
 }
