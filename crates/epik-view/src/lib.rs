@@ -73,7 +73,7 @@ pub struct NowLine {
     pub last_event: Option<i64>,
 }
 
-/// A run, as Home and the popover show it.
+/// A run, as Home shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCard {
     /// The run, `owner/name#number`.
@@ -98,7 +98,7 @@ pub struct RunCard {
     pub sentence: Option<Words>,
     /// A second line under it.
     pub note: Option<String>,
-    /// For the popover: where it stands, while building.
+    /// Where it stands, while building.
     pub summary: Option<Words>,
 }
 
@@ -134,14 +134,28 @@ pub struct Sidebar {
     pub status: String,
 }
 
-/// The tray's popover.
+/// A building run, as the tray menu lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayRun {
+    /// The run, `owner/name#number`.
+    pub run: String,
+    pub title: String,
+    /// How many of its issues are merged, of all of them: "3/7".
+    pub count: String,
+    /// Each issue's state, in the run's order: a segment each of its
+    /// progress bar.
+    pub segments: Vec<NodeState>,
+    /// "building #443 · 2m 00s · epik-agent/Epik#441".
+    pub line: String,
+}
+
+/// The tray menu: whether Epik is running, and each building run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Popover {
-    /// "Two runs building".
-    pub headline: String,
-    pub building: Vec<RunCard>,
-    /// A sentence for each run waiting for review or needing attention.
-    pub waiting: Vec<(Disposition, String, Words)>,
+    /// "3 runs · 4 agents · up 4h 12m".
+    pub about: String,
+    /// The building runs.
+    pub runs: Vec<TrayRun>,
 }
 
 /// An issue's card on the run page, and what its detail panel says.

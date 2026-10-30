@@ -2,16 +2,19 @@
 //! tray (Linux).
 //!
 //! The tray runs the same socket and builds as `--headless`, with Tauri's
-//! event loop on the main thread. Clicking its icon opens the popover; its
-//! menu (a right click, or on Linux, where tray clicks aren't reported, any
-//! click) opens Epik's window, checks setup, or quits. The icon shows
-//! whether anything is building, and with a red dot, whether any run needs
-//! attention. On macOS, Epik is in the Dock and Cmd-Tab only while its main
-//! window is open. Where there is no tray, the app runs headless and says so.
+//! event loop on the main thread. Clicking its icon opens the tray menu,
+//! which says what is building and opens Epik's window, its Settings or the
+//! setup checklist, checks for updates, restarts or quits. Linux doesn't
+//! report tray clicks, so there the tray has a native menu of the same
+//! items instead. The icon shows whether anything is building, and with a
+//! red dot, whether any run needs attention. On macOS, Epik is in the Dock
+//! and Cmd-Tab only while its main window is open. Where there is no tray,
+//! the app runs headless and says so.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -20,9 +23,9 @@ use std::time::Duration;
 use epik_core::repositories;
 use epik_core::run::Disposition;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::MenuEvent;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use crate::App;
 use crate::{main_window, popover, setup_window};
@@ -31,9 +34,12 @@ use crate::{main_window, popover, setup_window};
 /// attention, besides each time a build changes.
 const REFRESH: Duration = Duration::from_secs(2);
 
-const QUIT: &str = "quit";
+const OPEN_DASHBOARD: &str = "open-dashboard";
+const RESTART: &str = "restart";
+const SETTINGS: &str = "settings";
 const CHECK_SETUP: &str = "check-setup";
-const OPEN_EPIK: &str = "open-epik";
+const CHECK_FOR_UPDATES: &str = "check-for-updates";
+const QUIT: &str = "quit";
 
 /// Runs the app in the tray until Quit, SIGINT or SIGTERM, or headless
 /// where there is no tray.
@@ -64,7 +70,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         return Err("no display".to_owned());
     }
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-    let mut tauri = tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .manage(main_window::Window {
             root: app.root.clone(),
             builds: app.builds.clone(),
@@ -75,7 +81,11 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             builds: app.builds.clone(),
             outputs: Default::default(),
         })
-        .manage(popover::Quit(app.stop.clone()))
+        .manage(popover::Quit {
+            stop: app.stop.clone(),
+            restart: Arc::default(),
+        })
+        .on_menu_event(chosen)
         .invoke_handler(tauri::generate_handler![
             main_window::home,
             main_window::sidebar,
@@ -91,68 +101,155 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::open_github,
             main_window::agent_stream,
             popover::open_main,
+            popover::check_setup,
+            popover::check_for_updates,
+            popover::restart,
             popover::quit,
             setup_window::setup_checklist,
             setup_window::setup_run,
             setup_window::setup_output,
-        ])
+        ]);
+    // The default app menu's Quit would end Epik without stopping its
+    // builds, and take Cmd-Q from the tray menu.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.menu(app_menu);
+    }
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut tauri = builder
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
     // No Dock icon until the main window opens.
     #[cfg(target_os = "macos")]
     tauri.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-    let handle = tauri.handle();
     let failed = |error: tauri::Error| error.to_string();
-    let menu = Menu::with_items(
-        handle,
-        &[
-            &MenuItem::with_id(handle, OPEN_EPIK, "Open Epik", true, None::<&str>)
-                .map_err(failed)?,
-            &MenuItem::with_id(handle, CHECK_SETUP, "Check setup", true, None::<&str>)
-                .map_err(failed)?,
-            &PredefinedMenuItem::separator(handle).map_err(failed)?,
-            &MenuItem::with_id(handle, QUIT, "Quit Epik", true, None::<&str>).map_err(failed)?,
-        ],
-    )
-    .map_err(failed)?;
-    let stop = app.stop.clone();
     let idle = look(TEMPLATE, false, false);
+    let root = app.root.clone();
     let tray = TrayIconBuilder::new()
         .icon(icon(idle))
         .icon_as_template(idle.template)
         .tooltip("Epik")
-        .menu(&menu)
         .show_menu_on_left_click(cfg!(target_os = "linux"))
-        .on_menu_event(move |handle, event| {
-            let opened = match event.id().as_ref() {
-                QUIT => {
-                    stop.store(true, Ordering::SeqCst);
-                    Ok(())
-                }
-                CHECK_SETUP => setup_window::open(handle),
-                OPEN_EPIK => main_window::open(handle, ""),
-                _ => Ok(()),
-            };
-            if let Err(error) = opened {
-                eprintln!("epik-app: couldn't open the window: {error}");
-            }
-        })
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(move |tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 rect,
                 ..
             } = event
-                && let Err(error) = popover::toggle(tray.app_handle(), rect)
+                && let Err(error) = popover::toggle(tray.app_handle(), rect, building(&root))
             {
-                eprintln!("epik-app: couldn't open the popover: {error}");
+                eprintln!("epik-app: couldn't open the tray menu: {error}");
             }
-        })
-        .build(&tauri)
-        .map_err(failed)?;
+        });
+    // Linux doesn't report tray clicks, so there the menu is native.
+    #[cfg(target_os = "linux")]
+    let tray = tray.menu(&tray_menu(tauri.handle()).map_err(failed)?);
+    let tray = tray.build(&tauri).map_err(failed)?;
     Ok((tauri, tray))
+}
+
+/// The tray's native menu on Linux: the tray menu's items, without its
+/// header and runs.
+#[cfg(target_os = "linux")]
+fn tray_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    let item = |id, label| MenuItem::with_id(handle, id, label, true, None::<&str>);
+    Menu::with_items(
+        handle,
+        &[
+            &item(OPEN_DASHBOARD, "Open Dashboard")?,
+            &PredefinedMenuItem::separator(handle)?,
+            &item(RESTART, "Restart")?,
+            &PredefinedMenuItem::separator(handle)?,
+            &item(SETTINGS, "Settings…")?,
+            &item(CHECK_SETUP, "Check setup…")?,
+            &item(CHECK_FOR_UPDATES, "Check for updates…")?,
+            &item(QUIT, "Quit Epik")?,
+        ],
+    )
+}
+
+/// The app's menu on macOS: the default menu's Epik, Edit and Window
+/// menus, whose Quit Epik stops Epik as the tray menu's does.
+#[cfg(target_os = "macos")]
+fn app_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let separator = || PredefinedMenuItem::separator(handle);
+    Menu::with_items(
+        handle,
+        &[
+            &Submenu::with_items(
+                handle,
+                "Epik",
+                true,
+                &[
+                    &PredefinedMenuItem::hide(handle, None)?,
+                    &PredefinedMenuItem::hide_others(handle, None)?,
+                    &PredefinedMenuItem::show_all(handle, None)?,
+                    &separator()?,
+                    &MenuItem::with_id(handle, QUIT, "Quit Epik", true, Some("CmdOrCtrl+Q"))?,
+                ],
+            )?,
+            &Submenu::with_items(
+                handle,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(handle, None)?,
+                    &PredefinedMenuItem::redo(handle, None)?,
+                    &separator()?,
+                    &PredefinedMenuItem::cut(handle, None)?,
+                    &PredefinedMenuItem::copy(handle, None)?,
+                    &PredefinedMenuItem::paste(handle, None)?,
+                    &PredefinedMenuItem::select_all(handle, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                handle,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(handle, None)?,
+                    &PredefinedMenuItem::close_window(handle, None)?,
+                ],
+            )?,
+        ],
+    )
+}
+
+/// Does what the menu item chosen in `event` says.
+fn chosen(handle: &AppHandle, event: MenuEvent) {
+    let quit = handle.state::<popover::Quit>();
+    let opened = match event.id().as_ref() {
+        OPEN_DASHBOARD => main_window::open(handle, "").map_err(|e| e.to_string()),
+        SETTINGS => main_window::open(handle, "settings").map_err(|e| e.to_string()),
+        CHECK_SETUP => setup_window::open(handle).map_err(|e| e.to_string()),
+        CHECK_FOR_UPDATES => open::that_detached(popover::RELEASES).map_err(|e| e.to_string()),
+        RESTART => {
+            quit.restart();
+            Ok(())
+        }
+        QUIT => {
+            quit.quit();
+            Ok(())
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = opened {
+        eprintln!("epik-app: couldn't open it: {error}");
+    }
+}
+
+/// How many runs of a monitored repository are building, for the tray menu
+/// to make room for. If the runs can't be read, none is.
+fn building(root: &Path) -> usize {
+    repositories::monitored_runs(root).map_or(0, |runs| {
+        runs.iter()
+            .filter(|run| run.disposition == Disposition::Building)
+            .count()
+    })
 }
 
 /// Whether there is a desktop to put a tray on. Linux without X or Wayland
@@ -213,6 +310,8 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
             }
         }
     });
+    let restart = tauri.state::<popover::Quit>().restart.clone();
+    let env = tauri.env();
     let handle = tauri.handle().clone();
     let server = thread::spawn(move || {
         let code = app.serve();
@@ -240,7 +339,14 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
         }
         _ => {}
     });
-    server.join().unwrap_or(ExitCode::FAILURE)
+    let code = server.join().unwrap_or(ExitCode::FAILURE);
+    // The builds and the server have stopped, so the new Epik can take the
+    // socket.
+    if restart.load(Ordering::SeqCst) {
+        eprintln!("epik-app: restarting");
+        tauri::process::restart(&env);
+    }
+    code
 }
 
 /// Whether any run of a monitored repository needs attention. If the runs

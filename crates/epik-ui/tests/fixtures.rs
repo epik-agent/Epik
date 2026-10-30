@@ -6,7 +6,7 @@ use leptos::prelude::{Owner, RenderHtml};
 
 use epik_view::{
     Disposition, Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
-    RepositoryRow, RunCard, RunPage, Sidebar, SidebarRun, Span,
+    RepositoryRow, RunCard, RunPage, Sidebar, SidebarRun, Span, TrayRun,
 };
 
 pub fn text(text: &str) -> Span {
@@ -86,11 +86,22 @@ pub fn card(now: Vec<NowLine>) -> RunCard {
     }
 }
 
-pub fn popover(building: Vec<RunCard>, waiting: Vec<(Disposition, String, Vec<Span>)>) -> Popover {
+/// Exponentiation, building, with three issues: one merged, one running,
+/// one waiting.
+pub fn tray_run() -> TrayRun {
+    TrayRun {
+        run: "acme/widgets#13".into(),
+        title: "Exponentiation".into(),
+        count: "1/3".into(),
+        segments: vec![NodeState::Merged, NodeState::Running, NodeState::NotStarted],
+        line: "building #2 · 2m 00s · acme/widgets#13".into(),
+    }
+}
+
+pub fn popover(runs: Vec<TrayRun>) -> Popover {
     Popover {
-        headline: "One run building".into(),
-        building,
-        waiting,
+        about: "3 runs · 4 agents · up 4h 12m".into(),
+        runs,
     }
 }
 
