@@ -11,7 +11,7 @@ use tauri::{
     WindowEvent,
 };
 
-use crate::main_window;
+use crate::{main_window, navigation};
 
 /// The popover's label.
 const LABEL: &str = "popover";
@@ -43,6 +43,7 @@ pub fn toggle(handle: &AppHandle, rect: Rect) -> tauri::Result<()> {
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .visible(false)
+                .on_navigation(navigation::stay_in_app)
                 .build()?;
             let hide = window.clone();
             window.on_window_event(move |event| {

@@ -18,7 +18,7 @@ use epik_core::{setup, uninstall};
 use epik_view::{Home, Popover, RunPage, Settings, Uninstall, UninstallStep};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
-use crate::pages;
+use crate::{navigation, pages};
 
 /// What the window's commands reach.
 pub struct Window {
@@ -201,6 +201,7 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     .title("Epik")
     .inner_size(1120.0, 780.0)
     .min_inner_size(720.0, 480.0)
+    .on_navigation(navigation::stay_in_app)
     .build()?;
     Ok(())
 }
