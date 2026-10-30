@@ -1,5 +1,5 @@
 use epik_ui::run_page::{Detail, Edges, Issue, RunView};
-use epik_view::NodeState;
+use epik_view::{Change, Entry, Excerpt, LineRange, NodeState, Stream, StreamEntry};
 use leptos::prelude::*;
 
 mod fixtures;
@@ -93,18 +93,10 @@ fn the_detail_panel_has_the_issues_facts_and_activity() {
     running.worked = Some("2m 40s · $0.48 so far".into());
     running.recent = vec!["Read src/lib.rs".into(), "Ran cargo test".into()];
     running.pull_request = vec![link("PR #31", "https://github.com/acme/widgets/pull/31")];
-    let html = render(|| view! { <Detail issue=running/> });
+    let html = render(|| view! { <Detail issue=running summary=true/> });
     assert!(html.starts_with(r#"<section class="detail"><div class="facts"><h3><a href="https://github.com/acme/widgets/issues/2">#2</a> Add a power operator</h3><span class="state running">Waiting for #1</span>"#), "{html}");
     assert!(html.contains(r#"<dl><dt>Working for</dt><dd>2m 40s · $0.48 so far</dd><dt>Depends on</dt><dd><span><a href="https://github.com/acme/widgets/issues/1">#1</a></span></dd><dt>Unblocks</dt><dd><span>nothing</span></dd><dt>Pull request</dt><dd><span><a href="https://github.com/acme/widgets/pull/31">PR #31</a></span></dd></dl></div>"#), "{html}");
-    assert!(html.ends_with(r#"<div class="doing"><div class="doing-head"><span class="label">What the agent has done</span></div><ol class="recent"><li>Read src/lib.rs</li><li>Ran cargo test</li></ol></div></section>"#), "{html}");
-}
-
-#[test]
-fn the_detail_panel_links_to_the_full_log() {
-    let mut running = issue(2, NodeState::Running, 1, 0);
-    running.log = Some("/Users/me/.epik/runs/acme/widgets/13/1/2.log".into());
-    let html = render(|| view! { <Detail issue=running/> });
-    assert!(html.contains(r##"<span class="label">What the agent has done</span><a href="#" class="full-log">Full log</a></div>"##), "{html}");
+    assert!(html.ends_with(&(r#"<div class="doing">"#.to_owned() + SUMMARY_CHOSEN + r#"<ol class="recent"><li>Read src/lib.rs</li><li>Ran cargo test</li></ol></div></section>"#)), "{html}");
 }
 
 #[test]
@@ -118,7 +110,7 @@ fn the_detail_panel_of_an_ended_issue_says_how_long_it_took() {
         "{html}"
     );
     assert!(
-        html.contains(r#"<ol class="recent"><li class="muted">Nothing yet.</li></ol>"#),
+        html.contains(r#"<p class="muted nothing">Nothing yet.</p>"#),
         "{html}"
     );
 }
@@ -144,7 +136,7 @@ fn a_runs_page_has_its_head_builds_graph_and_detail() {
     assert!(html.contains(r#"<div class="graph-scroll"><div class="graph" style="width:456px;height:170px;"><svg width="456" height="170"><path d="#), "{html}");
     assert_eq!(html.matches(r#"<button title="#).count(), 3, "{html}");
     assert!(html.contains(r#"class="issue running chosen""#), "{html}");
-    assert!(html.ends_with(r#"</ol></div></section>"#), "{html}");
+    assert!(html.ends_with(r#"</div></div></section>"#), "{html}");
     assert!(html.contains(r#"<section class="detail"><div class="facts"><h3><a href="https://github.com/acme/widgets/issues/2">#2</a>"#), "{html}");
 }
 
@@ -183,5 +175,337 @@ fn the_detail_panel_draws_the_issue_on_the_left_and_its_agent_on_the_right() {
     assert!(facts < doing, "{html}");
     assert!(html[facts..doing].contains("<h3>"), "{html}");
     assert!(html[facts..doing].contains("<dl>"), "{html}");
-    assert!(html[doing..].contains(r#"<ol class="recent">"#), "{html}");
+    assert!(
+        html[doing..].contains(r#"<div class="stream-box">"#),
+        "{html}"
+    );
+}
+
+/// The switch with Full chosen, and with Summary chosen.
+const FULL_CHOSEN: &str = r#"<div role="group" aria-label="What the agent has done" class="switch"><button aria-pressed="true">Full</button><button aria-pressed="false">Summary</button></div>"#;
+const SUMMARY_CHOSEN: &str = r#"<div role="group" aria-label="What the agent has done" class="switch"><button aria-pressed="false">Full</button><button aria-pressed="true">Summary</button></div>"#;
+
+/// 22:13:20 UTC, Nov 14, 2023.
+const AT: i64 = 1_700_000_000_000;
+
+fn stream(entries: Vec<Entry>, working: bool) -> Stream {
+    Stream {
+        entries: entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, what)| StreamEntry {
+                at: Some(AT + 1000 * i as i64),
+                what,
+            })
+            .collect(),
+        working,
+    }
+}
+
+fn lines(lines: &[&str]) -> Excerpt {
+    Excerpt {
+        head: lines.iter().map(|line| line.to_string()).collect(),
+        more: 0,
+        tail: vec![],
+    }
+}
+
+/// The stream as the detail panel of a running issue draws it.
+fn full(stream: Stream) -> String {
+    let running = issue(2, NodeState::Running, 1, 0);
+    let stream = Some(stream);
+    render(move || view! { <Detail issue=running.clone() stream=stream.clone()/> })
+}
+
+#[test]
+fn the_detail_panel_has_a_full_and_summary_switch_with_full_chosen() {
+    let html = full(stream(vec![], false));
+    assert!(
+        html.contains(
+            &(r#"<div class="doing">"#.to_owned() + FULL_CHOSEN + r#"<div class="stream-box">"#)
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("What the agent has done</span>"), "{html}");
+    assert!(!html.contains("Full log"), "{html}");
+    assert!(!html.contains(r#"class="recent""#), "{html}");
+}
+
+#[test]
+fn summary_shows_the_agents_recent_actions() {
+    let mut running = issue(2, NodeState::Running, 1, 0);
+    running.recent = vec!["Read src/lib.rs".into()];
+    let stream = Some(stream(
+        vec![Entry::Other {
+            text: "Thinking".into(),
+        }],
+        true,
+    ));
+    let html = render(
+        move || view! { <Detail issue=running.clone() stream=stream.clone() summary=true/> },
+    );
+    assert!(
+        html.contains(
+            &(SUMMARY_CHOSEN.to_owned() + r#"<ol class="recent"><li>Read src/lib.rs</li></ol>"#)
+        ),
+        "{html}"
+    );
+    assert!(!html.contains("Thinking"), "{html}");
+    assert!(!html.contains("cursor"), "{html}");
+}
+
+#[test]
+fn without_a_log_the_stream_says_nothing_yet() {
+    let html = render(|| view! { <Detail issue=issue(2, NodeState::Running, 1, 0)/> });
+    assert!(html.contains(r#"<div class="stream-box"><div class="stream"><p class="muted nothing">Nothing yet.</p></div></div>"#), "{html}");
+}
+
+#[test]
+fn narration_is_plain_sentences_with_code_in_monospace() {
+    let html = full(stream(
+        vec![Entry::Narration {
+            text: "Two failures, both in `upload::tests`.\n\nChecking `put`.".into(),
+        }],
+        false,
+    ));
+    assert!(html.contains(r#"<div class="stream"><div class="entry narration"><time>22:13:20</time><div class="what"><p>Two failures, both in <code>upload::tests</code>.</p><p>Checking <code>put</code>.</p></div></div></div>"#), "{html}");
+}
+
+#[test]
+fn an_entry_without_a_time_leaves_its_time_empty() {
+    let html = full(Stream {
+        entries: vec![StreamEntry {
+            at: None,
+            what: Entry::Other {
+                text: "Updating its plan".into(),
+            },
+        }],
+        working: false,
+    });
+    assert!(html.contains(r#"<div class="entry other"><time></time><div class="what">Updating its plan</div></div>"#), "{html}");
+}
+
+#[test]
+fn a_command_shows_its_line_and_output_with_failures_in_red() {
+    let html = full(stream(
+        vec![Entry::Command {
+            command: "cargo test".into(),
+            output: Excerpt {
+                head: vec!["running 43 tests".into(), "test a ... ok".into()],
+                more: 40,
+                tail: vec![
+                    "assertion `left == right` failed".into(),
+                    "  left: 1".into(),
+                    "test result: FAILED. 42 passed; 1 failed; 0 ignored".into(),
+                ],
+            },
+        }],
+        false,
+    ));
+    assert!(
+        html.contains(concat!(
+            r#"<div class="entry command"><time>22:13:20</time><div class="what">"#,
+            r#"<div class="command-line"><span class="prompt">$ </span>cargo test</div>"#,
+            r#"<div class="output"><div>running 43 tests</div><div>test a ... ok</div>"#,
+            r#"<div class="more">… 40 more lines</div>"#,
+            r#"<div class="failed">assertion `left == right` failed</div><div>  left: 1</div>"#,
+            r#"<div class="failed">test result: FAILED. 42 passed; 1 failed; 0 ignored</div>"#,
+            r#"</div></div></div>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_command_without_output_is_its_line() {
+    let html = full(stream(
+        vec![Entry::Command {
+            command: "git status".into(),
+            output: Excerpt::default(),
+        }],
+        false,
+    ));
+    assert!(html.contains(r#"<div class="what"><div class="command-line"><span class="prompt">$ </span>git status</div></div>"#), "{html}");
+}
+
+#[test]
+fn one_more_line_is_singular() {
+    let html = full(stream(
+        vec![Entry::Command {
+            command: "ls".into(),
+            output: Excerpt {
+                head: vec!["a".into()],
+                more: 1,
+                tail: vec!["c".into()],
+            },
+        }],
+        false,
+    ));
+    assert!(
+        html.contains(r#"<div class="more">… 1 more line</div>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn reads_are_one_line_with_their_range() {
+    let read = |lines| Entry::Read {
+        path: "src/upload.rs".into(),
+        lines,
+    };
+    let html = full(stream(
+        vec![
+            read(None),
+            read(Some(LineRange {
+                from: 30,
+                to: Some(70),
+            })),
+            read(Some(LineRange { from: 30, to: None })),
+        ],
+        false,
+    ));
+    assert!(html.contains(r#"<div class="entry read"><time>22:13:20</time><div class="what">Read <code>src/upload.rs</code></div></div>"#), "{html}");
+    assert!(
+        html.contains(r#"<div class="what">Read <code>src/upload.rs</code> (lines 30-70)</div>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<div class="what">Read <code>src/upload.rs</code> (from line 30)</div>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn searches_are_one_line_with_their_matches() {
+    let html = full(stream(
+        vec![
+            Entry::Search {
+                pattern: "fn put".into(),
+                within: Some("crates/epik-cache/src".into()),
+                matches: 2,
+                hits: lines(&["store.rs:88", "upload.rs:41"]),
+            },
+            Entry::Search {
+                pattern: "TODO".into(),
+                within: None,
+                matches: 0,
+                hits: Excerpt::default(),
+            },
+            Entry::Search {
+                pattern: "*.rs".into(),
+                within: None,
+                matches: 9,
+                hits: Excerpt {
+                    head: vec!["a.rs".into()],
+                    more: 7,
+                    tail: vec!["z.rs".into()],
+                },
+            },
+        ],
+        false,
+    ));
+    assert!(html.contains(r#"<div class="entry search"><time>22:13:20</time><div class="what">Searched for <code>"fn put"</code> in <code>crates/epik-cache/src</code> · 2 matches: store.rs:88, upload.rs:41</div></div>"#), "{html}");
+    assert!(
+        html.contains(r#"<div class="what">Searched for <code>"TODO"</code> · no matches</div>"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"<div class="what">Searched for <code>"*.rs"</code> · 9 matches: a.rs, … 7 more, z.rs</div>"#), "{html}");
+}
+
+#[test]
+fn an_edit_shows_removed_lines_in_red_and_added_lines_in_green() {
+    let html = full(stream(
+        vec![Entry::Edit {
+            path: "src/upload.rs".into(),
+            changes: Excerpt {
+                head: vec![
+                    Change::Removed("entry.path".into()),
+                    Change::Added("entry.digest".into()),
+                ],
+                more: 3,
+                tail: vec![Change::Added("}".into())],
+            },
+        }],
+        false,
+    ));
+    assert!(html.contains(concat!(
+        r#"<div class="entry edit"><time>22:13:20</time><div class="what">"#,
+        r#"<div class="path">Edited <code>src/upload.rs</code></div>"#,
+        r#"<div class="output"><div class="removed">- entry.path</div><div class="added">+ entry.digest</div>"#,
+        r#"<div class="more">… 3 more lines</div><div class="added">+ }</div></div>"#,
+        r#"</div></div>"#,
+    )), "{html}");
+}
+
+#[test]
+fn a_new_file_shows_its_first_lines() {
+    let html = full(stream(
+        vec![Entry::NewFile {
+            path: "tests/upload.rs".into(),
+            content: Excerpt {
+                head: vec!["use epik_cache::Store;".into()],
+                more: 20,
+                tail: vec!["}".into()],
+            },
+        }],
+        false,
+    ));
+    assert!(html.contains(concat!(
+        r#"<div class="entry new_file"><time>22:13:20</time><div class="what">"#,
+        r#"<div class="path">Created <code>tests/upload.rs</code></div>"#,
+        r#"<div class="output"><div>use epik_cache::Store;</div><div class="more">… 20 more lines</div><div>}</div></div>"#,
+        r#"</div></div>"#,
+    )), "{html}");
+}
+
+#[test]
+fn a_blinking_cursor_shows_the_agent_is_still_working() {
+    let entries = || {
+        vec![Entry::Other {
+            text: "Thinking".into(),
+        }]
+    };
+    let html = full(stream(entries(), true));
+    assert!(
+        html.contains(
+            r#"<div class="what">Thinking</div></div><span class="cursor"></span></div>"#
+        ),
+        "{html}"
+    );
+    let html = full(stream(entries(), false));
+    assert!(!html.contains("cursor"), "{html}");
+}
+
+#[test]
+fn a_runs_page_streams_the_chosen_issues_log() {
+    let mut page = run_page();
+    let path = "/Users/me/.epik/runs/acme/widgets/13/1/2.jsonl".to_owned();
+    for issue in &mut page.issues {
+        if issue.number == 2 {
+            issue.log = Some(path.clone());
+        }
+    }
+    let streamed = Some((
+        path,
+        stream(
+            vec![Entry::Other {
+                text: "Thinking".into(),
+            }],
+            false,
+        ),
+    ));
+    let html = render({
+        let (page, streamed) = (page.clone(), streamed.clone());
+        move || view! { <RunView page=page.clone() chosen=Some(2) streamed=streamed.clone()/> }
+    });
+    assert!(
+        html.contains(r#"<div class="what">Thinking</div>"#),
+        "{html}"
+    );
+    // Another issue's stream isn't drawn.
+    let html = render(
+        move || view! { <RunView page=page.clone() chosen=Some(3) streamed=streamed.clone()/> },
+    );
+    assert!(!html.contains("Thinking"), "{html}");
+    assert!(html.contains("Nothing yet."), "{html}");
 }
