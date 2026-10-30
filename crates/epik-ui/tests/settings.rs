@@ -1,4 +1,4 @@
-use epik_ui::settings::{ConfirmBody, MonitorForm, Repositories};
+use epik_ui::settings::{ConfirmBody, MonitorForm, Repositories, SettingsPage};
 use epik_view::Settings;
 use leptos::prelude::*;
 
@@ -97,5 +97,46 @@ fn the_monitor_form_shows_its_error_under_the_input() {
             r#"<div class="row"><input id="repo" placeholder="owner/name" autocomplete="off" spellcheck="false"><button class="primary">Add</button></div>"#,
             r#"<p id="add-error" class="error">acme/nope isn't on GitHub</p></form>"#,
         )
+    );
+}
+
+#[test]
+fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
+    let settings = Signal::stored(Ok(Settings {
+        repositories: vec![repository("acme/widgets", vec![], false)],
+    }));
+    let error = RwSignal::new(String::new());
+    let html = render(|| view! { <SettingsPage settings error/> });
+    assert!(
+        html.starts_with(concat!(
+            r#"<h1 class="page-title">Settings</h1><div class="card settings">"#,
+            r#"<section><h3>Monitored repositories</h3>"#,
+            r#"<p class="muted">Epik monitors these repositories. When Epik creates an epic or starts a build in a repository that isn't listed, it adds that repository here.</p>"#,
+            r#"<ul id="repositories"><li class="repository">"#,
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<button>Stop monitoring</button></li></ul><form id="add">"#),
+        "{html}"
+    );
+    assert!(
+        html.ends_with(concat!(
+            r#"</form></section><section class="uninstall"><h3>Uninstall</h3>"#,
+            r#"<p class="muted">Remove what Epik put on this computer. You delete the app yourself afterward.</p>"#,
+            r#"<button class="danger-outline">Uninstall Epik…</button></section></div>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn the_settings_page_says_why_it_could_not_read_the_repositories() {
+    let settings = Signal::stored(Err("no ~/.epik".to_string()));
+    let error = RwSignal::new(String::new());
+    let html = render(|| view! { <SettingsPage settings error/> });
+    assert!(
+        html.contains(r#"<ul id="repositories"><li class="error">no ~/.epik</li></ul>"#),
+        "{html}"
     );
 }

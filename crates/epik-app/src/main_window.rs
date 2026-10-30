@@ -240,8 +240,8 @@ pub fn follow(handle: &AppHandle, label: &str, change: Change) {
 }
 
 /// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
-/// for a run's page), or brings it forward there, and puts Epik in the
-/// Dock while it is open.
+/// for a run's page, `settings` for Settings), or brings it forward there,
+/// and puts Epik in the Dock while it is open.
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     // A run's `#` would end the URL's fragment.
     let hash = format!("#/{}", route.replace('#', "%23"));
