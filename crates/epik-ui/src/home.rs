@@ -173,13 +173,14 @@ fn run_key(card: &RunCard) -> String {
     card.run.clone()
 }
 
-/// Home: a section for each kind of run that has any, or that there are
-/// none.
+/// Home: the headline, top right, then a section for each kind of run
+/// that has any, or that there are none.
 #[component]
 pub fn HomePage(
     #[prop(into)] home: Signal<Home>,
     #[prop(optional)] on_act: Option<Callback<Act>>,
 ) -> impl IntoView {
+    let headline = part(home, |home| home.headline.clone());
     let building = part(home, |home| home.building.clone());
     let waiting = part(home, |home| home.waiting.clone());
     let attention = part(home, |home| home.attention.clone());
@@ -187,6 +188,7 @@ pub fn HomePage(
         home.building.is_empty() && home.waiting.is_empty() && home.attention.is_empty()
     });
     view! {
+        <p class="headline">{headline}</p>
         {heading(building, "section", "Building")}
         {keyed(building.into(), run_key, |card| view! { <BuildingCard card/> })}
         {heading(waiting, "section", "Waiting for your review")}

@@ -106,12 +106,31 @@ pub struct RunCard {
 pub struct Home {
     /// What is happening, in a sentence.
     pub headline: String,
-    /// Whether any monitored repository is no longer on GitHub, which
-    /// marks the Settings gear.
-    pub missing_repository: bool,
     pub building: Vec<RunCard>,
     pub waiting: Vec<RunCard>,
     pub attention: Vec<RunCard>,
+}
+
+/// A run, as the main window's sidebar lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidebarRun {
+    /// The run, `owner/name#number`.
+    pub run: String,
+    pub title: String,
+    pub disposition: Disposition,
+}
+
+/// The main window's sidebar, beside every page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sidebar {
+    /// The monitored runs: those needing attention, then building, then
+    /// waiting for review.
+    pub runs: Vec<SidebarRun>,
+    /// Whether any monitored repository is no longer on GitHub, which
+    /// marks Settings.
+    pub missing_repository: bool,
+    /// "Epik running · up 4h 12m".
+    pub status: String,
 }
 
 /// The tray's popover.

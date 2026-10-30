@@ -14,7 +14,7 @@ use epik_core::uninstall::Outcome;
 use epik_core::words::{dollars, duration};
 use epik_view::{
     Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress, RepositoryRow,
-    RunCard, RunPage, Settings, Span, UninstallStep, Words,
+    RunCard, RunPage, Settings, Sidebar, SidebarRun, Span, UninstallStep, Words,
 };
 
 /// How long an agent may log nothing and still be "active".
@@ -471,7 +471,7 @@ fn headline(building: usize, short: bool) -> String {
 
 /// Home, for the runs of the monitored repositories, newest activity first,
 /// at `now`.
-pub fn home(runs: &[RunState], repositories: &[Repository], now: DateTime<Utc>) -> Home {
+pub fn home(runs: &[RunState], now: DateTime<Utc>) -> Home {
     let cards = |wanted: Disposition| -> Vec<RunCard> {
         runs.iter()
             .filter(|run| run.disposition == wanted)
@@ -481,10 +481,38 @@ pub fn home(runs: &[RunState], repositories: &[Repository], now: DateTime<Utc>) 
     let building = cards(Disposition::Building);
     Home {
         headline: headline(building.len(), false),
-        missing_repository: repositories.iter().any(|r| r.missing),
         building,
         waiting: cards(Disposition::WaitingForReview),
         attention: cards(Disposition::NeedsAttention),
+    }
+}
+
+/// The main window's sidebar, for the same runs as Home and the monitored
+/// `repositories`, at `now`, for an Epik that started at `started`.
+pub fn sidebar(
+    runs: &[RunState],
+    repositories: &[Repository],
+    started: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Sidebar {
+    let order = [
+        Disposition::NeedsAttention,
+        Disposition::Building,
+        Disposition::WaitingForReview,
+    ];
+    let up = u64::try_from((now - started).num_milliseconds()).unwrap_or(0);
+    Sidebar {
+        runs: order
+            .iter()
+            .flat_map(|&wanted| runs.iter().filter(move |run| run.disposition == wanted))
+            .map(|run| SidebarRun {
+                run: run.run.to_string(),
+                title: run.title.clone(),
+                disposition: shown(run.disposition),
+            })
+            .collect(),
+        missing_repository: repositories.iter().any(|r| r.missing),
+        status: format!("Epik running · up {}", duration(up)),
     }
 }
 

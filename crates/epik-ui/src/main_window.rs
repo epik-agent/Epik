@@ -1,12 +1,15 @@
-//! The main window: Home (`#/`), a run's page (`#/run/<owner/name%23n>`),
-//! and Settings over Home. It asks the app what to show every second and
+//! The main window: a sidebar beside Home (`#/`) or a run's page
+//! (`#/run/<owner/name%23n>`), and Settings over them. It asks the app what to show every second and
 //! draws it. Its only controls are Rerun and Delete on a run that needs
 //! attention, and Settings, which can also uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use epik_view::{Home, NodeState, RepositoryRow, RunPage, Settings, Uninstall, UninstallStep};
+use epik_view::{
+    Disposition, Home, NodeState, RepositoryRow, RunPage, Settings, Sidebar as SidebarView,
+    SidebarRun, Uninstall, UninstallStep,
+};
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
 use leptos::prelude::*;
@@ -15,7 +18,7 @@ use serde::Serialize;
 
 use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
-use crate::live::kept;
+use crate::live::{kept, keyed, part};
 use crate::run_page::RunView;
 use crate::settings::{
     ConfirmBody, MonitorForm, Repositories, UninstallBody, UninstallButton, Uninstalling,
@@ -78,28 +81,98 @@ pub fn href(path: &str) -> String {
 /// children in groups.
 const MARK: &str = r##"<svg viewBox="0 0 64 64" width="20" height="20" aria-hidden="true"><g stroke="#171717" stroke-width="3" opacity="0.3"><line x1="16" y1="16" x2="48" y2="24"/><line x1="16" y1="16" x2="24" y2="48"/><line x1="48" y1="24" x2="40" y2="48"/><line x1="24" y1="48" x2="40" y2="48"/></g><circle cx="16" cy="16" r="7" fill="#00c07a"/><circle cx="48" cy="24" r="6" fill="#171717"/><circle cx="24" cy="48" r="6" fill="#171717"/><circle cx="40" cy="48" r="5" fill="#00c07a" opacity="0.7"/></svg>"##;
 
-/// The bar on Home: the mark, the name, the headline, and the Settings
-/// gear, marked when a monitored repository is no longer on GitHub.
+/// A run's status dot's class.
+fn disposition_class(disposition: Disposition) -> &'static str {
+    match disposition {
+        Disposition::Building => "building",
+        Disposition::WaitingForReview => "waiting_for_review",
+        Disposition::NeedsAttention => "needs_attention",
+    }
+}
+
+fn sidebar_key(run: &SidebarRun) -> String {
+    run.run.clone()
+}
+
+/// The sidebar beside every page: the mark and name; Runs, which opens
+/// Home, with a foldable list of the runs, each opening its page; and at
+/// the bottom Settings, marked when a monitored repository is no longer on
+/// GitHub, and how long Epik has been running. The current page is
+/// highlighted.
 #[component]
-pub fn HomeBar(
-    headline: String,
-    missing_repository: bool,
+pub fn Sidebar(
+    #[prop(into)] sidebar: Signal<SidebarView>,
+    #[prop(into)] page: Signal<Page>,
+    #[prop(optional)] folded: bool,
     #[prop(optional)] on_settings: Option<Callback<()>>,
 ) -> impl IntoView {
+    let folded = RwSignal::new(folded);
+    let runs = part(sidebar, |sidebar| sidebar.runs.clone());
+    let count = part(sidebar, |sidebar| sidebar.runs.len());
+    let missing = part(sidebar, |sidebar| sidebar.missing_repository);
+    let status = part(sidebar, |sidebar| sidebar.status.clone());
+    let at_home = Memo::new(move |_| page.with(|page| *page == Page::Home));
+    let fold = move |_: MouseEvent| folded.update(|folded| *folded = !*folded);
     let settings = move |_: MouseEvent| {
         if let Some(on_settings) = on_settings {
             on_settings.run(());
         }
     };
-    let badge = missing_repository.then(|| view! { <span class="badge">"✕"</span> });
+    let run_item = move |run: Signal<SidebarRun>| {
+        let key = part(run, |run| run.run.clone());
+        let class = Memo::new(move |_| {
+            let current = page.with(|page| matches!(page, Page::Run(at) if *at == key.get()));
+            if current {
+                "item run current"
+            } else {
+                "item run"
+            }
+        });
+        let link = part(run, |run| href(&format!("run/{}", run.run)));
+        let dot = part(run, |run| {
+            format!("dot {}", disposition_class(run.disposition))
+        });
+        let title = part(run, |run| run.title.clone());
+        view! {
+            <li>
+                <a href=link class=class>
+                    <span class=dot></span>
+                    <span class="title">{title}</span>
+                </a>
+            </li>
+        }
+    };
     view! {
-        <span class="mark" inner_html=MARK></span>
-        <span class="name">"Epik"</span>
-        <span class="headline">{headline}</span>
-        <button class="gear" title="Settings" aria-label="Settings" on:click=settings>
-            "⚙"
-            {badge}
-        </button>
+        <div class="brand">
+            <span class="mark" inner_html=MARK></span>
+            <span class="name">"Epik"</span>
+        </div>
+        <div class=move || if at_home.get() { "item runs current" } else { "item runs" }>
+            <button
+                aria-label=move || if folded.get() { "Unfold the runs" } else { "Fold the runs" }
+                aria-expanded=move || if folded.get() { "false" } else { "true" }
+                class="fold"
+                on:click=fold
+            >
+                {move || if folded.get() { "▸" } else { "▾" }}
+            </button>
+            <a href="#/" class="label">"Runs"</a>
+            <span class="count">{count}</span>
+        </div>
+        {move || {
+            (!folded.get())
+                .then(|| view! { <ul class="run-list">{keyed(runs.into(), sidebar_key, run_item)}</ul> })
+        }}
+        <div class="foot">
+            <button class="item settings" on:click=settings>
+                "Settings"
+                {move || missing.get().then(|| view! { <span class="badge">"✕"</span> })}
+            </button>
+            <div class="status">
+                <span class="dot"></span>
+                {status}
+            </div>
+        </div>
     }
 }
 
@@ -149,11 +222,10 @@ enum Which {
     Failed(String),
 }
 
-/// What the bar shows: it stays when a refresh fails.
+/// What the bar over a run's page shows: it stays when a refresh fails.
 #[derive(Debug, Clone, PartialEq)]
 enum Bar {
     Nothing,
-    Home(String, bool),
     Run(String, Vec<(String, String)>),
 }
 
@@ -221,6 +293,12 @@ async fn fetch_uninstall_plan(plan: RwSignal<Uninstall>, stage: RwSignal<Uninsta
 pub fn MainWindow() -> impl IntoView {
     let page = RwSignal::new(current_page());
     let shown = RwSignal::new(None::<Shown>);
+    // The sidebar, which keeps what it last showed when a refresh fails.
+    let sidebar = RwSignal::new(SidebarView {
+        runs: vec![],
+        missing_repository: false,
+        status: String::new(),
+    });
     // What the user asked for that failed, until the page changes.
     let error = RwSignal::new(String::new());
     // The issue chosen on each run's page.
@@ -236,6 +314,9 @@ pub fn MainWindow() -> impl IntoView {
         }
         refreshing.set_value(true);
         spawn_local(async move {
+            if let Ok(fetched) = tauri::invoke::<_, SidebarView>("sidebar", &()).await {
+                sidebar.set(fetched);
+            }
             let at = page.get_untracked();
             let fetched = match &at {
                 Page::Home => tauri::invoke::<_, Home>("home", &()).await.map(Shown::Home),
@@ -397,17 +478,16 @@ pub fn MainWindow() -> impl IntoView {
 
     let bar = Memo::new(move |before: Option<&Bar>| {
         shown.with(|shown| match shown {
-            Some(Shown::Home(home)) => Bar::Home(home.headline.clone(), home.missing_repository),
+            Some(Shown::Home(_)) => Bar::Nothing,
             Some(Shown::Run(page)) => Bar::Run(page.title.clone(), page.also_building.clone()),
             _ => before.cloned().unwrap_or(Bar::Nothing),
         })
     });
     let bar = move || match bar.get() {
         Bar::Nothing => ().into_any(),
-        Bar::Home(headline, missing_repository) => {
-            view! { <HomeBar headline missing_repository on_settings/> }.into_any()
+        Bar::Run(title, also_building) => {
+            view! { <header id="bar"><RunBar title also_building/></header> }.into_any()
         }
-        Bar::Run(title, also_building) => view! { <RunBar title also_building/> }.into_any(),
     };
 
     let which = Memo::new(move |_| {
@@ -473,8 +553,11 @@ pub fn MainWindow() -> impl IntoView {
     };
 
     view! {
-        <header id="bar">{bar}</header>
-        <main id="page">{body}</main>
+        <nav id="sidebar"><Sidebar sidebar page on_settings/></nav>
+        <div id="content">
+            {bar}
+            <main id="page">{body}</main>
+        </div>
         <dialog id="settings" node_ref=settings_dialog>
             <form method="dialog" class="dialog-head">
                 <h2>"Settings"</h2>
