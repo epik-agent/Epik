@@ -206,11 +206,46 @@ pub fn agent_stream(path: String, window: State<'_, Window>) -> Result<Stream, S
     stream(&window.root, &path)
 }
 
+/// A window opening or closing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    Opened,
+    Closed,
+}
+
+/// Whether Epik belongs in the Dock and Cmd-Tab after the window `label`
+/// opens or closes, or `None` if that window leaves it as it was. Epik is
+/// a regular app while its main window is open, and otherwise lives only
+/// in the menu bar.
+pub fn in_dock_after(label: &str, change: Change) -> Option<bool> {
+    (label == LABEL).then_some(change == Change::Opened)
+}
+
+/// Puts Epik in the Dock and Cmd-Tab, or takes it out, as the window
+/// `label` opening or closing calls for. Only macOS has a Dock to leave.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn follow(handle: &AppHandle, label: &str, change: Change) {
+    let in_dock = in_dock_after(label, change);
+    #[cfg(target_os = "macos")]
+    if let Some(in_dock) = in_dock {
+        let policy = if in_dock {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        };
+        if let Err(error) = handle.set_activation_policy(policy) {
+            eprintln!("epik-app: couldn't change Epik's place in the Dock: {error}");
+        }
+    }
+}
+
 /// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
-/// for a run's page, `settings` for Settings), or brings it forward there.
+/// for a run's page, `settings` for Settings), or brings it forward there,
+/// and puts Epik in the Dock while it is open.
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     // A run's `#` would end the URL's fragment.
     let hash = format!("#/{}", route.replace('#', "%23"));
+    follow(handle, LABEL, Change::Opened);
     if let Some(window) = handle.get_webview_window(LABEL) {
         let script = format!(
             "window.location.hash = {};",
@@ -278,5 +313,19 @@ mod tests {
             assert!(refused.unwrap_err().ends_with("isn't an agent's log"));
         }
         assert!(stream(root.path(), "").is_err());
+    }
+
+    #[test]
+    fn epik_is_in_the_dock_while_the_main_window_is_open() {
+        assert_eq!(in_dock_after(LABEL, Change::Opened), Some(true));
+        assert_eq!(in_dock_after(LABEL, Change::Closed), Some(false));
+    }
+
+    #[test]
+    fn the_other_windows_leave_the_dock_alone() {
+        for label in [crate::popover::LABEL, crate::setup_window::LABEL] {
+            assert_eq!(in_dock_after(label, Change::Opened), None);
+            assert_eq!(in_dock_after(label, Change::Closed), None);
+        }
     }
 }

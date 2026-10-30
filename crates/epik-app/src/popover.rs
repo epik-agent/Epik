@@ -14,7 +14,7 @@ use tauri::{
 use crate::{main_window, navigation};
 
 /// The popover's label.
-const LABEL: &str = "popover";
+pub(crate) const LABEL: &str = "popover";
 /// Its size, in logical pixels.
 const WIDTH: f64 = 360.0;
 const HEIGHT: f64 = 520.0;
