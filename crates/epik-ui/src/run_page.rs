@@ -8,6 +8,7 @@ use leptos::prelude::*;
 
 use crate::flash::flash_on;
 use crate::live::{kept, keyed, part};
+use crate::main_window::RunBar;
 use crate::words::{GithubLink, Words};
 
 /// An issue card's size, and the gaps between cards.
@@ -237,8 +238,8 @@ fn issue_number(issue: &IssueCard) -> u64 {
     issue.number
 }
 
-/// A run's page: what it is and where it stands, its builds, its issues as
-/// a graph, and the chosen issue's detail panel.
+/// A run's page: its breadcrumb, what it is and where it stands, its
+/// builds, its issues as a graph, and the chosen issue's detail panel.
 #[component]
 pub fn RunView(
     #[prop(into)] page: Signal<RunPage>,
@@ -249,6 +250,7 @@ pub fn RunView(
     #[prop(optional)] on_open_log: Option<Callback<String>>,
 ) -> impl IntoView {
     let run = page.with_untracked(|page| page.run.clone());
+    let also_building = part(page, |page| page.also_building.clone());
     let epic = part(page, |page| page.epic.clone());
     let about = part(page, |page| page.about.clone());
     let title = part(page, |page| page.title.clone());
@@ -285,6 +287,7 @@ pub fn RunView(
         Some(view! { <Detail issue on_open_log/> })
     };
     view! {
+        <nav class="run-bar"><RunBar title also_building/></nav>
         <section class="run-head">
             <div>
                 <div class="about">{link(epic)}" · "{words(about, None)}</div>
