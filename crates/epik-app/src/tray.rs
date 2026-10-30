@@ -5,17 +5,20 @@
 //! event loop on the main thread. Clicking its icon opens the popover; its
 //! menu (a right click, or on Linux, where tray clicks aren't reported, any
 //! click) opens Epik's window, checks setup, or quits. The icon shows
-//! whether anything is building. On macOS, Epik is in the Dock and Cmd-Tab
-//! only while its main window is open. Where there is no tray, the app runs
-//! headless and says so.
+//! whether anything is building, and with a red dot, whether any run needs
+//! attention. On macOS, Epik is in the Dock and Cmd-Tab only while its main
+//! window is open. Where there is no tray, the app runs headless and says so.
 
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use epik_core::repositories;
+use epik_core::run::Disposition;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -24,8 +27,8 @@ use tauri::{RunEvent, WindowEvent};
 use crate::App;
 use crate::{main_window, popover, setup_window};
 
-/// How often the icon is checked against what is building, besides each
-/// time that changes.
+/// How often the icon is checked against what is building and what needs
+/// attention, besides each time a build changes.
 const REFRESH: Duration = Duration::from_secs(2);
 
 const QUIT: &str = "quit";
@@ -65,6 +68,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .manage(main_window::Window {
             root: app.root.clone(),
             builds: app.builds.clone(),
+            started: chrono::Utc::now(),
         })
         .manage(setup_window::Setup {
             root: app.root.clone(),
@@ -74,6 +78,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .manage(popover::Quit(app.stop.clone()))
         .invoke_handler(tauri::generate_handler![
             main_window::home,
+            main_window::sidebar,
             main_window::popover,
             main_window::run_page,
             main_window::rerun,
@@ -84,7 +89,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::uninstall_plan,
             main_window::uninstall,
             main_window::open_github,
-            main_window::open_log,
+            main_window::agent_stream,
             popover::open_main,
             popover::quit,
             setup_window::setup_checklist,
@@ -112,9 +117,10 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     )
     .map_err(failed)?;
     let stop = app.stop.clone();
+    let idle = look(TEMPLATE, false, false);
     let tray = TrayIconBuilder::new()
-        .icon(icon(false))
-        .icon_as_template(TEMPLATE)
+        .icon(icon(idle))
+        .icon_as_template(idle.template)
         .tooltip("Epik")
         .menu(&menu)
         .show_menu_on_left_click(cfg!(target_os = "linux"))
@@ -162,20 +168,21 @@ fn has_display() -> bool {
 /// runs on this one. When serving stops, the builds are stopped, then
 /// Tauri.
 fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -> ExitCode {
-    let builds = app.builds.clone();
+    let (root, builds) = (app.root.clone(), app.builds.clone());
     let stop = app.stop.clone();
     thread::spawn(move || {
-        let mut shown = Some(false);
+        let mut shown = look(TEMPLATE, false, false);
         while !stop.load(Ordering::SeqCst) {
             let building = !builds.active().is_empty();
-            if shown != Some(building) {
+            let now = look(TEMPLATE, building, needs_attention(&root));
+            if shown != now {
                 let drawn = tray
-                    .set_icon(Some(icon(building)))
-                    .and_then(|()| tray.set_icon_as_template(TEMPLATE));
+                    .set_icon(Some(icon(now)))
+                    .and_then(|()| tray.set_icon_as_template(now.template));
                 if let Err(error) = drawn {
                     eprintln!("epik-app: couldn't redraw the tray: {error}");
                 }
-                shown = Some(building);
+                shown = now;
             }
             if let Err(RecvTimeoutError::Disconnected) = changes.recv_timeout(REFRESH) {
                 break;
@@ -236,19 +243,130 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
     server.join().unwrap_or(ExitCode::FAILURE)
 }
 
+/// Whether any run of a monitored repository needs attention. If the runs
+/// can't be read, none is said to.
+fn needs_attention(root: &Path) -> bool {
+    repositories::monitored_runs(root).is_ok_and(|runs| {
+        runs.iter()
+            .any(|run| run.disposition == Disposition::NeedsAttention)
+    })
+}
+
 /// Whether the icons are templates, which the menu bar tints: on macOS.
 const TEMPLATE: bool = cfg!(target_os = "macos");
 
-/// The idle or building icon, at 2x, which the tray scales to its size. On
-/// macOS a one-color template, hollow nodes when idle and solid when
-/// building; elsewhere gray when idle and in the mark's colors when
-/// building. `icons/make-tray-icons.py` draws them.
-fn icon(building: bool) -> Image<'static> {
-    let png: &[u8] = match (TEMPLATE, building) {
-        (true, false) => include_bytes!("../icons/idle-template@2x.png"),
-        (true, true) => include_bytes!("../icons/building-template@2x.png"),
-        (false, false) => include_bytes!("../icons/idle@2x.png"),
-        (false, true) => include_bytes!("../icons/building@2x.png"),
+/// Which icon the tray shows, and whether it is a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Look {
+    name: &'static str,
+    template: bool,
+}
+
+/// The icon for whether the tray takes templates, whether anything is
+/// building, and whether any run needs attention, which a red dot shows. A
+/// template is one color, so it can't carry the dot: then the icon is drawn
+/// in gray instead, which reads on light and dark menu bars.
+fn look(template: bool, building: bool, attention: bool) -> Look {
+    let name = match (template, building, attention) {
+        (true, false, false) => "idle-template",
+        (true, true, false) => "building-template",
+        (true, false, true) => "idle-attention-gray",
+        (true, true, true) => "building-attention-gray",
+        (false, false, false) => "idle",
+        (false, true, false) => "building",
+        (false, false, true) => "idle-attention",
+        (false, true, true) => "building-attention",
     };
-    Image::from_bytes(png).expect("the tray icons are PNGs")
+    Look {
+        name,
+        template: template && !attention,
+    }
+}
+
+/// An icon, at 2x, which the tray scales to its size. On macOS the
+/// templates have hollow nodes when idle and solid when building; elsewhere
+/// the icons are gray when idle and in the mark's colors when building.
+/// `icons/make-tray-icons.py` draws them.
+fn icon(look: Look) -> Image<'static> {
+    Image::from_bytes(png(look.name)).expect("the tray icons are PNGs")
+}
+
+fn png(name: &str) -> &'static [u8] {
+    match name {
+        "idle-template" => include_bytes!("../icons/idle-template@2x.png"),
+        "building-template" => include_bytes!("../icons/building-template@2x.png"),
+        "idle-attention-gray" => include_bytes!("../icons/idle-attention-gray@2x.png"),
+        "building-attention-gray" => include_bytes!("../icons/building-attention-gray@2x.png"),
+        "idle" => include_bytes!("../icons/idle@2x.png"),
+        "building" => include_bytes!("../icons/building@2x.png"),
+        "idle-attention" => include_bytes!("../icons/idle-attention@2x.png"),
+        "building-attention" => include_bytes!("../icons/building-attention@2x.png"),
+        _ => panic!("there is no tray icon {name}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn templates_show_whether_anything_is_building() {
+        assert_eq!(
+            look(true, false, false),
+            Look {
+                name: "idle-template",
+                template: true
+            }
+        );
+        assert_eq!(
+            look(true, true, false),
+            Look {
+                name: "building-template",
+                template: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_template_cant_be_red_so_attention_is_drawn_in_gray() {
+        assert_eq!(
+            look(true, false, true),
+            Look {
+                name: "idle-attention-gray",
+                template: false
+            }
+        );
+        assert_eq!(
+            look(true, true, true),
+            Look {
+                name: "building-attention-gray",
+                template: false
+            }
+        );
+    }
+
+    #[test]
+    fn colored_icons_show_building_and_attention() {
+        let names: Vec<_> = [(false, false), (true, false), (false, true), (true, true)]
+            .into_iter()
+            .map(|(building, attention)| look(false, building, attention))
+            .inspect(|look| assert!(!look.template))
+            .map(|look| look.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["idle", "building", "idle-attention", "building-attention"]
+        );
+    }
+
+    #[test]
+    fn every_look_has_an_icon() {
+        for template in [false, true] {
+            for building in [false, true] {
+                for attention in [false, true] {
+                    let _ = png(look(template, building, attention).name);
+                }
+            }
+        }
+    }
 }

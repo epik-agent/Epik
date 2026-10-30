@@ -265,14 +265,8 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
     let mut second = exponentiation();
     second.run = RunKey::new("wpm/tic-tac-toe", 4);
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
-    let missing = Repository {
-        repo: "wpm/calc-old".to_owned(),
-        added_at: time(0),
-        added_by_user: false,
-        missing: true,
-    };
 
-    let home = home(&runs, &[missing], now());
+    let home = home(&runs, now());
 
     let keys = |cards: &[RunCard]| cards.iter().map(|c| c.run.clone()).collect::<Vec<_>>();
     assert_eq!(
@@ -288,11 +282,68 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
         home.headline
     );
     assert!(home.headline.ends_with(" awake until they finish."));
-    assert!(home.missing_repository);
+    assert_eq!(super::home(&[], now()).headline, "Nothing is building.");
+}
+
+#[test]
+fn the_sidebar_lists_runs_needing_attention_then_building_then_waiting() {
+    let mut second = exponentiation();
+    second.run = RunKey::new("wpm/tic-tac-toe", 4);
+    second.title = "Tic-tac-toe".to_owned();
+    let runs = [exponentiation(), waiting_run(), failed_run(), second];
+
+    let sidebar = sidebar(&runs, &[], time(0), now());
+
+    let listed: Vec<(&str, &str, epik_view::Disposition)> = sidebar
+        .runs
+        .iter()
+        .map(|r| (r.run.as_str(), r.title.as_str(), r.disposition))
+        .collect();
     assert_eq!(
-        super::home(&[], &[], now()).headline,
-        "Nothing is building."
+        listed,
+        [
+            (
+                "wpm/epik-test#7",
+                "Division by zero",
+                epik_view::Disposition::NeedsAttention
+            ),
+            (
+                "wpm/epik-test#13",
+                "Exponentiation",
+                epik_view::Disposition::Building
+            ),
+            (
+                "wpm/tic-tac-toe#4",
+                "Tic-tac-toe",
+                epik_view::Disposition::Building
+            ),
+            (
+                "wpm/epik-test#9",
+                "Calculator REPL",
+                epik_view::Disposition::WaitingForReview
+            ),
+        ]
     );
+    assert!(!sidebar.missing_repository);
+}
+
+#[test]
+fn the_sidebar_marks_settings_while_a_repository_is_missing() {
+    let missing = Repository {
+        repo: "wpm/calc-old".to_owned(),
+        added_at: time(0),
+        added_by_user: false,
+        missing: true,
+    };
+
+    assert!(sidebar(&[], &[missing], time(0), now()).missing_repository);
+}
+
+#[test]
+fn the_status_line_says_how_long_epik_has_been_running() {
+    let up = |seconds: i64| sidebar(&[], &[], time(0), time(seconds)).status;
+    assert_eq!(up(0), "Epik running · up 0s");
+    assert_eq!(up(4 * 3600 + 12 * 60 + 30), "Epik running · up 4h 12m");
 }
 
 #[test]

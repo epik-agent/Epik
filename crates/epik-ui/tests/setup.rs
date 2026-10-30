@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use epik_ui::setup::{Item, Items, Setup};
+use epik_ui::setup::{Intro, Item, Items, Setup};
 use epik_view::{Checklist, ItemState, Output, Row};
 use leptos::prelude::*;
 
@@ -203,5 +203,14 @@ fn a_step_is_followed_until_it_stops_running_and_its_output_is_kept() {
     assert_eq!(
         setup.outputs,
         BTreeMap::from([("gh".to_owned(), output(&["one", "two"], false, Some("bad")))])
+    );
+}
+
+#[test]
+fn the_intro_names_no_operating_system() {
+    let html = render(|| view! { <Intro/> });
+    assert!(
+        html.starts_with("<p>Epik needs these on this computer. Each button says"),
+        "{html}"
     );
 }

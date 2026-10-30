@@ -118,6 +118,6 @@ fn home_without_runs_says_so() {
     let html = render(|| view! { <HomePage home=home(vec![], vec![], vec![])/> });
     assert_eq!(
         html,
-        r#"<div class="empty"><p>No runs right now.</p><p class="muted">Ask Epik to build an issue or an epic in Claude Code, and it shows up here while it builds.</p></div>"#
+        r#"<p class="headline">One run building</p><div class="empty"><p>No runs right now.</p><p class="muted">Ask Epik to build an issue or an epic in Claude Code, and it shows up here while it builds.</p></div>"#
     );
 }

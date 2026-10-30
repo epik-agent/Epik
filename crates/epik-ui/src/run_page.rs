@@ -1,13 +1,15 @@
 //! A run's page: its issues laid out as their dependency graph, and the
 //! chosen issue's detail panel.
 
-use epik_view::{Disposition, IssueCard, NodeState, RunPage, Span, Words as Sentence};
+use epik_view::{Disposition, IssueCard, NodeState, RunPage, Span, Stream, Words as Sentence};
 use leptos::ev::MouseEvent;
 use leptos::html::Button;
 use leptos::prelude::*;
 
 use crate::flash::flash_on;
 use crate::live::{kept, keyed, part};
+use crate::main_window::RunBar;
+use crate::stream::StreamView;
 use crate::words::{GithubLink, Words};
 
 /// An issue card's size, and the gaps between cards.
@@ -158,12 +160,18 @@ pub fn Edges(issues: Vec<IssueCard>, edges: Vec<(u64, u64)>) -> impl IntoView {
         .collect_view()
 }
 
-/// The chosen issue's detail panel: its state, facts, and what its agent
-/// has done, with a link to its full log.
+/// The chosen issue's detail panel: its state and facts, and what its
+/// agent is doing, in Full, the stream of its log, or in Summary, its
+/// recent actions.
 #[component]
 pub fn Detail(
     #[prop(into)] issue: Signal<IssueCard>,
-    #[prop(optional_no_strip)] on_open_log: Option<Callback<String>>,
+    /// The stream of its agent's log, if it has one.
+    #[prop(optional, into)]
+    stream: Signal<Option<Stream>>,
+    /// Whether it starts on Summary rather than Full.
+    #[prop(optional)]
+    summary: bool,
 ) -> impl IntoView {
     let title = part(issue, |issue| format!(" {}", issue.title));
     let state = part(issue, |issue| issue.state);
@@ -181,17 +189,17 @@ pub fn Detail(
             <dd>{words(sentence, None)}</dd>
         }
     };
-    let log = part(issue, |issue| issue.log.clone());
-    let full_log = move || {
-        log.get().map(|path| {
-            let open = move |event: MouseEvent| {
-                event.prevent_default();
-                if let Some(on_open_log) = on_open_log {
-                    on_open_log.run(path.clone());
-                }
-            };
-            view! { <a class="full-log" href="#" on:click=open>"Full log"</a> }
-        })
+    let summary = RwSignal::new(summary);
+    let choice = move |label: &'static str, shows_summary: bool| {
+        let chosen = move || summary.get() == shows_summary;
+        view! {
+            <button
+                aria-pressed=move || if chosen() { "true" } else { "false" }
+                on:click=move |_| summary.set(shows_summary)
+            >
+                {label}
+            </button>
+        }
     };
     let recent = part(issue, |issue| issue.recent.clone());
     let recent = move || {
@@ -204,6 +212,13 @@ pub fn Detail(
                 .map(|action| view! { <li>{action}</li> })
                 .collect_view()
                 .into_any()
+        }
+    };
+    let doing = move || {
+        if summary.get() {
+            view! { <ol class="recent">{recent}</ol> }.into_any()
+        } else {
+            view! { <StreamView stream/> }.into_any()
         }
     };
     let sentence = part(issue, |issue| issue.sentence.clone());
@@ -223,11 +238,11 @@ pub fn Detail(
                 </dl>
             </div>
             <div class="doing">
-                <div class="doing-head">
-                    <span class="label">"What the agent has done"</span>
-                    {full_log}
+                <div class="switch" role="group" aria-label="What the agent has done">
+                    {choice("Full", false)}
+                    {choice("Summary", true)}
                 </div>
-                <ol class="recent">{recent}</ol>
+                {doing}
             </div>
         </section>
     }
@@ -237,8 +252,8 @@ fn issue_number(issue: &IssueCard) -> u64 {
     issue.number
 }
 
-/// A run's page: what it is and where it stands, its builds, its issues as
-/// a graph, and the chosen issue's detail panel.
+/// A run's page: its breadcrumb, what it is and where it stands, its
+/// builds, its issues as a graph, and the chosen issue's detail panel.
 #[component]
 pub fn RunView(
     #[prop(into)] page: Signal<RunPage>,
@@ -246,9 +261,12 @@ pub fn RunView(
     #[prop(into)]
     chosen: Signal<Option<u64>>,
     #[prop(optional)] on_choose: Option<Callback<u64>>,
-    #[prop(optional)] on_open_log: Option<Callback<String>>,
+    /// The stream of an agent's log, and the log's path.
+    #[prop(optional, into)]
+    streamed: Signal<Option<(String, Stream)>>,
 ) -> impl IntoView {
     let run = page.with_untracked(|page| page.run.clone());
+    let also_building = part(page, |page| page.also_building.clone());
     let epic = part(page, |page| page.epic.clone());
     let about = part(page, |page| page.about.clone());
     let title = part(page, |page| page.title.clone());
@@ -282,9 +300,20 @@ pub fn RunView(
         let issue = kept(issue, move || {
             issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())
         });
-        Some(view! { <Detail issue on_open_log/> })
+        // Only the chosen issue's own stream.
+        let stream = Memo::new(move |_| {
+            let log = issue.with(|issue| issue.log.clone());
+            streamed.with(|streamed| {
+                streamed
+                    .as_ref()
+                    .filter(|(path, _)| log.as_ref() == Some(path))
+                    .map(|(_, stream)| stream.clone())
+            })
+        });
+        Some(view! { <Detail issue stream/> })
     };
     view! {
+        <nav class="run-bar"><RunBar title also_building/></nav>
         <section class="run-head">
             <div>
                 <div class="about">{link(epic)}" · "{words(about, None)}</div>

@@ -159,6 +159,17 @@ struct Step {
     id: String,
 }
 
+/// The line under the window's title, which names no operating system:
+/// Epik runs on macOS, Windows and Linux.
+#[component]
+pub fn Intro() -> impl IntoView {
+    view! {
+        <p>
+            "Epik needs these on this computer. Each button says what it will do, and nothing happens until you press it. Nothing is installed system-wide."
+        </p>
+    }
+}
+
 /// The setup window, which checks the checklist when it opens.
 #[component]
 pub fn SetupWindow() -> impl IntoView {
@@ -178,9 +189,7 @@ pub fn SetupWindow() -> impl IntoView {
     view! {
         <header>
             <h1>"Set up Epik"</h1>
-            <p>
-                "Epik needs these on your Mac or PC. Each button says what it will do, and nothing happens until you press it. Nothing is installed system-wide."
-            </p>
+            <Intro/>
         </header>
         <main>{move || view! { <Items setup=setup.get() on_press=press/> }}</main>
     }
