@@ -34,16 +34,16 @@ pub fn toggle(handle: &AppHandle, rect: Rect) -> tauri::Result<()> {
             window
         }
         None => {
-            let window =
-                WebviewWindowBuilder::new(handle, LABEL, WebviewUrl::App("popover.html".into()))
-                    .title("Epik")
-                    .inner_size(WIDTH, HEIGHT)
-                    .resizable(false)
-                    .decorations(false)
-                    .always_on_top(true)
-                    .skip_taskbar(true)
-                    .visible(false)
-                    .build()?;
+            let url = WebviewUrl::App("index.html#/popover".into());
+            let window = WebviewWindowBuilder::new(handle, LABEL, url)
+                .title("Epik")
+                .inner_size(WIDTH, HEIGHT)
+                .resizable(false)
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .visible(false)
+                .build()?;
             let hide = window.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::Focused(false) = event {

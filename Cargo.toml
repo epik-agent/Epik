@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/epik-core", "crates/epik-app"]
+members = ["crates/epik-core", "crates/epik-view", "crates/epik-ui", "crates/epik-app"]
 
 [workspace.package]
 version = "0.3.0"

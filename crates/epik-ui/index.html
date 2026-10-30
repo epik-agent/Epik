@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- The Epik app's windows: one WebAssembly app, which draws the window the
+     URL's hash names. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Epik</title>
+    <link data-trunk rel="rust" data-cargo-features="csr" />
+    <link data-trunk rel="css" href="epik.css" />
+    <!-- Each window's own stylesheet, which it loads itself: they style the
+         page's body, header and main differently. -->
+    <link data-trunk rel="copy-file" href="popover.css" />
+    <link data-trunk rel="copy-file" href="setup.css" />
+    <link data-trunk rel="copy-file" href="app.css" />
+  </head>
+  <body></body>
+</html>
