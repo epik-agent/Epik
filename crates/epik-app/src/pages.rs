@@ -10,10 +10,11 @@ use epik_core::graph::Graph;
 use epik_core::record::{BuildStatus, IssueState, IssueStatus, Kind};
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
+use epik_core::uninstall::Outcome;
 use epik_core::words::{dollars, duration};
 use epik_view::{
     Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress, RepositoryRow,
-    RunCard, RunPage, Settings, Span, Words,
+    RunCard, RunPage, Settings, Span, UninstallStep, Words,
 };
 
 /// How long an agent may log nothing and still be "active".
@@ -866,6 +867,17 @@ pub fn settings(repositories: &[Repository], runs: &[RunState], zone: &FixedOffs
             })
             .collect(),
     }
+}
+
+/// How each step of uninstalling went, as its dialog lists them.
+pub fn uninstall_steps(outcomes: &[Outcome]) -> Vec<UninstallStep> {
+    outcomes
+        .iter()
+        .map(|outcome| UninstallStep {
+            title: outcome.step.title().to_owned(),
+            error: outcome.result.clone().err(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

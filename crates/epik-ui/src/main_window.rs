@@ -1,12 +1,12 @@
 //! The main window: Home (`#/`), a run's page (`#/run/<owner/name%23n>`),
 //! and Settings over Home. It asks the app what to show every second and
 //! draws it. Its only controls are Rerun and Delete on a run that needs
-//! attention, and Settings.
+//! attention, and Settings, which can also uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use epik_view::{Home, NodeState, RepositoryRow, RunPage, Settings};
+use epik_view::{Home, NodeState, RepositoryRow, RunPage, Settings, Uninstall, UninstallStep};
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
 use leptos::prelude::*;
@@ -17,7 +17,9 @@ use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::kept;
 use crate::run_page::RunView;
-use crate::settings::{ConfirmBody, MonitorForm, Repositories};
+use crate::settings::{
+    ConfirmBody, MonitorForm, Repositories, UninstallBody, UninstallButton, Uninstalling,
+};
 use crate::tauri;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -205,6 +207,15 @@ async fn fetch_settings(settings: RwSignal<Option<Result<Settings, String>>>) {
     settings.set(Some(tauri::invoke::<_, Settings>("settings", &()).await));
 }
 
+/// Fetches what the confirmation to uninstall Epik says, or shows why it
+/// couldn't.
+async fn fetch_uninstall_plan(plan: RwSignal<Uninstall>, stage: RwSignal<Uninstalling>) {
+    match tauri::invoke::<_, Uninstall>("uninstall_plan", &()).await {
+        Ok(fetched) => plan.set(fetched),
+        Err(reason) => stage.set(Uninstalling::Asking(Some(reason))),
+    }
+}
+
 /// The main window, refreshed from the app every second.
 #[component]
 pub fn MainWindow() -> impl IntoView {
@@ -331,6 +342,59 @@ pub fn MainWindow() -> impl IntoView {
     };
     let on_monitored = Callback::new(move |()| spawn_local(fetch_settings(settings)));
 
+    // The dialog that uninstalls Epik. While it asks, it follows whether a
+    // build is running.
+    let uninstall_dialog = NodeRef::<Dialog>::new();
+    let plan = RwSignal::new(Uninstall::default());
+    let stage = RwSignal::new(Uninstalling::Asking(None));
+    let asking = move || {
+        matches!(stage.get_untracked(), Uninstalling::Asking(_))
+            && uninstall_dialog
+                .get_untracked()
+                .is_some_and(|dialog| dialog.open())
+    };
+    set_interval(
+        move || {
+            if asking() {
+                spawn_local(fetch_uninstall_plan(plan, stage));
+            }
+        },
+        REFRESH,
+    );
+    let on_open_uninstall = Callback::new(move |()| {
+        stage.set(Uninstalling::Asking(None));
+        spawn_local(async move {
+            fetch_uninstall_plan(plan, stage).await;
+            if let Some(dialog) = uninstall_dialog.get_untracked() {
+                let _ = dialog.show_modal();
+            }
+        });
+    });
+    let on_uninstall = Callback::new(move |()| {
+        stage.set(Uninstalling::Removing);
+        spawn_local(async move {
+            match tauri::invoke::<_, Vec<UninstallStep>>("uninstall", &()).await {
+                Ok(steps) => stage.set(Uninstalling::Done(steps)),
+                Err(reason) => {
+                    stage.set(Uninstalling::Asking(Some(reason)));
+                    fetch_uninstall_plan(plan, stage).await;
+                }
+            }
+        });
+    });
+    let on_cancel_uninstall = Callback::new(move |()| {
+        if let Some(dialog) = uninstall_dialog.get_untracked() {
+            dialog.close();
+        }
+    });
+    let on_quit = Callback::new(move |()| tauri::run("quit", ()));
+    // Escape only closes the dialog while it asks.
+    let escape = move |event: leptos::ev::Event| {
+        if !matches!(stage.get_untracked(), Uninstalling::Asking(_)) {
+            event.prevent_default();
+        }
+    };
+
     let bar = Memo::new(move |before: Option<&Bar>| {
         shown.with(|shown| match shown {
             Some(Shown::Home(home)) => Bar::Home(home.headline.clone(), home.missing_repository),
@@ -426,6 +490,7 @@ pub fn MainWindow() -> impl IntoView {
                 </ul>
                 <MonitorForm error=monitor_error on_monitored=Some(on_monitored)/>
             </section>
+            <UninstallButton on_open=Some(on_open_uninstall)/>
         </dialog>
         <dialog id="confirm" node_ref=confirm_dialog on:close=confirmed>
             {move || confirming.get().map(|repository| view! { <ConfirmBody repository/> })}
@@ -433,6 +498,19 @@ pub fn MainWindow() -> impl IntoView {
                 <button value="cancel" id="confirm-cancel" autofocus node_ref=cancel>"Cancel"</button>
                 <button value="ok" class="danger">"Stop monitoring"</button>
             </form>
+        </dialog>
+        <dialog id="uninstall" node_ref=uninstall_dialog on:cancel=escape>
+            {move || {
+                view! {
+                    <UninstallBody
+                        plan=plan.get()
+                        stage=stage.get()
+                        on_uninstall=Some(on_uninstall)
+                        on_cancel=Some(on_cancel_uninstall)
+                        on_quit=Some(on_quit)
+                    />
+                }
+            }}
         </dialog>
     }
 }

@@ -2,7 +2,8 @@
 //!
 //! The window, drawn by `epik-ui` at `index.html#/`, asks these commands
 //! for what to show every second, and draws it. The window notifies; its only controls are Rerun
-//! and Delete on a run that needs attention, and Settings. Every command
+//! and Delete on a run that needs attention, and Settings, which can also
+//! uninstall Epik. Every command
 //! goes through `epik-core`; nothing here touches `~/.epik` itself.
 
 use std::path::PathBuf;
@@ -13,7 +14,8 @@ use epik_core::builds::Builds;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
-use epik_view::{Home, Popover, RunPage, Settings};
+use epik_core::{setup, uninstall};
+use epik_view::{Home, Popover, RunPage, Settings, Uninstall, UninstallStep};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::pages;
@@ -122,6 +124,34 @@ pub fn monitor(repo: String, window: State<'_, Window>) -> Result<(), String> {
 #[tauri::command]
 pub fn stop_monitoring(repo: String, window: State<'_, Window>) -> Result<(), String> {
     repositories::remove(&window.root, &repo).map_err(failed)
+}
+
+/// Why Epik can't be uninstalled while a build runs.
+const BUILDING: &str = "Wait for the running build to finish, or stop it first.";
+
+/// What the confirmation to uninstall Epik says: how many runs' history
+/// goes, and whether a build is running.
+#[tauri::command]
+pub fn uninstall_plan(window: State<'_, Window>) -> Result<Uninstall, String> {
+    Ok(Uninstall {
+        runs: run::list(&window.root).map_err(failed)?.len(),
+        building: !window.builds.active().is_empty(),
+    })
+}
+
+/// Removes what Epik put on the machine, unless a build is running, and
+/// says how each step went. The app keeps running until the user quits it.
+#[tauri::command]
+pub async fn uninstall(window: State<'_, Window>) -> Result<Vec<UninstallStep>, String> {
+    if !window.builds.active().is_empty() {
+        return Err(BUILDING.to_owned());
+    }
+    let root = window.root.clone();
+    let outcomes =
+        tauri::async_runtime::spawn_blocking(move || uninstall::uninstall(&root, &setup::System))
+            .await
+            .map_err(failed)?;
+    Ok(pages::uninstall_steps(&outcomes))
 }
 
 /// Opens a GitHub page in the browser. Only GitHub's pages: the window
