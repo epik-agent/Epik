@@ -20,6 +20,7 @@ use agent_client_protocol::schema::v1::{
     TextContent,
 };
 use agent_client_protocol::{AcpAgent, Client, ConnectionTo, LineDirection};
+use chrono::{SecondsFormat, Utc};
 use futures::future::{Either, select};
 use serde_json::{Value, json};
 
@@ -34,7 +35,8 @@ pub struct AgentRequest {
     pub plugin_dir: PathBuf,
     /// Where every message in both directions goes, one JSON object per
     /// line: `{"to_agent": ...}`, `{"from_agent": ...}`, or `{"note": ...}`
-    /// for something Epik did on its own, such as refusing a permission.
+    /// for something Epik did on its own, such as refusing a permission,
+    /// each with `"at"`, when it arrived, in RFC 3339 and UTC.
     pub jsonl_path: PathBuf,
     /// Where the agent's stderr goes.
     pub err_path: PathBuf,
@@ -349,7 +351,12 @@ impl Record {
         self.json(json!({"note": note}));
     }
 
-    fn json(&self, value: Value) {
+    /// Writes `value` as a line, with when it arrived as `"at"`.
+    fn json(&self, mut value: Value) {
+        if let Value::Object(object) = &mut value {
+            let at = Utc::now().to_rfc3339_opts(SecondsFormat::AutoSi, true);
+            object.insert("at".into(), Value::from(at));
+        }
         // A log that can't be written mustn't stop the run.
         // One write per line, rather than one per JSON token.
         let _ = self
@@ -357,5 +364,45 @@ impl Record {
             .lock()
             .unwrap()
             .write_all(format!("{value}\n").as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_line_written_says_when_it_arrived() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = AgentRequest {
+            prompt: String::new(),
+            cwd: dir.path().to_owned(),
+            plugin_dir: dir.path().to_owned(),
+            jsonl_path: dir.path().join("1.jsonl"),
+            err_path: dir.path().join("1.err"),
+        };
+        let record = Record::create(&request).unwrap();
+        let before = chrono::Utc::now();
+
+        record.line(r#"{"id":1}"#, LineDirection::Stdin);
+        record.line(r#"{"id":1,"result":{}}"#, LineDirection::Stdout);
+        record.line("not json", LineDirection::Stdout);
+        record.note("rejected a permission request: rm");
+
+        let text = std::fs::read_to_string(&request.jsonl_path).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            let at = line["at"].as_str().unwrap_or_else(|| panic!("{line}"));
+            let at = chrono::DateTime::parse_from_rfc3339(at).unwrap();
+            assert!(at >= before && at <= chrono::Utc::now(), "{line}");
+            assert!(at.offset().local_minus_utc() == 0, "{line}");
+        }
+        assert_eq!(lines[0]["to_agent"], json!({"id": 1}));
+        assert_eq!(lines[2]["from_agent"], "not json");
+        assert_eq!(lines[3]["note"], "rejected a permission request: rm");
     }
 }
