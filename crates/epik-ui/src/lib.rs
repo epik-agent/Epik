@@ -14,6 +14,7 @@ pub mod popover;
 pub mod run_page;
 pub mod settings;
 pub mod setup;
+pub mod stream;
 pub mod tauri;
 pub mod words;
 

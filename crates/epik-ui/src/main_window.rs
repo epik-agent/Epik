@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use epik_view::{
     Disposition, Home, NodeState, RepositoryRow, RunPage, Settings, Sidebar as SidebarView,
-    SidebarRun, Uninstall, UninstallStep,
+    SidebarRun, Stream, Uninstall, UninstallStep,
 };
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
@@ -268,6 +268,34 @@ struct Log {
     path: String,
 }
 
+/// The issue whose detail panel shows on a run's page: the one picked, or
+/// else the first running, or else the first.
+fn chosen_issue(page: &RunPage, picked: Option<u64>) -> Option<u64> {
+    picked.or_else(|| {
+        page.issues
+            .iter()
+            .find(|issue| issue.state == NodeState::Running)
+            .or(page.issues.first())
+            .map(|issue| issue.number)
+    })
+}
+
+/// The stream of the chosen issue's agent log on a run's page, and the
+/// log's path, if it has one and it can be read.
+async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Option<(String, Stream)> {
+    let number = chosen_issue(page, picked)?;
+    let path = page
+        .issues
+        .iter()
+        .find(|issue| issue.number == number)?
+        .log
+        .clone()?;
+    let stream = tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() })
+        .await
+        .ok()?;
+    Some((path, stream))
+}
+
 fn current_page() -> Page {
     Page::from_hash(&window().location().hash().unwrap_or_default())
 }
@@ -301,6 +329,8 @@ pub fn MainWindow() -> impl IntoView {
     let error = RwSignal::new(String::new());
     // The issue chosen on each run's page.
     let selected = RwSignal::new(HashMap::<String, u64>::new());
+    // The stream of the chosen issue's agent log, and the log's path.
+    let streamed = RwSignal::new(None::<(String, Stream)>);
     let flashing = Flashing(RwSignal::new(HashMap::new()));
     provide_context(flashing);
     let flashes = StoredValue::new(Flashes::default());
@@ -326,6 +356,15 @@ pub fn MainWindow() -> impl IntoView {
             };
             match fetched {
                 Ok(fetched) => {
+                    let stream = match &fetched {
+                        Shown::Run(page) => {
+                            let picked = selected
+                                .with_untracked(|selected| selected.get(&page.run).copied());
+                            fetch_stream(page, picked).await
+                        }
+                        _ => None,
+                    };
+                    streamed.set(stream);
                     let title = match &fetched {
                         Shown::Run(page) => format!("{} · Epik", page.title),
                         _ => "Epik".to_owned(),
@@ -362,13 +401,6 @@ pub fn MainWindow() -> impl IntoView {
                 Err(reason) => error.set(reason),
             }
             refresh();
-        });
-    });
-    let on_open_log = Callback::new(move |path: String| {
-        spawn_local(async move {
-            if let Err(reason) = tauri::invoke::<_, ()>("open_log", &Log { path }).await {
-                error.set(reason);
-            }
         });
     });
 
@@ -511,26 +543,18 @@ pub fn MainWindow() -> impl IntoView {
                 let run = run.clone();
                 move || {
                     let picked = selected.with(|selected| selected.get(&run).copied());
-                    picked.or_else(|| {
-                        let page = page?;
-                        page.with(|page| {
-                            page.issues
-                                .iter()
-                                .find(|issue| issue.state == NodeState::Running)
-                                .or(page.issues.first())
-                                .map(|issue| issue.number)
-                        })
-                    })
+                    page?.with(|page| chosen_issue(page, picked))
                 }
             });
             let on_choose = Callback::new(move |number: u64| {
                 selected.update(|selected| {
                     selected.insert(run.clone(), number);
                 });
+                refresh();
             });
             view! {
                 {error_line}
-                {page.map(|page| view! { <RunView page chosen on_choose on_open_log/> })}
+                {page.map(|page| view! { <RunView page chosen on_choose streamed/> })}
             }
             .into_any()
         }
