@@ -5,11 +5,18 @@ on:
   push:
     branches: [main]
 
+env:
+  # Sets Git's init.defaultBranch for every job, which silences the
+  # hint actions/checkout's `git init` prints.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
+
 jobs:
   ci:
     # The branch ruleset requires a status check with this exact context.
     name: CI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # No step writes to GitHub, and actions/checkout needs contents: read to
     # clone this private repository.
     permissions:
@@ -23,19 +30,19 @@ jobs:
       # Validate the marketplace and plugin manifests the way Claude Code
       # reads them. Not --strict: plugin.json omits `version` on purpose so
       # each commit is a new version, and --strict fails on that warning.
-      - run: npm install --global @anthropic-ai/claude-code@2.1.309
+      - run: npm install --global --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.309
       - run: claude plugin validate .
       - run: claude plugin validate ./plugin
 
   rust:
     # The Epik app is cross-platform, so its workspace is checked on each
     # platform it runs on.
-    # GitHub appends the matrix's os to the name: "Rust (ubuntu-latest)".
+    # GitHub appends the matrix's os to the name: "Rust (ubuntu-24.04)".
     name: Rust
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -77,7 +84,7 @@ jobs:
     name: Deploy website
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Listing any permission drops the rest to none, and actions/checkout
     # needs contents: read to clone this private repository.
     permissions:
