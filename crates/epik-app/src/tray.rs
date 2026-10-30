@@ -88,7 +88,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::uninstall_plan,
             main_window::uninstall,
             main_window::open_github,
-            main_window::open_log,
+            main_window::agent_stream,
             popover::open_main,
             popover::quit,
             setup_window::setup_checklist,
