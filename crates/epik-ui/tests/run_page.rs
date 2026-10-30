@@ -138,7 +138,8 @@ fn a_runs_page_has_its_head_builds_graph_and_detail() {
     let mut page = run_page();
     page.builds.push("Last build, failed at 9:40".into());
     let html = render(|| view! { <RunView page chosen=Some(2)/> });
-    assert!(html.starts_with(r#"<section class="run-head"><div><div class="about"><a href="https://github.com/acme/widgets/issues/13">acme/widgets#13</a> · <span>3 issues · merging into <code>epic/13-exponentiation</code></span></div><h1>Exponentiation</h1><p class="sentence building">First build running. 1 of 3 issues merged, 1 agent working.</p></div><dl class="totals"><dt>Elapsed</dt><dd>4m 12s</dd><dt>Cost so far</dt><dd>$1.20</dd></dl></section>"#), "{html}");
+    assert!(html.starts_with(r##"<nav class="run-bar"><span class="crumbs"><a class="back" href="#/">‹ Runs</a><span class="slash">/</span><span>Exponentiation</span></span></nav><section class="run-head">"##), "{html}");
+    assert!(html.contains(r#"<section class="run-head"><div><div class="about"><a href="https://github.com/acme/widgets/issues/13">acme/widgets#13</a> · <span>3 issues · merging into <code>epic/13-exponentiation</code></span></div><h1>Exponentiation</h1><p class="sentence building">First build running. 1 of 3 issues merged, 1 agent working.</p></div><dl class="totals"><dt>Elapsed</dt><dd>4m 12s</dd><dt>Cost so far</dt><dd>$1.20</dd></dl></section>"#), "{html}");
     assert!(html.contains(r#"<div class="builds"><span class="label">Builds</span><span class="build current">First build, started 10:02</span><span class="build">Last build, failed at 9:40</span></div>"#), "{html}");
     assert!(html.contains(r#"<div class="graph-scroll"><div class="graph" style="width:456px;height:170px;"><svg width="456" height="170"><path d="#), "{html}");
     assert_eq!(html.matches(r#"<button title="#).count(), 3, "{html}");
@@ -164,4 +165,23 @@ fn a_run_needing_attention_says_so_in_red() {
         html.contains(r#"<p class="sentence needs_attention">The build failed.</p>"#),
         "{html}"
     );
+}
+
+#[test]
+fn a_runs_page_starts_with_its_breadcrumb_and_the_other_runs_building() {
+    let mut page = run_page();
+    page.also_building = vec![("acme/tools#2".into(), "Lint".into())];
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(html.starts_with(r##"<nav class="run-bar"><span class="crumbs"><a class="back" href="#/">‹ Runs</a><span class="slash">/</span><span>Exponentiation</span></span><span class="also">Also building: <a href="#/run/acme/tools%232">Lint</a></span></nav>"##), "{html}");
+}
+
+#[test]
+fn the_detail_panel_draws_the_issue_on_the_left_and_its_agent_on_the_right() {
+    let html = render(|| view! { <Detail issue=issue(2, NodeState::Running, 1, 0)/> });
+    let facts = html.find(r#"<div class="facts">"#).expect(&html);
+    let doing = html.find(r#"<div class="doing">"#).expect(&html);
+    assert!(facts < doing, "{html}");
+    assert!(html[facts..doing].contains("<h3>"), "{html}");
+    assert!(html[facts..doing].contains("<dl>"), "{html}");
+    assert!(html[doing..].contains(r#"<ol class="recent">"#), "{html}");
 }

@@ -176,25 +176,30 @@ pub fn Sidebar(
     }
 }
 
-/// The bar on a run's page: the run, a link back to Home, and links to the
-/// other runs building.
+/// The breadcrumb at the top of a run's page: a link back to Home, the
+/// run, and links to the other runs building.
 #[component]
-pub fn RunBar(title: String, also_building: Vec<(String, String)>) -> impl IntoView {
-    let also = (!also_building.is_empty()).then(|| {
-        let links = also_building
-            .into_iter()
-            .enumerate()
-            .map(|(i, (run, title))| {
-                view! {
-                    {(i > 0).then_some(", ")}
-                    <a href=href(&format!("run/{run}"))>{title}</a>
-                }
-            })
-            .collect_view();
-        view! { <span class="also">"Also building: "{links}</span> }
-    });
+pub fn RunBar(
+    #[prop(into)] title: Signal<String>,
+    #[prop(into)] also_building: Signal<Vec<(String, String)>>,
+) -> impl IntoView {
+    let also = move || {
+        let also_building = also_building.get();
+        (!also_building.is_empty()).then(|| {
+            let links = also_building
+                .into_iter()
+                .enumerate()
+                .map(|(i, (run, title))| {
+                    view! {
+                        {(i > 0).then_some(", ")}
+                        <a href=href(&format!("run/{run}"))>{title}</a>
+                    }
+                })
+                .collect_view();
+            view! { <span class="also">"Also building: "{links}</span> }
+        })
+    };
     view! {
-        <span class="mark" inner_html=MARK></span>
         <span class="crumbs">
             <a class="back" href="#/">"‹ Runs"</a>
             <span class="slash">"/"</span>
@@ -220,13 +225,6 @@ enum Which {
     Home,
     Run(String),
     Failed(String),
-}
-
-/// What the bar over a run's page shows: it stays when a refresh fails.
-#[derive(Debug, Clone, PartialEq)]
-enum Bar {
-    Nothing,
-    Run(String, Vec<(String, String)>),
 }
 
 /// The keys of what flashes in `shown`: each running issue whose agent
@@ -476,20 +474,6 @@ pub fn MainWindow() -> impl IntoView {
         }
     };
 
-    let bar = Memo::new(move |before: Option<&Bar>| {
-        shown.with(|shown| match shown {
-            Some(Shown::Home(_)) => Bar::Nothing,
-            Some(Shown::Run(page)) => Bar::Run(page.title.clone(), page.also_building.clone()),
-            _ => before.cloned().unwrap_or(Bar::Nothing),
-        })
-    });
-    let bar = move || match bar.get() {
-        Bar::Nothing => ().into_any(),
-        Bar::Run(title, also_building) => {
-            view! { <header id="bar"><RunBar title also_building/></header> }.into_any()
-        }
-    };
-
     let which = Memo::new(move |_| {
         shown.with(|shown| match shown {
             None => Which::Nothing,
@@ -554,10 +538,7 @@ pub fn MainWindow() -> impl IntoView {
 
     view! {
         <nav id="sidebar"><Sidebar sidebar page on_settings/></nav>
-        <div id="content">
-            {bar}
-            <main id="page">{body}</main>
-        </div>
+        <main id="page">{body}</main>
         <dialog id="settings" node_ref=settings_dialog>
             <form method="dialog" class="dialog-head">
                 <h2>"Settings"</h2>
