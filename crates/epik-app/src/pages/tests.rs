@@ -468,3 +468,32 @@ fn settings_lists_each_repository_with_its_runs_and_when_it_was_added() {
         "https://github.com/wpm/epik-test"
     );
 }
+
+#[test]
+fn uninstalling_reports_each_step_by_its_title_with_any_error() {
+    use epik_core::uninstall::{Outcome, Step};
+    let outcomes = [
+        Outcome {
+            step: Step::Plugin,
+            result: Err("disk full".to_owned()),
+        },
+        Outcome {
+            step: Step::Runs,
+            result: Ok(()),
+        },
+    ];
+
+    assert_eq!(
+        uninstall_steps(&outcomes),
+        [
+            UninstallStep {
+                title: "The Epik plugin".to_owned(),
+                error: Some("disk full".to_owned()),
+            },
+            UninstallStep {
+                title: "Run history".to_owned(),
+                error: None,
+            },
+        ]
+    );
+}

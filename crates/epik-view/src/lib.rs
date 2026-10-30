@@ -245,3 +245,21 @@ pub enum ItemState {
     Missing,
     Outdated,
 }
+
+/// What the confirmation to uninstall Epik needs to say.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Uninstall {
+    /// How many runs' history uninstalling deletes.
+    pub runs: usize,
+    /// Whether a build is running, which keeps Epik from being uninstalled.
+    pub building: bool,
+}
+
+/// How one step of uninstalling went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UninstallStep {
+    /// What it removed: "Run history".
+    pub title: String,
+    /// Why it couldn't, if it couldn't.
+    pub error: Option<String>,
+}
