@@ -226,6 +226,78 @@ fn output() {
 }
 
 #[test]
+fn stream() {
+    let lines = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect();
+    round_trip(Stream {
+        entries: vec![
+            StreamEntry {
+                at: Some(1_700_000_000_000),
+                what: Entry::Narration {
+                    text: "I'll read the issue.".to_owned(),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Command {
+                    command: "cargo test".to_owned(),
+                    output: Excerpt {
+                        head: lines(&["running 40 tests"]),
+                        more: 30,
+                        tail: lines(&["test result: ok"]),
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Read {
+                    path: "src/eval.rs".to_owned(),
+                    lines: Some(LineRange { from: 10, to: None }),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Search {
+                    pattern: "fn eval".to_owned(),
+                    within: Some("src".to_owned()),
+                    matches: 1,
+                    hits: Excerpt {
+                        head: lines(&["src/eval.rs:3"]),
+                        ..Excerpt::default()
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Edit {
+                    path: "src/eval.rs".to_owned(),
+                    changes: Excerpt {
+                        head: vec![
+                            Change::Removed("a".to_owned()),
+                            Change::Added("b".to_owned()),
+                        ],
+                        ..Excerpt::default()
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::NewFile {
+                    path: "src/new.rs".to_owned(),
+                    content: Excerpt::default(),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Other {
+                    text: "Updating its plan".to_owned(),
+                },
+            },
+        ],
+        working: true,
+    });
+}
+
+#[test]
 fn the_json_is_what_the_windows_read() {
     let json = serde_json::to_value((
         text("plain"),

@@ -7,7 +7,7 @@
 //! uninstall Epik. Every command
 //! goes through `epik-core`; nothing here touches `~/.epik` itself.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, Utc};
@@ -16,7 +16,7 @@ use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
 use epik_core::{setup, uninstall};
-use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Uninstall, UninstallStep};
+use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::{navigation, pages};
@@ -178,18 +178,32 @@ pub fn open_github(url: String) -> Result<(), String> {
     open::that_detached(&url).map_err(failed)
 }
 
-/// Opens an agent's full log, which must be one of Epik's records.
-#[tauri::command]
-pub fn open_log(path: String, window: State<'_, Window>) -> Result<(), String> {
-    let path = PathBuf::from(path);
-    let runs = record::runs_dir(&window.root);
-    let inside = path
+/// The stream in the agent log at `path`, which must be one of Epik's
+/// records. A log not written yet has nothing in it.
+fn stream(root: &Path, path: &str) -> Result<Stream, String> {
+    let path = Path::new(path);
+    let refused = || format!("{} isn't an agent's log", path.display());
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(refused());
+    };
+    let runs = record::runs_dir(root)
         .canonicalize()
-        .is_ok_and(|path| runs.canonicalize().is_ok_and(|runs| path.starts_with(runs)));
-    if !inside {
-        return Err(format!("{} isn't an agent's log", path.display()));
+        .map_err(|_| refused())?;
+    let dir = dir.canonicalize().map_err(|_| refused())?;
+    if !dir.starts_with(runs) {
+        return Err(refused());
     }
-    open::that_detached(&path).map_err(failed)
+    match epik_core::stream::read(&dir.join(name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Stream::default()),
+        read => read.map_err(failed),
+    }
+}
+
+/// What the agent whose log is at `path` has said and done, for the run
+/// page's stream.
+#[tauri::command]
+pub fn agent_stream(path: String, window: State<'_, Window>) -> Result<Stream, String> {
+    stream(&window.root, &path)
 }
 
 /// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
@@ -218,4 +232,51 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     .on_navigation(navigation::stay_in_app)
     .build()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    const LINE: &str = r#"{"at":"2026-10-30T18:11:41Z","from_agent":{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello."}}}}}"#;
+
+    #[test]
+    fn the_stream_is_read_from_a_log_in_the_records() {
+        let root = tempfile::tempdir().unwrap();
+        let build = root.path().join("runs/acme/widgets/13/b1");
+        fs::create_dir_all(&build).unwrap();
+        let log = build.join("2.jsonl");
+        fs::write(&log, format!("{LINE}\n")).unwrap();
+        let stream = stream(root.path(), log.to_str().unwrap()).unwrap();
+        assert_eq!(stream, epik_core::stream::parse(LINE));
+        assert_eq!(stream.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_log_not_written_yet_has_nothing_in_it() {
+        let root = tempfile::tempdir().unwrap();
+        let build = root.path().join("runs/acme/widgets/13/b1");
+        fs::create_dir_all(&build).unwrap();
+        let log = build.join("2.jsonl");
+        assert_eq!(
+            stream(root.path(), log.to_str().unwrap()),
+            Ok(Stream::default())
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_records_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("runs")).unwrap();
+        let elsewhere = root.path().join("secret.jsonl");
+        fs::write(&elsewhere, format!("{LINE}\n")).unwrap();
+        let sneaky = root.path().join("runs/../secret.jsonl");
+        for path in [elsewhere, sneaky] {
+            let refused = stream(root.path(), path.to_str().unwrap());
+            assert!(refused.unwrap_err().ends_with("isn't an agent's log"));
+        }
+        assert!(stream(root.path(), "").is_err());
+    }
 }

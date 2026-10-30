@@ -107,19 +107,20 @@ fn the_current_page_is_highlighted() {
 }
 
 #[test]
-fn the_bar_on_a_runs_page_names_the_run_and_links_back_home() {
-    let html = render(|| view! { <RunBar title="Exponentiation".into() also_building=vec![]/> });
-    assert!(html.starts_with(r#"<span class="mark"><svg"#), "{html}");
-    assert!(html.ends_with(r##"<span class="crumbs"><a class="back" href="#/">‹ Runs</a><span class="slash">/</span><span>Exponentiation</span></span>"##), "{html}");
-    assert!(!html.contains("gear"), "{html}");
+fn the_breadcrumb_on_a_runs_page_names_the_run_and_links_back_home() {
+    let html = render(|| view! { <RunBar title="Exponentiation" also_building=vec![]/> });
+    assert_eq!(
+        html,
+        r##"<span class="crumbs"><a class="back" href="#/">‹ Runs</a><span class="slash">/</span><span>Exponentiation</span></span>"##
+    );
 }
 
 #[test]
-fn the_bar_on_a_runs_page_links_to_the_other_runs_building() {
+fn the_breadcrumb_on_a_runs_page_links_to_the_other_runs_building() {
     let also = vec![
         ("acme/widgets#40".to_string(), "Logging".to_string()),
         ("acme/tools#2".to_string(), "Lint".to_string()),
     ];
-    let html = render(|| view! { <RunBar title="Exponentiation".into() also_building=also/> });
+    let html = render(|| view! { <RunBar title="Exponentiation" also_building=also/> });
     assert!(html.ends_with(r##"<span class="also">Also building: <a href="#/run/acme/widgets%2340">Logging</a>, <a href="#/run/acme/tools%232">Lint</a></span>"##), "{html}");
 }

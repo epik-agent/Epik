@@ -50,10 +50,10 @@ pub fn read(path: &Path) -> io::Result<Activity> {
 
 /// A tool call, as its updates arrive.
 #[derive(Default)]
-struct Call {
-    tool: Option<String>,
-    title: Option<String>,
-    input: Option<Value>,
+pub(crate) struct Call {
+    pub(crate) tool: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) input: Option<Value>,
 }
 
 /// The activity in an agent log's text, without when it last grew.
@@ -155,7 +155,7 @@ fn output(update: &Value) -> String {
 }
 
 /// A tool call in words.
-fn describe(call: &Call, dirs: &[String]) -> String {
+pub(crate) fn describe(call: &Call, dirs: &[String]) -> String {
     let input = call.input.as_ref();
     let field = |name: &str| input.and_then(|i| i.get(name)).and_then(Value::as_str);
     let path = || {
@@ -200,7 +200,7 @@ fn describe(call: &Call, dirs: &[String]) -> String {
 }
 
 /// `path` relative to the longest of `dirs` it is inside, or as it is.
-fn relative(path: &str, dirs: &[String]) -> String {
+pub(crate) fn relative(path: &str, dirs: &[String]) -> String {
     dirs.iter()
         .filter_map(|dir| {
             let dir = dir.trim_end_matches('/');
@@ -222,7 +222,7 @@ fn segments(command: &str) -> Vec<&str> {
 }
 
 /// The absolute directories a command `cd`s into.
-fn cd_targets(command: &str) -> Vec<String> {
+pub(crate) fn cd_targets(command: &str) -> Vec<String> {
     segments(command)
         .into_iter()
         .filter_map(|segment| segment.strip_prefix("cd "))

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use epik_view::{
     Disposition, Home, NodeState, RepositoryRow, RunPage, Settings, Sidebar as SidebarView,
-    SidebarRun, Uninstall, UninstallStep,
+    SidebarRun, Stream, Uninstall, UninstallStep,
 };
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
@@ -177,25 +177,30 @@ pub fn Sidebar(
     }
 }
 
-/// The bar on a run's page: the run, a link back to Home, and links to the
-/// other runs building.
+/// The breadcrumb at the top of a run's page: a link back to Home, the
+/// run, and links to the other runs building.
 #[component]
-pub fn RunBar(title: String, also_building: Vec<(String, String)>) -> impl IntoView {
-    let also = (!also_building.is_empty()).then(|| {
-        let links = also_building
-            .into_iter()
-            .enumerate()
-            .map(|(i, (run, title))| {
-                view! {
-                    {(i > 0).then_some(", ")}
-                    <a href=href(&format!("run/{run}"))>{title}</a>
-                }
-            })
-            .collect_view();
-        view! { <span class="also">"Also building: "{links}</span> }
-    });
+pub fn RunBar(
+    #[prop(into)] title: Signal<String>,
+    #[prop(into)] also_building: Signal<Vec<(String, String)>>,
+) -> impl IntoView {
+    let also = move || {
+        let also_building = also_building.get();
+        (!also_building.is_empty()).then(|| {
+            let links = also_building
+                .into_iter()
+                .enumerate()
+                .map(|(i, (run, title))| {
+                    view! {
+                        {(i > 0).then_some(", ")}
+                        <a href=href(&format!("run/{run}"))>{title}</a>
+                    }
+                })
+                .collect_view();
+            view! { <span class="also">"Also building: "{links}</span> }
+        })
+    };
     view! {
-        <span class="mark" inner_html=MARK></span>
         <span class="crumbs">
             <a class="back" href="#/">"‹ Runs"</a>
             <span class="slash">"/"</span>
@@ -225,13 +230,6 @@ enum Which {
     Run(String),
     Settings,
     Failed(String),
-}
-
-/// What the bar over a run's page shows: it stays when a refresh fails.
-#[derive(Debug, Clone, PartialEq)]
-enum Bar {
-    Nothing,
-    Run(String, Vec<(String, String)>),
 }
 
 /// The keys of what flashes in `shown`: each running issue whose agent
@@ -275,6 +273,34 @@ struct Log {
     path: String,
 }
 
+/// The issue whose detail panel shows on a run's page: the one picked, or
+/// else the first running, or else the first.
+fn chosen_issue(page: &RunPage, picked: Option<u64>) -> Option<u64> {
+    picked.or_else(|| {
+        page.issues
+            .iter()
+            .find(|issue| issue.state == NodeState::Running)
+            .or(page.issues.first())
+            .map(|issue| issue.number)
+    })
+}
+
+/// The stream of the chosen issue's agent log on a run's page, and the
+/// log's path, if it has one and it can be read.
+async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Option<(String, Stream)> {
+    let number = chosen_issue(page, picked)?;
+    let path = page
+        .issues
+        .iter()
+        .find(|issue| issue.number == number)?
+        .log
+        .clone()?;
+    let stream = tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() })
+        .await
+        .ok()?;
+    Some((path, stream))
+}
+
 fn current_page() -> Page {
     Page::from_hash(&window().location().hash().unwrap_or_default())
 }
@@ -303,6 +329,8 @@ pub fn MainWindow() -> impl IntoView {
     let error = RwSignal::new(String::new());
     // The issue chosen on each run's page.
     let selected = RwSignal::new(HashMap::<String, u64>::new());
+    // The stream of the chosen issue's agent log, and the log's path.
+    let streamed = RwSignal::new(None::<(String, Stream)>);
     let flashing = Flashing(RwSignal::new(HashMap::new()));
     provide_context(flashing);
     let flashes = StoredValue::new(Flashes::default());
@@ -331,6 +359,15 @@ pub fn MainWindow() -> impl IntoView {
             };
             match fetched {
                 Ok(fetched) => {
+                    let stream = match &fetched {
+                        Shown::Run(page) => {
+                            let picked = selected
+                                .with_untracked(|selected| selected.get(&page.run).copied());
+                            fetch_stream(page, picked).await
+                        }
+                        _ => None,
+                    };
+                    streamed.set(stream);
                     let title = match &fetched {
                         Shown::Run(page) => format!("{} · Epik", page.title),
                         Shown::Settings(_) => "Settings · Epik".to_owned(),
@@ -368,13 +405,6 @@ pub fn MainWindow() -> impl IntoView {
                 Err(reason) => error.set(reason),
             }
             refresh();
-        });
-    });
-    let on_open_log = Callback::new(move |path: String| {
-        spawn_local(async move {
-            if let Err(reason) = tauri::invoke::<_, ()>("open_log", &Log { path }).await {
-                error.set(reason);
-            }
         });
     });
 
@@ -469,20 +499,6 @@ pub fn MainWindow() -> impl IntoView {
         }
     };
 
-    let bar = Memo::new(move |before: Option<&Bar>| {
-        shown.with(|shown| match shown {
-            Some(Shown::Home(_) | Shown::Settings(_)) => Bar::Nothing,
-            Some(Shown::Run(page)) => Bar::Run(page.title.clone(), page.also_building.clone()),
-            _ => before.cloned().unwrap_or(Bar::Nothing),
-        })
-    });
-    let bar = move || match bar.get() {
-        Bar::Nothing => ().into_any(),
-        Bar::Run(title, also_building) => {
-            view! { <header id="bar"><RunBar title also_building/></header> }.into_any()
-        }
-    };
-
     let which = Memo::new(move |_| {
         shown.with(|shown| match shown {
             None => Which::Nothing,
@@ -525,26 +541,18 @@ pub fn MainWindow() -> impl IntoView {
                 let run = run.clone();
                 move || {
                     let picked = selected.with(|selected| selected.get(&run).copied());
-                    picked.or_else(|| {
-                        let page = page?;
-                        page.with(|page| {
-                            page.issues
-                                .iter()
-                                .find(|issue| issue.state == NodeState::Running)
-                                .or(page.issues.first())
-                                .map(|issue| issue.number)
-                        })
-                    })
+                    page?.with(|page| chosen_issue(page, picked))
                 }
             });
             let on_choose = Callback::new(move |number: u64| {
                 selected.update(|selected| {
                     selected.insert(run.clone(), number);
                 });
+                refresh();
             });
             view! {
                 {error_line}
-                {page.map(|page| view! { <RunView page chosen on_choose on_open_log/> })}
+                {page.map(|page| view! { <RunView page chosen on_choose streamed/> })}
             }
             .into_any()
         }
@@ -568,10 +576,7 @@ pub fn MainWindow() -> impl IntoView {
 
     view! {
         <nav id="sidebar"><Sidebar sidebar page/></nav>
-        <div id="content">
-            {bar}
-            <main id="page">{body}</main>
-        </div>
+        <main id="page">{body}</main>
         <dialog id="confirm" node_ref=confirm_dialog on:close=confirmed>
             {move || confirming.get().map(|repository| view! { <ConfirmBody repository/> })}
             <form method="dialog" class="buttons">
