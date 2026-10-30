@@ -12,22 +12,26 @@ struct OpenGithub {
     url: String,
 }
 
+/// A link that opens a GitHub page in the browser.
+#[component]
+pub fn GithubLink(text: String, url: String) -> impl IntoView {
+    let open = url.clone();
+    let click = move |event: MouseEvent| {
+        event.prevent_default();
+        event.stop_propagation();
+        tauri::run("open_github", OpenGithub { url: open.clone() });
+    };
+    view! { <a href=url on:click=click>{text}</a> }
+}
+
 /// A sentence of spans: a span with a `url` is a link that opens GitHub in
 /// the browser, a span with `code` is code, and otherwise it's text.
 #[component]
-pub fn Words(spans: Vec<Span>, #[prop(optional)] class: Option<&'static str>) -> impl IntoView {
+pub fn Words(spans: Vec<Span>, #[prop(optional, into)] class: Option<String>) -> impl IntoView {
     let spans = spans
         .into_iter()
         .map(|span| match span.url {
-            Some(url) => {
-                let open = url.clone();
-                let click = move |event: MouseEvent| {
-                    event.prevent_default();
-                    event.stop_propagation();
-                    tauri::run("open_github", OpenGithub { url: open.clone() });
-                };
-                view! { <a href=url on:click=click>{span.text}</a> }.into_any()
-            }
+            Some(url) => view! { <GithubLink text=span.text url/> }.into_any(),
             None if span.code => view! { <code>{span.text}</code> }.into_any(),
             None => span.text.into_any(),
         })
