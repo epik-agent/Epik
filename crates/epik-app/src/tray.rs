@@ -6,7 +6,8 @@
 //! menu (a right click, or on Linux, where tray clicks aren't reported, any
 //! click) opens Epik's window, checks setup, or quits. The icon shows
 //! whether anything is building, and with a red dot, whether any run needs
-//! attention. Where there is no tray, the app runs headless and says so.
+//! attention. On macOS, Epik is in the Dock and Cmd-Tab only while its main
+//! window is open. Where there is no tray, the app runs headless and says so.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
@@ -18,10 +19,10 @@ use std::time::Duration;
 
 use epik_core::repositories;
 use epik_core::run::Disposition;
-use tauri::RunEvent;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{RunEvent, WindowEvent};
 
 use crate::App;
 use crate::{main_window, popover, setup_window};
@@ -97,7 +98,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         ])
         .build(tauri::generate_context!())
         .map_err(|error| error.to_string())?;
-    // No Dock icon.
+    // No Dock icon until the main window opens.
     #[cfg(target_os = "macos")]
     tauri.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
@@ -218,15 +219,26 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
         handle.exit(0);
         code
     });
-    tauri.run_return(|_, event| {
+    tauri.run_return(|handle, event| match event {
         // Closing the last window doesn't quit an app that lives in the
         // tray; only Quit does.
-        if let RunEvent::ExitRequested {
+        RunEvent::ExitRequested {
             code: None, api, ..
-        } = event
-        {
-            api.prevent_exit();
+        } => api.prevent_exit(),
+        // Closing the main window takes Epik out of the Dock.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } => main_window::follow(handle, &label, main_window::Change::Closed),
+        // Clicking the Dock icon opens the main window.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            if let Err(error) = main_window::open(handle, "") {
+                eprintln!("epik-app: couldn't open Epik's window: {error}");
+            }
         }
+        _ => {}
     });
     server.join().unwrap_or(ExitCode::FAILURE)
 }

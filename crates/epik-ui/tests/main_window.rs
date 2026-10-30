@@ -33,7 +33,7 @@ fn the_sidebar_has_the_mark_and_name_runs_settings_and_the_status_line() {
         "{html}"
     );
     assert!(
-        html.ends_with(r#"<div class="foot"><button class="item settings">Settings</button><div class="status"><span class="dot"></span>Epik running · up 4h 12m</div></div>"#),
+        html.ends_with(r##"<div class="foot"><a href="#/settings" class="item settings">Settings</a><div class="status"><span class="dot"></span>Epik running · up 4h 12m</div></div>"##),
         "{html}"
     );
 }
@@ -51,7 +51,7 @@ fn settings_has_a_badge_while_a_repository_is_missing() {
     let html = render(|| view! { <Sidebar sidebar=missing page=Page::Home/> });
     assert!(
         html.contains(
-            r#"<button class="item settings">Settings<span class="badge">✕</span></button>"#
+            r##"<a href="#/settings" class="item settings">Settings<span class="badge">✕</span></a>"##
         ),
         "{html}"
     );
@@ -93,6 +93,17 @@ fn the_current_page_is_highlighted() {
         "{run}"
     );
     assert_eq!(run.matches("current").count(), 1, "{run}");
+
+    let settings = render(|| view! { <Sidebar sidebar=runs() page=Page::Settings/> });
+    assert!(
+        settings.contains(r#"<div class="item runs">"#),
+        "{settings}"
+    );
+    assert!(
+        settings.contains(r##"<a href="#/settings" class="item settings current">"##),
+        "{settings}"
+    );
+    assert_eq!(settings.matches("current").count(), 1, "{settings}");
 }
 
 #[test]
