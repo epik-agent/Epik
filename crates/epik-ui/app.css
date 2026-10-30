@@ -308,7 +308,7 @@ button.danger { background: var(--error); border-color: var(--error); color: #ff
 button.danger:disabled { opacity: 0.45; cursor: default; }
 button.danger-outline { border-color: var(--error); color: var(--error); }
 section.uninstall { border-top: 1px solid var(--border); margin-top: 8px; }
-section.uninstall .muted { margin: 0 0 10px; }
+section.uninstall button { margin-top: 6px; }
 .uninstall-list { margin: 4px 0 12px; padding-left: 20px; }
 .uninstall-steps { list-style: none; margin: 8px 0 12px; padding: 0; }
 .uninstall-steps .removed { color: var(--secondary); }

@@ -19,17 +19,19 @@ const KEEPS: &str = concat!(
     r#"<li>gh on your PATH, your sign-in to GitHub, and git pushing with gh</li></ul>"#,
 );
 
+const AFTERWARD: &str = r#"<p>Afterward, quit Epik and delete the app yourself.</p>"#;
+
 #[test]
 fn settings_ends_with_the_uninstall_button() {
     let html = render(|| view! { <UninstallButton/> });
     assert_eq!(
         html,
-        r#"<section class="uninstall"><h3>Uninstall</h3><p class="muted">Remove what Epik put on this computer. You delete the app yourself afterward.</p><button class="danger-outline">Uninstall Epik…</button></section>"#
+        r#"<section class="uninstall"><h3>Uninstall</h3><button class="danger-outline">Uninstall Epik…</button></section>"#
     );
 }
 
 #[test]
-fn the_confirmation_lists_what_goes_and_what_stays() {
+fn the_confirmation_lists_what_goes_and_what_stays_and_to_delete_the_app() {
     let plan = Uninstall {
         runs: 0,
         building: false,
@@ -41,6 +43,7 @@ fn the_confirmation_lists_what_goes_and_what_stays() {
             r#"<h2>Uninstall Epik?</h2>"#,
             REMOVES,
             KEEPS,
+            AFTERWARD,
             r#"<div class="buttons"><button>Cancel</button><button class="danger">Uninstall</button></div>"#,
         ]
         .concat()
@@ -56,7 +59,7 @@ fn the_confirmation_says_how_many_runs_history_is_deleted() {
     let html = render(|| view! { <UninstallBody plan stage=Uninstalling::Asking(None)/> });
     assert!(
         html.contains(&format!(
-            r#"{KEEPS}<p class="warning">The history of 3 runs will be deleted and can't be recovered.</p><div class="buttons">"#
+            r#"{KEEPS}{AFTERWARD}<p class="warning">The history of 3 runs will be deleted and can't be recovered.</p><div class="buttons">"#
         )),
         "{html}"
     );
@@ -84,6 +87,8 @@ fn while_a_build_runs_uninstall_is_disabled_and_the_dialog_says_why() {
     let html = render(|| view! { <UninstallBody plan stage=Uninstalling::Asking(None)/> });
     assert!(
         html.ends_with(concat!(
+            r#"<p>Afterward, quit Epik and delete the app yourself.</p>"#,
+            r#"<p class="warning">The history of 1 run will be deleted and can't be recovered.</p>"#,
             r#"<p class="why">Wait for the running build to finish, or stop it first.</p>"#,
             r#"<div class="buttons"><button>Cancel</button><button disabled class="danger">Uninstall</button></div>"#,
         )),
