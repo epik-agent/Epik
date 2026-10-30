@@ -265,14 +265,8 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
     let mut second = exponentiation();
     second.run = RunKey::new("wpm/tic-tac-toe", 4);
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
-    let missing = Repository {
-        repo: "wpm/calc-old".to_owned(),
-        added_at: time(0),
-        added_by_user: false,
-        missing: true,
-    };
 
-    let home = home(&runs, &[missing], now());
+    let home = home(&runs, now());
 
     let keys = |cards: &[RunCard]| cards.iter().map(|c| c.run.clone()).collect::<Vec<_>>();
     assert_eq!(
@@ -288,11 +282,68 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
         home.headline
     );
     assert!(home.headline.ends_with(" awake until they finish."));
-    assert!(home.missing_repository);
+    assert_eq!(super::home(&[], now()).headline, "Nothing is building.");
+}
+
+#[test]
+fn the_sidebar_lists_runs_needing_attention_then_building_then_waiting() {
+    let mut second = exponentiation();
+    second.run = RunKey::new("wpm/tic-tac-toe", 4);
+    second.title = "Tic-tac-toe".to_owned();
+    let runs = [exponentiation(), waiting_run(), failed_run(), second];
+
+    let sidebar = sidebar(&runs, &[], time(0), now());
+
+    let listed: Vec<(&str, &str, epik_view::Disposition)> = sidebar
+        .runs
+        .iter()
+        .map(|r| (r.run.as_str(), r.title.as_str(), r.disposition))
+        .collect();
     assert_eq!(
-        super::home(&[], &[], now()).headline,
-        "Nothing is building."
+        listed,
+        [
+            (
+                "wpm/epik-test#7",
+                "Division by zero",
+                epik_view::Disposition::NeedsAttention
+            ),
+            (
+                "wpm/epik-test#13",
+                "Exponentiation",
+                epik_view::Disposition::Building
+            ),
+            (
+                "wpm/tic-tac-toe#4",
+                "Tic-tac-toe",
+                epik_view::Disposition::Building
+            ),
+            (
+                "wpm/epik-test#9",
+                "Calculator REPL",
+                epik_view::Disposition::WaitingForReview
+            ),
+        ]
     );
+    assert!(!sidebar.missing_repository);
+}
+
+#[test]
+fn the_sidebar_marks_settings_while_a_repository_is_missing() {
+    let missing = Repository {
+        repo: "wpm/calc-old".to_owned(),
+        added_at: time(0),
+        added_by_user: false,
+        missing: true,
+    };
+
+    assert!(sidebar(&[], &[missing], time(0), now()).missing_repository);
+}
+
+#[test]
+fn the_status_line_says_how_long_epik_has_been_running() {
+    let up = |seconds: i64| sidebar(&[], &[], time(0), time(seconds)).status;
+    assert_eq!(up(0), "Epik running · up 0s");
+    assert_eq!(up(4 * 3600 + 12 * 60 + 30), "Epik running · up 4h 12m");
 }
 
 #[test]
@@ -327,19 +378,82 @@ fn an_agent_is_active_for_a_minute_then_quiet() {
 }
 
 #[test]
-fn the_popover_lists_building_runs_and_the_rest_in_sentences() {
-    let popover = popover(&[exponentiation(), waiting_run(), failed_run()], now());
+fn the_tray_menu_counts_the_runs_and_agents_and_says_how_long_epik_has_been_up() {
+    let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    assert_eq!(popover.headline, "One run building");
-    assert_eq!(popover.building.len(), 1);
-    let sentences: Vec<String> = popover.waiting.iter().map(|(_, _, w)| plain(w)).collect();
+    let menu = popover(&runs, time(0), time(4 * 3600 + 12 * 60 + 30));
+
+    assert_eq!(menu.about, "3 runs · 2 agents · up 4h 12m");
+}
+
+#[test]
+fn the_tray_menus_counts_read_as_english() {
+    let mut run = exponentiation();
+    run.issues.retain(|i| i.issue.number != 17);
     assert_eq!(
-        sentences,
+        popover(&[run], time(0), time(5)).about,
+        "1 run · 1 agent · up 5s"
+    );
+    assert_eq!(
+        popover(&[], time(0), time(0)).about,
+        "0 runs · 0 agents · up 0s"
+    );
+}
+
+#[test]
+fn the_tray_menu_lists_each_building_run_with_its_progress() {
+    let runs = [exponentiation(), waiting_run(), failed_run()];
+
+    let menu = popover(&runs, time(0), now());
+
+    assert_eq!(menu.runs.len(), 1);
+    let run = &menu.runs[0];
+    assert_eq!(run.run, "wpm/epik-test#13");
+    assert_eq!(run.title, "Exponentiation");
+    assert_eq!(run.count, "2/6");
+    assert_eq!(
+        run.segments,
         [
-            "Calculator REPL is done. PR #12 is ready for your review.",
-            "Division by zero stopped: CI failed on PR #8.",
+            NodeState::Merged,
+            NodeState::Merged,
+            NodeState::Running,
+            NodeState::Running,
+            NodeState::NotStarted,
+            NodeState::NotStarted,
         ]
     );
+    assert_eq!(run.line, "building #16 and #17 · 2m 00s · wpm/epik-test#13");
+}
+
+#[test]
+fn a_tray_menu_row_times_its_longest_running_issue() {
+    let mut run = exponentiation();
+    run.issues[2].started_at = Some(time(60));
+    run.issues[3].started_at = Some(time(30));
+
+    let menu = popover(&[run], time(0), now());
+
+    assert_eq!(
+        menu.runs[0].line,
+        "building #16 and #17 · 1m 30s · wpm/epik-test#13"
+    );
+}
+
+#[test]
+fn a_tray_menu_row_with_nothing_running_is_starting() {
+    let mut run = exponentiation();
+    run.issues.retain(|i| i.status != IssueStatus::Running);
+
+    let menu = popover(&[run], time(0), now());
+
+    assert_eq!(menu.runs[0].line, "starting · wpm/epik-test#13");
+}
+
+#[test]
+fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
+    let menu = popover(&[waiting_run(), failed_run()], time(0), now());
+
+    assert!(menu.runs.is_empty());
 }
 
 #[test]
@@ -466,6 +580,38 @@ fn settings_lists_each_repository_with_its_runs_and_when_it_was_added() {
     assert_eq!(
         settings.repositories[0].url,
         "https://github.com/wpm/epik-test"
+    );
+}
+
+#[test]
+fn stopping_monitoring_a_repository_lists_only_its_runs() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let repository = |repo: &str| Repository {
+        repo: repo.to_owned(),
+        added_at: time(0),
+        added_by_user: false,
+        missing: false,
+    };
+    let mut elsewhere = failed_run();
+    elsewhere.run = RunKey::new("wpm/calc", 7);
+    elsewhere.repo = "wpm/calc".to_owned();
+
+    let settings = settings(
+        &[repository("wpm/epik-test"), repository("wpm/calc")],
+        &[exponentiation(), elsewhere, waiting_run()],
+        &zone,
+    );
+
+    assert_eq!(
+        settings.repositories[0].runs,
+        [
+            ("wpm/epik-test#13".to_owned(), "Exponentiation".to_owned()),
+            ("wpm/epik-test#9".to_owned(), "Calculator REPL".to_owned()),
+        ]
+    );
+    assert_eq!(
+        settings.repositories[1].runs,
+        [("wpm/calc#7".to_owned(), "Division by zero".to_owned())]
     );
 }
 
