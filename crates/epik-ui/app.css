@@ -54,42 +54,63 @@ body { display: flex; height: 100vh; overflow: hidden; }
 }
 #sidebar .status { display: flex; align-items: center; gap: 8px; padding: 10px 8px 0; color: var(--muted); font-size: 12px; }
 
-.headline { margin: 12px 0 0; text-align: right; color: var(--secondary); }
-
 #page { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 24px 32px; }
-.section {
-  margin: 20px 0 8px;
-  font: 500 11px/1 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-.section.bad { color: var(--error); }
 .error { color: var(--error); }
 .muted { color: var(--muted); }
 code { font: 12px var(--mono); }
+.about > a:first-child { font-family: var(--mono); font-size: 12px; color: var(--secondary); text-decoration: underline dotted; }
 
-.card {
+/* Home, the Runs page */
+.page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 16px 0 14px; }
+.page-head h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.headline { margin: 0; color: var(--secondary); }
+.tabs { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 14px; background: var(--raised); border-radius: 8px; }
+.tab { border: none; background: none; padding: 4px 10px; border-radius: 6px; color: var(--secondary); font-size: 12px; }
+.tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.tab .count { margin-left: 6px; font: 11px var(--mono); color: var(--muted); }
+table.run-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 14px 16px;
-  margin-bottom: 10px;
+  font-size: 13px;
 }
-.card-head {
-  display: grid;
-  grid-template-columns: 90px 1fr auto;
-  gap: 14px;
-  align-items: center;
+.run-table th {
+  box-sizing: border-box;
+  padding: 10px 8px;
+  text-align: left;
+  font: 500 10px var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
-.titles .title { display: block; font-size: 14px; font-weight: 600; color: var(--text); }
-.titles .sub { color: var(--secondary); margin-top: 2px; }
-.titles .sub > a:first-child, .about > a:first-child { font-family: var(--mono); font-size: 12px; color: var(--secondary); text-decoration: underline dotted; }
-.said.good { color: var(--accent); }
-.said.bad { color: var(--error); }
-.note { color: var(--secondary); margin-top: 2px; }
-.figures { display: flex; gap: 18px; align-items: center; font-family: var(--mono); }
-.figures .open { color: var(--accent); font-family: inherit; }
+.run-table th:nth-child(1) { width: 24px; }
+.run-table th:nth-child(2) { width: 140px; }
+.run-table th:nth-child(3) { width: 88px; }
+.run-table th:nth-child(5) { width: 64px; }
+.run-table th:nth-child(6) { width: 56px; }
+.run-table th:nth-child(7) { width: 136px; }
+.run-table td { padding: 12px 8px; vertical-align: middle; }
+.run-table tbody tr:first-child td { border-top: 1px solid var(--border); }
+.run-table .figure { text-align: right; white-space: nowrap; }
+.run-table td.figure { font: 12px var(--mono); }
+.run-table .fold { border: none; background: none; padding: 0 4px; font-size: 10px; color: var(--muted); }
+.run-cell .title { display: block; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-cell .repo a { font: 11px var(--mono); color: var(--secondary); text-decoration: underline dotted; }
+.progress-cell .progress { margin: 6px 0 0; }
+.run-table .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); }
+.run-table .status .dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent-fill); }
+.run-table .status .dot.needs_attention { background: var(--error); }
+.run-table .status .dot.waiting_for_review { background: #6ee7b7; }
+.run.needs_attention .status { color: var(--error); }
+.run.waiting_for_review .status { color: var(--accent); }
+.run-table .actions { text-align: right; white-space: nowrap; }
+.actions .open { color: var(--accent); }
+.actions button { margin-left: 4px; padding: 5px 10px; font: 12px "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+.run-table .lines td { padding-top: 0; }
 
 .mini-graph { overflow: visible; }
 .mini-edge { stroke: var(--strong); stroke-width: 1.2; }
@@ -104,8 +125,8 @@ code { font: 12px var(--mono); }
 .progress .running { background: var(--accent); }
 .progress .not_started { background: var(--raised); }
 
-.rows .line { display: flex; gap: 12px; padding: 3px 0; border-radius: 4px; }
-.rows .label, .label {
+.lines .line { display: flex; gap: 12px; padding: 3px 0; border-radius: 4px; }
+.label {
   width: 44px;
   flex: none;
   font: 500 10px/1.9 var(--mono);
@@ -122,8 +143,6 @@ code { font: 12px var(--mono); }
   100% { background: transparent; box-shadow: none; }
 }
 
-.card.attention .figures button { margin-left: 4px; font-family: inherit; }
-.figures button { font: 13px "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
 .empty { margin-top: 64px; text-align: center; font-size: 14px; }
 
 /* A run's page */
