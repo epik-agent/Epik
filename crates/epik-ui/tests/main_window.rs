@@ -1,37 +1,98 @@
-use epik_ui::main_window::{HomeBar, RunBar};
+use epik_ui::main_window::{Page, RunBar, Sidebar};
+use epik_view::Disposition;
 use leptos::prelude::*;
 
 mod fixtures;
-use fixtures::render;
+use fixtures::{render, sidebar, sidebar_run};
+
+fn runs() -> epik_view::Sidebar {
+    sidebar(vec![
+        sidebar_run(
+            "acme/widgets#7",
+            "Division by zero",
+            Disposition::NeedsAttention,
+        ),
+        sidebar_run("acme/widgets#13", "Exponentiation", Disposition::Building),
+        sidebar_run("acme/tools#2", "Lint", Disposition::WaitingForReview),
+    ])
+}
 
 #[test]
-fn the_bar_on_home_has_the_mark_the_name_the_headline_and_the_settings_gear() {
-    let html =
-        render(|| view! { <HomeBar headline="One run building".into() missing_repository=false/> });
+fn the_sidebar_has_the_mark_and_name_runs_settings_and_the_status_line() {
+    let html = render(|| view! { <Sidebar sidebar=runs() page=Page::Home/> });
     assert!(
-        html.starts_with(r#"<span class="mark"><svg viewBox="0 0 64 64" width="20" height="20""#),
+        html.starts_with(r#"<div class="brand"><span class="mark"><svg viewBox="0 0 64 64""#),
         "{html}"
     );
     assert!(
-        html.contains(
-            r#"<span class="name">Epik</span><span class="headline">One run building</span>"#
-        ),
+        html.contains(r#"</span><span class="name">Epik</span></div>"#),
         "{html}"
     );
     assert!(
-        html.ends_with(r#"<button title="Settings" aria-label="Settings" class="gear">⚙</button>"#),
+        html.contains(r##"<a href="#/" class="label">Runs</a><span class="count">3</span>"##),
+        "{html}"
+    );
+    assert!(
+        html.ends_with(r#"<div class="foot"><button class="item settings">Settings</button><div class="status"><span class="dot"></span>Epik running · up 4h 12m</div></div>"#),
         "{html}"
     );
 }
 
 #[test]
-fn the_settings_gear_has_a_badge_when_a_repository_is_missing() {
-    let html =
-        render(|| view! { <HomeBar headline="Nothing building".into() missing_repository=true/> });
+fn the_sidebar_lists_each_run_with_a_dot_for_its_disposition() {
+    let html = render(|| view! { <Sidebar sidebar=runs() page=Page::Home/> });
+    assert!(html.contains(r##"<ul class="run-list"><li><a href="#/run/acme/widgets%237" class="item run"><span class="dot needs_attention"></span><span class="title">Division by zero</span></a></li><li><a href="#/run/acme/widgets%2313" class="item run"><span class="dot building"></span><span class="title">Exponentiation</span></a></li><li><a href="#/run/acme/tools%232" class="item run"><span class="dot waiting_for_review"></span><span class="title">Lint</span></a></li></ul>"##), "{html}");
+}
+
+#[test]
+fn settings_has_a_badge_while_a_repository_is_missing() {
+    let mut missing = runs();
+    missing.missing_repository = true;
+    let html = render(|| view! { <Sidebar sidebar=missing page=Page::Home/> });
     assert!(
-        html.ends_with(r#"class="gear">⚙<span class="badge">✕</span></button>"#),
+        html.contains(
+            r#"<button class="item settings">Settings<span class="badge">✕</span></button>"#
+        ),
         "{html}"
     );
+}
+
+#[test]
+fn the_list_of_runs_folds() {
+    let open = render(|| view! { <Sidebar sidebar=runs() page=Page::Home/> });
+    assert!(
+        open.contains(
+            r#"<button aria-label="Fold the runs" aria-expanded="true" class="fold">▾</button>"#
+        ),
+        "{open}"
+    );
+    let folded = render(|| view! { <Sidebar sidebar=runs() page=Page::Home folded=true/> });
+    assert!(
+        folded.contains(
+            r#"<button aria-label="Unfold the runs" aria-expanded="false" class="fold">▸</button>"#
+        ),
+        "{folded}"
+    );
+    assert!(!folded.contains("run-list"), "{folded}");
+}
+
+#[test]
+fn the_current_page_is_highlighted() {
+    let home = render(|| view! { <Sidebar sidebar=runs() page=Page::Home/> });
+    assert!(
+        home.contains(r#"<div class="item runs current">"#),
+        "{home}"
+    );
+    assert!(!home.contains("run current"), "{home}");
+
+    let run =
+        render(|| view! { <Sidebar sidebar=runs() page=Page::Run("acme/widgets#13".into())/> });
+    assert!(run.contains(r#"<div class="item runs">"#), "{run}");
+    assert!(
+        run.contains(r##"<a href="#/run/acme/widgets%2313" class="item run current">"##),
+        "{run}"
+    );
+    assert_eq!(run.matches("current").count(), 1, "{run}");
 }
 
 #[test]

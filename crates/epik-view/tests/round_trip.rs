@@ -79,10 +79,22 @@ fn card(disposition: Disposition) -> RunCard {
 fn home() {
     round_trip(Home {
         headline: "One run building.".to_owned(),
-        missing_repository: true,
         building: vec![card(Disposition::Building)],
         waiting: vec![card(Disposition::WaitingForReview)],
         attention: vec![card(Disposition::NeedsAttention)],
+    });
+}
+
+#[test]
+fn sidebar() {
+    round_trip(Sidebar {
+        runs: vec![SidebarRun {
+            run: "o/r#13".to_owned(),
+            title: "Exponentiation".to_owned(),
+            disposition: Disposition::NeedsAttention,
+        }],
+        missing_repository: true,
+        status: "Epik running · up 4h 12m".to_owned(),
     });
 }
 

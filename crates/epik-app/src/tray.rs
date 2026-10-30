@@ -64,6 +64,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .manage(main_window::Window {
             root: app.root.clone(),
             builds: app.builds.clone(),
+            started: chrono::Utc::now(),
         })
         .manage(setup_window::Setup {
             root: app.root.clone(),
@@ -73,6 +74,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         .manage(popover::Quit(app.stop.clone()))
         .invoke_handler(tauri::generate_handler![
             main_window::home,
+            main_window::sidebar,
             main_window::popover,
             main_window::run_page,
             main_window::rerun,

@@ -1,4 +1,5 @@
-//! The Epik app's main window: Home, a run's page, and Settings.
+//! The Epik app's main window: its sidebar, Home, a run's page, and
+//! Settings.
 //!
 //! The window, drawn by `epik-ui` at `index.html#/`, asks these commands
 //! for what to show every second, and draws it. The window notifies; its only controls are Rerun
@@ -9,13 +10,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, Utc};
 use epik_core::builds::Builds;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
 use epik_core::{setup, uninstall};
-use epik_view::{Home, Popover, RunPage, Settings, Uninstall, UninstallStep};
+use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Uninstall, UninstallStep};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::pages;
@@ -24,6 +25,8 @@ use crate::pages;
 pub struct Window {
     pub root: PathBuf,
     pub builds: Arc<Builds>,
+    /// When this Epik started, for the sidebar's status line.
+    pub started: DateTime<Utc>,
 }
 
 /// The main window's label.
@@ -40,8 +43,19 @@ fn failed(error: impl std::fmt::Display) -> String {
 #[tauri::command]
 pub fn home(window: State<'_, Window>) -> Result<Home, String> {
     let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
+    Ok(pages::home(&runs, Utc::now()))
+}
+
+#[tauri::command]
+pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
+    let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
     let monitored = repositories::list(&window.root).map_err(failed)?;
-    Ok(pages::home(&runs, &monitored, Utc::now()))
+    Ok(pages::sidebar(
+        &runs,
+        &monitored,
+        window.started,
+        Utc::now(),
+    ))
 }
 
 #[tauri::command]
