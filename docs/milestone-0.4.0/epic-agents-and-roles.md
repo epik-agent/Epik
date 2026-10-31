@@ -274,7 +274,7 @@ reads the latest session's log. Comment wording.
   no `CODEX_PATH`: the adapter runs the Codex it depends on
   (`@openai/codex` 0.165). The unattended setting is the session mode
   `agent`, whose automatic reviewer answers approvals (the probe built #13
-  this way; **[Bill to confirm, decision 2]**). It is a plain session mode, so
+  this way; decided 2026-10-31 over `agent-full-access`). It is a plain session mode, so
   `agent.rs:198-215` works unchanged. A prompt that fails with
   `codexErrorInfo` (such as `usageLimitExceeded`) records that reason, not
   "Internal error". Reports cost: no. Quiet period: 5 seconds. The probe

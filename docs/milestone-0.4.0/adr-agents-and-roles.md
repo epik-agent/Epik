@@ -89,8 +89,10 @@ Planning with Epik in Codex is its own, later piece of work (see the plan).
 The Codex profile runs `@agentclientprotocol/codex-acp`, pinned, through
 `npx`, with the Codex the adapter brings. It runs in the **`agent` mode**, where Codex's
 own reviewer answers approvals inside a sandbox with no network of its
-own; the probe built an issue this way. **[Bill to confirm, against
-`agent-full-access`.]** The
+own; the probe built an issue this way. `agent-full-access`, which has no
+sandbox and no reviewer, was considered and declined (2026-10-31): the
+probe showed it isn't needed, and `agent` is more cautious than anything
+Epik runs today. The
 checklist gains **Codex** and **Codex sign-in**, needed only while a role
 uses Codex. Claude Code and its sign-in are needed to build only while a
 role uses Claude Code.
@@ -166,5 +168,4 @@ in `plugin/skills/review/procedure.md`.
 
 ## Open questions
 
-- Which unattended setup Codex should run in (see §4). Settled by a probe.
 - Is two rounds the right review limit? Start with two; tune from use.
