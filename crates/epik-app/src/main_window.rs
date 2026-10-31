@@ -19,12 +19,15 @@ use epik_core::{setup, uninstall};
 use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
+use crate::runs::Runs;
 use crate::{navigation, pages};
 
 /// What the window's commands reach.
 pub struct Window {
     pub root: PathBuf,
     pub builds: Arc<Builds>,
+    /// The runs of the monitored repositories, which the tray reads too.
+    pub runs: Arc<Runs>,
     /// When this Epik started, for the sidebar's status line and the tray
     /// menu.
     pub started: DateTime<Utc>,
@@ -43,13 +46,13 @@ fn failed(error: impl std::fmt::Display) -> String {
 
 #[tauri::command]
 pub fn home(window: State<'_, Window>) -> Result<Home, String> {
-    let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
+    let runs = window.runs.monitored().map_err(failed)?;
     Ok(pages::home(&runs, Utc::now()))
 }
 
 #[tauri::command]
 pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
-    let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
+    let runs = window.runs.monitored().map_err(failed)?;
     let monitored = repositories::list(&window.root).map_err(failed)?;
     Ok(pages::sidebar(
         &runs,
@@ -61,7 +64,7 @@ pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
 
 #[tauri::command]
 pub fn popover(window: State<'_, Window>) -> Result<Popover, String> {
-    let runs = repositories::monitored_runs(&window.root).map_err(failed)?;
+    let runs = window.runs.monitored().map_err(failed)?;
     Ok(pages::popover(&runs, window.started, Utc::now()))
 }
 
@@ -69,7 +72,7 @@ pub fn popover(window: State<'_, Window>) -> Result<Popover, String> {
 pub fn run_page(run: String, window: State<'_, Window>) -> Result<RunPage, String> {
     let key = key(&run)?;
     let state = run::read(&window.root, &key).map_err(failed)?;
-    let others = repositories::monitored_runs(&window.root).map_err(failed)?;
+    let others = window.runs.monitored().map_err(failed)?;
     let builds = record::list_builds(&window.root, &key).map_err(failed)?;
     let merged_by_build: Vec<Vec<u64>> = builds
         .iter()
@@ -111,13 +114,19 @@ async fn off_main(
 #[tauri::command]
 pub async fn rerun(run: String, window: State<'_, Window>) -> Result<(), String> {
     let key = key(&run)?;
-    off_main(window, move |builds| builds.rerun(&key).map(drop)).await
+    let runs = window.runs.clone();
+    let rerun = off_main(window, move |builds| builds.rerun(&key).map(drop)).await;
+    runs.forget();
+    rerun
 }
 
 #[tauri::command]
 pub async fn delete_run(run: String, window: State<'_, Window>) -> Result<(), String> {
     let key = key(&run)?;
-    off_main(window, move |builds| builds.delete(&key)).await
+    let runs = window.runs.clone();
+    let deleted = off_main(window, move |builds| builds.delete(&key)).await;
+    runs.forget();
+    deleted
 }
 
 #[tauri::command]
@@ -131,14 +140,16 @@ pub fn settings(window: State<'_, Window>) -> Result<Settings, String> {
 pub fn monitor(repo: String, window: State<'_, Window>) -> Result<(), String> {
     let repo = repo.trim();
     let repo = repo.strip_prefix("https://github.com/").unwrap_or(repo);
-    repositories::add(&window.root, repo.trim_end_matches('/'), true, Utc::now())
-        .map(drop)
-        .map_err(failed)
+    let added = repositories::add(&window.root, repo.trim_end_matches('/'), true, Utc::now());
+    window.runs.forget();
+    added.map(drop).map_err(failed)
 }
 
 #[tauri::command]
 pub fn stop_monitoring(repo: String, window: State<'_, Window>) -> Result<(), String> {
-    repositories::remove(&window.root, &repo).map_err(failed)
+    let removed = repositories::remove(&window.root, &repo);
+    window.runs.forget();
+    removed.map_err(failed)
 }
 
 /// Why Epik can't be uninstalled while a build runs.
@@ -246,7 +257,7 @@ pub fn follow(handle: &AppHandle, label: &str, change: Change) {
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     // A run's `#` would end the URL's fragment.
     let hash = format!("#/{}", route.replace('#', "%23"));
-    follow(handle, LABEL, Change::Opened);
+    // Into the Dock only once there is a window to show there.
     if let Some(window) = handle.get_webview_window(LABEL) {
         let script = format!(
             "window.location.hash = {};",
@@ -255,6 +266,7 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
         window.eval(&script)?;
         window.unminimize()?;
         window.show()?;
+        follow(handle, LABEL, Change::Opened);
         return window.set_focus();
     }
     WebviewWindowBuilder::new(
@@ -267,6 +279,7 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     .min_inner_size(720.0, 480.0)
     .on_navigation(navigation::stay_in_app)
     .build()?;
+    follow(handle, LABEL, Change::Opened);
     Ok(())
 }
 

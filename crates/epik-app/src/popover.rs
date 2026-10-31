@@ -11,7 +11,7 @@ use tauri::{
     WindowEvent,
 };
 
-use crate::{main_window, navigation, setup_window};
+use crate::{main_window, navigation, pages, setup_window};
 
 /// The menu's label.
 pub(crate) const LABEL: &str = "popover";
@@ -133,7 +133,29 @@ pub fn check_for_updates(handle: AppHandle) -> Result<(), String> {
     open::that_detached(RELEASES).map_err(|error| error.to_string())
 }
 
-/// Quits Epik, interrupting any build, and starts it again.
+/// Asks in a dialog before restarting, warning of the `building` runs it
+/// interrupts: for Linux's native tray menu, which can't ask itself.
+pub fn ask_to_restart(handle: &AppHandle, building: usize) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let answered = handle.clone();
+    handle
+        .dialog()
+        .message(pages::restart_warning(building))
+        .title(pages::restart_question(building))
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Restart".to_owned(),
+            "Cancel".to_owned(),
+        ))
+        .show(move |restart| {
+            if restart {
+                answered.state::<Quit>().restart();
+            }
+        });
+}
+
+/// Quits Epik, interrupting any build, and starts it again. The tray menu
+/// asks first.
 #[tauri::command]
 pub fn restart(quit: State<'_, Quit>) {
     quit.restart();

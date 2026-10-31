@@ -285,20 +285,40 @@ fn chosen_issue(page: &RunPage, picked: Option<u64>) -> Option<u64> {
     })
 }
 
-/// The stream of the chosen issue's agent log on a run's page, and the
-/// log's path, if it has one and it can be read.
-async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Option<(String, Stream)> {
-    let number = chosen_issue(page, picked)?;
-    let path = page
-        .issues
-        .iter()
-        .find(|issue| issue.number == number)?
-        .log
-        .clone()?;
-    let stream = tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() })
-        .await
-        .ok()?;
-    Some((path, stream))
+/// What reading the chosen issue's agent log on a run's page found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetched {
+    /// The issue has no log: it isn't running.
+    NoLog,
+    /// The stream in the log at the path.
+    Read(String, Stream),
+    /// The log at the path, which couldn't be read this time.
+    Unread(String),
+}
+
+/// The stream of the chosen issue's agent log on a run's page.
+async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Fetched {
+    let path = chosen_issue(page, picked)
+        .and_then(|number| page.issues.iter().find(|issue| issue.number == number))
+        .and_then(|issue| issue.log.clone());
+    let Some(path) = path else {
+        return Fetched::NoLog;
+    };
+    match tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() }).await {
+        Ok(stream) => Fetched::Read(path, stream),
+        Err(_) => Fetched::Unread(path),
+    }
+}
+
+/// The stream, and its log's path, to show after `before` once a refresh
+/// has `fetched`: a log that couldn't be read this time keeps the stream it
+/// had.
+pub fn next_stream(before: Option<(String, Stream)>, fetched: Fetched) -> Option<(String, Stream)> {
+    match fetched {
+        Fetched::NoLog => None,
+        Fetched::Read(path, stream) => Some((path, stream)),
+        Fetched::Unread(path) => before.filter(|(shown, _)| *shown == path),
+    }
 }
 
 fn current_page() -> Page {
@@ -365,9 +385,9 @@ pub fn MainWindow() -> impl IntoView {
                                 .with_untracked(|selected| selected.get(&page.run).copied());
                             fetch_stream(page, picked).await
                         }
-                        _ => None,
+                        _ => Fetched::NoLog,
                     };
-                    streamed.set(stream);
+                    streamed.set(next_stream(streamed.get_untracked(), stream));
                     let title = match &fetched {
                         Shown::Run(page) => format!("{} · Epik", page.title),
                         Shown::Settings(_) => "Settings · Epik".to_owned(),

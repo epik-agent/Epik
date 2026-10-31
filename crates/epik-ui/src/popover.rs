@@ -208,10 +208,60 @@ fn ItemButton(item: Item, mac: bool) -> impl IntoView {
     }
 }
 
-/// The items, grouped: the dashboard, Restart, then the rest. Shortcuts
-/// are drawn with Cmd on a Mac and Ctrl elsewhere.
+/// Restart, which asks `restart` first, since it interrupts what is
+/// building: Cancel, or Restart again to restart. It stops asking when the
+/// menu loses focus.
 #[component]
-pub fn Items(mac: bool) -> impl IntoView {
+fn RestartItem(restart: Signal<String>, confirming: bool) -> impl IntoView {
+    let confirming = RwSignal::new(confirming);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let blur = window_event_listener(leptos::ev::blur, move |_| confirming.set(false));
+        on_cleanup(move || blur.remove());
+    }
+    let ask = move |event: MouseEvent| {
+        event.prevent_default();
+        confirming.set(true);
+    };
+    let cancel = move |_: MouseEvent| confirming.set(false);
+    let restart_now = move |_: MouseEvent| {
+        confirming.set(false);
+        Item::Restart.command().send();
+    };
+    move || {
+        if confirming.get() {
+            view! {
+                <div class="item confirm" id=Item::Restart.id()>
+                    <span class="label">{restart}</span>
+                    <span class="choices">
+                        <button type="button" id="restart-cancel" on:click=cancel>"Cancel"</button>
+                        <button type="button" class="danger" id="restart-confirm" on:click=restart_now>
+                            "Restart"
+                        </button>
+                    </span>
+                </div>
+            }
+            .into_any()
+        } else {
+            view! {
+                <button type="button" class="item" id=Item::Restart.id() on:click=ask>
+                    <span class="label">{Item::Restart.label()}</span>
+                </button>
+            }
+            .into_any()
+        }
+    }
+}
+
+/// The items, grouped: the dashboard, Restart, then the rest. Shortcuts
+/// are drawn with Cmd on a Mac and Ctrl elsewhere. Restart asks `restart`
+/// before it restarts; `confirming` is whether it starts out asking.
+#[component]
+pub fn Items(
+    mac: bool,
+    #[prop(optional, into)] restart: Signal<String>,
+    #[prop(optional)] confirming: bool,
+) -> impl IntoView {
     let button = move |item| view! { <ItemButton item mac/> };
     let rest = Item::ALL[2..]
         .iter()
@@ -221,7 +271,7 @@ pub fn Items(mac: bool) -> impl IntoView {
         <nav class="items">
             {button(Item::OpenDashboard)}
             <hr/>
-            {button(Item::Restart)}
+            <RestartItem restart confirming/>
             <hr/>
             {rest}
         </nav>
@@ -261,6 +311,10 @@ pub fn PopoverWindow() -> impl IntoView {
     });
     on_cleanup(move || keys.remove());
     let mac = on_a_mac();
+    let restart = Signal::derive(move || match drawn.get() {
+        Some(Ok(popover)) => popover.restart,
+        _ => Item::Restart.label().to_owned() + "?",
+    });
     view! {
         {move || match drawn.get() {
             Some(Ok(popover)) => view! {
@@ -271,6 +325,6 @@ pub fn PopoverWindow() -> impl IntoView {
             Some(Err(reason)) => view! { <p class="error">{reason}</p> }.into_any(),
             None => ().into_any(),
         }}
-        <Items mac/>
+        <Items mac restart/>
     }
 }

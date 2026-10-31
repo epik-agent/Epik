@@ -32,5 +32,9 @@ button.run:hover, button.item:hover { background: var(--raised); }
 hr { border: none; border-top: 1px solid var(--border); margin: 4px; }
 button.item { display: flex; justify-content: space-between; padding: 5px 6px; }
 #open-dashboard { font-weight: 600; }
+.item.confirm { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 6px; }
+.choices { display: flex; gap: 6px; }
+.choices button { padding: 1px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-size: 12px; }
+.choices .danger { border-color: transparent; background: var(--error); color: #fff; }
 .shortcut { font: 11px var(--mono); color: var(--muted); }
 .error { color: var(--error); padding: 8px; }

@@ -1,5 +1,5 @@
-use epik_ui::main_window::{Page, RunBar, Sidebar};
-use epik_view::Disposition;
+use epik_ui::main_window::{Fetched, Page, RunBar, Sidebar, next_stream};
+use epik_view::{Disposition, Entry, Stream, StreamEntry};
 use leptos::prelude::*;
 
 mod fixtures;
@@ -123,4 +123,43 @@ fn the_breadcrumb_on_a_runs_page_links_to_the_other_runs_building() {
     ];
     let html = render(|| view! { <RunBar title="Exponentiation" also_building=also/> });
     assert!(html.ends_with(r##"<span class="also">Also building: <a href="#/run/acme/widgets%2340">Logging</a>, <a href="#/run/acme/tools%232">Lint</a></span>"##), "{html}");
+}
+
+fn said(text: &str) -> Stream {
+    Stream {
+        entries: vec![StreamEntry {
+            at: None,
+            what: Entry::Narration { text: text.into() },
+        }],
+        working: true,
+    }
+}
+
+#[test]
+fn a_stream_read_replaces_the_one_shown() {
+    let before = Some(("/logs/2.jsonl".to_owned(), said("Reading.")));
+    let read = Fetched::Read("/logs/2.jsonl".to_owned(), said("Reading. Testing."));
+    assert_eq!(
+        next_stream(before, read),
+        Some(("/logs/2.jsonl".to_owned(), said("Reading. Testing.")))
+    );
+}
+
+#[test]
+fn a_stream_that_cant_be_read_stays_as_it_was() {
+    let before = Some(("/logs/2.jsonl".to_owned(), said("Reading.")));
+    assert_eq!(
+        next_stream(before.clone(), Fetched::Unread("/logs/2.jsonl".to_owned())),
+        before
+    );
+}
+
+#[test]
+fn another_issues_unread_stream_shows_nothing() {
+    let before = Some(("/logs/2.jsonl".to_owned(), said("Reading.")));
+    assert_eq!(
+        next_stream(before.clone(), Fetched::Unread("/logs/3.jsonl".to_owned())),
+        None
+    );
+    assert_eq!(next_stream(before, Fetched::NoLog), None);
 }

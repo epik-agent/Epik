@@ -102,6 +102,7 @@ fn sidebar() {
 fn popover() {
     round_trip(Popover {
         about: "1 run · 2 agents · up 4h 12m".to_owned(),
+        restart: "Interrupt one build?".to_owned(),
         runs: vec![TrayRun {
             run: "o/r#13".to_owned(),
             title: "Exponentiation".to_owned(),

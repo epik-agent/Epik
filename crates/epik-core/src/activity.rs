@@ -38,13 +38,14 @@ pub struct Activity {
     pub cost_usd: Option<f64>,
 }
 
-/// The activity in the agent log at `path`.
+/// The activity in the agent log at `path`, which is read only as far as
+/// it has grown since it was last read.
 pub fn read(path: &Path) -> io::Result<Activity> {
-    let text = fs::read_to_string(path)?;
     let modified = fs::metadata(path)?.modified()?;
+    let activity = crate::tail::read(path, |readers| readers.activity.activity())?;
     Ok(Activity {
         last_event: Some(modified.into()),
-        ..parse(&text)
+        ..activity
     })
 }
 
@@ -56,41 +57,55 @@ pub(crate) struct Call {
     pub(crate) input: Option<Value>,
 }
 
+/// An agent log's activity, read a line at a time.
+#[derive(Default)]
+pub struct Reader {
+    dirs: Vec<String>,
+    calls: HashMap<String, Call>,
+    /// The calls with their input known, in the order it arrived.
+    actions: Vec<String>,
+    last_test: Option<String>,
+    cost_usd: Option<f64>,
+}
+
 /// The activity in an agent log's text, without when it last grew.
 pub fn parse(text: &str) -> Activity {
-    let mut dirs: Vec<String> = Vec::new();
-    let mut calls: HashMap<String, Call> = HashMap::new();
-    // The calls with their input known, in the order it arrived.
-    let mut actions: Vec<String> = Vec::new();
-    let mut last_test = None;
-    let mut cost_usd = None;
+    let mut reader = Reader::default();
     for line in text.lines() {
+        reader.feed(line);
+    }
+    reader.activity()
+}
+
+impl Reader {
+    /// Reads the log's next line. A line that isn't JSON is skipped.
+    pub fn feed(&mut self, line: &str) {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
-            continue;
+            return;
         };
         if let Some(cwd) = message
             .pointer("/to_agent/params/cwd")
             .and_then(Value::as_str)
         {
-            dirs.push(cwd.to_owned());
-            continue;
+            self.dirs.push(cwd.to_owned());
+            return;
         }
         let Some(update) = message.pointer("/from_agent/params/update") else {
-            continue;
+            return;
         };
         let kind = update.get("sessionUpdate").and_then(Value::as_str);
         if kind == Some("usage_update")
             && update.pointer("/cost/currency").and_then(Value::as_str) == Some("USD")
         {
-            cost_usd = update.pointer("/cost/amount").and_then(Value::as_f64);
+            self.cost_usd = update.pointer("/cost/amount").and_then(Value::as_f64);
         }
         if !matches!(kind, Some("tool_call" | "tool_call_update")) {
-            continue;
+            return;
         }
         let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
-            continue;
+            return;
         };
-        let call = calls.entry(id.to_owned()).or_default();
+        let call = self.calls.entry(id.to_owned()).or_default();
         if let Some(tool) = update.pointer("/_meta/claudeCode/toolName") {
             call.tool = tool.as_str().map(str::to_owned);
         }
@@ -101,11 +116,11 @@ pub fn parse(text: &str) -> Activity {
             && input.as_object().is_some_and(|input| !input.is_empty())
         {
             if call.input.is_none() {
-                actions.push(id.to_owned());
+                self.actions.push(id.to_owned());
             }
             call.input = Some(input.clone());
             if let Some(command) = input.get("command").and_then(Value::as_str) {
-                dirs.extend(cd_targets(command));
+                self.dirs.extend(cd_targets(command));
             }
         }
         if update.get("status").and_then(Value::as_str) == Some("completed")
@@ -117,23 +132,27 @@ pub fn parse(text: &str) -> Activity {
             && is_test_command(command)
             && let Some(result) = test_result(&output(update))
         {
-            last_test = Some(result);
+            self.last_test = Some(result);
         }
     }
-    // Described once every directory the agent works in is known, so a
-    // file read before the agent first `cd`s into its worktree is still
-    // named relative to it.
-    let skip = actions.len().saturating_sub(RECENT);
-    let recent: Vec<String> = actions[skip..]
-        .iter()
-        .map(|id| describe(&calls[id], &dirs))
-        .collect();
-    Activity {
-        last_action: recent.last().cloned(),
-        last_test,
-        last_event: None,
-        recent,
-        cost_usd,
+
+    /// The activity so far, without when the log last grew. Described now,
+    /// once every directory the agent works in so far is known, so a file
+    /// read before the agent first `cd`s into its worktree is still named
+    /// relative to it.
+    pub fn activity(&self) -> Activity {
+        let skip = self.actions.len().saturating_sub(RECENT);
+        let recent: Vec<String> = self.actions[skip..]
+            .iter()
+            .map(|id| describe(&self.calls[id], &self.dirs))
+            .collect();
+        Activity {
+            last_action: recent.last().cloned(),
+            last_test: self.last_test.clone(),
+            last_event: None,
+            recent,
+            cost_usd: self.cost_usd,
+        }
     }
 }
 
