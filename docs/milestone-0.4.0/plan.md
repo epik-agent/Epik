@@ -43,8 +43,10 @@ Three epics (the third was optional until 2026-10-31; see decision 5):
    tools installed into Codex's CLI from the checklist. In
    `epic-plan-in-codex.md`; the sketch below is superseded by it.
 
-Each decision record lands first as its own docs pull request, as #355 and
-#394 did, so the epics' issues can cite it.
+This directory is a workspace, not a publication (Bill, 2026-10-31). When
+the documents are in good shape, the decision records are checked into
+`docs/design-history/`, the issues are filed from the epic files, and
+this directory is deleted.
 
 ## What I found that changes the plan
 
