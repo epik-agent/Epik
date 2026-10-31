@@ -1,4 +1,4 @@
-# Epic: Agents and roles — Codex beside Claude Code, a model per role, and review before merge
+# Epic: Agents and roles — Codex beside Claude Code, a model per role, and a review of every build
 
 Draft plan, 2026-10-30, revised after a review against the code. No issues
 are filed. Each section is what its issue would say, written so an agent
@@ -9,9 +9,9 @@ and line numbers are from `origin/epic/458-…`.
 ## Goal
 
 The user picks, in Settings, which agent and model codes each issue and
-whether, and with which agent and model, each pull request is reviewed
-before it merges. Claude Code and OpenAI's Codex are the agents. Builds
-stop depending on Epik's plugin.
+whether, and with which agent and model, each build's pull request is
+reviewed and fixed before it reaches them. Claude Code and OpenAI's Codex
+are the agents. Builds stop depending on Epik's plugin.
 
 ## In scope
 
@@ -26,7 +26,8 @@ stop depending on Epik's plugin.
 - Setup checklist items for Codex, needed only when a build's roles use it,
   and a private copy of Codex.
 - Activity and the live stream read plain ACP tool calls.
-- Review before merge, with up to two rounds of changes.
+- Review of the run's pull request when the build is done, with up to
+  two rounds of fixes. An epic never pauses for a review.
 - Settings page: an Agents section.
 - Uninstall works on a machine without Claude Code.
 
@@ -44,9 +45,10 @@ stop depending on Epik's plugin.
 A user can switch coding to Codex in Settings, build an epic, and watch
 each Codex agent's commands and edits stream on the run page. Its issues
 merge into the epic branch as with Claude Code. Their comments show time,
-with cost "not reported by Codex". With review on, each pull request gets
-a review comment before it merges, and a change request sends the coding
-agent back to the pull request.
+with cost "not reported by Codex". With review on, the build's pull
+request gets a review comment when the build is done, and a change
+request sends a coding agent to address it before the pull request
+reaches the user.
 
 ## Graph
 
@@ -63,7 +65,7 @@ graph LR
   A9["A9 Activity and stream read plain ACP"]
   A10["A10 Review procedure"]
   A11["A11 Reading a review's verdict"]
-  A12["A12 Review before merge"]
+  A12["A12 Review the run's pull request"]
   A13["A13 Changes send the coder back"]
   A14["A14 Run page shows sessions"]
   A15["A15 Settings: Agents section"]
@@ -234,8 +236,8 @@ reason, writes no record and starts no agent.
 
 ## A5. Record each agent session an issue takes
 
-**Why.** With review, an issue can take several sessions: coding,
-review, coding again. Today one `IssueFinished` carries the agent's time
+**Why.** With review, a run takes sessions beyond its issues' coding
+sessions: a review of its pull request, a fix, a review again. Today one `IssueFinished` carries the agent's time
 and cost, the fold keeps the last one (`record.rs:492-506`), and activity
 reads only `<n>.jsonl`. Each session needs its own record so that time and
 cost add up and the window can show who did what.
@@ -244,8 +246,10 @@ cost add up and the window can show who did what.
 - Events `SessionStarted {number, role, round, agent, model, log}` and
   `SessionFinished {number, role, round, duration_ms, cost_usd}`. `role`
   is `coding` or `review`; `log` is the session's file name (`<n>.jsonl`
-  for the first coding session, as today). `IssueFinished` keeps the
-  outcome, reason and pull request.
+  for the first coding session, as today). `number` is the issue the
+  session worked on; the run's own sessions (A12's review, A13's fix)
+  carry the run's number, which for an epic is the epic issue's.
+  `IssueFinished` keeps the outcome, reason and pull request.
 - The fold gives each `IssueState` its `sessions`, and its duration and
   cost as their sums. Records with no sessions fold as today.
 - Activity (`run.rs:312-313`) and the stream read the latest session's
@@ -398,8 +402,9 @@ user, so a review is a comment.
 issue (`gh issue view`) and the pull request (`gh pr view`, `gh pr diff`),
 from GitHub, since the clone's checkout is the target branch and the
 coder's worktree is gone; judge whether the change does what the issue
-says, whether its behavior has tests, and whether it can be explained in a
-few sentences, against Epik's rules; post one review with
+says (for an epic, the epic issue and its sub-issues, which the header
+lists), whether its behavior has tests, and whether it can be explained
+in a few sentences, against Epik's rules; post one review with
 `gh pr review <n> --comment --body-file <file>`, whose last line is
 `<!-- epik-review: approve round=<r> -->` or
 `<!-- epik-review: changes round=<r> -->`, with the round the header gave;
@@ -430,50 +435,63 @@ not on the last line, several reviews for the round (newest wins), none.
 
 ---
 
-## A12. Review each pull request before it merges, when review is on
+## A12. Review the run's pull request when the build is done, when review is on
 
-**Why.** A second agent, or a second model, reading the change before it
-merges catches what the first missed.
+**Why.** A second agent, or a second model, reading the change before the
+user does catches what the first missed. A build is judged at one pull
+request, a single issue's or the epic's, so that is where the review
+goes: an epic's issues merge into the epic branch as they finish, and
+the build never pauses for a review on the way.
 
-**What.** In `Build::build_issue`, when the build's roles have review:
-- After the coding session, wait for the pull request's checks. For an
-  epic issue this is the existing wait before merging. For a single issue,
-  which today finishes without waiting (`build.rs:508-510`), it is a new
-  wait, only when review is on.
+**What.** In `Build::orchestrate`, when the build's roles have review,
+once the run's pull request exists (a single issue's, found after its
+coding session; the epic's, opened by the build after every issue
+merged, `build.rs:420-432`):
+- Wait for its checks. Today both finish without waiting
+  (`build.rs:416,508-510`); the wait is new, and only with review on.
 - Run the review agent in the clone with A10's prompt for round 1, as a
-  session (`role: review, round: 1`, log `<n>-review-1.jsonl`). Then read
-  round 1's verdict with A11.
-- **Approve** goes on as today: merge into the epic branch, or finish a
-  single issue at its pull request. **Changes**, or no verdict, fails the
-  issue with the reason, until A13.
-- While the review runs, the issue's status is `reviewing` (protocol,
+  session on the run's number (`role: review, round: 1`, log
+  `<n>-review-1.jsonl`). Then read round 1's verdict with A11.
+- Finish the build as today, with the pull request for the user, and
+  record the verdict: `BuildFinished` gains `review`
+  (`approve`, `changes` or `none`), and `status` shows it. A fix (A13)
+  comes between a `changes` verdict and the finish.
+- While the review runs, the run's disposition is `reviewing` (protocol,
   fold and `epik_view`).
 
-**Tests first.** With fakes: review off changes nothing; approve merges;
-changes fails the issue with "the review asked for changes"; no verdict
-fails it; a single issue with review waits for its checks first; the
-fold shows `reviewing`; time and cost sum the coding and review sessions.
+**Tests first.** With fakes: review off changes nothing; approve finishes
+with `review: approve`; changes finishes with the pull request open and
+`review: changes`; no marker gives `none`; the build waits for the pull
+request's checks first; an epic's issues merge with no review between
+them, and the review runs once, after the epic's pull request opens; the
+fold shows `reviewing`; time and cost include the review session.
 
-**Out.** Sending the coding agent back (A13). The UI (A14, A15).
+**Out.** Addressing the review (A13). The UI (A14, A15). Review of each
+issue's pull request before it merges: deferred, see the record.
 
 ---
 
-## A13. Send the coding agent back when the review asks for changes
+## A13. Address the review before the pull request reaches the user
 
-**What.** On **changes**, run the coding agent again (`role: coding,
-round: 2`, log `<n>-coding-2.jsonl`), with the issue procedure and a
-header that overrides its first steps: pull request #<pr> on branch
-`<head>` is already open, so make the worktree from that branch, address
-the latest review there, push to it, and open no new pull request; then
-wait for the checks as the procedure says. Then the checks and a review
-again (`round: 2`, with round 2 in its prompt). When the second review still
-asks for changes, fail the issue: "the review still asks for changes after
-2 rounds; see #<pr>". The limit is a constant.
+**What.** On **changes**, run the coding agent on the run's number
+(`role: coding, round: 2`, log `<n>-coding-2.jsonl`), with the issue
+procedure and a header that overrides its first steps (A1's second
+variant): pull request #<pr> on branch `<head>` is open, so make the
+worktree from that branch, address the latest review there, push to it,
+and open no new pull request; then wait for the checks as the procedure
+says. On an epic that branch is the epic branch, and the push is direct,
+as Epik's own merges into it are. Then the checks and a review again
+(`round: 2`, with round 2 in its prompt). When the second review still
+asks for changes, finish the build with the pull request for the user and
+the run needing attention: "the review still asks for changes after 2
+rounds; see #<pr>". The limit is a constant.
 
-**Tests first.** Changes, then approve, merges after one more round;
-changes twice fails with the reason; the second coding prompt names the
-pull request and its branch and says not to open another; the second
-review prompt says round 2; time and cost sum over all four sessions.
+**Tests first.** Changes, then approve, finishes with `review: approve`
+after one more round; changes twice finishes needing attention with the
+reason; the second coding prompt names the pull request and its branch
+and says not to open another; for an epic it names the epic branch; the
+second review prompt says round 2; time and cost sum over all the run's
+sessions.
 
 **Out.** A setting for the limit.
 
@@ -482,15 +500,17 @@ review prompt says round 2; time and cost sum over all four sessions.
 ## A14. Show each issue's sessions on the run page
 
 **What.** The issue panel lists the issue's sessions in order: role,
-round, agent, model, time, and cost or "not reported", with a review's
-verdict and a link to the pull request's reviews. The live stream shows
-the chosen session, the latest by default. An issue in review shows as
-"reviewing" in the graph and in the runs table's Now line.
+round, agent, model, time, and cost or "not reported". The run's own
+sessions, its reviews and fixes, are listed under the run's header the
+same way, with each review's verdict and a link to the pull request's
+reviews. The live stream shows the chosen session, the latest by
+default. A run in review shows "reviewing" in the run header and in the
+runs table's Now line.
 
 **Tests first.** In `epik-app/src/pages/tests.rs` and
-`epik-ui/tests/run_page.rs`: an issue with coding, review (changes),
-coding, review (approve) shows four sessions in order; a reviewing node;
-a Codex session's cost wording.
+`epik-ui/tests/run_page.rs`: a run with review (changes), fix, review
+(approve) shows three sessions in order under its header, with verdicts;
+a reviewing run; a Codex session's cost wording.
 
 **Out.** Showing a review's text in the window: GitHub has it.
 
@@ -501,7 +521,10 @@ a Codex session's cost wording.
 **What.** The Settings page gets an **Agents** section above the
 repositories: **Coding** (agent: Claude Code or Codex; model: a text field
 whose placeholder is "The agent's default"), and **Review** (Off, Claude
-Code or Codex; model). Saving uses A3's `set_settings` command. When an
+Code or Codex; model), described in a line: "Reviews the build's pull
+request when the build is done, and fixes what it finds, up to twice,
+before the pull request reaches you." Saving uses A3's `set_settings`
+command. When an
 agent's setup items aren't done, the section says so and links **Check
 setup**. Each agent says, in a line, how it runs unattended: Codex in a
 sandbox, with its own reviewer approving what leaves it (A6's mode);

@@ -24,7 +24,7 @@ to use Epik. The kinds of work are **roles**:
 - **Coding**: implementing one issue, up to a pull request with passing
   checks. Today's only role.
 - **Review**: reading an issue's pull request against the issue and Epik's
-  rules before it merges. New.
+  rules when the build is done, before the user sees it. New.
 
 ### Findings (2026-10-30, from documentation, the adapters' source, and this Mac)
 
@@ -77,8 +77,8 @@ starts, the app opens a session for each role without a prompt, to check
 that the agent runs unattended and offers the model. A model it doesn't
 offer refuses the build, as a missing setup item does: an error naming the
 models the agent offers, and no record. A build records the roles it ran
-with, and a rerun uses them again. Each **agent session** an issue takes (coding, review, coding again) is
-recorded with its role, round, agent, model, time and cost, and the issue's
+with, and a rerun uses them again. Each **agent session** a run takes (an issue's coding, the run's review, a fix, a review again) is
+recorded with its role, round, agent, model, time and cost, and the run's
 time and cost are their sums.
 
 The design role isn't the app's: it is whichever client the user plans in.
@@ -103,26 +103,41 @@ An agent that reports cost has it recorded, summed and commented on the
 issue, as today. One that doesn't, like Codex, has its time recorded, and
 its cost shown as "not reported by Codex". Epik keeps no price table.
 
-### 6. Review comes before merge
+### 6. The run's pull request is reviewed when the build is done
 
-With review on, an issue's pull request is reviewed once its checks pass:
+A build is judged at one pull request: a single issue's into the default
+branch, or the epic's into the default branch once every issue has
+merged. With review on, that pull request is reviewed when it exists and
+its checks pass. **An epic's build never pauses for a review**: its
+issues merge into the epic branch as they finish, as today, and the one
+review comes at the end.
 
-1. The review agent reads the issue and the pull request, judges the change
-   against the issue and Epik's rules, and posts its review on the pull
-   request as a comment that ends with Epik's verdict marker, naming the
-   round it answers: `<!-- epik-review: approve round=1 -->` or
+1. The review agent reads the issue (for an epic, the epic issue and its
+   sub-issues) and the pull request, judges the change against them and
+   Epik's rules, and posts its review on the pull request as a comment
+   that ends with Epik's verdict marker, naming the round it answers:
+   `<!-- epik-review: approve round=1 -->` or
    `<!-- epik-review: changes round=1 -->`.
 2. The app reads the verdict from GitHub, not from the agent's words: the
    review whose marker names the current round. The round, not a
    timestamp, ties a verdict to an attempt, so the clocks of GitHub and
    the building machine never have to agree.
-3. On **approve**, the build goes on as today: it merges into the epic
-   branch, or leaves a single issue's pull request for the user.
-4. On **changes**, the coding agent runs again on the same pull request,
-   told to address the review, then the checks and the review run again.
-   After two rounds of changes, the issue fails and the run needs
-   attention. The pull request stays open with its reviews.
-5. A review that posts no verdict fails the issue.
+3. On **approve**, the build finishes and the pull request waits for the
+   user, as today, with the verdict in the record.
+4. On **changes**, a coding agent works on the pull request's branch,
+   told to address the review, pushes, and the checks and the review run
+   again. On an epic's branch that is a direct push, as Epik's merges
+   into it already are. After two rounds of changes the build finishes
+   anyway, the pull request waits for the user with its reviews, and the
+   run needs attention, saying so.
+5. A review that posts no verdict is recorded as none, and the pull
+   request waits for the user.
+
+The user asked for this shape (2026-10-31): an epic that stops in the
+middle for individual reviews is an epic the user has to babysit, and an
+epic's one pull request is where they judge it anyway. Review of each
+issue's pull request before it merges into the epic branch was the first
+design and is deferred; it could return as a setting.
 
 The procedure the review agent follows lives beside the issue procedure,
 in `plugin/skills/review/procedure.md`.
@@ -137,7 +152,8 @@ in `plugin/skills/review/procedure.md`.
 | A price table to estimate Codex's cost | Rejected | Goes stale, and means nothing on ChatGPT plans. |
 | The review agent approves or requests changes on GitHub | Impossible | GitHub refuses either on one's own pull request. |
 | The app reads the verdict from the agent's last message | Rejected | The verdict should be where the user can read it, in the pull request. |
-| Review on by default | Rejected | It roughly doubles each issue's agent time. The user turns it on. |
+| Review on by default | Rejected | It adds agent time to every run. The user turns it on. |
+| Review each issue's pull request before it merges into the epic branch | Deferred | Holds the epic at every merge, so a build the user meant to leave alone keeps needing them. The epic's one pull request is where they judge it. A setting, if anyone wants it. |
 | Per-repository or per-build roles | Deferred | One setting until someone needs more. |
 | Roles for agents not reached over ACP | Rejected | ACP is the seam. |
 | Claude Code's own sandbox, through the adapter's `sandbox` option | Deferred | It works, but on macOS `gh` can't verify the sandbox proxy's certificate, and with the defaults Claude leaves the sandbox whenever a command fails inside it, with auto mode's classifier approving. One build cost $0.26 against $0.17 and ran every network command outside the sandbox anyway. Revisit when `gh` trusts the proxy (perhaps on Linux) and a strict configuration has built an issue. |
@@ -158,8 +174,8 @@ in `plugin/skills/review/procedure.md`.
   record as "Guardian Review" tool calls. Were `agent-full-access` chosen
   instead, Codex would run with no sandbox and no reviewer, and Settings
   would say so.
-- **Review adds a step, and cost, to every issue**, and a comment per round
-  to every pull request.
+- **Review adds a step, and cost, to the end of every run**, and a comment
+  per round to its pull request. Issues inside an epic are unaffected.
 - **An unreported cost is never a zero.** The audit block on GitHub
   records it as null, and totals count the issues without one.
 - **Uninstalling works without Claude Code**, skipping the plugin steps.

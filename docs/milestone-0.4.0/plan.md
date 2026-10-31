@@ -33,8 +33,9 @@ Three epics (the third was optional until 2026-10-31; see decision 5):
 1. **Agents and roles (A).** The procedure travels in the prompt, so builds
    stop needing the plugin. Agents become profiles of one ACP client.
    Codex is the second profile. A role is an agent and a model, set in
-   Settings. Optional review before merge, with the verdict posted on the
-   pull request.
+   Settings. Optional review of the build's pull request when the build
+   is done, with the verdict posted on it and the coder fixing what it
+   finds.
 2. **Remote hosts (R).** A remote host is a whole headless Epik app on
    another machine, reached through `ssh <host> epik-app stdio`. Builds run
    entirely there, so the laptop can close. The local app mirrors the
@@ -121,7 +122,12 @@ no roles until A lands.
    two rounds (recommended), or cut to keep the release small. A10–A13 cut
    cleanly: drop them, and A14 and A15 lose their review parts. A5 (one
    record per agent session) is still worth keeping.
-   **Decided 2026-10-31: in, off by default.**
+   **Decided 2026-10-31: in, off by default.** Revised the same day:
+   the review is of the *run's* pull request when the build is done, a
+   single issue's or the epic's, never of each issue's before it merges.
+   An epic never pauses for a review. The coder addresses the review up
+   to twice; then the pull request goes to the user with its reviews.
+   Per-issue review is deferred, a possible setting later.
 5. **The design role:** epic C in 0.4.0, or the next release. I lean to
    next release unless Sabine, or someone else without an Anthropic
    account, is the user 0.4.0 is for.
