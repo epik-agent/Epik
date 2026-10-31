@@ -57,9 +57,12 @@ reads the same file.
 
 One ACP client runs every agent. What differs is data, an **agent
 profile**: the command that starts its adapter, the session mode that runs
-unattended (`auto` for Claude Code), the extra environment, and whether
-it reports cost. Claude Code and Codex are two profiles. A third ACP agent
-is a third profile.
+unattended (`auto` for Claude Code), the extra environment, whether it
+reports cost, and how long it must be quiet after its prompt returns before
+the session is closed. Claude Code needs that quiet period, 300 seconds
+today, because its background subagents can outlive the prompt; Codex
+returns only when its work is done, so its period is short. Claude Code and
+Codex are two profiles. A third ACP agent is a third profile.
 
 ### 3. A role is an agent and a model
 
@@ -69,12 +72,12 @@ Settings holds, in `~/.epik/settings.json`:
   agent's default model, unless the user changes it.
 - **Review**: off, or an agent and, optionally, a model. Off by default.
 
-A model is set through the session's `model` config option. When a build
+A model is set through the session's `model` config option. Before a build
 starts, the app opens a session for each role without a prompt, to check
 that the agent runs unattended and offers the model. A model it doesn't
-offer stops the build before any agent works, naming the models it does
-offer. A build records the roles it ran with, and a rerun
-uses them again. Each **agent session** an issue takes (coding, review, coding again) is
+offer refuses the build, as a missing setup item does: an error naming the
+models the agent offers, and no record. A build records the roles it ran
+with, and a rerun uses them again. Each **agent session** an issue takes (coding, review, coding again) is
 recorded with its role, round, agent, model, time and cost, and the issue's
 time and cost are their sums.
 
@@ -104,9 +107,13 @@ With review on, an issue's pull request is reviewed once its checks pass:
 
 1. The review agent reads the issue and the pull request, judges the change
    against the issue and Epik's rules, and posts its review on the pull
-   request as a comment that ends with Epik's verdict marker:
-   `<!-- epik-review: approve -->` or `<!-- epik-review: changes -->`.
-2. The app reads the verdict from GitHub, not from the agent's words.
+   request as a comment that ends with Epik's verdict marker, naming the
+   round it answers: `<!-- epik-review: approve round=1 -->` or
+   `<!-- epik-review: changes round=1 -->`.
+2. The app reads the verdict from GitHub, not from the agent's words: the
+   review whose marker names the current round. The round, not a
+   timestamp, ties a verdict to an attempt, so the clocks of GitHub and
+   the building machine never have to agree.
 3. On **approve**, the build goes on as today: it merges into the epic
    branch, or leaves a single issue's pull request for the user.
 4. On **changes**, the coding agent runs again on the same pull request,

@@ -64,8 +64,14 @@ request lines from stdin, hands each to that machine's app over its socket,
 and writes the replies to stdout, until stdin closes. Nothing new listens
 anywhere: SSH is the authentication, and the socket keeps its `0600`.
 
-`BatchMode` means Epik never waits for a password prompt. A host that
-needs one is reported as unreachable, with SSH's own message.
+`BatchMode` means Epik never waits for a password prompt, and never
+answers a host-key question: a host the user hasn't connected to by hand
+once is reported as unreachable, with SSH's own message, and the docs say
+to run `ssh <host>` first. One `ssh` process serves a host, and the
+requests over it, from the mirror and from forwarded builds alike, are
+sent one at a time, each waiting for its reply. Whatever the remote login
+shell prints before `epik-app stdio` starts is skipped: a line that isn't
+JSON is not a reply.
 
 The protocol (`docs/app-protocol.md`) is the contract both ways. It gains:
 

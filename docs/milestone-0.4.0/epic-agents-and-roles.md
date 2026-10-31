@@ -145,17 +145,22 @@ client.
 - Rename `ClaudeAcp` to `AcpClient` (`AcpAgent` is already the crate's
   name, imported at `agent.rs:22`) and give it an `AgentProfile`: `id`
   (`claude`), name (`Claude Code`), adapter command, the unattended mode
-  id, extra environment variables, whether it reports cost.
-  `AgentProfile::claude()` is today's settings, pinned at
-  `@agentclientprotocol/claude-agent-acp@0.99.0`.
+  id, extra environment variables, whether it reports cost, and the quiet
+  period: how long the agent must send nothing after its prompt returns
+  before the session is closed (`agent.rs:112-120` today, a field of the
+  client; it moves into the profile because only Claude Code's background
+  subagents need it). `AgentProfile::claude()` is today's settings, pinned
+  at `@agentclientprotocol/claude-agent-acp@0.99.0`, with 300 seconds.
 - `AgentRequest` gains `model: Option<String>`. After `session/new`, with
   a model given, find the session config option whose `category` is
   `model` (else whose `id` is `model`) and set it with
   `session/set_config_option`.
 - `Agent::check(cwd, model) -> Result<(), String>` opens a session with no
-  prompt and closes it: the unattended mode exists, and the model, if
-  given, is among the option's values. Its errors name the agent and list
-  what it offers. (`build::start` calls it in A4.)
+  prompt and drops the connection: the unattended mode exists, and the
+  model, if given, is among the option's values. Its errors name the agent
+  and list what it offers. It starts the adapter, so it takes a few
+  seconds; that is accepted, and nothing is cached between it and the
+  session that does the work. (`Builds::start` calls it in A4.)
 - The no-auto-mode error names the profile's agent and mode.
 
 **Tests first.** `fake-acp-agent` gains `--models <a,b>` (a `model`
@@ -202,18 +207,21 @@ started with, since that machine has its own settings.
 - `Request::Build` gains optional `roles` (the shape of
   `settings.json`). Absent, the app uses its settings. Document it.
 - `Builds` holds a way to make an agent from a profile and model, instead
-  of one `agent` (`builds.rs:44`). `build::start` makes the coding agent,
-  and the review agent when review is on, and calls `check` on each
-  (A2). A failure is one of the build's `problems`, so it stops before
-  any agent works.
+  of one `agent` (`builds.rs:44`). `Builds::start` makes the coding agent,
+  and the review agent when review is on, and calls `check` on each (A2)
+  beside the setup refusal, before `build::start`. A failure refuses the
+  build the way a missing setup item does: an error reply naming the
+  agent, the model and what it offers, and no record, no clone. (The
+  build's `problems` are written after the clone and `build_started`,
+  `build.rs:239-283`, and would leave a failed run to delete.)
 - `BuildStarted` records `roles`. `Rerun` uses the recorded roles, not
   the current settings. Records without `roles` mean Claude Code with its
   default model and no review.
 
 **Tests first.** With the fake GitHub and agents: a build without roles
 uses the settings; with roles, uses those; a rerun after the settings
-change uses the recorded ones; a failed `check` stops the build with the
-reason and starts no agent.
+change uses the recorded ones; a failed `check` refuses the build with the
+reason, writes no record and starts no agent.
 
 **Out.** Running review (A12). Recording sessions (A5).
 
@@ -264,11 +272,14 @@ reads the latest session's log. Comment wording.
   this way; **[Bill to confirm, decision 2]**). It is a plain session mode, so
   `agent.rs:198-215` works unchanged. A prompt that fails with
   `codexErrorInfo` (such as `usageLimitExceeded`) records that reason, not
-  "Internal error".
-  Reports cost: no.
+  "Internal error". Reports cost: no. Quiet period: 5 seconds. The probe
+  saw nothing arrive after `end_turn`, and Codex has no background
+  subagents, so Claude's 300 seconds would only add five minutes to every
+  Codex session, and with review on an issue has up to four of them.
 - Settings and roles accept `codex`.
 - An unreported cost is never zero. The comment's audit block writes
-  `null` for it (`comment.rs:35` writes zero today). `BuildState` and
+  `null` for it (`comment.rs:35` writes zero today, which also misreports
+  an interrupted Claude Code session). `BuildState` and
   `RunState` count the issues whose cost wasn't reported, rather than
   adding nothing (`run.rs:226`). Wherever cost is shown, an issue says
   "not reported by Codex" and a total says "plus N issues not reported".
@@ -293,8 +304,10 @@ Claude Code shouldn't be blocked by it.
 - Items `codex` ("Codex") and `codex-auth` ("Codex sign-in"), after
   `claude-auth`. `codex`: the adapter's Codex runs (it comes with the
   adapter, so this mostly checks Node and the download). `codex-auth`: a
-  sign-in in `~/.codex/auth.json`, or the adapter's auth status; the step
-  runs the adapter's Codex with `login`.
+  sign-in in `~/.codex/auth.json`, or the adapter's auth status. Both
+  reach the bundled Codex through npm rather than by searching the npx
+  cache: `npx -y -p @agentclientprotocol/codex-acp@<pinned> codex
+  --version`, and for the sign-in step `… codex login`.
 - A build needs `gh`, `gh-auth` and `node` always; `claude` and
   `claude-auth` when its roles use Claude Code; `codex` and `codex-auth`
   when they use Codex. `setup::refusal` takes the build's roles, so a
@@ -347,19 +360,24 @@ ACP itself has `kind` (`read`, `edit`, `delete`, `move`, `search`,
 `newText`).
 
 **What.** When `_meta.claudeCode` is absent, describe a call from the ACP
-fields: `execute` with `rawInput.command` as "Running …", with its output
-from `rawOutput` or text content; `edit` with diff content as an edit of
-its path, shown as changed lines (a diff with no `oldText` is a new file);
-`read` and `search` from `locations` and `title`. Claude Code's calls read
-as today.
+fields: `execute` with `rawInput.command` as "Running …"; `edit` with diff
+content as an edit of its path, shown as changed lines (a diff with no
+`oldText` is a new file; Codex sends `rawInput` null for edits); `read` and
+`search` from `locations` and `title`; `think` calls are skipped by the
+activity line and shown by the stream under their title, which for Codex's
+automatic reviewer is "Guardian Review". Codex puts a command's output
+nowhere standard: `rawOutput` is empty when the client declares no
+terminal capability, and the output arrives in `_meta.terminal_output_delta`
+with the exit code in `_meta.terminal_exit` (probe, 2026-10-31). The stream
+reads those for Codex; when both are absent, a command shows without
+output. Claude Code's calls read as today.
 
-**Tests first.** A fixture `codex.jsonl`, modeled on codex-acp's own test
-data (a shell command with output and exit code; adding a file; editing
-one), gives the expected activity lines and stream entries. Claude's
-fixture gives what it gives today.
+**Tests first.** A fixture `codex.jsonl`, cut from the probe's
+`runs/agent-mode.jsonl` (a shell command with output and exit code; adding
+a file; editing one; a Guardian Review), gives the expected activity lines
+and stream entries. Claude's fixture gives what it gives today.
 
-**Out.** Codex's `_meta.terminal_output_delta` streaming, unless the probe
-shows `rawOutput` empty.
+**Out.** Any other agent's `_meta`.
 
 ---
 
@@ -372,18 +390,21 @@ user, so a review is a comment.
 
 **What.** `plugin/skills/review/procedure.md`, and a `review` skill (like
 `issue`, `disable-model-invocation: true`) for reviewing by hand: read the
-issue and the pull request's diff; judge whether the change does what the
-issue says, whether its behavior has tests, and whether it can be
-explained in a few sentences, against Epik's rules; post one review with
+issue (`gh issue view`) and the pull request (`gh pr view`, `gh pr diff`),
+from GitHub, since the clone's checkout is the target branch and the
+coder's worktree is gone; judge whether the change does what the issue
+says, whether its behavior has tests, and whether it can be explained in a
+few sentences, against Epik's rules; post one review with
 `gh pr review <n> --comment --body-file <file>`, whose last line is
-`<!-- epik-review: approve -->` or `<!-- epik-review: changes -->`; for
-changes, say what to change, specifically; never push, merge, close or
+`<!-- epik-review: approve round=<r> -->` or
+`<!-- epik-review: changes round=<r> -->`, with the round the header gave;
+for changes, say what to change, specifically; never push, merge, close or
 edit. Embed it in `epik-core` as A1 does the issue procedure, with a
 function that builds the review prompt (header with repository, issue, pull
-request; rules; procedure).
+request and round; rules; procedure).
 
 **Tests first.** The review prompt holds the pull request number, the
-rules and the procedure.
+round, the rules and the procedure.
 
 **Out.** Running it (A12).
 
@@ -392,13 +413,15 @@ rules and the procedure.
 ## A11. Read a pull request's review verdict
 
 **What.** `GitHub::reviews(repo, pr)` (with `gh api`, in `gh.rs`, and in the
-fake), returning each review's author, body and submission time. Then
-`review::verdict(reviews, since)`: the newest review submitted at or after
-`since` whose body's last non-blank line is an Epik verdict marker, as
-`Approve` or `Changes`; `None` if there is none.
+fake), returning each review's body and submission time. Then
+`review::verdict(reviews, round)`: the newest review whose body's last
+non-blank line is an Epik verdict marker naming `round`, as `Approve` or
+`Changes`; `None` if there is none. The round, not a time, picks the
+review: the building machine's clock and GitHub's never have to agree,
+and a reader of the pull request sees which review answered which attempt.
 
-**Tests first.** Approve, changes, a marker older than `since`, a marker
-not on the last line, several reviews (newest wins), none.
+**Tests first.** Approve, changes, a marker for another round, a marker
+not on the last line, several reviews for the round (newest wins), none.
 
 ---
 
@@ -412,9 +435,9 @@ merges catches what the first missed.
   epic issue this is the existing wait before merging. For a single issue,
   which today finishes without waiting (`build.rs:508-510`), it is a new
   wait, only when review is on.
-- Run the review agent in the clone with A10's prompt, as a session
-  (`role: review, round: 1`, log `<n>-review-1.jsonl`). Then read the
-  verdict with A11, from when the session started.
+- Run the review agent in the clone with A10's prompt for round 1, as a
+  session (`role: review, round: 1`, log `<n>-review-1.jsonl`). Then read
+  round 1's verdict with A11.
 - **Approve** goes on as today: merge into the epic branch, or finish a
   single issue at its pull request. **Changes**, or no verdict, fails the
   issue with the reason, until A13.
@@ -434,15 +457,18 @@ fold shows `reviewing`; time and cost sum the coding and review sessions.
 
 **What.** On **changes**, run the coding agent again (`role: coding,
 round: 2`, log `<n>-coding-2.jsonl`), with the issue procedure and a
-header saying its pull request #<pr> is open and to address the latest
-review on that pull request's branch, push, and wait for the checks. Then
-the checks and a review again (`round: 2`). When the second review still
+header that overrides its first steps: pull request #<pr> on branch
+`<head>` is already open, so make the worktree from that branch, address
+the latest review there, push to it, and open no new pull request; then
+wait for the checks as the procedure says. Then the checks and a review
+again (`round: 2`, with round 2 in its prompt). When the second review still
 asks for changes, fail the issue: "the review still asks for changes after
 2 rounds; see #<pr>". The limit is a constant.
 
 **Tests first.** Changes, then approve, merges after one more round;
 changes twice fails with the reason; the second coding prompt names the
-pull request; time and cost sum over all four sessions.
+pull request and its branch and says not to open another; the second
+review prompt says round 2; time and cost sum over all four sessions.
 
 **Out.** A setting for the limit.
 
@@ -472,8 +498,8 @@ repositories: **Coding** (agent: Claude Code or Codex; model: a text field
 whose placeholder is "The agent's default"), and **Review** (Off, Claude
 Code or Codex; model). Saving uses A3's `set_settings` command. When an
 agent's setup items aren't done, the section says so and links **Check
-setup**. If Codex runs without a sandbox (A6), choosing it says that Codex
-works without a sandbox, with the user's own access.
+setup**. Choosing Codex says, in a line, how it runs unattended: in a
+sandbox, with Codex's own reviewer approving what leaves it (A6's mode).
 
 **Tests first.** `epik-ui/tests/settings.rs`: the current roles shown;
 changing and saving calls `set_settings`; review Off hides its model
@@ -487,14 +513,15 @@ when a build starts (A4).
 ## A16. Uninstall Epik on a machine without Claude Code
 
 **Why.** Uninstalling runs `claude plugin` steps (`uninstall.rs:103`), and
-fails where Claude Code isn't installed, which A7 makes possible. Its
-"Tools" step doesn't mention Codex (`uninstall.rs:47`).
+fails where Claude Code isn't installed, which A7 makes possible.
 
-**What.** Skip the plugin steps, saying so, when `claude` isn't found. The
-Tools step names a private Codex when there is one.
+**What.** Skip the plugin steps, saying so, when `claude` isn't found.
+Codex itself lives in npm's cache with its adapter, not under `~/.epik`,
+so the Tools step is unchanged. (Were A8 kept, the step would name the
+private Codex too.)
 
 **Tests first.** In `uninstall.rs`'s tests: no `claude` skips the plugin
-steps and the rest succeeds; a private Codex is named and removed.
+steps, says so, and the rest succeeds.
 
 ---
 

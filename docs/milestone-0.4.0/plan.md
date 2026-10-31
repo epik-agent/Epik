@@ -145,6 +145,25 @@ cost would have been written as $0 (A6); and the release names files
 without their version (R14). It also split six issues that were too large
 and fixed several dependency edges.
 
+A second review on 2026-10-31, against `main` after the polish epic
+merged, agreed with every recommendation above and changed these: the
+quiet period is a field of the agent profile, since Claude's 300 seconds
+would have added five minutes to every Codex session and up to four
+sessions per issue with review on (ADR §2, A2, A6); a model the agent
+doesn't offer refuses the build with no record, like a missing setup item,
+rather than recording a failed run to delete (ADR §3, A4); the verdict
+marker names its round, so no clock comparison picks a review (ADR §6,
+A10–A13); A9 reads Codex's command output from `_meta.terminal_output_delta`,
+as the probe found, and skips Guardian Review calls; the round-2 coding
+header says to work on the existing branch and open no new pull request
+(A13); the review agent reads the pull request from GitHub, the clone
+having no checkout of it (A10); the `codex` items reach the bundled Codex
+through `npx -p … codex` (A7); R5 serializes requests over the one `ssh`
+process, skips shell noise, and names the host-key failure; R9 follows R7
+and R4 rather than R8; R15 gives the Claude Code installer and the
+first `ssh <host>` by hand; A16 drops the private Codex that A8 no longer
+installs.
+
 ## Epic C (optional): plan with Epik in Codex
 
 A user with no Anthropic account can build with Codex after epic A, but

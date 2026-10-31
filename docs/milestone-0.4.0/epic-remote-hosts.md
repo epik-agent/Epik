@@ -72,8 +72,8 @@ graph LR
   R5 --> R6
   R6 --> R7
   R7 --> R8
-  R5 --> R9
-  R8 --> R9
+  R4 --> R9
+  R7 --> R9
   R9 --> R10
   R9 --> R11
   R10 --> R12
@@ -84,9 +84,11 @@ graph LR
   R14 --> R15
 ```
 
-R1, R3 and R4 have no blockers and build in parallel. R8, R10 and R12 all
-edit `pages.rs` and `main_window.rs`, so they are in one line, as are R1, R2
-and R13, which edit `main.rs` and `tests/cli.rs`.
+R1, R3 and R4 have no blockers and build in parallel. R8 and R9 both
+follow R7 and build in parallel: R8 is the window, R9 is `ipc.rs` and
+`builds.rs`. R8, R10 and R12 all edit `pages.rs` and `main_window.rs`, so
+they are in one line, as are R1, R2 and R13, which edit `main.rs` and
+`tests/cli.rs`.
 
 ---
 
@@ -153,9 +155,11 @@ say which runs a host still has.
 - `{"type":"read","run":…,"path":…,"offset":1234}` →
   `{"type":"chunk","path":…,"offset":1234,"data":"…","size":5678}`: whole
   lines from `offset`, up to 1 MiB, never part of a line. If the first line
-  alone is over 1 MiB, it is returned whole. A path that leaves the run's
-  directory (`..`, absolute) is a `bad request`. An offset past the size
-  returns empty `data`: the file was rewritten, and the client starts over.
+  alone is over 1 MiB, it is returned whole. `data` is text, so bytes that
+  aren't UTF-8 (an agent's `.err` file is its raw stderr) are decoded
+  lossily. A path that leaves the run's directory (`..`, absolute) is a
+  `bad request`. An offset past the size returns empty `data`: the file
+  was rewritten, and the client starts over.
 
 **Tests first.** All runs listed past 20; files for a run with two builds;
 reads from 0, mid-file and at the end; a cut at the last whole line under
@@ -189,19 +193,26 @@ survives a reload and clears when its host goes; directory names.
 `ssh -T -o BatchMode=yes -o ServerAliveInterval=30 <destination>
 .epik/bin/epik-app stdio` (relative to the remote home), keeps the process
 for later requests, and sends each request as a line and reads one reply.
-If the process has exited or a write fails, it starts a new one once and
-retries. A request waits at most 30 seconds. A failure to connect is an
-error carrying ssh's last stderr line. The program run as `ssh` is a field,
+The mirror thread (R7) and request handlers (R9, R10) share the one
+process, so `request` holds a mutex from writing the line to reading the
+reply: one request is in flight at a time. Lines on stdout that aren't
+JSON are skipped, since a login shell's startup files can print before
+`epik-app stdio` does. If the process has exited or a write fails, it
+starts a new one once and retries. A request waits at most 30 seconds. A
+failure to connect is an error carrying ssh's last stderr line. The program run as `ssh` is a field,
 so tests replace it. On first use it `ping`s, and refuses a host whose
 app's minor version differs from this app's: "devbox runs Epik 0.3.2;
 install 0.4.x there". It offers `request(&Request) -> Result<Response>`.
 
-**Tests first.** With a fake `ssh` (a test program that runs
-`epik-app stdio` against a temporary home): request and reply; a killed
+**Tests first.** With a fake `ssh` (a test program that prints a line of
+shell noise, then runs `epik-app stdio` against a temporary home): request
+and reply; two threads' requests each get their own reply; a killed
 connection restarts; a version mismatch is refused; a connection failure
-carries stderr; a hung host times out.
+carries stderr, which for a host never connected to by hand is "Host key
+verification failed"; a hung host times out.
 
-**Out.** Password prompts. `BatchMode` refuses them by design.
+**Out.** Password and host-key prompts. `BatchMode` refuses them by
+design; the docs (R15) say to `ssh <host>` once by hand first.
 
 ---
 
@@ -371,14 +382,18 @@ The website's download page doesn't list them; the host docs do.
 ## R15. Document building on another machine
 
 **What.** A "Build on another machine" section in `README.md`, and the
-same in `how-it-works.md` for Epik to answer from: what a host is; on the
-host, download and check the tarball, put the binary at
-`~/.epik/bin/epik-app`, run `epik-app setup` and its installs, sign in
-`gh` (`gh auth login -s project`, `gh auth setup-git`) and each agent the
-roles use (`claude auth login`, `codex login`); run it as a
-`systemd --user` service (the unit file in full) with
-`loginctl enable-linger`; then add the host in Settings. Troubleshooting:
-unreachable (check that `ssh <host>` works without a password), a version
+same in `how-it-works.md` for Epik to answer from: what a host is; from
+the laptop, `ssh <host>` once by hand, so the host key is known and no
+password is asked; on the host, download and check the tarball, put the
+binary at `~/.epik/bin/epik-app`, run `epik-app setup` and its installs,
+install Claude Code if a role uses it (the checklist's own one-liner,
+`curl -fsSL https://claude.ai/install.sh | bash`, `setup.rs:531`; R13
+installs no agent but Codex, which comes with its adapter), sign in `gh`
+(`gh auth login -s project`, `gh auth setup-git`) and each agent the roles
+use (`claude auth login`, `codex login`); run it as a `systemd --user`
+service (the unit file in full) with `loginctl enable-linger`; then add
+the host in Settings. Troubleshooting: unreachable (check that
+`ssh <host>` works without a password or a host-key question), a version
 mismatch, missing setup.
 
 ---
