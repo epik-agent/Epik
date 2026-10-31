@@ -558,3 +558,18 @@ little on OpenAI's API (this Mac's Codex is signed in with an API key).
 2. **Prompt against skill, for Claude.** Build the same small issue with
    A1's prompt and with today's `/epik:issue`. Compare cost and outcome.
    One run each says only that nothing broke.
+3. **Claude Code's sandbox through ACP** (added 2026-10-31, correcting
+   the record's claim that the adapter doesn't expose it). The Agent SDK
+   has a `sandbox` option (`enabled`, `network.allowedDomains`,
+   `filesystem.allowWrite`, `failIfUnavailable`, …), `claude-agent-acp`
+   0.99.0 accepts it in `_meta.claudeCode.options` on `session/new`, and
+   the adapter already turns the sandbox's network requests into ACP
+   permission requests (`SandboxNetworkAccess`), which Epik rejects.
+   Build #13 with a sandbox on: Seatbelt here, GitHub's domains allowed,
+   the worktree's directory writable. Settles: whether `git push` and
+   `gh pr create` get through in auto mode with nothing reaching Epik;
+   what the worktree's path has to be for `allowWrite`; what the record
+   shows for a refused connection. If it works, A2's Claude profile
+   carries the sandbox block (and Linux hosts need `bubblewrap` and
+   `socat`, which R13 and R15 would then name); if not, Claude runs as
+   today and the plan says so. Windows has no sandbox either way.

@@ -94,25 +94,41 @@ no roles until A lands.
 ## Decisions for Bill
 
 1. **Order:** A then R (recommended), or R then A as agreed.
+   **Decided 2026-10-31: A then R.** R is tested locally and in CI
+   against a Docker container running the headless app and `sshd`, so
+   it needs no real host to start; a real host tests only the closed lid
+   (epic R, finding 1).
 2. **Codex's unattended mode:** the default `agent` mode, sandboxed, with
    Codex's own reviewer approving what leaves the sandbox (recommended:
    the probe built #13 this way with no prompt reaching Epik), or
    `agent-full-access` (no sandbox, the user's own access). A sandboxed
    setup with open network isn't possible through the adapter. Either
    way, Settings says which.
+   **Decided 2026-10-31: `agent`.** Bill prefers it a little to Claude's
+   auto mode, since ordinary work stays in a sandbox and only what
+   leaves it is reviewed.
 3. **Cost Codex doesn't report:** show "not reported" (recommended), or
-   keep a price table.
+   keep a price table. **Decided 2026-10-31: "not reported."** Tokens
+   stay in the record.
 4. **Review in 0.4.0:** in, off by default, verdict by marker comment,
    two rounds (recommended), or cut to keep the release small. A10–A13 cut
    cleanly: drop them, and A14 and A15 lose their review parts. A5 (one
    record per agent session) is still worth keeping.
+   **Decided 2026-10-31: in, off by default.**
 5. **The design role:** epic C in 0.4.0, or the next release. I lean to
    next release unless Sabine, or someone else without an Anthropic
    account, is the user 0.4.0 is for.
+   **Decided 2026-10-31: in 0.4.0.** Epic C gets its own file, in the
+   form of the other two, after its three findings (below) are made.
+   It builds after A, since it needs Codex as a role to show its setup
+   item; it is still the first thing to cut if the release runs long.
 6. **Host setup by hand, Linux-only artifacts** (recommended), or
-   automated setup from the app.
+   automated setup from the app. **Decided 2026-10-31: by hand.**
 7. **A host to test on:** a small cloud VM (with Tailscale SSH), a machine
    at home, or a container on this Mac for development only.
+   **Decided 2026-10-31: both.** A Docker container running `sshd` and
+   the headless app is the host for R's tests and CI; a small cloud VM
+   reached over Tailscale SSH proves the closed lid.
 
 ## Findings to make before filing
 
@@ -125,7 +141,14 @@ OpenAI's API, or need a machine:
    **Done 2026-10-31:** Codex built #13 unattended in `agent` mode and
    opened wpm/epik-test#17. Details in `probe-codex.md`.
 2. Prompt against skill for Claude (epic A, finding 2).
-3. A host, and the sign-ins over SSH (epic R, findings 1–2).
+   2a. Claude Code's sandbox through ACP (epic A, finding 3, added
+   2026-10-31): the adapter accepts the SDK's `sandbox` option in
+   `_meta.claudeCode.options`. Build #13 with it on, with GitHub's
+   domains allowed and the worktree writable, and see whether anything
+   reaches Epik as a permission request. If it works, the Claude profile
+   gets a sandbox too, and the two agents' trust is the same shape.
+3. The sign-ins over SSH on the cloud VM (epic R, finding 2). Finding 1
+   is decided: a container for tests, the VM for the lid.
 4. Windows' in-box `ssh -T` relaying stdio (epic R, finding 3), on the
    machine used for the `${HOME}` check.
 
