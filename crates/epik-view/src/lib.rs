@@ -154,6 +154,8 @@ pub struct TrayRun {
 pub struct Popover {
     /// "3 runs · 4 agents · up 4h 12m".
     pub about: String,
+    /// What Restart asks before it restarts: "Interrupt two builds?".
+    pub restart: String,
     /// The building runs.
     pub runs: Vec<TrayRun>,
 }

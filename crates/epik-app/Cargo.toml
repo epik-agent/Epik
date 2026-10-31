@@ -17,6 +17,7 @@ open = "5.4.4"
 rust_decimal = { version = "1.43.0", default-features = false }
 serde_json = "1.0.154"
 tauri = { version = "2.12.3", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2.8.4"
 
 [dev-dependencies]
 serde_json = "1.0.154"

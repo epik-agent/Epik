@@ -86,6 +86,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             stop: app.stop.clone(),
             restart: Arc::default(),
         })
+        .plugin(tauri_plugin_dialog::init())
         .on_menu_event(chosen)
         .invoke_handler(tauri::generate_handler![
             main_window::home,
@@ -227,8 +228,10 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
         SETTINGS => main_window::open(handle, "settings").map_err(|e| e.to_string()),
         CHECK_SETUP => setup_window::open(handle).map_err(|e| e.to_string()),
         CHECK_FOR_UPDATES => open::that_detached(popover::RELEASES).map_err(|e| e.to_string()),
+        // Only Linux's native tray menu has Restart, and it can't ask first.
         RESTART => {
-            quit.restart();
+            let runs = &handle.state::<main_window::Window>().runs;
+            popover::ask_to_restart(handle, building(runs));
             Ok(())
         }
         QUIT => {

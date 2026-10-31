@@ -387,6 +387,32 @@ fn the_tray_menu_counts_the_runs_and_agents_and_says_how_long_epik_has_been_up()
 }
 
 #[test]
+fn restarting_warns_of_the_builds_it_interrupts() {
+    assert_eq!(restart_question(0), "Restart Epik?");
+    assert_eq!(restart_question(1), "Interrupt one build?");
+    assert_eq!(restart_question(2), "Interrupt two builds?");
+    assert_eq!(restart_warning(0), "Epik will quit and start again.");
+    assert_eq!(
+        restart_warning(1),
+        "Restarting interrupts the build running now. You can rerun it from its page."
+    );
+    assert_eq!(
+        restart_warning(3),
+        "Restarting interrupts the three builds running now. You can rerun each from its page."
+    );
+}
+
+#[test]
+fn the_tray_menu_asks_before_interrupting_its_building_runs() {
+    let runs = [exponentiation(), waiting_run(), failed_run()];
+    assert_eq!(
+        popover(&runs, time(0), time(5)).restart,
+        "Interrupt one build?"
+    );
+    assert_eq!(popover(&[], time(0), time(5)).restart, "Restart Epik?");
+}
+
+#[test]
 fn the_tray_menus_counts_read_as_english() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.issue.number != 17);
