@@ -3,7 +3,8 @@
 //!
 //! Only types live here, with no dependency but `serde`, so a front end
 //! compiled to WebAssembly can deserialize what the app serializes. The
-//! functions that build them are in `epik-app`.
+//! functions that build them are in `epik-app`, and in `epik-core` for
+//! [`Stream`].
 
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +73,7 @@ pub struct NowLine {
     pub last_event: Option<i64>,
 }
 
-/// A run, as Home and the popover show it.
+/// A run, as Home shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCard {
     /// The run, `owner/name#number`.
@@ -97,7 +98,7 @@ pub struct RunCard {
     pub sentence: Option<Words>,
     /// A second line under it.
     pub note: Option<String>,
-    /// For the popover: where it stands, while building.
+    /// Where it stands, while building.
     pub summary: Option<Words>,
 }
 
@@ -106,22 +107,57 @@ pub struct RunCard {
 pub struct Home {
     /// What is happening, in a sentence.
     pub headline: String,
-    /// Whether any monitored repository is no longer on GitHub, which
-    /// marks the Settings gear.
-    pub missing_repository: bool,
     pub building: Vec<RunCard>,
     pub waiting: Vec<RunCard>,
     pub attention: Vec<RunCard>,
 }
 
-/// The tray's popover.
+/// A run, as the main window's sidebar lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SidebarRun {
+    /// The run, `owner/name#number`.
+    pub run: String,
+    pub title: String,
+    pub disposition: Disposition,
+}
+
+/// The main window's sidebar, beside every page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sidebar {
+    /// The monitored runs: those needing attention, then building, then
+    /// waiting for review.
+    pub runs: Vec<SidebarRun>,
+    /// Whether any monitored repository is no longer on GitHub, which
+    /// marks Settings.
+    pub missing_repository: bool,
+    /// "Epik running · up 4h 12m".
+    pub status: String,
+}
+
+/// A building run, as the tray menu lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrayRun {
+    /// The run, `owner/name#number`.
+    pub run: String,
+    pub title: String,
+    /// How many of its issues are merged, of all of them: "3/7".
+    pub count: String,
+    /// Each issue's state, in the run's order: a segment each of its
+    /// progress bar.
+    pub segments: Vec<NodeState>,
+    /// "building #443 · 2m 00s · epik-agent/Epik#441".
+    pub line: String,
+}
+
+/// The tray menu: whether Epik is running, and each building run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Popover {
-    /// "Two runs building".
-    pub headline: String,
-    pub building: Vec<RunCard>,
-    /// A sentence for each run waiting for review or needing attention.
-    pub waiting: Vec<(Disposition, String, Words)>,
+    /// "3 runs · 4 agents · up 4h 12m".
+    pub about: String,
+    /// What Restart asks before it restarts: "Interrupt two builds?".
+    pub restart: String,
+    /// The building runs.
+    pub runs: Vec<TrayRun>,
 }
 
 /// An issue's card on the run page, and what its detail panel says.
@@ -262,4 +298,90 @@ pub struct UninstallStep {
     pub title: String,
     /// Why it couldn't, if it couldn't.
     pub error: Option<String>,
+}
+
+/// An agent's log as people read it: what it said and did, in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stream {
+    pub entries: Vec<StreamEntry>,
+    /// Whether its last tool call hasn't completed, so the agent is still
+    /// at work.
+    pub working: bool,
+}
+
+/// One thing an agent said or did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamEntry {
+    /// When it began, in milliseconds since the Unix epoch. None in a log
+    /// written before Epik recorded times.
+    pub at: Option<i64>,
+    pub what: Entry,
+}
+
+/// What an agent said or did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Entry {
+    /// The agent's own words.
+    Narration { text: String },
+    /// A command line and what it printed.
+    Command { command: String, output: Excerpt },
+    /// A file read, and which of its lines, if not all of them.
+    Read {
+        path: String,
+        lines: Option<LineRange>,
+    },
+    /// A search: its pattern, where it looked, how many matches it found,
+    /// and where they are, as `file:line` or a file.
+    Search {
+        pattern: String,
+        within: Option<String>,
+        matches: usize,
+        hits: Excerpt,
+    },
+    /// A file changed: the lines it removed and added.
+    Edit {
+        path: String,
+        changes: Excerpt<Change>,
+    },
+    /// A file written whole.
+    NewFile { path: String, content: Excerpt },
+    /// Any other tool call, in words: "Updating its plan".
+    Other { text: String },
+}
+
+/// Lines of a file, counted from 1. `to` is None when the range runs to
+/// the end of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineRange {
+    pub from: u64,
+    pub to: Option<u64>,
+}
+
+/// A line an edit removed or added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Change {
+    Removed(String),
+    Added(String),
+}
+
+/// Lines cut down to fit: all of them if there are few, else the first
+/// and last, with "… N more lines" between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Excerpt<T = String> {
+    pub head: Vec<T>,
+    /// How many lines are left out between `head` and `tail`.
+    pub more: usize,
+    pub tail: Vec<T>,
+}
+
+impl<T> Default for Excerpt<T> {
+    fn default() -> Self {
+        Self {
+            head: Vec::new(),
+            more: 0,
+            tail: Vec::new(),
+        }
+    }
 }

@@ -79,7 +79,6 @@ fn card(disposition: Disposition) -> RunCard {
 fn home() {
     round_trip(Home {
         headline: "One run building.".to_owned(),
-        missing_repository: true,
         building: vec![card(Disposition::Building)],
         waiting: vec![card(Disposition::WaitingForReview)],
         attention: vec![card(Disposition::NeedsAttention)],
@@ -87,15 +86,30 @@ fn home() {
 }
 
 #[test]
+fn sidebar() {
+    round_trip(Sidebar {
+        runs: vec![SidebarRun {
+            run: "o/r#13".to_owned(),
+            title: "Exponentiation".to_owned(),
+            disposition: Disposition::NeedsAttention,
+        }],
+        missing_repository: true,
+        status: "Epik running · up 4h 12m".to_owned(),
+    });
+}
+
+#[test]
 fn popover() {
     round_trip(Popover {
-        headline: "One run building".to_owned(),
-        building: vec![card(Disposition::Building)],
-        waiting: vec![(
-            Disposition::NeedsAttention,
-            "o/r#13".to_owned(),
-            vec![text("Exponentiation failed.")],
-        )],
+        about: "1 run · 2 agents · up 4h 12m".to_owned(),
+        restart: "Interrupt one build?".to_owned(),
+        runs: vec![TrayRun {
+            run: "o/r#13".to_owned(),
+            title: "Exponentiation".to_owned(),
+            count: "1/3".to_owned(),
+            segments: vec![NodeState::Merged, NodeState::Running, NodeState::Failed],
+            line: "building #2 · 2m 00s · o/r#13".to_owned(),
+        }],
     });
 }
 
@@ -210,6 +224,78 @@ fn output() {
         lines: vec!["Installing…".to_owned()],
         running: false,
         error: Some("it failed".to_owned()),
+    });
+}
+
+#[test]
+fn stream() {
+    let lines = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect();
+    round_trip(Stream {
+        entries: vec![
+            StreamEntry {
+                at: Some(1_700_000_000_000),
+                what: Entry::Narration {
+                    text: "I'll read the issue.".to_owned(),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Command {
+                    command: "cargo test".to_owned(),
+                    output: Excerpt {
+                        head: lines(&["running 40 tests"]),
+                        more: 30,
+                        tail: lines(&["test result: ok"]),
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Read {
+                    path: "src/eval.rs".to_owned(),
+                    lines: Some(LineRange { from: 10, to: None }),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Search {
+                    pattern: "fn eval".to_owned(),
+                    within: Some("src".to_owned()),
+                    matches: 1,
+                    hits: Excerpt {
+                        head: lines(&["src/eval.rs:3"]),
+                        ..Excerpt::default()
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Edit {
+                    path: "src/eval.rs".to_owned(),
+                    changes: Excerpt {
+                        head: vec![
+                            Change::Removed("a".to_owned()),
+                            Change::Added("b".to_owned()),
+                        ],
+                        ..Excerpt::default()
+                    },
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::NewFile {
+                    path: "src/new.rs".to_owned(),
+                    content: Excerpt::default(),
+                },
+            },
+            StreamEntry {
+                at: None,
+                what: Entry::Other {
+                    text: "Updating its plan".to_owned(),
+                },
+            },
+        ],
+        working: true,
     });
 }
 

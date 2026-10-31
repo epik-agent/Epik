@@ -1,151 +1,185 @@
-use epik_ui::flash::Flashes;
-use epik_ui::popover::{Card, Runs, latest};
-use epik_view::Disposition;
+use epik_ui::popover::{Command, Header, Item, Items, RunRow, Runs, Segments, shortcut};
+use epik_view::NodeState;
 use leptos::prelude::*;
 
 mod fixtures;
 use fixtures::render;
-use fixtures::{card, link, now, popover, text};
+use fixtures::{popover, tray_run};
 
 #[test]
-fn a_card_has_its_graph_title_time_and_summary() {
-    let html = render(|| view! { <Card run=card(vec![]) flash=false/> });
-    assert!(html.starts_with(r#"<article class="card">"#), "{html}");
-    assert!(html.contains(r#"<div class="head"><svg viewBox="0 0 32 24" width="32" height="24" class="mini-graph""#), "{html}");
-    assert!(
-        html.contains(r##"<a href="#" class="title">Exponentiation</a>"##),
-        "{html}"
-    );
-    assert!(
-        html.contains(r#"<span class="time">4m 12s</span>"#),
-        "{html}"
-    );
-    assert!(
-        html.contains(r#"<span class="summary">1 of 3 merged, "#),
-        "{html}"
-    );
-}
-
-#[test]
-fn a_card_without_a_life_line_has_none() {
-    let html = render(|| view! { <Card run=card(vec![now(2, None, None)]) flash=false/> });
-    assert!(!html.contains("life"), "{html}");
-}
-
-#[test]
-fn a_card_has_its_latest_agents_life_line() {
-    let run = card(vec![
-        now(2, Some("active 9s ago"), Some(100)),
-        now(3, Some("active 2s ago"), Some(200)),
-    ]);
-    let html = render(|| view! { <Card run flash=false/> });
-    assert!(
-        html.contains(r#"<div class="life">active 2s ago</div>"#),
-        "{html}"
-    );
-    assert!(!html.contains("active 9s ago"), "{html}");
-}
-
-#[test]
-fn a_quiet_life_line_is_quiet() {
-    let html = render(
-        || view! { <Card run=card(vec![now(2, Some("quiet 1m 50s"), Some(100))]) flash=false/> },
-    );
-    assert!(
-        html.contains(r#"<div class="life quiet">quiet 1m 50s</div>"#),
-        "{html}"
-    );
-}
-
-#[test]
-fn a_flashing_card_has_the_flash_class() {
-    let html = render(|| view! { <Card run=card(vec![]) flash=true/> });
-    assert!(
-        html.starts_with(r#"<article class="card flash">"#),
-        "{html}"
-    );
-}
-
-#[test]
-fn a_card_has_a_progress_bar_when_it_has_more_than_one_issue() {
-    let html = render(|| view! { <Card run=card(vec![]) flash=false/> });
-    assert!(html.contains(r#"<div class="progress">"#), "{html}");
-    let mut one = card(vec![]);
-    one.graph.layout.places.truncate(1);
-    let html = render(|| view! { <Card run=one flash=false/> });
-    assert!(!html.contains("progress"), "{html}");
-}
-
-#[test]
-fn the_runs_are_a_card_for_each_building_run() {
-    let html =
-        render(|| view! { <Runs popover=popover(vec![card(vec![]), card(vec![])], vec![])/> });
+fn the_header_says_epik_is_running_and_what_it_is_doing() {
+    let html = render(|| view! { <Header about=popover(vec![]).about/> });
     assert_eq!(
-        html.matches(r#"<article class="card">"#).count(),
+        html,
+        r#"<header><div class="running"><span class="dot"></span><span class="name">Epik is running</span></div><div class="about">3 runs · 4 agents · up 4h 12m</div></header>"#
+    );
+}
+
+#[test]
+fn a_run_row_has_its_title_count_segments_and_line() {
+    let html = render(|| view! { <RunRow run=tray_run()/> });
+    assert!(
+        html.starts_with(r#"<button type="button" class="run">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<div class="head"><span class="title">Exponentiation</span><span class="count">1/3</span></div>"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"<div class="segments">"#), "{html}");
+    assert!(
+        html.contains(r#"<div class="line">building #2 · 2m 00s · acme/widgets#13</div>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn the_segments_are_one_for_each_issue_in_its_state() {
+    let segments = vec![
+        NodeState::Merged,
+        NodeState::Running,
+        NodeState::NotStarted,
+        NodeState::Failed,
+    ];
+    let html = render(|| view! { <Segments segments/> });
+    assert_eq!(
+        html,
+        r#"<div class="segments"><span class="merged"></span><span class="running"></span><span class="not_started"></span><span class="failed"></span></div>"#
+    );
+}
+
+#[test]
+fn the_runs_are_a_row_for_each_active_run_under_their_heading() {
+    let html = render(|| view! { <Runs runs=popover(vec![tray_run(), tray_run()]).runs/> });
+    assert!(
+        html.starts_with(r#"<section class="runs"><h2>Active runs</h2>"#),
+        "{html}"
+    );
+    assert_eq!(
+        html.matches(r#"<button type="button" class="run">"#)
+            .count(),
         2,
         "{html}"
     );
-    assert!(!html.contains("Waiting for you"), "{html}");
-    assert!(!html.contains("Nothing is building."), "{html}");
 }
 
 #[test]
-fn the_runs_list_those_waiting_for_the_user() {
-    let waiting = vec![
-        (
-            Disposition::WaitingForReview,
-            "acme/widgets#13".into(),
-            vec![
-                link("Exponentiation", "https://github.com/acme/widgets/pull/30"),
-                text(" is ready for review"),
-            ],
-        ),
-        (
-            Disposition::NeedsAttention,
-            "acme/widgets#40".into(),
-            vec![text("Logging failed")],
-        ),
-    ];
-    let html = render(|| view! { <Runs popover=popover(vec![], waiting)/> });
-    assert!(html.contains("<h2>Waiting for you</h2>"), "{html}");
-    assert!(html.contains(r#"<ul class="waiting"><li class="waiting_for_review"><span class="marker"></span><span><a href="https://github.com/acme/widgets/pull/30">Exponentiation</a>"#), "{html}");
-    assert!(html.contains(r#"<li class="needs_attention"><span class="marker"></span><span>Logging failed</span></li></ul>"#), "{html}");
-    assert!(!html.contains("Nothing is building."), "{html}");
+fn with_nothing_building_the_runs_are_left_out() {
+    let html = render(|| view! { <Runs runs=vec![]/> });
+    assert_eq!(html, "");
 }
 
 #[test]
-fn the_runs_say_nothing_is_building_when_there_is_nothing_to_show() {
-    let html = render(|| view! { <Runs popover=popover(vec![], vec![])/> });
-    assert_eq!(html, r#"<p class="quiet-note">Nothing is building.</p>"#);
-}
-
-#[test]
-fn the_latest_agent_is_the_first_with_the_greatest_last_event() {
-    let lines = [
-        now(1, Some("a"), Some(5)),
-        now(2, Some("b"), Some(9)),
-        now(3, Some("c"), Some(9)),
-    ];
-    assert_eq!(latest(&lines).map(|line| line.number), Some(2));
-}
-
-#[test]
-fn there_is_no_latest_agent_until_one_has_logged() {
-    let lines = [now(1, Some("a"), None), now(2, Some("b"), Some(0))];
-    assert_eq!(latest(&lines), None);
-    assert_eq!(latest(&[]), None);
-}
-
-#[test]
-fn a_run_flashes_when_its_last_event_changes() {
-    let mut flashes = Flashes::default();
-    assert!(
-        !flashes.changed("acme/widgets#13", Some(1)),
-        "the first sighting"
+fn the_items_are_in_order_with_their_shortcuts() {
+    let html = render(|| view! { <Items mac=true/> });
+    let labels: Vec<&str> = Item::ALL.iter().map(|item| item.label()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Open Dashboard",
+            "Restart",
+            "Settings…",
+            "Check setup…",
+            "Check for updates…",
+            "Quit Epik",
+        ]
     );
-    assert!(!flashes.changed("acme/widgets#13", Some(1)), "no change");
-    assert!(flashes.changed("acme/widgets#13", Some(2)));
-    assert!(!flashes.changed("acme/widgets#13", None), "no event");
-    assert!(flashes.changed("acme/widgets#13", Some(3)));
-    assert!(!flashes.changed("acme/widgets#40", Some(3)), "another run");
+    let mut at = 0;
+    for item in Item::ALL {
+        let found = html[at..]
+            .find(&format!(r#"id="{}""#, item.id()))
+            .unwrap_or_else(|| panic!("{} is missing or out of order: {html}", item.id()));
+        at += found;
+    }
+    assert!(
+        html.contains(
+            r#"<span class="label">Open Dashboard</span><span class="shortcut">⌘D</span>"#
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="shortcut">⌘,</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="shortcut">⌘Q</span>"#),
+        "{html}"
+    );
+    assert_eq!(html.matches(r#"class="shortcut""#).count(), 3, "{html}");
+}
+
+#[test]
+fn the_items_are_grouped_as_the_menu_draws_them() {
+    let html = render(|| view! { <Items mac=true/> });
+    assert_eq!(html.matches(r#"<hr>"#).count(), 2, "{html}");
+    let dashboard = html.find("open-dashboard").unwrap();
+    let restart = html.find("restart").unwrap();
+    let settings = html.find("settings").unwrap();
+    let rules: Vec<usize> = html.match_indices("<hr>").map(|(i, _)| i).collect();
+    assert!(dashboard < rules[0] && rules[0] < restart, "{html}");
+    assert!(restart < rules[1] && rules[1] < settings, "{html}");
+}
+
+#[test]
+fn elsewhere_the_shortcuts_use_ctrl() {
+    let html = render(|| view! { <Items mac=false/> });
+    assert!(
+        html.contains(r#"<span class="shortcut">Ctrl+D</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="shortcut">Ctrl+,</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="shortcut">Ctrl+Q</span>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn each_item_calls_its_command() {
+    let commands: Vec<Command> = Item::ALL.iter().map(|item| item.command()).collect();
+    assert_eq!(
+        commands,
+        [
+            Command::OpenMain("".into()),
+            Command::Run("restart"),
+            Command::OpenMain("settings".into()),
+            Command::Run("check_setup"),
+            Command::Run("check_for_updates"),
+            Command::Run("quit"),
+        ]
+    );
+}
+
+#[test]
+fn a_run_row_opens_its_run_page() {
+    assert_eq!(
+        Command::open_run("acme/widgets#13"),
+        Command::OpenMain("run/acme/widgets#13".into())
+    );
+}
+
+#[test]
+fn the_shortcuts_choose_their_items() {
+    assert_eq!(shortcut("d"), Some(Item::OpenDashboard));
+    assert_eq!(shortcut("D"), Some(Item::OpenDashboard));
+    assert_eq!(shortcut(","), Some(Item::Settings));
+    assert_eq!(shortcut("q"), Some(Item::Quit));
+    assert_eq!(shortcut("r"), None);
+}
+
+#[test]
+fn restart_asks_first() {
+    let html =
+        render(|| view! { <Items mac=true confirming=true restart="Interrupt two builds?"/> });
+    assert!(html.contains(r#"<div id="restart" class="item confirm"><span class="label">Interrupt two builds?</span><span class="choices"><button type="button" id="restart-cancel">Cancel</button><button type="button" id="restart-confirm" class="danger">Restart</button></span></div>"#), "{html}");
+}
+
+#[test]
+fn until_chosen_restart_is_an_item() {
+    let html = render(|| view! { <Items mac=true restart="Interrupt two builds?"/> });
+    assert!(html.contains(r#"<button type="button" id="restart" class="item"><span class="label">Restart</span></button>"#), "{html}");
+    assert!(!html.contains("Interrupt"), "{html}");
 }

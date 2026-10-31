@@ -16,8 +16,10 @@ use epik_core::setup::{self, Check, Item};
 use epik_view::{Checklist, ItemState, Output, Row};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
+use crate::navigation;
+
 /// The window's label.
-const LABEL: &str = "setup";
+pub(crate) const LABEL: &str = "setup";
 
 /// An item's state, as the checklist is given it.
 fn shown(state: setup::State) -> ItemState {
@@ -154,6 +156,7 @@ pub fn open(handle: &AppHandle) -> tauri::Result<()> {
     WebviewWindowBuilder::new(handle, LABEL, WebviewUrl::App("index.html#/setup".into()))
         .title("Set up Epik")
         .inner_size(640.0, 720.0)
+        .on_navigation(navigation::stay_in_app)
         .build()?;
     Ok(())
 }

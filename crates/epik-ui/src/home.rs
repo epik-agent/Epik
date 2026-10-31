@@ -1,53 +1,66 @@
-//! The main window's Home: sections of run cards for the runs building,
-//! waiting for review, and needing attention.
+//! The main window's Home, the Runs page: a table of the runs, which tabs
+//! filter by where they stand, whose building rows unfold to show what is
+//! running, what starts next, and what is done.
 
-use epik_view::{Home, NowLine, RunCard, Words as Sentence};
+use epik_view::{Disposition, Home, NowLine, RunCard, Words as Sentence};
+use leptos::ev::MouseEvent;
 use leptos::html::Div;
 use leptos::prelude::*;
 
 use crate::flash::flash_on;
 use crate::graph::{MiniGraph, ProgressBar};
 use crate::live::{keyed, part};
-use crate::main_window::href;
+use crate::main_window::{disposition_class, href};
 use crate::words::{GithubLink, Words};
 
-/// What a card needing attention asks the app to do to its run: `rerun`
-/// or `delete_run`.
+/// What a row needing attention asks the app to do to its run: `rerun` or
+/// `delete_run`.
 pub type Act = (&'static str, String);
 
-/// A card's mini graph, redrawn when it changes.
-fn graph(card: Signal<RunCard>) -> impl IntoView {
-    let graph = part(card, |card| card.graph.clone());
-    move || view! { <MiniGraph graph=graph.get()/> }
+/// Which runs the table shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Filter {
+    #[default]
+    All,
+    Building,
+    Waiting,
+    Attention,
 }
 
-/// A card's title, linking to the run's page.
-fn title(card: Signal<RunCard>) -> impl IntoView {
-    let page = part(card, |card| href(&format!("run/{}", card.run)));
-    let title = part(card, |card| card.title.clone());
-    view! { <a class="title" href=page>{title}</a> }
-}
-
-/// A card's epic, linked to GitHub.
-fn epic(card: Signal<RunCard>) -> impl IntoView {
-    let epic = part(card, |card| card.epic.clone());
-    move || {
-        let epic = epic.get();
-        view! { <GithubLink text=epic.text url=epic.url.unwrap_or_default()/> }
+impl Filter {
+    fn label(self) -> &'static str {
+        match self {
+            Filter::All => "All",
+            Filter::Building => "Building",
+            Filter::Waiting => "Waiting for review",
+            Filter::Attention => "Needs attention",
+        }
     }
-}
 
-/// A sentence, redrawn when it changes.
-fn words(sentence: Memo<Sentence>) -> impl IntoView {
-    move || view! { <Words spans=sentence.get()/> }
-}
+    /// The runs it shows: those needing attention, then building, then
+    /// waiting for review.
+    fn runs(self, home: &Home) -> Vec<RunCard> {
+        let all = self == Filter::All;
+        let mut runs = Vec::new();
+        if all || self == Filter::Attention {
+            runs.extend(home.attention.iter().cloned());
+        }
+        if all || self == Filter::Building {
+            runs.extend(home.building.iter().cloned());
+        }
+        if all || self == Filter::Waiting {
+            runs.extend(home.waiting.iter().cloned());
+        }
+        runs
+    }
 
-fn time(card: Signal<RunCard>) -> impl IntoView {
-    let elapsed = part(card, |card| card.elapsed.clone());
-    let cost = part(card, |card| card.cost.clone());
-    view! {
-        <span class="time">{elapsed}</span>
-        <span class="cost">{cost}</span>
+    fn count(self, home: &Home) -> usize {
+        match self {
+            Filter::All => home.building.len() + home.waiting.len() + home.attention.len(),
+            Filter::Building => home.building.len(),
+            Filter::Waiting => home.waiting.len(),
+            Filter::Attention => home.attention.len(),
+        }
     }
 }
 
@@ -58,26 +71,27 @@ fn life_class(life: &Option<String>) -> &'static str {
     }
 }
 
-/// A running issue's row: what it's doing and its agent's life line. It
+/// A running issue's line: what it's doing and its agent's life line. It
 /// flashes when its agent logs.
-fn now_row(run: String, line: Signal<NowLine>) -> impl IntoView {
+fn now_line(run: String, line: Signal<NowLine>) -> impl IntoView {
     let row = NodeRef::<Div>::new();
     flash_on(
         row,
         format!("{run}#{}", line.with_untracked(|line| line.number)),
     );
+    let words = part(line, |line| line.words.clone());
     let life = part(line, |line| line.life.clone());
     view! {
         <div class="line" node_ref=row>
             <span class="label">"Now"</span>
-            {words(part(line, |line| line.words.clone()))}
+            {move || view! { <Words spans=words.get()/> }}
             <span class=move || life.with(life_class)>{move || life.get()}</span>
         </div>
     }
 }
 
-/// A row of a sentence, while there is one.
-fn row(label: &'static str, sentence: Memo<Option<Sentence>>) -> impl IntoView {
+/// A line of a sentence, while there is one.
+fn line(label: &'static str, sentence: Memo<Option<Sentence>>) -> impl IntoView {
     move || {
         sentence.get().map(|spans| {
             view! {
@@ -90,124 +104,204 @@ fn row(label: &'static str, sentence: Memo<Option<Sentence>>) -> impl IntoView {
     }
 }
 
-/// A building run's card: its graph, title, figures and progress, and a
-/// row for each running issue, what starts next, and what is done.
-#[component]
-pub fn BuildingCard(#[prop(into)] card: Signal<RunCard>) -> impl IntoView {
+/// A run's row: its title and repository, graph and progress, a dot and
+/// its sentence, its time and cost, and Rerun and Delete if it needs
+/// attention or else Open ›. A building run's row unfolds to its Now, Next
+/// and Done lines.
+fn run_row(
+    card: Signal<RunCard>,
+    unfolded: RwSignal<Vec<String>>,
+    on_act: Option<Callback<Act>>,
+) -> AnyView {
     let run = card.with_untracked(|card| card.run.clone());
-    let page = part(card, |card| href(&format!("run/{}", card.run)));
-    let count = part(card, |card| format!(" · {}", card.count));
-    let progress = part(card, |card| card.progress);
-    let now = part(card, |card| card.now.clone());
-    view! {
-        <article class="card building">
-            <div class="card-head">
-                {graph(card)}
-                <div class="titles">
-                    {title(card)}
-                    <div class="sub">{epic(card)}{count}</div>
-                </div>
-                <div class="figures">
-                    {time(card)}
-                    <a class="open" href=page>"Open ›"</a>
-                </div>
-            </div>
-            {move || view! { <ProgressBar progress=progress.get()/> }}
-            <div class="rows">
-                {keyed(now.into(), |line: &NowLine| line.number, move |line| now_row(run.clone(), line))}
-                {row("Next", part(card, |card| card.next.clone()))}
-                {row("Done", part(card, |card| card.done.clone()))}
-            </div>
-        </article>
-    }
-}
-
-/// A card for a run that has ended: waiting for review, or needing
-/// attention, when it has Rerun and Delete buttons.
-#[component]
-pub fn EndedCard(
-    #[prop(into)] card: Signal<RunCard>,
-    attention: bool,
-    #[prop(optional_no_strip)] on_act: Option<Callback<Act>>,
-) -> impl IntoView {
-    let run = card.with_untracked(|card| card.run.clone());
-    let note = part(card, |card| card.note.clone());
-    let sentence = part(card, |card| card.sentence.clone().unwrap_or_default());
-    let buttons = attention.then(|| {
-        let act = move |command: &'static str| {
-            let run = run.clone();
-            move |_| {
-                if let Some(on_act) = on_act {
-                    on_act.run((command, run.clone()));
+    let disposition = part(card, |card| card.disposition);
+    let building = Memo::new(move |_| disposition.get() == Disposition::Building);
+    let open = {
+        let run = run.clone();
+        Memo::new(move |_| building.get() && unfolded.with(|unfolded| unfolded.contains(&run)))
+    };
+    let fold = {
+        let run = run.clone();
+        move |_: MouseEvent| {
+            unfolded.update(|unfolded| match unfolded.iter().position(|at| *at == run) {
+                Some(at) => {
+                    unfolded.remove(at);
                 }
-            }
-        };
-        view! {
-            <button class="primary" on:click=act("rerun")>"Rerun"</button>
-            <button on:click=act("delete_run")>"Delete"</button>
+                None => unfolded.push(run.clone()),
+            })
         }
+    };
+    let page = part(card, |card| href(&format!("run/{}", card.run)));
+    let title = part(card, |card| card.title.clone());
+    let epic = part(card, |card| card.epic.clone());
+    let graph = part(card, |card| card.graph.clone());
+    let progress = part(card, |card| card.progress);
+    let sentence = part(card, |card| {
+        match card.disposition {
+            Disposition::Building => card.summary.clone(),
+            _ => card.sentence.clone(),
+        }
+        .unwrap_or_default()
     });
+    let elapsed = part(card, |card| card.elapsed.clone());
+    let cost = part(card, |card| card.cost.clone());
+    let now = part(card, |card| card.now.clone());
+    let actions = {
+        let run = run.clone();
+        move || {
+            if disposition.get() != Disposition::NeedsAttention {
+                return view! { <a href=page class="open">"Open ›"</a> }.into_any();
+            }
+            let act = |command: &'static str| {
+                let run = run.clone();
+                move |_: MouseEvent| {
+                    if let Some(on_act) = on_act {
+                        on_act.run((command, run.clone()));
+                    }
+                }
+            };
+            view! {
+                <button class="primary" on:click=act("rerun")>"Rerun"</button>
+                <button on:click=act("delete_run")>"Delete"</button>
+            }
+            .into_any()
+        }
+    };
+    let lines = move || {
+        let run = run.clone();
+        open.get().then(|| {
+            view! {
+                <tr class="lines">
+                    <td></td>
+                    <td colspan="6">
+                        {keyed(now.into(), |line: &NowLine| line.number, move |line| now_line(run.clone(), line))}
+                        {line("Next", part(card, |card| card.next.clone()))}
+                        {line("Done", part(card, |card| card.done.clone()))}
+                    </td>
+                </tr>
+            }
+        })
+    };
     view! {
-        <article class=if attention { "card attention" } else { "card waiting" }>
-            <div class="card-head">
-                {graph(card)}
-                <div class="titles">
-                    {title(card)}
-                    <div class=if attention { "sub said bad" } else { "sub said good" }>
-                        {epic(card)}" · "{words(sentence)}
+        <tbody class=move || format!("run {}", disposition_class(disposition.get()))>
+            <tr>
+                <td class="fold-cell">
+                    {move || {
+                        let fold = fold.clone();
+                        building.get().then(|| view! {
+                            <button
+                                aria-label=move || if open.get() { "Fold" } else { "Unfold" }
+                                aria-expanded=move || if open.get() { "true" } else { "false" }
+                                class="fold"
+                                on:click=fold
+                            >
+                                {move || if open.get() { "▾" } else { "▸" }}
+                            </button>
+                        })
+                    }}
+                </td>
+                <td class="run-cell">
+                    <a href=page class="title">{title}</a>
+                    <div class="repo">
+                        {move || {
+                            let epic = epic.get();
+                            view! { <GithubLink text=epic.text url=epic.url.unwrap_or_default()/> }
+                        }}
                     </div>
-                    {move || note.get().map(|note| view! { <div class="note">{note}</div> })}
-                </div>
-                <div class="figures">{time(card)}{buttons}</div>
-            </div>
-        </article>
+                </td>
+                <td class="progress-cell">
+                    {move || view! { <MiniGraph graph=graph.get()/> }}
+                    {move || view! { <ProgressBar progress=progress.get()/> }}
+                </td>
+                <td class="status">
+                    <span class=move || format!("dot {}", disposition_class(disposition.get()))></span>
+                    {move || view! { <Words spans=sentence.get()/> }}
+                </td>
+                <td class="figure">{elapsed}</td>
+                <td class="figure">{cost}</td>
+                <td class="actions">{actions}</td>
+            </tr>
+            {lines}
+        </tbody>
     }
-}
-
-/// A section's heading, while it has cards.
-fn heading(cards: Memo<Vec<RunCard>>, class: &'static str, title: &'static str) -> impl IntoView {
-    move || (!cards.with(Vec::is_empty)).then(|| view! { <h2 class=class>{title}</h2> })
+    .into_any()
 }
 
 fn run_key(card: &RunCard) -> String {
     card.run.clone()
 }
 
-/// Home: a section for each kind of run that has any, or that there are
-/// none.
+/// Home, the Runs page: its title and the headline, tabs that filter the
+/// runs, each with how many runs it shows, and the table of runs; or that
+/// there are none. `filter` is the tab chosen at first, and `unfolded` the
+/// building runs whose rows are unfolded at first.
 #[component]
 pub fn HomePage(
     #[prop(into)] home: Signal<Home>,
+    #[prop(optional)] filter: Filter,
+    #[prop(optional)] unfolded: Vec<String>,
     #[prop(optional)] on_act: Option<Callback<Act>>,
 ) -> impl IntoView {
-    let building = part(home, |home| home.building.clone());
-    let waiting = part(home, |home| home.waiting.clone());
-    let attention = part(home, |home| home.attention.clone());
-    let empty = part(home, |home| {
-        home.building.is_empty() && home.waiting.is_empty() && home.attention.is_empty()
-    });
+    let filter = RwSignal::new(filter);
+    let unfolded = RwSignal::new(unfolded);
+    let headline = part(home, |home| home.headline.clone());
+    let empty = part(home, |home| Filter::All.count(home) == 0);
+    let runs = Memo::new(move |_| home.with(|home| filter.get().runs(home)));
+    let tab = move |tab: Filter| {
+        let count = part(home, move |home| tab.count(home));
+        let chosen = Memo::new(move |_| filter.get() == tab);
+        view! {
+            <button
+                role="tab"
+                aria-selected=move || if chosen.get() { "true" } else { "false" }
+                class="tab"
+                on:click=move |_| filter.set(tab)
+            >
+                {tab.label()}
+                <span class="count">{count}</span>
+            </button>
+        }
+    };
     view! {
-        {heading(building, "section", "Building")}
-        {keyed(building.into(), run_key, |card| view! { <BuildingCard card/> })}
-        {heading(waiting, "section", "Waiting for your review")}
-        {keyed(waiting.into(), run_key, |card| view! { <EndedCard card attention=false/> })}
-        {heading(attention, "section bad", "Needs attention")}
-        {keyed(attention.into(), run_key, move |card| {
-            view! { <EndedCard card attention=true on_act/> }
-        })}
+        <div class="page-head">
+            <h1>"Runs"</h1>
+            <p class="headline">{headline}</p>
+        </div>
         {move || {
-            empty
-                .get()
-                .then(|| {
-                    view! {
-                        <div class="empty">
-                            <p>"No runs right now."</p>
-                            <p class="muted">
-                                "Ask Epik to build an issue or an epic in Claude Code, and it shows up here while it builds."
-                            </p>
-                        </div>
-                    }
-                })
+            if empty.get() {
+                return view! {
+                    <div class="empty">
+                        <p>"No runs right now."</p>
+                        <p class="muted">
+                            "Ask Epik to build an issue or an epic in Claude Code, and it shows up here while it builds."
+                        </p>
+                    </div>
+                }
+                .into_any();
+            }
+            view! {
+                <div role="tablist" class="tabs">
+                    {tab(Filter::All)}
+                    {tab(Filter::Building)}
+                    {tab(Filter::Waiting)}
+                    {tab(Filter::Attention)}
+                </div>
+                <table class="run-table">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>"Run"</th>
+                            <th>"Progress"</th>
+                            <th>"Status"</th>
+                            <th class="figure">"Time"</th>
+                            <th class="figure">"Cost"</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    {keyed(runs.into(), run_key, move |card| run_row(card, unfolded, on_act))}
+                </table>
+            }
+            .into_any()
         }}
     }
 }

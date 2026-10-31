@@ -18,6 +18,8 @@ pub mod repositories;
 pub mod run;
 pub mod self_link;
 pub mod setup;
+pub mod stream;
+mod tail;
 pub mod uninstall;
 pub mod words;
 
