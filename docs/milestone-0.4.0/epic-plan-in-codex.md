@@ -118,7 +118,9 @@ the wrong client to the user.
 - `SKILL.md`: "Claude Code builds those issues" becomes "coding agents
   build those issues"; nothing else there names a client.
 - `how-it-works.md`: the opening says Epik is the app plus Epik in the
-  client the user talks to it in, Claude Code, Claude Desktop or Codex.
+  client the user talks to it in: any Claude Code client (the terminal,
+  Claude Desktop, the JetBrains and VS Code extensions, all of which
+  load the user-scope plugin), or Codex.
   Setup lists the Codex items and **Epik in Codex** (C1). Planning says
   "in the client" instead of "in a Claude Code session". A short
   **Codex** section beside **Claude Desktop**: the skill lives in
