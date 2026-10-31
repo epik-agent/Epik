@@ -30,6 +30,20 @@ fn said(text: &str) -> String {
     )
 }
 
+/// A chunk of the agent's message `message`.
+fn said_in(message: &str, text: &str) -> String {
+    update(json!({
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text},
+        "messageId": message,
+    }))
+}
+
+fn thought(text: &str) -> String {
+    update(
+        json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": text}}),
+    )
+}
+
 /// A tool call as the adapter starts it, before its input is known.
 fn started(id: &str, tool: &str) -> String {
     update(json!({
@@ -117,7 +131,51 @@ fn narration_is_joined_across_chunks() {
 }
 
 #[test]
-fn a_commands_output_grows_as_it_arrives() {
+fn separate_messages_are_separate_narration() {
+    let entries = entries(&[
+        said_in("m1", "Reading "),
+        said_in("m1", "the issue."),
+        said_in("m2", "Now the tests."),
+    ]);
+
+    assert_eq!(
+        entries,
+        [
+            Entry::Narration {
+                text: "Reading the issue.".to_owned()
+            },
+            Entry::Narration {
+                text: "Now the tests.".to_owned()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_thought_between_chunks_separates_the_narration() {
+    let entries = entries(&[
+        said("Reading the issue."),
+        thought("Hmm."),
+        said("Now the tests."),
+    ]);
+
+    assert_eq!(
+        entries,
+        [
+            Entry::Narration {
+                text: "Reading the issue.".to_owned()
+            },
+            Entry::Narration {
+                text: "Now the tests.".to_owned()
+            },
+        ]
+    );
+}
+
+/// ACP's tool call updates carry only the fields that changed, and each
+/// replaces what was there: a later `rawOutput` is the whole output so far.
+#[test]
+fn a_commands_output_is_its_latest_raw_output() {
     let command = "cd /wt && cargo test 2>&1 | tail";
     let first = [
         started("t1", "Bash"),
@@ -125,7 +183,11 @@ fn a_commands_output_grows_as_it_arrives() {
         printed("t1", "in_progress", "Compiling epik\nRunning tests\n"),
     ];
     let mut whole = first.to_vec();
-    whole.push(printed("t1", "completed", "test result: ok. 3 passed"));
+    whole.push(printed(
+        "t1",
+        "completed",
+        "Compiling epik\nRunning tests\ntest result: ok. 3 passed",
+    ));
 
     let running = parse(&log(&first));
     let finished = parse(&log(&whole));
