@@ -18,6 +18,7 @@ starting with OpenAI.*
 | `epic-agents-and-roles.md` | Epic A: 17 issues, graph, findings still to make |
 | `epic-remote-hosts.md` | Epic R: 15 issues, graph, findings still to make |
 | `epic-plan-in-codex.md` | Epic C: 4 issues, graph, its findings (made 2026-10-31) |
+| `adr-ad-hoc-builds.md` | Draft decision record for the release after 0.4.0: a task is a block of work given in words; cites the two records above |
 | `probe-codex.md` | The Codex probe's first attempt: what it settled, what's open, how to rerun |
 | `probe-claude.md` | Epic A's findings 2 and 3: the prompt against the skill, and Claude's sandbox through ACP |
 
