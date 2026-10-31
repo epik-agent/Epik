@@ -12,7 +12,6 @@
 //! the app runs headless and says so.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -20,7 +19,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use epik_core::repositories;
 use epik_core::run::Disposition;
 use tauri::image::Image;
 use tauri::menu::MenuEvent;
@@ -28,6 +26,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use crate::App;
+use crate::runs::Runs;
 use crate::{main_window, popover, setup_window};
 
 /// How often the icon is checked against what is building and what needs
@@ -69,11 +68,13 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
     if !has_display() {
         return Err("no display".to_owned());
     }
+    let runs = Arc::new(Runs::new(app.root.clone()));
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .manage(main_window::Window {
             root: app.root.clone(),
             builds: app.builds.clone(),
+            runs: runs.clone(),
             started: chrono::Utc::now(),
         })
         .manage(setup_window::Setup {
@@ -85,6 +86,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             stop: app.stop.clone(),
             restart: Arc::default(),
         })
+        .plugin(tauri_plugin_dialog::init())
         .on_menu_event(chosen)
         .invoke_handler(tauri::generate_handler![
             main_window::home,
@@ -125,7 +127,6 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
 
     let failed = |error: tauri::Error| error.to_string();
     let idle = look(TEMPLATE, false, false);
-    let root = app.root.clone();
     let tray = TrayIconBuilder::new()
         .icon(icon(idle))
         .icon_as_template(idle.template)
@@ -138,7 +139,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
                 rect,
                 ..
             } = event
-                && let Err(error) = popover::toggle(tray.app_handle(), rect, building(&root))
+                && let Err(error) = popover::toggle(tray.app_handle(), rect, building(&runs))
             {
                 eprintln!("epik-app: couldn't open the tray menu: {error}");
             }
@@ -227,8 +228,10 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
         SETTINGS => main_window::open(handle, "settings").map_err(|e| e.to_string()),
         CHECK_SETUP => setup_window::open(handle).map_err(|e| e.to_string()),
         CHECK_FOR_UPDATES => open::that_detached(popover::RELEASES).map_err(|e| e.to_string()),
+        // Only Linux's native tray menu has Restart, and it can't ask first.
         RESTART => {
-            quit.restart();
+            let runs = &handle.state::<main_window::Window>().runs;
+            popover::ask_to_restart(handle, building(runs));
             Ok(())
         }
         QUIT => {
@@ -244,8 +247,8 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
 
 /// How many runs of a monitored repository are building, for the tray menu
 /// to make room for. If the runs can't be read, none is.
-fn building(root: &Path) -> usize {
-    repositories::monitored_runs(root).map_or(0, |runs| {
+pub(crate) fn building(runs: &Runs) -> usize {
+    runs.monitored().map_or(0, |runs| {
         runs.iter()
             .filter(|run| run.disposition == Disposition::Building)
             .count()
@@ -265,13 +268,14 @@ fn has_display() -> bool {
 /// runs on this one. When serving stops, the builds are stopped, then
 /// Tauri.
 fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -> ExitCode {
-    let (root, builds) = (app.root.clone(), app.builds.clone());
+    let runs = tauri.state::<main_window::Window>().runs.clone();
+    let builds = app.builds.clone();
     let stop = app.stop.clone();
     thread::spawn(move || {
         let mut shown = look(TEMPLATE, false, false);
         while !stop.load(Ordering::SeqCst) {
             let building = !builds.active().is_empty();
-            let now = look(TEMPLATE, building, needs_attention(&root));
+            let now = look(TEMPLATE, building, needs_attention(&runs));
             if shown != now {
                 let drawn = tray
                     .set_icon(Some(icon(now)))
@@ -351,8 +355,8 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
 
 /// Whether any run of a monitored repository needs attention. If the runs
 /// can't be read, none is said to.
-fn needs_attention(root: &Path) -> bool {
-    repositories::monitored_runs(root).is_ok_and(|runs| {
+fn needs_attention(runs: &Runs) -> bool {
+    runs.monitored().is_ok_and(|runs| {
         runs.iter()
             .any(|run| run.disposition == Disposition::NeedsAttention)
     })

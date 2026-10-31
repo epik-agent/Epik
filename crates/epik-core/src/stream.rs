@@ -8,7 +8,6 @@
 //! [`crate::activity`] names them, relative to where the agent works.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -27,37 +26,64 @@ const HEAD: usize = LIMIT / 2;
 /// How many last lines long text keeps, leaving a row for "… N more lines".
 const TAIL: usize = LIMIT - HEAD - 1;
 
-/// The stream in the agent log at `path`.
+/// The stream in the agent log at `path`, which is read only as far as it
+/// has grown since it was last read.
 pub fn read(path: &Path) -> io::Result<Stream> {
-    Ok(parse(&fs::read_to_string(path)?))
+    crate::tail::read(path, |readers| readers.stream.stream())
 }
 
-/// What the stream holds, in order, until the whole log is read.
+/// What the stream holds, in order, as far as the log has been read.
 enum Item {
-    Said { at: Option<i64>, text: String },
-    Called { at: Option<i64>, id: String },
+    Said {
+        at: Option<i64>,
+        text: String,
+        /// The message it is part of, if the agent said.
+        message: Option<String>,
+    },
+    Called {
+        at: Option<i64>,
+        id: String,
+    },
 }
 
 /// A tool call, as its updates arrive.
 #[derive(Default)]
 struct Tracked {
     call: Call,
-    /// Its `rawOutput`s, joined as they arrive.
+    /// Its latest `rawOutput`, which, as each update's fields replace
+    /// those before, is all of its output so far.
     output: String,
     /// What Claude Code says the tool did, from its latest update.
     response: Option<Value>,
     finished: bool,
 }
 
+/// An agent log's stream, read a line at a time.
+#[derive(Default)]
+pub struct Reader {
+    dirs: Vec<String>,
+    calls: HashMap<String, Tracked>,
+    items: Vec<Item>,
+    last_call: Option<String>,
+    /// Whether something other than narration came since the last chunk,
+    /// so the next chunk starts new narration.
+    broken: bool,
+}
+
 /// The stream in an agent log's text. Lines that aren't JSON are skipped.
 pub fn parse(text: &str) -> Stream {
-    let mut dirs: Vec<String> = Vec::new();
-    let mut calls: HashMap<String, Tracked> = HashMap::new();
-    let mut items: Vec<Item> = Vec::new();
-    let mut last_call: Option<String> = None;
+    let mut reader = Reader::default();
     for line in text.lines() {
+        reader.feed(line);
+    }
+    reader.stream()
+}
+
+impl Reader {
+    /// Reads the log's next line. A line that isn't JSON is skipped.
+    pub fn feed(&mut self, line: &str) {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
-            continue;
+            return;
         };
         let at = message
             .get("at")
@@ -68,35 +94,45 @@ pub fn parse(text: &str) -> Stream {
             .pointer("/to_agent/params/cwd")
             .and_then(Value::as_str)
         {
-            dirs.push(cwd.to_owned());
-            continue;
+            self.dirs.push(cwd.to_owned());
+            return;
         }
         let Some(update) = message.pointer("/from_agent/params/update") else {
-            continue;
+            return;
         };
         match update.get("sessionUpdate").and_then(Value::as_str) {
             Some("agent_message_chunk") => {
                 let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) else {
-                    continue;
+                    return;
                 };
-                match items.last_mut() {
-                    Some(Item::Said { text, .. }) => text.push_str(chunk),
-                    _ => items.push(Item::Said {
+                let id = update.get("messageId").and_then(Value::as_str);
+                match self.items.last_mut() {
+                    Some(Item::Said { text, message, .. })
+                        if !self.broken && message.as_deref() == id =>
+                    {
+                        text.push_str(chunk);
+                    }
+                    _ => self.items.push(Item::Said {
                         at,
                         text: chunk.to_owned(),
+                        message: id.map(str::to_owned),
                     }),
                 }
+                self.broken = false;
             }
+            Some("agent_thought_chunk") => self.broken = true,
             Some("tool_call" | "tool_call_update") => {
                 let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
-                    continue;
+                    return;
                 };
-                let tracked = calls.entry(id.to_owned()).or_insert_with(|| {
+                let items = &mut self.items;
+                let last_call = &mut self.last_call;
+                let tracked = self.calls.entry(id.to_owned()).or_insert_with(|| {
                     items.push(Item::Called {
                         at,
                         id: id.to_owned(),
                     });
-                    last_call = Some(id.to_owned());
+                    *last_call = Some(id.to_owned());
                     Tracked::default()
                 });
                 if let Some(tool) = update.pointer("/_meta/claudeCode/toolName") {
@@ -109,7 +145,7 @@ pub fn parse(text: &str) -> Stream {
                     && input.as_object().is_some_and(|input| !input.is_empty())
                 {
                     if let Some(command) = input.get("command").and_then(Value::as_str) {
-                        dirs.extend(activity::cd_targets(command));
+                        self.dirs.extend(activity::cd_targets(command));
                     }
                     tracked.call.input = Some(input.clone());
                 }
@@ -117,7 +153,7 @@ pub fn parse(text: &str) -> Stream {
                     tracked.response = Some(response.clone());
                 }
                 if let Some(output) = update.get("rawOutput") {
-                    tracked.output.push_str(&text_of(output));
+                    tracked.output = text_of(output);
                 }
                 if matches!(
                     update.get("status").and_then(Value::as_str),
@@ -129,26 +165,34 @@ pub fn parse(text: &str) -> Stream {
             _ => {}
         }
     }
-    // Made once every directory the agent works in is known, as
-    // `activity` describes its actions.
-    let entries = items
-        .into_iter()
-        .map(|item| match item {
-            Item::Said { at, text } => StreamEntry {
-                at,
-                what: Entry::Narration {
-                    text: text.trim().to_owned(),
+
+    /// The stream so far. Its entries are made now, once every directory
+    /// the agent works in so far is known, as `activity` describes its
+    /// actions.
+    pub fn stream(&self) -> Stream {
+        let entries = self
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Said { at, text, .. } => StreamEntry {
+                    at: *at,
+                    what: Entry::Narration {
+                        text: text.trim().to_owned(),
+                    },
                 },
-            },
-            Item::Called { at, id } => StreamEntry {
-                at,
-                what: entry(&calls[&id], &dirs),
-            },
-        })
-        .collect();
-    Stream {
-        entries,
-        working: last_call.is_some_and(|id| !calls[&id].finished),
+                Item::Called { at, id } => StreamEntry {
+                    at: *at,
+                    what: entry(&self.calls[id], &self.dirs),
+                },
+            })
+            .collect();
+        Stream {
+            entries,
+            working: self
+                .last_call
+                .as_ref()
+                .is_some_and(|id| !self.calls[id].finished),
+        }
     }
 }
 

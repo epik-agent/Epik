@@ -5,6 +5,9 @@ use epik_view::{Change, Entry, Excerpt, LineRange, Stream, StreamEntry};
 use leptos::ev::MouseEvent;
 use leptos::html::Div;
 use leptos::prelude::*;
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+use crate::live::keyed;
 
 /// How near the bottom, in pixels, still counts as at the newest line.
 const NEAR: i32 = 4;
@@ -96,28 +99,19 @@ fn changed(change: Change) -> AnyView {
     .into_any()
 }
 
-/// The agent's words: a paragraph for each, with what is in backticks in
-/// monospace.
-fn narration(text: &str) -> AnyView {
-    text.split("\n\n")
-        .map(str::trim)
-        .filter(|paragraph| !paragraph.is_empty())
-        .map(|paragraph| {
-            let spans = paragraph
-                .split('`')
-                .enumerate()
-                .map(|(i, span)| {
-                    if i % 2 == 1 {
-                        view! { <code>{span.to_owned()}</code> }.into_any()
-                    } else {
-                        span.to_owned().into_any()
-                    }
-                })
-                .collect_view();
-            view! { <p>{spans}</p> }
-        })
-        .collect_view()
-        .into_any()
+/// The agent's words, which are Markdown, as HTML: paragraphs, lists,
+/// code and emphasis. Its HTML is shown as text rather than run, and its
+/// links and images are only their text, since the window goes nowhere.
+pub fn narration(text: &str) -> String {
+    let events = Parser::new(text).filter_map(|event| match event {
+        Event::Html(html) | Event::InlineHtml(html) => Some(Event::Text(html)),
+        Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::HtmlBlock)
+        | Event::End(TagEnd::Link | TagEnd::Image | TagEnd::HtmlBlock) => None,
+        event => Some(event),
+    });
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events);
+    html
 }
 
 /// " (lines 30-70)".
@@ -151,9 +145,17 @@ fn path(done: &'static str, path: String) -> impl IntoView {
 }
 
 /// One thing the agent said or did, with its time at the left.
-fn entry(entry: StreamEntry) -> impl IntoView {
+fn entry(entry: StreamEntry) -> AnyView {
     let (class, what) = match entry.what {
-        Entry::Narration { text } => ("narration", narration(&text)),
+        Entry::Narration { text } => {
+            return view! {
+                <div class="entry narration">
+                    <time>{entry.at.map(clock)}</time>
+                    <div class="what" inner_html=narration(&text)></div>
+                </div>
+            }
+            .into_any();
+        }
         Entry::Command {
             command,
             output: printed_lines,
@@ -216,6 +218,11 @@ fn entry(entry: StreamEntry) -> impl IntoView {
             <div class="what">{what}</div>
         </div>
     }
+    .into_any()
+}
+
+fn place(item: &(usize, StreamEntry)) -> usize {
+    item.0
 }
 
 /// The stream of an agent's log: each thing it said or did, and a
@@ -247,18 +254,34 @@ pub fn StreamView(#[prop(into)] stream: Signal<Option<Stream>>) -> impl IntoView
         stuck.set(true);
         to_latest();
     };
-    let entries = move || match stream.get() {
-        Some(stream) if !stream.entries.is_empty() => {
-            let cursor = stream
-                .working
-                .then(|| view! { <span class="cursor"></span> });
+    // Keyed by place, so a refresh redraws only the entries that changed,
+    // such as a command whose output grew.
+    let entries = Memo::new(move |_| {
+        stream.with(|stream| {
+            stream
+                .iter()
+                .flat_map(|stream| stream.entries.iter().cloned().enumerate())
+                .collect::<Vec<_>>()
+        })
+    });
+    let working =
+        Memo::new(move |_| stream.with(|stream| stream.as_ref().is_some_and(|s| s.working)));
+    let empty = Memo::new(move |_| entries.with(Vec::is_empty));
+    let entries = move || {
+        if empty.get() {
+            view! { <p class="muted nothing">"Nothing yet."</p> }.into_any()
+        } else {
+            let cursor = move || {
+                working
+                    .get()
+                    .then(|| view! { <span class="cursor"></span> })
+            };
             view! {
-                {stream.entries.into_iter().map(entry).collect_view()}
+                {keyed(entries.into(), place, |item| move || entry(item.get().1))}
                 {cursor}
             }
             .into_any()
         }
-        _ => view! { <p class="muted nothing">"Nothing yet."</p> }.into_any(),
     };
     view! {
         <div class="stream-box">

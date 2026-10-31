@@ -253,8 +253,13 @@ table.run-table {
 .entry .what { min-width: 0; overflow-wrap: anywhere; }
 .entry code, .entry .output, .command-line { font: 12px/1.6 var(--mono); }
 .entry code { padding: 0 3px; border-radius: 3px; background: var(--raised); }
-.narration p { margin: 0; }
-.narration p + p { margin-top: 6px; }
+.narration :is(p, ul, ol, pre, h1, h2, h3, h4, blockquote) { margin: 0; }
+.narration .what > * + * { margin-top: 6px; }
+.narration :is(h1, h2, h3, h4) { font-size: inherit; }
+.narration :is(ul, ol) { padding-left: 18px; }
+.narration pre { padding: 6px 10px; border-radius: 4px; background: var(--raised); overflow-x: auto; }
+.narration pre code { padding: 0; background: none; white-space: pre; }
+.narration blockquote { padding-left: 12px; border-left: 1px solid var(--border); color: var(--secondary); }
 .read .what, .search .what, .other .what { font: 12px/1.6 var(--mono); color: var(--muted); }
 .read code, .search code { padding: 0; background: none; color: var(--text); }
 .command-line { font-weight: 500; }

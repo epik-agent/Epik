@@ -101,6 +101,7 @@ pub fn tray_run() -> TrayRun {
 pub fn popover(runs: Vec<TrayRun>) -> Popover {
     Popover {
         about: "3 runs · 4 agents · up 4h 12m".into(),
+        restart: "Interrupt one build?".into(),
         runs,
     }
 }

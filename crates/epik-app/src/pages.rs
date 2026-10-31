@@ -530,7 +530,32 @@ pub fn popover(runs: &[RunState], started: DateTime<Utc>, now: DateTime<Utc>) ->
             plural(agents, "agent", "agents"),
             duration(up)
         ),
+        restart: restart_question(building.len()),
         runs: building.iter().map(|run| tray_run(run, now)).collect(),
+    }
+}
+
+/// What the tray menu's Restart asks, with `building` runs building:
+/// "Interrupt two builds?".
+pub fn restart_question(building: usize) -> String {
+    match building {
+        0 => "Restart Epik?".to_owned(),
+        1 => "Interrupt one build?".to_owned(),
+        n => format!("Interrupt {} builds?", lowercased_first(&number_word(n))),
+    }
+}
+
+/// What the dialog that confirms a restart says, with `building` runs
+/// building.
+pub fn restart_warning(building: usize) -> String {
+    match building {
+        0 => "Epik will quit and start again.".to_owned(),
+        1 => "Restarting interrupts the build running now. You can rerun it from its page."
+            .to_owned(),
+        n => format!(
+            "Restarting interrupts the {} builds running now. You can rerun each from its page.",
+            lowercased_first(&number_word(n))
+        ),
     }
 }
 

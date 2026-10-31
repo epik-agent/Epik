@@ -169,3 +169,17 @@ fn the_shortcuts_choose_their_items() {
     assert_eq!(shortcut("q"), Some(Item::Quit));
     assert_eq!(shortcut("r"), None);
 }
+
+#[test]
+fn restart_asks_first() {
+    let html =
+        render(|| view! { <Items mac=true confirming=true restart="Interrupt two builds?"/> });
+    assert!(html.contains(r#"<div id="restart" class="item confirm"><span class="label">Interrupt two builds?</span><span class="choices"><button type="button" id="restart-cancel">Cancel</button><button type="button" id="restart-confirm" class="danger">Restart</button></span></div>"#), "{html}");
+}
+
+#[test]
+fn until_chosen_restart_is_an_item() {
+    let html = render(|| view! { <Items mac=true restart="Interrupt two builds?"/> });
+    assert!(html.contains(r#"<button type="button" id="restart" class="item"><span class="label">Restart</span></button>"#), "{html}");
+    assert!(!html.contains("Interrupt"), "{html}");
+}
