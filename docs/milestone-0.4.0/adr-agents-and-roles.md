@@ -138,6 +138,7 @@ in `plugin/skills/review/procedure.md`.
 | Review on by default | Rejected | It roughly doubles each issue's agent time. The user turns it on. |
 | Per-repository or per-build roles | Deferred | One setting until someone needs more. |
 | Roles for agents not reached over ACP | Rejected | ACP is the seam. |
+| Claude Code's own sandbox, through the adapter's `sandbox` option | Deferred | It works, but on macOS `gh` can't verify the sandbox proxy's certificate, and with the defaults Claude leaves the sandbox whenever a command fails inside it, with auto mode's classifier approving. One build cost $0.26 against $0.17 and ran every network command outside the sandbox anyway. Revisit when `gh` trusts the proxy (perhaps on Linux) and a strict configuration has built an issue. |
 
 ## Consequences
 
@@ -148,9 +149,10 @@ in `plugin/skills/review/procedure.md`.
   Codex's own client.
 - **Codex's cost isn't known**, so a run that used Codex shows a partial
   total, and its comment says which issues' costs are missing.
-- **In `agent` mode Codex's trust matches Claude's auto mode**: a model
-  reviews each risky action, here inside a sandbox, and approves what
-  leaves it. The approvals happen out of Epik's sight, but are in the
+- **In `agent` mode Codex is the more cautious agent**: ordinary work
+  runs in a sandbox and a model reviews what leaves it, where Claude's
+  auto mode has the model review risky actions with no sandbox around
+  the rest. The approvals happen out of Epik's sight, but are in the
   record as "Guardian Review" tool calls. Were `agent-full-access` chosen
   instead, Codex would run with no sandbox and no reviewer, and Settings
   would say so.

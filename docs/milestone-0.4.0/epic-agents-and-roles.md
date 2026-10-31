@@ -498,8 +498,9 @@ repositories: **Coding** (agent: Claude Code or Codex; model: a text field
 whose placeholder is "The agent's default"), and **Review** (Off, Claude
 Code or Codex; model). Saving uses A3's `set_settings` command. When an
 agent's setup items aren't done, the section says so and links **Check
-setup**. Choosing Codex says, in a line, how it runs unattended: in a
-sandbox, with Codex's own reviewer approving what leaves it (A6's mode).
+setup**. Each agent says, in a line, how it runs unattended: Codex in a
+sandbox, with its own reviewer approving what leaves it (A6's mode);
+Claude Code with a model approving each risky action, and no sandbox.
 
 **Tests first.** `epik-ui/tests/settings.rs`: the current roles shown;
 changing and saving calls `set_settings`; review Off hides its model
@@ -555,21 +556,14 @@ little on OpenAI's API (this Mac's Codex is signed in with an API key).
    - whether `rawOutput` holds command output when the client declares no
      terminal capability;
    - the `model` option's values.
-2. **Prompt against skill, for Claude.** Build the same small issue with
-   A1's prompt and with today's `/epik:issue`. Compare cost and outcome.
-   One run each says only that nothing broke.
-3. **Claude Code's sandbox through ACP** (added 2026-10-31, correcting
-   the record's claim that the adapter doesn't expose it). The Agent SDK
-   has a `sandbox` option (`enabled`, `network.allowedDomains`,
-   `filesystem.allowWrite`, `failIfUnavailable`, …), `claude-agent-acp`
-   0.99.0 accepts it in `_meta.claudeCode.options` on `session/new`, and
-   the adapter already turns the sandbox's network requests into ACP
-   permission requests (`SandboxNetworkAccess`), which Epik rejects.
-   Build #13 with a sandbox on: Seatbelt here, GitHub's domains allowed,
-   the worktree's directory writable. Settles: whether `git push` and
-   `gh pr create` get through in auto mode with nothing reaching Epik;
-   what the worktree's path has to be for `allowWrite`; what the record
-   shows for a refused connection. If it works, A2's Claude profile
-   carries the sandbox block (and Linux hosts need `bubblewrap` and
-   `socat`, which R13 and R15 would then name); if not, Claude runs as
-   today and the plan says so. Windows has no sandbox either way.
+2. **Prompt against skill, for Claude.** *Done 2026-10-31: 60 s and
+   $0.17 from the prompt, 61 s and $0.19 from `/epik:issue`; both opened
+   their pull request. A1 stands. See `probe-claude.md`.*
+3. **Claude Code's sandbox through ACP.** *Done 2026-10-31: not
+   adopted. The adapter takes the SDK's `sandbox` option in
+   `_meta.claudeCode.options`, but on macOS `gh` fails TLS against the
+   sandbox proxy, and Claude then runs commands with
+   `dangerouslyDisableSandbox`, which auto mode approves: 6 of 11
+   commands escaped, the build cost $0.26, and nothing reached Epik.
+   A2's Claude profile has no sandbox; A15 says Codex runs sandboxed
+   and Claude Code doesn't. See `probe-claude.md`.*

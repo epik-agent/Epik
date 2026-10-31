@@ -17,7 +17,9 @@ starting with OpenAI.*
 | `adr-remote-hosts.md` | Draft decision record |
 | `epic-agents-and-roles.md` | Epic A: 17 issues, graph, findings still to make |
 | `epic-remote-hosts.md` | Epic R: 15 issues, graph, findings still to make |
+| `epic-plan-in-codex.md` | Epic C: 4 issues, graph, its findings (made 2026-10-31) |
 | `probe-codex.md` | The Codex probe's first attempt: what it settled, what's open, how to rerun |
+| `probe-claude.md` | Epic A's findings 2 and 3: the prompt against the skill, and Claude's sandbox through ACP |
 
 Each epic file gives each issue as it would be filed: why, what, tests
 first, and what's out. They are meant to be read, argued with and cut
@@ -25,7 +27,7 @@ before anything is filed.
 
 ## The shape of 0.4.0
 
-Two epics, then an optional third:
+Three epics (the third was optional until 2026-10-31; see decision 5):
 
 1. **Agents and roles (A).** The procedure travels in the prompt, so builds
    stop needing the plugin. Agents become profiles of one ACP client.
@@ -37,7 +39,9 @@ Two epics, then an optional third:
    entirely there, so the laptop can close. The local app mirrors the
    host's records under `~/.epik/hosts/<host>/` and reads them through the
    same code as local runs.
-3. **Plan with Epik in Codex (C), optional.** The design role. See below.
+3. **Plan with Epik in Codex (C).** The design role: Epik's skill and
+   tools installed into Codex's CLI from the checklist. In
+   `epic-plan-in-codex.md`; the sketch below is superseded by it.
 
 Each decision record lands first as its own docs pull request, as #355 and
 #394 did, so the epics' issues can cite it.
@@ -140,19 +144,27 @@ OpenAI's API, or need a machine:
    through codex-acp 2.5.0. Settles decision 2 and four smaller questions.
    **Done 2026-10-31:** Codex built #13 unattended in `agent` mode and
    opened wpm/epik-test#17. Details in `probe-codex.md`.
-2. Prompt against skill for Claude (epic A, finding 2).
-   2a. Claude Code's sandbox through ACP (epic A, finding 3, added
-   2026-10-31): the adapter accepts the SDK's `sandbox` option in
-   `_meta.claudeCode.options`. Build #13 with it on, with GitHub's
-   domains allowed and the worktree writable, and see whether anything
-   reaches Epik as a permission request. If it works, the Claude profile
-   gets a sandbox too, and the two agents' trust is the same shape.
+2. Prompt against skill for Claude (epic A, finding 2). **Done
+   2026-10-31:** 60 s and $0.17 against 61 s and $0.19; the prompt
+   stands. See `probe-claude.md`.
+   2a. Claude Code's sandbox through ACP (epic A, finding 3). **Done
+   2026-10-31: not adopted.** The adapter takes the option, but `gh`
+   can't verify the sandbox proxy's certificate on macOS, and Claude
+   leaves the sandbox at will with the classifier's approval, so it
+   costs half again as much ($0.26) and sandboxes nothing that touches
+   the network. Deferred; see `probe-claude.md` for what would change it.
+   2b. Epic C's findings. **Done 2026-10-31:** Codex loads Epik's skill
+   from `~/.agents/skills/epik` by its description; in its default
+   `agent` preset its reviewer approves Epik's MCP tools and `gh` with
+   nothing reaching the user; `codex exec` refuses MCP tools that need
+   approval. See `epic-plan-in-codex.md`.
 3. The sign-ins over SSH on the cloud VM (epic R, finding 2). Finding 1
    is decided: a container for tests, the VM for the lid.
 4. Windows' in-box `ssh -T` relaying stdio (epic R, finding 3), on the
    machine used for the `${HOME}` check.
 
-Findings 1 and 2 finish the agents record; 3 and 4 finish the remote one.
+Findings 1, 2 and 2a finish the agents record, and are done; 2b finishes
+epic C's plan, and is done; 3 and 4 finish the remote one.
 Then the records merge, and the issues are filed with `blocked-by` links as
 drawn, checked with `epic_status`.
 
