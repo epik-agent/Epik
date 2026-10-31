@@ -114,10 +114,14 @@ review comes at the end.
 
 1. The review agent reads the issue (for an epic, the epic issue and its
    sub-issues) and the pull request, judges the change against them and
-   Epik's rules, and posts its review on the pull request as a comment
-   that ends with Epik's verdict marker, naming the round it answers:
-   `<!-- epik-review: approve round=1 -->` or
-   `<!-- epik-review: changes round=1 -->`.
+   Epik's rules, and posts **one GitHub review** on the pull request: an
+   inline comment on each line it questions, each the start of a review
+   thread, and a summary that ends with Epik's verdict marker, naming
+   the round it answers: `<!-- epik-review: approve round=1 -->` or
+   `<!-- epik-review: changes round=1 -->`. A concern with no line goes
+   in the summary. The review uses GitHub's own review and thread
+   machinery wherever it can, so the user reads it as they read any
+   review.
 2. The app reads the verdict from GitHub, not from the agent's words: the
    review whose marker names the current round. The round, not a
    timestamp, ties a verdict to an attempt, so the clocks of GitHub and
@@ -125,10 +129,14 @@ review comes at the end.
 3. On **approve**, the build finishes and the pull request waits for the
    user, as today, with the verdict in the record.
 4. On **changes**, a coding agent works on the pull request's branch,
-   told to address the review, pushes, and the checks and the review run
-   again. On an epic's branch that is a direct push, as Epik's merges
-   into it already are. After two rounds of changes the build finishes
-   anyway, the pull request waits for the user with its reviews, and the
+   told to address the review: for each open thread it fixes what the
+   thread asks, replies in the thread saying what it did, and **resolves
+   the thread**; a thread it thinks is wrong it answers and leaves open.
+   Then it pushes, and the checks and the review run again, the reviewer
+   reading the threads before the diff. On an epic's branch the push is
+   direct, as Epik's merges into it already are. After two rounds of
+   changes the build finishes anyway, the pull request waits for the
+   user with its reviews and whatever threads are still open, and the
    run needs attention, saying so.
 5. A review that posts no verdict is recorded as none, and the pull
    request waits for the user.
@@ -152,6 +160,8 @@ in `plugin/skills/review/procedure.md`.
 | A price table to estimate Codex's cost | Rejected | Goes stale, and means nothing on ChatGPT plans. |
 | The review agent approves or requests changes on GitHub | Impossible | GitHub refuses either on one's own pull request. |
 | The app reads the verdict from the agent's last message | Rejected | The verdict should be where the user can read it, in the pull request. |
+| The verdict is "no open threads" rather than a marker | Rejected | A reviewer's concern with no line has no thread, and a fixer that resolves a thread without fixing it would approve itself. The marker is the reviewer's word; the threads are the conversation. The app shows the count of open threads beside the verdict. |
+| The review as one plain comment on the pull request | Rejected | Loses the lines, the threads and resolution, which is what GitHub's review UI is for. |
 | Review on by default | Rejected | It adds agent time to every run. The user turns it on. |
 | Review each issue's pull request before it merges into the epic branch | Deferred | Holds the epic at every merge, so a build the user meant to leave alone keeps needing them. The epic's one pull request is where they judge it. A setting, if anyone wants it. |
 | Per-repository or per-build roles | Deferred | One setting until someone needs more. |

@@ -404,17 +404,32 @@ from GitHub, since the clone's checkout is the target branch and the
 coder's worktree is gone; judge whether the change does what the issue
 says (for an epic, the epic issue and its sub-issues, which the header
 lists), whether its behavior has tests, and whether it can be explained
-in a few sentences, against Epik's rules; post one review with
-`gh pr review <n> --comment --body-file <file>`, whose last line is
-`<!-- epik-review: approve round=<r> -->` or
-`<!-- epik-review: changes round=<r> -->`, with the round the header gave;
-for changes, say what to change, specifically; never push, merge, close or
-edit. Embed it in `epik-core` as A1 does the issue procedure, with a
-function that builds the review prompt (header with repository, issue, pull
-request and round; rules; procedure).
+in a few sentences, against Epik's rules; post **one GitHub review**
+with inline comments, through the API, since `gh pr review` can't place
+comments on lines:
+`gh api repos/<o>/<r>/pulls/<n>/reviews --input <file>`, where the file
+is `{"event": "COMMENT", "body": …, "comments": [{"path", "line",
+"side": "RIGHT", "body"}, …]}`; each comment says, specifically, what to
+change on that line; a concern with no line goes in the body; the body's
+last line is `<!-- epik-review: approve round=<r> -->` or
+`<!-- epik-review: changes round=<r> -->`, with the round the header gave,
+and `changes` whenever there is at least one comment; on round 2 and
+later, read the pull request's review threads first
+(`gh api graphql` on `pullRequest.reviewThreads` with `isResolved`,
+`comments`) and judge the fixer's replies before the diff; never push,
+merge, close or edit. The procedure's second part, **Addressing a
+review**, is for the fixer (A13): list the open threads the same way;
+for each, fix what it asks, reply in the thread with what was done
+(`gh api repos/<o>/<r>/pulls/<n>/comments/<id>/replies`), and resolve it
+(`gh api graphql` mutation `resolveReviewThread`); a thread the fixer
+thinks is wrong gets a reply and stays open; then push. Embed it in
+`epik-core` as A1 does the issue procedure, with a function that builds
+the review prompt (header with repository, issue, pull request and
+round; rules; procedure).
 
 **Tests first.** The review prompt holds the pull request number, the
-round, the rules and the procedure.
+round, the rules and the procedure. The procedure's API calls are tried
+once by hand on `wpm/epik-test`, since a wrong field name costs a round.
 
 **Out.** Running it (A12).
 
@@ -423,7 +438,10 @@ round, the rules and the procedure.
 ## A11. Read a pull request's review verdict
 
 **What.** `GitHub::reviews(repo, pr)` (with `gh api`, in `gh.rs`, and in the
-fake), returning each review's body and submission time. Then
+fake), returning each review's body and submission time, and
+`GitHub::open_review_threads(repo, pr) -> usize` (GraphQL
+`reviewThreads`, counting `isResolved: false`), for the record and the
+run page. Then
 `review::verdict(reviews, round)`: the newest review whose body's last
 non-blank line is an Epik verdict marker naming `round`, as `Approve` or
 `Changes`; `None` if there is none. The round, not a time, picks the
@@ -431,7 +449,8 @@ review: the building machine's clock and GitHub's never have to agree,
 and a reader of the pull request sees which review answered which attempt.
 
 **Tests first.** Approve, changes, a marker for another round, a marker
-not on the last line, several reviews for the round (newest wins), none.
+not on the last line, several reviews for the round (newest wins), none;
+the open-thread count from a recorded GraphQL reply.
 
 ---
 
@@ -454,8 +473,9 @@ merged, `build.rs:420-432`):
   `<n>-review-1.jsonl`). Then read round 1's verdict with A11.
 - Finish the build as today, with the pull request for the user, and
   record the verdict: `BuildFinished` gains `review`
-  (`approve`, `changes` or `none`), and `status` shows it. A fix (A13)
-  comes between a `changes` verdict and the finish.
+  (`approve`, `changes` or `none`) and `open_threads` (A11's count,
+  read at the finish), and `status` shows both. A fix (A13) comes
+  between a `changes` verdict and the finish.
 - While the review runs, the run's disposition is `reviewing` (protocol,
   fold and `epik_view`).
 
@@ -475,10 +495,12 @@ issue's pull request before it merges: deferred, see the record.
 
 **What.** On **changes**, run the coding agent on the run's number
 (`role: coding, round: 2`, log `<n>-coding-2.jsonl`), with the issue
-procedure and a header that overrides its first steps (A1's second
-variant): pull request #<pr> on branch `<head>` is open, so make the
-worktree from that branch, address the latest review there, push to it,
-and open no new pull request; then wait for the checks as the procedure
+procedure, A10's "Addressing a review" part, and a header that overrides
+the issue procedure's first steps (A1's second variant): pull request
+#<pr> on branch `<head>` is open, so make the worktree from that branch,
+address each open review thread there as A10's second part says (fix,
+reply, resolve; or reply and leave open), push to it, and open no new
+pull request; then wait for the checks as the procedure
 says. On an epic that branch is the epic branch, and the push is direct,
 as Epik's own merges into it are. Then the checks and a review again
 (`round: 2`, with round 2 in its prompt). When the second review still
@@ -488,8 +510,9 @@ rounds; see #<pr>". The limit is a constant.
 
 **Tests first.** Changes, then approve, finishes with `review: approve`
 after one more round; changes twice finishes needing attention with the
-reason; the second coding prompt names the pull request and its branch
-and says not to open another; for an epic it names the epic branch; the
+reason; the second coding prompt names the pull request and its branch,
+says not to open another, and carries the addressing procedure; for an
+epic it names the epic branch; the
 second review prompt says round 2; time and cost sum over all the run's
 sessions.
 
@@ -502,8 +525,9 @@ sessions.
 **What.** The issue panel lists the issue's sessions in order: role,
 round, agent, model, time, and cost or "not reported". The run's own
 sessions, its reviews and fixes, are listed under the run's header the
-same way, with each review's verdict and a link to the pull request's
-reviews. The live stream shows the chosen session, the latest by
+same way, with each review's verdict, and beside the last one the count
+of review threads still open ("2 threads open"), linking to the pull
+request's Files view where GitHub shows them. The live stream shows the chosen session, the latest by
 default. A run in review shows "reviewing" in the run header and in the
 runs table's Now line.
 
