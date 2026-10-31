@@ -112,7 +112,12 @@ except Epik's rules, which the prompt then has to carry too.
   `plugin/skills/assistant/rules.md` in `epik-core` with `include_str!`.
   `Build::build_issue` (`build.rs:469`) builds the prompt: a short header
   (repository, issue number, target branch, that no one will answer
-  questions), the rules, then the procedure, each in its own words.
+  questions), the rules, then the procedure, each in its own words. The
+  header is built from a value saying what the work is, of which "issue
+  #n" is the first variant: A13 adds "address the review on pull request
+  #n", and a later release adds a task given in words with no issue (an
+  ad hoc build, noted in `plan.md`). The function takes the variant, not
+  an issue number.
 - `AgentRequest` gains `issue: u64`, so fakes don't parse the prompt
   (`build.rs:732-735` today).
 - `ClaudeAcp` no longer sends `_meta.claudeCode.options.plugins` on

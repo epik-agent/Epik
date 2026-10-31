@@ -161,6 +161,11 @@ say which runs a host still has.
   `bad request`. An offset past the size returns empty `data`: the file
   was rewritten, and the client starts over.
 
+The three requests take the run's key as a string and resolve it through
+`run::run_dir`, as `status` does; nothing in them, or in R6's mirror,
+parses `owner/name#number` itself, so a run named another way (a later
+release's ad hoc build, noted in `plan.md`) mirrors unchanged.
+
 **Tests first.** All runs listed past 20; files for a run with two builds;
 reads from 0, mid-file and at the end; a cut at the last whole line under
 1 MiB; one long line whole; a trailing partial line held back; traversal

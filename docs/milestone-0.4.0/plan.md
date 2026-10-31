@@ -234,6 +234,28 @@ default sandbox? This epic is the first thing to cut.
 
 ## Outside 0.4.0, noted so they aren't lost
 
+- **Ad hoc builds** (Bill, 2026-10-31). Today a quick coding job, or
+  addressing a pull request's comments, is done by the assistant in the
+  conversation. It should instead be a tool that starts a build from a
+  task given in words, with no issue, tracked in the tray like any run.
+  Not planned now. Three places in 0.4.0 are written so it drops in
+  later: A1 builds the prompt from a "what the work is" value with the
+  issue as its first variant (A13's "address the review on #n" is the
+  second, and is the pull-request-comments case of this); R3 and R6
+  treat a run's key as an opaque string resolved in `run.rs`, so a run
+  named without an issue number mirrors unchanged; and how a run ends
+  (reconcile's "the epic issue closed", `find_pull_request`'s `Closes
+  #n`) stays behind `Kind`, which gains a variant then. Roles, hosts, the
+  tray and `build_status` take a run as given and need nothing.
+- **Taking the repository private** (Bill, 2026-10-31; not yet). The
+  repo is public for two things: the checklist clones it to install the
+  plugin, and the website's download buttons link to its releases.
+  The way out is the app carrying the plugin (embedded, written to
+  `~/.epik/plugin/`, added as a local marketplace, as C1 does for Codex)
+  and a public releases-only repository for the installers; then flip
+  it, and watch Actions minutes (macOS is 10× on the Team plan; the arm
+  runner R14 wants is free only on public repos). Pages keeps working.
+
 - The chat-support probes (Cowork, Desktop chat, Claude Design) are due
   once 0.3.0 merges. They are separate from this milestone.
 - The macOS app menu and About stay deferred until Settings outgrows its
