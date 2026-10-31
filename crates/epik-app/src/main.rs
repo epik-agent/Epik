@@ -4,6 +4,7 @@ mod main_window;
 mod navigation;
 mod pages;
 mod popover;
+mod runs;
 mod setup_window;
 mod tray;
 
