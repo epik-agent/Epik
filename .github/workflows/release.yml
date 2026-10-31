@@ -104,13 +104,11 @@ jobs:
           targets: ${{ matrix.targets }}
       - uses: Swatinem/rust-cache@v2
       # The windows are Rust compiled to WebAssembly by trunk, which the
-      # Tauri CLI runs as the beforeBuildCommand. The same version as
-      # ci.yml.
-      - name: Install trunk
-        shell: bash
-        run: |
-          trunk --version 2>/dev/null | grep -qx 'trunk 0.21.14' \
-            || cargo install trunk --locked --version 0.21.14
+      # Tauri CLI runs as the beforeBuildCommand. trunk's prebuilt release,
+      # the same version as ci.yml.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
       # Tauri's prebuilt CLI for the runner, from Tauri's own release:
       # compiling it took 6 to 11 minutes a job. The archive holds
       # cargo-tauri, or cargo-tauri.exe, at its root: a tgz on Linux, a zip
