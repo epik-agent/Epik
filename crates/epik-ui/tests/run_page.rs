@@ -268,7 +268,52 @@ fn narration_is_plain_sentences_with_code_in_monospace() {
         }],
         false,
     ));
-    assert!(html.contains(r#"<div class="stream"><div class="entry narration"><time>22:13:20</time><div class="what"><p>Two failures, both in <code>upload::tests</code>.</p><p>Checking <code>put</code>.</p></div></div></div>"#), "{html}");
+    assert!(html.contains("<div class=\"stream\"><div class=\"entry narration\"><time>22:13:20</time><div class=\"what\"><p>Two failures, both in <code>upload::tests</code>.</p>\n<p>Checking <code>put</code>.</p>\n</div></div>"), "{html}");
+}
+
+/// What the narration `text` is drawn as.
+fn narrated(text: &str) -> String {
+    let html = full(stream(vec![Entry::Narration { text: text.into() }], false));
+    let start =
+        html.find(r#"<div class="what">"#).expect("an entry") + r#"<div class="what">"#.len();
+    let end = start + html[start..].find("</div>").expect("the end of the entry");
+    html[start..end].to_owned()
+}
+
+#[test]
+fn narrated_code_blocks_are_kept_whole() {
+    assert_eq!(
+        narrated("The fix:\n\n```rust\nlet x = `a`;\n```\n\nDone."),
+        "<p>The fix:</p>\n<pre><code class=\"language-rust\">let x = `a`;\n</code></pre>\n<p>Done.</p>\n"
+    );
+}
+
+#[test]
+fn a_stray_backtick_is_just_a_backtick() {
+    assert_eq!(
+        narrated("Renamed `foo to bar, keeping `baz`."),
+        "<p>Renamed <code>foo to bar, keeping </code>baz`.</p>\n"
+    );
+    assert_eq!(
+        narrated("Renamed `foo to bar."),
+        "<p>Renamed `foo to bar.</p>\n"
+    );
+}
+
+#[test]
+fn html_in_narration_is_shown_not_run() {
+    assert_eq!(
+        narrated("Removed <script>alert(1)</script> from <b>it</b>."),
+        "<p>Removed &lt;script&gt;alert(1)&lt;/script&gt; from &lt;b&gt;it&lt;/b&gt;.</p>\n"
+    );
+}
+
+#[test]
+fn narrated_links_are_their_text() {
+    assert_eq!(
+        narrated("See [the docs](https://example.com) and ![a chart](chart.png)."),
+        "<p>See the docs and a chart.</p>\n"
+    );
 }
 
 #[test]
