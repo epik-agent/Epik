@@ -61,14 +61,18 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
+      # A pull request can restore only main's caches and its own, and the
+      # repository's caches share 10 GB. So only main saves them: each pull
+      # request saving its own pushed main's Windows cache out, and every
+      # Windows job compiled from nothing.
       - uses: Swatinem/rust-cache@v2
-      # rust-cache keeps ~/.cargo/bin, so trunk is compiled only when the
-      # cache doesn't have this version.
-      - name: Install trunk
-        shell: bash
-        run: |
-          trunk --version 2>/dev/null | grep -qx 'trunk 0.21.14' \
-            || cargo install trunk --locked --version 0.21.14
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # trunk's prebuilt release, checked against its hash: compiling it
+      # took 10 minutes when the cache missed.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
       # The app embeds the windows trunk builds into dist when it compiles,
       # so they're built before anything compiles the app.
       - name: Build the windows
