@@ -490,6 +490,8 @@ impl Build<'_> {
             log,
         });
         let outcome = self.agent.run(&request, cancel);
+        // Whether the agent was cancelled, before anything else takes time.
+        let cancelled = cancel.load(Ordering::SeqCst);
         self.append(Event::SessionFinished {
             at: Utc::now(),
             number,
@@ -500,7 +502,7 @@ impl Build<'_> {
                 .cost_usd
                 .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
         });
-        if cancel.load(Ordering::SeqCst) {
+        if cancelled {
             // What the agent spent before it was stopped still counts: its
             // session has it.
             let reason = Some("interrupted".to_owned());
