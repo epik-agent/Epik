@@ -6,3 +6,6 @@ members = ["crates/epik-core", "crates/epik-view", "crates/epik-ui", "crates/epi
 version = "0.3.0"
 edition = "2024"
 publish = false
+
+[workspace.lints.clippy]
+mod_module_files = "deny"
