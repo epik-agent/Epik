@@ -63,14 +63,17 @@ fn sync_file(client: &impl Client, key: &RunKey, file: &RecordFile, copy: &Path)
     if let Some(parent) = copy.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut out = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .truncate(false)
-        .open(copy)?;
-    if offset < had {
-        out.set_len(0)?;
-    }
+    // Truncating needs write access, which Windows doesn't give a file
+    // opened only to append.
+    let mut out = if offset < had {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(copy)?
+    } else {
+        OpenOptions::new().create(true).append(true).open(copy)?
+    };
     while offset < file.size {
         let request = Request::Read {
             run: key.clone(),
