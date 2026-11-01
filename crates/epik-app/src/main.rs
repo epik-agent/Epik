@@ -61,7 +61,6 @@ fn mcp() -> ExitCode {
         root,
         start_app: Box::new(start_detached),
         start_timeout: Duration::from_secs(15),
-        plugin_dir: std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from),
     });
     match server.serve_stdio() {
         Ok(()) => ExitCode::SUCCESS,

@@ -488,7 +488,6 @@ mod tests {
                 },
             ],
             closed: closed.to_vec(),
-            plugin_dir: None,
         }
     }
 
@@ -772,7 +771,6 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
-                plugin_dir: None,
             })
             .unwrap();
         std::fs::create_dir_all(run_dir(root.path(), &RunKey::new("wpm/empty", 1))).unwrap();
