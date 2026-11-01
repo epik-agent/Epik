@@ -178,6 +178,7 @@ mod tests {
                     branch: "main".to_owned(),
                     issues: Vec::new(),
                     closed: Vec::new(),
+                    roles: Default::default(),
                 })
                 .unwrap();
             record::build_dir(self.root(), &key, writer.build_id())
