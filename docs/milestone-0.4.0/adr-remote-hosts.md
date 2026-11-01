@@ -114,8 +114,9 @@ devbox" in the conversation.
 
 ### 5. A headless build of the app, for servers
 
-`epik-app` built without its default `desktop` feature leaves out Tauri
-and the windows: it has only `--headless`, `mcp`, `stdio` and `--version`.
+`epik-app` built without its default `desktop` feature leaves out Tauri,
+the windows, and keeping the machine awake (a server doesn't sleep): it
+has only `--headless`, `mcp`, `stdio` and `--version`.
 The release attaches it for Linux on x86-64 and ARM64 as tarballs with
 checksums (`epik-app-linux-x64.tar.gz`, `epik-app-linux-arm64.tar.gz`).
 Setting up a host is done by hand for now: download, put it at

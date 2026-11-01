@@ -105,15 +105,24 @@ Without it, no argument runs headless, as the desktop build already does
 where there is no tray (`tray.rs:44-62`), so `epik-app mcp`'s start of the
 app works unchanged. `mcp`, `--headless` and `--version` work as now.
 `App` and `reconcile_until` stay shared. `build.rs` runs `tauri_build`
-only with `desktop`. CI gains a job on `ubuntu-24.04` that installs **no**
-GUI packages and runs `cargo test -p epik-app --no-default-features`.
+only with `desktop`. Keeping the machine awake goes behind the switch
+too: `epik-core` gets a feature `awake`, on by default, that owns the
+`keepawake` dependency and `awake::System`; `epik-app`'s `desktop`
+enables `epik-core/awake`, and without it `App::start` uses a `Waker`
+that does nothing (the trait is already there, `awake.rs:14`), so a
+server neither links the D-Bus client nor logs that it couldn't keep
+itself awake. CI gains one job on `ubuntu-24.04`, beside the three-OS
+matrix, that installs **no** GUI packages and runs
+`cargo test -p epik-app --no-default-features`; the matrix's Linux job
+keeps installing them for the desktop build, so the two together prove
+the switch.
 
 **Tests first.** `crates/epik-app/tests/cli.rs`, run with the feature off:
-no argument runs headless and serves the socket; `--version` works.
+no argument runs headless and serves the socket; `--version` works; a
+build's start and end log nothing about keeping the machine awake. In
+`epik-core`, the `awake` tests run only with the feature.
 
 **Out.** Moving `App` into `epik-core`. Release artifacts (R14).
-Silencing `keepawake` on a server with no session bus: it is pure Rust,
-links nothing, and only logs that it couldn't; a server doesn't sleep.
 
 ---
 
