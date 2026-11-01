@@ -17,6 +17,7 @@ pub mod record;
 pub mod repositories;
 pub mod run;
 pub mod self_link;
+pub mod settings;
 pub mod setup;
 pub mod stream;
 mod tail;

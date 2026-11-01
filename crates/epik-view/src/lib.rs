@@ -232,6 +232,39 @@ pub struct Settings {
     pub repositories: Vec<RepositoryRow>,
 }
 
+/// The agent and model each role runs with, as `~/.epik/settings.json`
+/// keeps them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    /// Implementing one issue, up to a pull request with passing checks.
+    pub coding: Role,
+    /// Reading a build's pull requests before the user does, or `None`
+    /// when review is off.
+    pub review: Option<Role>,
+}
+
+impl Default for AgentSettings {
+    /// Claude Code codes with its default model, and nothing reviews.
+    fn default() -> Self {
+        Self {
+            coding: Role {
+                agent: "claude".to_owned(),
+                model: None,
+            },
+            review: None,
+        }
+    }
+}
+
+/// The agent a role runs, and the model it asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    /// The agent's id: `claude`.
+    pub agent: String,
+    /// The model, or `None` for the agent's default.
+    pub model: Option<String>,
+}
+
 /// One item as the checklist shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {

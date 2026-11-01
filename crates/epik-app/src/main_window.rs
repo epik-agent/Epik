@@ -15,8 +15,10 @@ use epik_core::builds::Builds;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
-use epik_core::{setup, uninstall};
-use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep};
+use epik_core::{settings, setup, uninstall};
+use epik_view::{
+    AgentSettings, Home, Popover, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep,
+};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::runs::Runs;
@@ -150,6 +152,22 @@ pub fn stop_monitoring(repo: String, window: State<'_, Window>) -> Result<(), St
     let removed = repositories::remove(&window.root, &repo);
     window.runs.forget();
     removed.map_err(failed)
+}
+
+/// The agent and model each role runs with.
+#[tauri::command]
+pub fn agent_settings(window: State<'_, Window>) -> Result<AgentSettings, String> {
+    settings::read(&window.root).map_err(failed)
+}
+
+/// Keeps the agent and model each role runs with, for the builds that
+/// start after.
+#[tauri::command]
+pub fn set_agent_settings(
+    settings: AgentSettings,
+    window: State<'_, Window>,
+) -> Result<(), String> {
+    settings::write(&window.root, &settings).map_err(failed)
 }
 
 /// Why Epik can't be uninstalled while a build runs.
