@@ -15,6 +15,7 @@ mod setup_window;
 #[cfg(feature = "desktop")]
 mod tray;
 
+#[cfg(feature = "desktop")]
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
