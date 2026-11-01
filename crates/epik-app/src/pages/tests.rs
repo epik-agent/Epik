@@ -1,7 +1,7 @@
 use super::*;
 use chrono::TimeZone;
 use epik_core::activity::Activity;
-use epik_core::record::Issue;
+use epik_core::record::{Issue, Session, SessionRole};
 use epik_core::run::RunKey;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -28,6 +28,7 @@ fn issue(number: u64, title: &str, blocked_by: &[u64], status: IssueStatus) -> I
         merge_commit: None,
         duration_ms: None,
         cost_usd: None,
+        sessions: Vec::new(),
         activity: None,
     }
 }
@@ -112,6 +113,7 @@ fn exponentiation() -> RunState {
         reason: None,
         pull_request: None,
         issues,
+        sessions: Vec::new(),
         builds: vec![
             summary(BuildStatus::Interrupted, -3600, 720_000, "1.01"),
             summary(BuildStatus::Running, 0, 0, "2.06"),
@@ -542,6 +544,43 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_running_issues_log_is_its_latest_sessions() {
+    let mut run = exponentiation();
+    let session = |build_id: &str, log: &str| Session {
+        build_id: build_id.to_owned(),
+        role: SessionRole::Coding,
+        round: 1,
+        agent: "claude".to_owned(),
+        model: None,
+        log: log.to_owned(),
+        started_at: time(0),
+        duration_ms: None,
+        cost_usd: None,
+    };
+    run.issues[3].sessions = vec![
+        session("b-3600", "17.jsonl"),
+        session("b0", "17.jsonl"),
+        session("b0", "17-coding-2.jsonl"),
+    ];
+    let dir = std::path::Path::new("/home/me/.epik/runs/wpm/epik-test/13/b0");
+
+    let page = run_page(
+        &run,
+        &[],
+        &[],
+        Some(dir),
+        now(),
+        &FixedOffset::east_opt(0).unwrap(),
+    );
+
+    let card = |n: u64| page.issues.iter().find(|c| c.number == n).unwrap();
+    let log = dir.join("17-coding-2.jsonl").display().to_string();
+    assert_eq!(card(17).log.as_deref(), Some(log.as_str()));
+    let old = dir.join("16.jsonl").display().to_string();
+    assert_eq!(card(16).log.as_deref(), Some(old.as_str()), "no sessions");
 }
 
 #[test]

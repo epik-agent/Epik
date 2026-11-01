@@ -69,7 +69,7 @@ sent by an older client is ignored.
 
 - `build_id`: the build's id, unique within its run: the UTC time it started and 4 random characters.
 - `kind`: `epic` or `issue`.
-- `build_dir`: the build's record, holding `events.jsonl`, each issue's agent output, and `summary.json` once the
+- `build_dir`: the build's record, holding `events.jsonl`, each agent session's log, and `summary.json` once the
   build ends.
 
 A pull request, a closed issue, or a failure before the build starts is an error, and leaves no record.
@@ -106,7 +106,20 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
       "pull_request": 367,
       "merge_commit": "dd1288cc693368c025b69618edc4bc603c07d301",
       "duration_ms": 512000,
-      "cost_usd": 1.12
+      "cost_usd": 1.12,
+      "sessions": [
+        {
+          "build_id": "20261028T212859Z-k3f9",
+          "role": "coding",
+          "round": 1,
+          "agent": "claude",
+          "model": "opus",
+          "log": "357.jsonl",
+          "started_at": "2026-10-28T21:29:01Z",
+          "duration_ms": 512000,
+          "cost_usd": 1.12
+        }
+      ]
     },
     {
       "number": 358,
@@ -117,6 +130,19 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
       "pull_request": null,
       "duration_ms": null,
       "cost_usd": null,
+      "sessions": [
+        {
+          "build_id": "20261028T212859Z-k3f9",
+          "role": "coding",
+          "round": 1,
+          "agent": "claude",
+          "model": "opus",
+          "log": "358.jsonl",
+          "started_at": "2026-10-28T21:37:35Z",
+          "duration_ms": null,
+          "cost_usd": null
+        }
+      ],
       "activity": {
         "last_action": "Running cargo test",
         "last_test": "23 passed, 1 failed",
@@ -125,6 +151,7 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
       }
     }
   ],
+  "sessions": [],
   "builds": [
     {
       "build_id": "20261028T212859Z-k3f9",
@@ -151,10 +178,19 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 - `pull_request`: the latest build's pull request into the default branch: the epic's, or a single issue's.
 - `issues`: every issue of the run, including ones merged in earlier builds. Each one's `status` is `waiting`,
   `running`, `succeeded` (its agent opened a pull request), `merged`, `failed`, or `closed` (closed before a build
-  started). Its `duration_ms` and `cost_usd` are summed over the builds. A running issue has `activity`: its agent's
-  last action and last test result in words, when its log last grew, and its recent actions.
+  started). Its `sessions` are the agent sessions it took over every build, oldest first, and its `duration_ms` and
+  `cost_usd` are their sums; an issue recorded before sessions has none, and its agent's time and cost. A running
+  issue has `activity`: its latest session's last action and last test result in words, when its log last grew, and
+  its recent actions.
+- Each session has its `role`, `coding` or `review`, and its `round`, from 1 for each role; the `agent` and `model`
+  it ran (`model` is `null` for the agent's default); its `log`, a file name in its build's directory, `build_id`;
+  when it started; and its `duration_ms` and `cost_usd`. `duration_ms` is `null` while it runs, and `cost_usd` when
+  its agent reported no cost.
+- `sessions`: the run's own sessions, such as reviews of its pull request, over every build. A single issue's run
+  has these in its issue's `sessions`.
 - `builds`: oldest first. `running_build` is the one running, if any.
 - `elapsed_ms` and `cost_usd` are summed over the builds so far; a running build's time counts to its latest event.
+  A build's `cost_usd` is its issues' and its own sessions'.
 
 An unknown run is an error.
 

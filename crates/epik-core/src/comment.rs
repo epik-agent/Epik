@@ -5,13 +5,15 @@
 //! epic issue when it closes. Each comment is readable, and carries the
 //! same figures in a hidden block, `<!-- epik:cost {json} -->`, for an audit
 //! tool to parse later. Every comment names the pull request and the merge
-//! commit the money bought.
+//! commit the money bought, and the agent and model of each session that
+//! spent it.
 
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::record::IssueState;
+use crate::record::{IssueState, Session, SessionRole};
 use crate::run::RunState;
+use crate::settings::{self, Role};
 use crate::words::{dollars, duration};
 
 /// The version of the hidden block's JSON.
@@ -25,6 +27,63 @@ struct IssueCost<'a> {
     cost_usd: Decimal,
     pull_request: Option<u64>,
     merge_commit: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sessions: Vec<SessionCost<'a>>,
+}
+
+/// One session's figures in the hidden block.
+#[derive(Serialize)]
+struct SessionCost<'a> {
+    role: SessionRole,
+    round: u32,
+    agent: &'a str,
+    model: Option<&'a str>,
+    duration_ms: Option<u64>,
+    cost_usd: Option<Decimal>,
+}
+
+impl<'a> SessionCost<'a> {
+    fn of(session: &'a Session) -> Self {
+        Self {
+            role: session.role,
+            round: session.round,
+            agent: &session.agent,
+            model: session.model.as_deref(),
+            duration_ms: session.duration_ms,
+            cost_usd: session.cost_usd,
+        }
+    }
+}
+
+/// Each session in a line: "- Coding, round 2: Claude Code with opus, 20s,
+/// $0.25". The first round of a role goes without its number.
+fn sessions(sessions: &[Session]) -> String {
+    sessions
+        .iter()
+        .map(|session| {
+            let role = match session.role {
+                SessionRole::Coding => "Coding",
+                SessionRole::Review => "Review",
+            };
+            let round = match session.round {
+                1 => String::new(),
+                n => format!(", round {n}"),
+            };
+            let agent = settings::profile(&Role {
+                agent: session.agent.clone(),
+                model: session.model.clone(),
+            })
+            .map_or_else(|_| session.agent.clone(), |profile| profile.name);
+            let model = session.model.as_deref().unwrap_or("its default model");
+            let time = session
+                .duration_ms
+                .map_or("still running".to_owned(), duration);
+            let cost = session
+                .cost_usd
+                .map_or("cost not reported".to_owned(), dollars);
+            format!("- {role}{round}: {agent} with {model}, {time}, {cost}\n")
+        })
+        .collect()
 }
 
 impl<'a> IssueCost<'a> {
@@ -35,6 +94,7 @@ impl<'a> IssueCost<'a> {
             cost_usd: issue.cost_usd.unwrap_or(Decimal::ZERO),
             pull_request: issue.pull_request,
             merge_commit: issue.merge_commit.as_deref(),
+            sessions: issue.sessions.iter().map(SessionCost::of).collect(),
         }
     }
 }
@@ -64,8 +124,12 @@ pub fn issue_merged(branch: &str, issue: &IssueState) -> String {
         (Some(pr), None) => format!(" by #{pr}"),
         _ => String::new(),
     };
+    let mut lines = sessions(&issue.sessions);
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
     format!(
-        "**Epik: {}, {}.** Merged into `{branch}`{by}.\n\n{}",
+        "**Epik: {}, {}.** Merged into `{branch}`{by}.\n\n{lines}{}",
         duration(cost.duration_ms),
         dollars(cost.cost_usd),
         hidden(&Block {
@@ -84,7 +148,8 @@ pub struct Merge {
 }
 
 /// The closing comment on a run's epic issue: the run's total time and
-/// cost, the number of builds, and a breakdown by issue. For a single
+/// cost, the number of builds, the run's own sessions, and a breakdown by
+/// issue. For a single
 /// issue's run, the issue is the epic issue, and `merge` gives its pull
 /// request and merge commit. For an epic, `merge` is the epic's pull
 /// request into the default branch, if it merged.
@@ -111,6 +176,16 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
             .map(|sha| format!(" ({})", short(sha)))
             .unwrap_or_default();
         text.push_str(&format!("Merged by #{}{sha}.\n\n", merge.pull_request));
+    }
+    // A single issue's sessions are the run's: its comment is this one.
+    let mut own: Vec<Session> = Vec::new();
+    if single {
+        own.extend(issues[0].sessions.iter().cloned());
+    }
+    own.extend(run.sessions.iter().cloned());
+    if !own.is_empty() {
+        text.push_str(&sessions(&own));
+        text.push('\n');
     }
     text.push_str("| Issue | Time | Cost | Pull request | Merge commit |\n");
     text.push_str("|---|---|---|---|---|\n");
@@ -142,6 +217,8 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
         cost_usd: Decimal,
         pull_request: Option<u64>,
         merge_commit: Option<&'a str>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        sessions: Vec<SessionCost<'a>>,
         issues: Vec<IssueCost<'a>>,
     }
     text.push('\n');
@@ -153,6 +230,7 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
         cost_usd: run.cost_usd,
         pull_request: merge.map(|merge| merge.pull_request),
         merge_commit: merge.and_then(|merge| merge.merge_commit.as_deref()),
+        sessions: run.sessions.iter().map(SessionCost::of).collect(),
         issues: issues.iter().map(IssueCost::of).collect(),
     }));
     text
@@ -161,7 +239,7 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{BuildStatus, Issue, IssueStatus, Kind};
+    use crate::record::{BuildStatus, Issue, IssueStatus, Kind, Session, SessionRole};
     use crate::run::{BuildSummary, Disposition, RunKey};
     use chrono::{TimeZone, Utc};
     use std::str::FromStr;
@@ -180,7 +258,28 @@ mod tests {
             started_at: None,
             duration_ms: Some(ms),
             cost_usd: Some(Decimal::from_str(cost).unwrap()),
+            sessions: Vec::new(),
             activity: None,
+        }
+    }
+
+    fn session(
+        role: SessionRole,
+        round: u32,
+        model: Option<&str>,
+        ms: u64,
+        cost: Option<&str>,
+    ) -> Session {
+        Session {
+            build_id: "b".to_owned(),
+            role,
+            round,
+            agent: "claude".to_owned(),
+            model: model.map(str::to_owned),
+            log: "14.jsonl".to_owned(),
+            started_at: Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap(),
+            duration_ms: Some(ms),
+            cost_usd: cost.map(|cost| Decimal::from_str(cost).unwrap()),
         }
     }
 
@@ -211,6 +310,7 @@ mod tests {
             pull_request: Some(30),
             cost_usd: issues.iter().filter_map(|i| i.cost_usd).sum(),
             issues,
+            sessions: Vec::new(),
             builds: (0..builds).map(|n| summary(&n.to_string())).collect(),
             running_build: None,
             started_at: at,
@@ -230,6 +330,64 @@ mod tests {
             "**Epik: 3m 05s, $0.92.** Merged into `epic/13` by #20 (1a2b3c4).\n\n\
              <!-- epik:cost {\"version\":1,\"number\":14,\"duration_ms\":185000,\
              \"cost_usd\":0.92,\"pull_request\":20,\"merge_commit\":\"1a2b3c4d5e6f\"} -->"
+        );
+    }
+
+    #[test]
+    fn a_merged_sub_issue_names_the_agent_and_model_of_each_session() {
+        let mut parse = issue(14, "Parse ^", 185_000, "0.92", 20, "1a2b3c4d5e6f");
+        parse.sessions = vec![
+            session(SessionRole::Coding, 1, Some("opus"), 125_000, Some("0.92")),
+            session(SessionRole::Review, 1, None, 40_000, None),
+            session(SessionRole::Coding, 2, Some("opus"), 20_000, None),
+        ];
+
+        let text = issue_merged("epic/13", &parse);
+
+        let (readable, block) = text.split_once("<!-- epik:cost ").unwrap();
+        assert_eq!(
+            readable,
+            "**Epik: 3m 05s, $0.92.** Merged into `epic/13` by #20 (1a2b3c4).\n\n\
+             - Coding: Claude Code with opus, 2m 05s, $0.92\n\
+             - Review: Claude Code with its default model, 40s, cost not reported\n\
+             - Coding, round 2: Claude Code with opus, 20s, cost not reported\n\n"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(block.strip_suffix(" -->").unwrap()).unwrap();
+        assert_eq!(
+            json["sessions"][1],
+            serde_json::json!({
+                "role": "review",
+                "round": 1,
+                "agent": "claude",
+                "model": null,
+                "duration_ms": 40000,
+                "cost_usd": null,
+            })
+        );
+    }
+
+    #[test]
+    fn the_closing_comment_names_the_runs_own_sessions_and_a_single_issues() {
+        let mut only = issue(7, "One thing", 60_000, "0.50", 8, "abcdef0123");
+        only.sessions = vec![session(SessionRole::Coding, 1, None, 60_000, Some("0.50"))];
+        let mut run = run(7, vec![only], 1);
+        run.sessions = vec![session(
+            SessionRole::Review,
+            1,
+            Some("sonnet"),
+            30_000,
+            Some("0.10"),
+        )];
+
+        let text = closing(&run, None);
+
+        assert!(
+            text.contains(
+                "\n\n- Coding: Claude Code with its default model, 1m 00s, $0.50\n\
+                 - Review: Claude Code with sonnet, 30s, $0.10\n\n| Issue |"
+            ),
+            "{text}"
         );
     }
 

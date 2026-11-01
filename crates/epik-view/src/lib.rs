@@ -187,7 +187,7 @@ pub struct IssueCard {
     pub pull_request: Words,
     /// What its agent has done, in words, oldest first.
     pub recent: Vec<String>,
-    /// Its agent's full log, if it has one.
+    /// Its latest agent session's full log, while it runs.
     pub log: Option<String>,
 }
 

@@ -27,13 +27,13 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use rust_decimal::Decimal;
 
-use crate::agent::{Agent, AgentOutcome, AgentRequest};
+use crate::agent::{Agent, AgentRequest};
 use crate::cleanup;
 use crate::comment;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
 use crate::prompt::{self, Work};
-use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
+use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome, SessionRole};
 use crate::run::{self, RunKey};
 use crate::settings::Settings;
 
@@ -469,20 +469,42 @@ impl Build<'_> {
     /// epic waits for its checks, merges it, and closes the issue.
     fn build_issue(&self, number: u64, cancel: &AtomicBool) -> Finished {
         let dir = &self.dir;
+        let log = format!("{number}.jsonl");
         let request = AgentRequest {
             prompt: prompt::prompt(&self.repo, Work::Issue(number), &self.branch),
             issue: number,
             branch: self.branch.clone(),
             cwd: self.clone.clone(),
-            jsonl_path: dir.join(format!("{number}.jsonl")),
+            jsonl_path: dir.join(&log),
             err_path: dir.join(format!("{number}.err")),
             model: self.roles.coding.model.clone(),
         };
+        let (role, round) = (SessionRole::Coding, 1);
+        self.append(Event::SessionStarted {
+            at: Utc::now(),
+            number,
+            role,
+            round,
+            agent: self.roles.coding.agent.clone(),
+            model: self.roles.coding.model.clone(),
+            log,
+        });
         let outcome = self.agent.run(&request, cancel);
+        self.append(Event::SessionFinished {
+            at: Utc::now(),
+            number,
+            role,
+            round,
+            duration_ms: outcome.duration_ms,
+            cost_usd: outcome
+                .cost_usd
+                .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
+        });
         if cancel.load(Ordering::SeqCst) {
-            // What the agent spent before it was stopped still counts.
+            // What the agent spent before it was stopped still counts: its
+            // session has it.
             let reason = Some("interrupted".to_owned());
-            self.issue_finished(number, &outcome, Outcome::Failed, reason, None);
+            self.issue_finished(number, Outcome::Failed, reason, None);
             return Finished::Cancelled;
         }
         let found = if outcome.exited_cleanly {
@@ -507,11 +529,11 @@ impl Build<'_> {
         let pr = match found {
             Ok(pr) => pr,
             Err(reason) => {
-                self.issue_finished(number, &outcome, Outcome::Failed, Some(reason), None);
+                self.issue_finished(number, Outcome::Failed, Some(reason), None);
                 return Finished::Failed;
             }
         };
-        self.issue_finished(number, &outcome, Outcome::Succeeded, None, Some(pr.number));
+        self.issue_finished(number, Outcome::Succeeded, None, Some(pr.number));
         if self.kind == Kind::Issue {
             return Finished::Done(pr.number);
         }
@@ -530,13 +552,7 @@ impl Build<'_> {
             Err(Stop::Failed(reason)) => {
                 // A second `issue_finished` records that the issue failed
                 // after its agent succeeded.
-                self.issue_finished(
-                    number,
-                    &outcome,
-                    Outcome::Failed,
-                    Some(reason),
-                    Some(pr.number),
-                );
+                self.issue_finished(number, Outcome::Failed, Some(reason), Some(pr.number));
                 Finished::Failed
             }
         }
@@ -601,7 +617,6 @@ impl Build<'_> {
     fn issue_finished(
         &self,
         number: u64,
-        agent: &AgentOutcome,
         outcome: Outcome,
         reason: Option<String>,
         pull_request: Option<u64>,
@@ -612,10 +627,8 @@ impl Build<'_> {
             outcome,
             reason,
             pull_request,
-            duration_ms: agent.duration_ms,
-            cost_usd: agent
-                .cost_usd
-                .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
+            duration_ms: None,
+            cost_usd: None,
         });
     }
 
@@ -687,6 +700,7 @@ fn numbered<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentOutcome;
     use crate::github::{FakeGitHub, MergeMethods, PullState};
     use crate::record::{BuildStatus, IssueStatus};
     use crate::settings::Role;
@@ -844,10 +858,20 @@ mod tests {
         *found.expect("the issue has a pull request").0
     }
 
-    /// The run's events on disk, each written briefly, without its time.
+    /// The run's events on disk, each written briefly, without its time,
+    /// leaving out its sessions'.
     fn events(root: &Path, state: &BuildState) -> Vec<String> {
         let events = record::read_events(root, &state.run(), &state.build_id).unwrap();
-        events.iter().map(brief).collect()
+        events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event,
+                    Event::SessionStarted { .. } | Event::SessionFinished { .. }
+                )
+            })
+            .map(brief)
+            .collect()
     }
 
     fn brief(event: &Event) -> String {
@@ -874,6 +898,26 @@ mod tests {
                 format!("build_started {kind:?} {branch} {}", issues.join(" "))
             }
             Event::IssueStarted { number, .. } => format!("issue_started {number}"),
+            Event::SessionStarted {
+                number,
+                role,
+                round,
+                agent,
+                model,
+                log,
+                ..
+            } => format!("session_started {number} {role:?} {round} {agent} {model:?} {log}"),
+            Event::SessionFinished {
+                number,
+                role,
+                round,
+                duration_ms,
+                cost_usd,
+                ..
+            } => format!(
+                "session_finished {number} {role:?} {round} {duration_ms} {}",
+                cost_usd.map_or("-".to_owned(), |cost| cost.to_string())
+            ),
             Event::IssueFinished {
                 number,
                 outcome,
@@ -999,6 +1043,53 @@ mod tests {
 
         assert_eq!(state.status, BuildStatus::Succeeded);
         assert_eq!(state.cost_usd, Decimal::from_str("1.00").unwrap());
+    }
+
+    #[test]
+    fn each_issues_agent_runs_as_a_coding_session_with_the_coding_role() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(root.path(), 1);
+        request.roles.coding.model = Some("opus".to_owned());
+        let state = start(&github, &agent, &request)
+            .unwrap()
+            .check_interval(Duration::from_millis(1))
+            .run(&AtomicBool::new(false));
+
+        let events = record::read_events(root.path(), &state.run(), &state.build_id).unwrap();
+        let briefly: Vec<String> = events.iter().map(brief).collect();
+        let pr = pr_of(&github, 2);
+        assert_eq!(
+            briefly[1..5],
+            [
+                "issue_started 2".to_owned(),
+                "session_started 2 Coding 1 claude Some(\"opus\") 2.jsonl".to_owned(),
+                "session_finished 2 Coding 1 1000 0.25".to_owned(),
+                format!("issue_finished 2 Succeeded #{pr}"),
+            ]
+        );
+        let finished = events
+            .iter()
+            .find(|event| matches!(event, Event::IssueFinished { .. }));
+        let Some(Event::IssueFinished {
+            duration_ms,
+            cost_usd,
+            ..
+        }) = finished
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (duration_ms, cost_usd),
+            (&None, &None),
+            "the session has them"
+        );
+
+        let issue = state.issue(2).unwrap();
+        assert_eq!(issue.sessions.len(), 1);
+        assert_eq!(issue.duration_ms, Some(1_000));
+        assert_eq!(issue.cost_usd, Some(Decimal::from_str("0.25").unwrap()));
     }
 
     #[test]
