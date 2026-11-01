@@ -166,6 +166,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
+                roles: Default::default(),
             })
             .unwrap();
     }

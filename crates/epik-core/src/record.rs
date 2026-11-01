@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::activity::Activity;
 use crate::run::{self, RunKey};
+use crate::settings::Settings;
 
 /// The file a build's events are appended to.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -111,6 +112,11 @@ pub enum Event {
         /// skips.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         closed: Vec<u64>,
+        /// The agent and model each role runs with. A record from before
+        /// roles has none, and ran Claude Code with its default model and
+        /// no review.
+        #[serde(default)]
+        roles: Settings,
     },
     IssueStarted {
         at: DateTime<Utc>,
@@ -383,6 +389,9 @@ pub struct BuildState {
     #[serde(default)]
     pub pull_request_closed: bool,
     pub issues: Vec<IssueState>,
+    /// The agent and model each role runs with.
+    #[serde(default)]
+    pub roles: Settings,
     pub started_at: DateTime<Utc>,
     /// When the build finished or was interrupted.
     pub ended_at: Option<DateTime<Utc>>,
@@ -431,6 +440,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         branch,
         issues,
         closed,
+        roles,
     } = first
     else {
         return None;
@@ -464,6 +474,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 activity: None,
             })
             .collect(),
+        roles: roles.clone(),
         started_at: *at,
         ended_at: None,
         latest_at: *at,
@@ -612,6 +623,7 @@ mod tests {
             branch: "epic-12".to_owned(),
             issues: vec![issue(13, &[]), issue(14, &[13])],
             closed: Vec::new(),
+            roles: Default::default(),
         }
     }
 
@@ -845,6 +857,7 @@ mod tests {
             branch,
             issues,
             closed: vec![13],
+            roles: Default::default(),
         };
         let state = fold(&[started]).unwrap();
         assert_eq!(state.issue(13).unwrap().status, IssueStatus::Closed);
@@ -963,6 +976,7 @@ mod tests {
             branch: "main".to_owned(),
             issues: vec![issue(7, &[])],
             closed: Vec::new(),
+            roles: Default::default(),
         }];
         let state = fold(&events).unwrap();
         assert_eq!(state.kind, Kind::Issue);
@@ -994,6 +1008,46 @@ mod tests {
 
         let mut summary = serde_json::to_value(&state).unwrap();
         summary["plugin_dir"] = "/plugin".into();
+        let read: BuildState = serde_json::from_value(summary).unwrap();
+        assert_eq!(read, state);
+    }
+
+    #[test]
+    fn a_build_keeps_the_roles_it_started_with() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}],
+            "roles": {"coding": {"agent": "claude", "model": "opus"},
+                      "review": {"agent": "claude", "model": null}}}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+
+        let role = |model: Option<&str>| crate::settings::Role {
+            agent: "claude".to_owned(),
+            model: model.map(str::to_owned),
+        };
+        assert_eq!(
+            state.roles,
+            Settings {
+                coding: role(Some("opus")),
+                review: Some(role(None)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_record_from_before_roles_ran_claude_code_with_no_review() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}]}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+        assert_eq!(state.roles, Settings::default());
+
+        let mut summary = serde_json::to_value(&state).unwrap();
+        summary.as_object_mut().unwrap().remove("roles");
         let read: BuildState = serde_json::from_value(summary).unwrap();
         assert_eq!(read, state);
     }

@@ -193,13 +193,15 @@ mod headless {
         let mut app = headless(home.path()).spawn().unwrap();
         wait_for_ping(home.path(), &mut app);
 
-        // The fake gh finds no issue, so the build starts and ends at once.
+        // The fake agent passes its check, and the fake gh finds no issue,
+        // so the build starts and ends at once.
         let response = ipc::request(
             &address(home.path()),
             &ipc::Request::Build {
                 repo: "epik-agent/nothing".to_owned(),
                 number: 1,
                 branch: None,
+                roles: None,
             },
         )
         .unwrap();
@@ -218,7 +220,9 @@ mod headless {
 
     /// Puts fake `gh`, `claude` and `node` in `home`'s `~/.local/bin`, and
     /// has git push with gh, so that the setup Epik checks before a build
-    /// is complete. The fake gh answers nothing else.
+    /// is complete. The fake gh answers nothing else. A fake `npx` runs an
+    /// ACP agent that opens a session in `auto` mode and does nothing more,
+    /// which is all Claude Code's check before a build asks.
     #[cfg(not(feature = "desktop"))]
     fn set_up_fakes(home: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -244,6 +248,18 @@ esac"#,
 esac"#,
             ),
             ("node", "echo v26.0.0"),
+            (
+                "npx",
+                r#"while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{"jsonrpc":"2.0","id":\([^,]*\),.*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{}}}' ;;
+    *'"method":"session/new"'*)
+      echo '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"s","modes":{"currentModeId":"auto","availableModes":[{"id":"auto","name":"auto"}]}}}' ;;
+  esac
+done"#,
+            ),
         ];
         for (name, body) in fakes {
             let path = bin.join(name);
