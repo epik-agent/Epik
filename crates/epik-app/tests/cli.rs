@@ -200,7 +200,6 @@ mod headless {
                 repo: "epik-agent/nothing".to_owned(),
                 number: 1,
                 branch: None,
-                plugin_dir: home.path().to_owned(),
             },
         )
         .unwrap();
