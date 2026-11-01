@@ -55,6 +55,17 @@ Still open: whether the reviewer approves a *mutating* tool, `build_start`
 or `issue_set_blocked_by`, as readily as a listing. It approved `git push`
 and `gh pr create` in builds, so probably; C1's first use will tell.
 
+Also open (Bill, 2026-11-01): **Codex inside JetBrains.** Codex runs in
+JetBrains IDEs as an agent in the AI Assistant chat, not as its own
+panel. C1 installs Epik through two user-level files, the skill in
+`~/.agents/skills` and the MCP entry in `~/.codex/config.toml`; OpenAI's
+surfaces (CLI, its VS Code extension, the ChatGPT app) read both, and
+whether JetBrains's embedding does is untested. Try it on RustRover once
+C1 exists: say "Are you Epik?" in a Codex chat there. If it works, C2
+names JetBrains among the Codex clients; if not, the docs say the CLI.
+Epik in JetBrains through *Claude Code's* extension is unaffected either
+way: that is the user-scope plugin, which C doesn't touch.
+
 ## Graph
 
 ```mermaid
