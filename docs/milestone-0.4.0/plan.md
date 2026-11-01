@@ -15,7 +15,7 @@ starting with OpenAI.*
 | `plan.md` | This overview: order, decisions for Bill, what's left out |
 | `adr-agents-and-roles.md` | Draft decision record, in `docs/design-history` style |
 | `adr-remote-hosts.md` | Draft decision record |
-| `epic-agents-and-roles.md` | Epic A: 17 issues, graph, findings still to make |
+| `epic-agents-and-roles.md` | Epic A: 16 issues, graph, findings still to make |
 | `epic-remote-hosts.md` | Epic R: 15 issues, graph, findings still to make |
 | `epic-plan-in-codex.md` | Epic C: 4 issues, graph, its findings (made 2026-10-31) |
 | `adr-ad-hoc-builds.md` | Draft decision record for the release after 0.4.0: a task is a block of work given in words; cites the two records above |

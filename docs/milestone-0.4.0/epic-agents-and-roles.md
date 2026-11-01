@@ -61,7 +61,6 @@ graph LR
   A5["A5 Record each agent session"]
   A6["A6 Codex profile"]
   A7["A7 Checklist knows each agent"]
-  A8["A8 A private copy of Codex"]
   A9["A9 Activity and stream read plain ACP"]
   A10["A10 Review procedure"]
   A11["A11 Reading a review's verdict"]
@@ -77,7 +76,7 @@ graph LR
   A4 --> A5
   A5 --> A6
   A6 --> A7
-  A7 --> A8
+  A7 --> A17
   A7 --> A16
   A1 --> A10
   A5 --> A12
@@ -89,7 +88,6 @@ graph LR
   A7 --> A15
   A12 --> A15
   A14 --> A15
-  A8 --> A17
   A9 --> A17
   A15 --> A17
   A16 --> A17
@@ -298,7 +296,7 @@ reads the latest session's log. Comment wording.
 no cost; without it, `check` fails naming Codex's setting. Comment, audit
 block and totals with a missing cost.
 
-**Out.** Installing or signing in Codex (A7, A8). Reading Codex's tool
+**Out.** Checking or signing in Codex (A7). Reading Codex's tool
 calls (A9).
 
 ---
@@ -330,31 +328,7 @@ Claude Code shouldn't be blocked by it.
 found or missing, signed in or out; which items a build needs for each
 combination of roles; `needed` in the reply.
 
-**Out.** Installing Codex (A8).
-
----
-
-## A8. Install a private copy of Codex
-
-*Probably dropped (probe, 2026-10-31): codex-acp 2.5.0 brings its own
-Codex. Keep only if the bundled copy fails in the probe.*
-
-**Why.** Like `gh` and Node, Codex should be installable without a
-package manager or administrator.
-
-**What.** In `install.rs`: the latest `openai/codex` release's archive for
-this platform, from GitHub's release API. Codex publishes no checksum
-file, so the SHA-256 to check against is the asset's `digest` field in the
-same API response, which is a different source from `install.rs`'s
-checksum lists (`install.rs:83-89,252`). Unpacked to
-`~/.epik/tools/codex/`, replacing an older copy only once the new one is
-verified, as for the others. The `codex` item's step installs it.
-
-**Tests first.** With local test servers, as for `gh`: the right asset
-per platform; a digest mismatch is refused and leaves the old copy; a
-release with no digest is refused.
-
-**Out.** Codex's install script, npm or Homebrew.
+**Out.** Installing Codex: the adapter brings its own, so there is nothing to install.
 
 ---
 
@@ -570,8 +544,7 @@ fails where Claude Code isn't installed, which A7 makes possible.
 
 **What.** Skip the plugin steps, saying so, when `claude` isn't found.
 Codex itself lives in npm's cache with its adapter, not under `~/.epik`,
-so the Tools step is unchanged. (Were A8 kept, the step would name the
-private Codex too.)
+so the Tools step is unchanged.
 
 **Tests first.** In `uninstall.rs`'s tests: no `claude` skips the plugin
 steps, says so, and the rest succeeds.

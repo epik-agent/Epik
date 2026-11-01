@@ -4,9 +4,9 @@
 - Date: 2026-10-31
 - Builds on: [A run is whatever it takes to finish a block of work](2026-10-28-a-run-finishes-a-block-of-work.md);
   [An Epik app runs builds, one agent per issue, and records every run](2026-10-28-epik-runs-the-epic.md);
-  [Agents and roles: each role is an agent and a model, and Codex is the second agent](adr-agents-and-roles.md) (under review), whose
+  [Agents and roles: each role is an agent and a model, and Codex is the second agent](../design-history/2026-10-31-agents-and-roles.md), whose
   §1 puts the procedure in the prompt and whose §6 sends a coding agent back to a pull request;
-  [Builds can run on another machine, which is a headless Epik app reached over SSH](adr-remote-hosts.md) (under review),
+  [Builds can run on another machine, which is a headless Epik app reached over SSH](../design-history/2026-10-31-remote-hosts.md),
   whose mirror names runs by their key
 - Refines: §4 ("One agent process per issue") of "An Epik app runs builds, one agent per issue, and records every run",
   which assumes every block of work is an issue
