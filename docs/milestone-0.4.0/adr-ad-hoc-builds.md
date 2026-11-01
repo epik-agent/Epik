@@ -87,7 +87,11 @@ The protocol gains a `task` request beside `build`, replied to with the
 same `started`. A task that belongs to a run is a build of that run and
 needs no key of its own; `started` names the run. A task on its own is a
 run whose key is `owner/name@<build id>`, the id of its first build,
-which is already unique and sorts by time. Its record
+which is already unique and sorts by time. It is a run in every sense
+the October record gives the word: it has builds, and rerunning it after
+a failure adds one; it is listed, shown, rerun, deleted and mirrored as
+any run is; and it is the third kind of run beside an epic's and a
+single issue's. Its record
 lives at `runs/<owner>/<name>/@<build id>/`, in the layout every run has.
 Its title, wherever runs are shown, is the first line of its words.
 
