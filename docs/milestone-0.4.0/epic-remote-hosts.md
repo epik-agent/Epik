@@ -112,6 +112,8 @@ GUI packages and runs `cargo test -p epik-app --no-default-features`.
 no argument runs headless and serves the socket; `--version` works.
 
 **Out.** Moving `App` into `epik-core`. Release artifacts (R14).
+Silencing `keepawake` on a server with no session bus: it is pure Rust,
+links nothing, and only logs that it couldn't; a server doesn't sleep.
 
 ---
 

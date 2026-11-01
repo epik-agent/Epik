@@ -32,7 +32,7 @@ the agents alone doesn't solve the problem.
 | Is `ssh` everywhere Epik runs? | **Yes.** macOS ships OpenSSH (10.3 here). Windows 10 1809+ and 11 ship the OpenSSH client. Linux has it. |
 | Can a desktop program talk to a remote daemon over SSH without forwarding sockets? | **Yes, by a stdio bridge:** `ssh -T host <program> <bridge>`, as `docker -H ssh://` does with `docker system dial-stdio`. Forwarding a Unix socket (`ssh -L a.sock:b.sock`) is unreliable with Windows' OpenSSH. |
 | Does piping the agent's ACP over `ssh` survive a dropped link? | **No.** Without a pty the remote processes get no SIGHUP and are orphaned, and the build is lost either way. |
-| Does the Epik app run on a server with no desktop? | **Its `--headless` mode does no desktop work, but the binary links Tauri,** so it needs WebKitGTK installed. Tauri has no headless feature. Everything `--headless` runs (`App`, `Builds`, the socket, reconcile) is already free of Tauri. |
+| Does the Epik app run on a server with no desktop? | **Its `--headless` mode does no desktop work, but the binary links Tauri.** Only `epik-app` does (`tauri` with `tray-icon`, `tauri-plugin-dialog`, and `tauri-build`); `epik-core` has no Tauri, GTK or WebKit beneath it, `epik-view` is plain types, and `epik-ui` is WebAssembly embedded as files. On Linux, Tauri links `webkit2gtk-4.1`, `gtk3`, `libsoup3` and `libayatana-appindicator` as shared libraries, which the loader wants before `main` runs, so on a bare server the binary doesn't start. macOS and Windows have them as system frameworks. Tauri has no headless feature; a Cargo feature on `epik-app` is the standard way, and it also drops `tauri-build`, so a headless build needs no `trunk`. |
 | Keeping a daemon alive on Linux | `systemd --user` unit plus `loginctl enable-linger`, the standard practice. |
 | Signing in on a remote machine | `gh auth login` (one-time code, works over SSH) then `gh auth setup-git`; `claude auth login` (paste-back code, works over SSH). `claude setup-token` gives a model-only token without plugin sync, which builds don't need once the procedure travels with the prompt (see the record "Agents and roles: each role is an agent and a model"). |
 
@@ -89,8 +89,13 @@ a remote run is building, it fetches what has been appended every few
 seconds. Otherwise it checks every minute. A run that has left the host
 leaves the mirror. Everything that reads runs, from the runs table and run
 page to the live stream and `build_status`, reads the mirror through the
-code that reads local runs, with the host named beside each run. A run is
-named by its host and `owner/name#number`. A repository built on a host is
+code that reads local runs. **Where a run is building is always shown**:
+every place a run appears, the runs table, the tray menu, the run page,
+the live stream's header, `build_status` and `build_list`, names its host
+("Building on devbox"; "This computer" is never abbreviated away when
+there is more than one host), and a host that can't be reached says when
+it was last heard from. A run is named by its host and
+`owner/name#number`. A repository built on a host is
 added to the local monitored repositories too.
 
 The mirror is a cache. The host owns the run: **Rerun** and **Delete** go
