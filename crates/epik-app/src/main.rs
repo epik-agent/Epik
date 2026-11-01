@@ -223,18 +223,20 @@ impl App {
         // decide whether it sleeps.
         #[cfg(feature = "desktop")]
         let keep_awake = KeepAwake::new(awake::System);
-        let builds = Arc::new(Builds::real(&root).on_active(move |active| {
-            eprintln!("epik-app: {active} build(s) running");
-            #[cfg(feature = "desktop")]
-            match keep_awake.follow(active) {
-                Ok(Some(Change::Held)) => eprintln!("epik-app: keeping the machine awake"),
-                Ok(Some(Change::Released)) => eprintln!("epik-app: letting the machine sleep"),
-                Ok(None) => {}
-                Err(error) => eprintln!("epik-app: couldn't keep the machine awake: {error}"),
-            }
-            on_active(active);
-        }));
         let mirrors = Arc::new(Mirrors::real(&root));
+        let builds = Arc::new(Builds::real(&root).reaching(mirrors.clone()).on_active(
+            move |active| {
+                eprintln!("epik-app: {active} build(s) running");
+                #[cfg(feature = "desktop")]
+                match keep_awake.follow(active) {
+                    Ok(Some(Change::Held)) => eprintln!("epik-app: keeping the machine awake"),
+                    Ok(Some(Change::Released)) => eprintln!("epik-app: letting the machine sleep"),
+                    Ok(None) => {}
+                    Err(error) => eprintln!("epik-app: couldn't keep the machine awake: {error}"),
+                }
+                on_active(active);
+            },
+        ));
         Ok(Self {
             #[cfg(feature = "desktop")]
             root,

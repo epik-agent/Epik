@@ -57,6 +57,9 @@ pub enum Request {
         /// app's settings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         roles: Option<Settings>,
+        /// The remote host to build on, or `None` for the default host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// A run's state.
     Status { run: RunKey },
@@ -169,9 +172,10 @@ fn handle(builds: &Builds, request: Request) -> Response {
             number,
             branch,
             roles,
-        } => match builds.start(&repo, number, branch, roles) {
+            host,
+        } => match builds.build(host.as_deref(), &repo, number, branch, roles) {
             Ok(started) => Response::Started(started),
-            Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
+            Err(message) => Response::error(message),
         },
         Request::Status { run } => status(builds.root(), &run),
         Request::List { limit } => match run::list(builds.root()) {
@@ -739,6 +743,20 @@ mod tests {
     }
 
     #[test]
+    fn build_takes_the_host_to_build_on() {
+        let app = Running::new(fake_github());
+
+        let reply =
+            app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7, "host": "devbox"}"#);
+
+        assert_eq!(
+            reply,
+            json!({"type": "error", "message": "couldn't build owner/repo#7: \"devbox\" is not a host: add it in Settings"})
+        );
+        assert!(app.builds.active().is_empty());
+    }
+
+    #[test]
     fn a_build_request_from_a_client_that_still_sends_a_plugin_is_answered() {
         let app = Running::new(fake_github());
 
@@ -1232,6 +1250,7 @@ mod tests {
             number: 7,
             branch: None,
             roles: None,
+            host: None,
         };
         assert_eq!(
             serde_json::to_value(&build).unwrap(),
@@ -1247,6 +1266,7 @@ mod tests {
             kind: Kind::Epic,
             branch: "epic/1".to_owned(),
             build_dir: "/runs/o/r/1/b".into(),
+            host: None,
         });
         assert_eq!(
             serde_json::to_value(&started).unwrap(),
