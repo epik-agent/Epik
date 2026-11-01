@@ -34,7 +34,7 @@ use epik_core::{record, run, self_link};
 /// whose pull request was closed. Modest to start with; tune it.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 
-const USAGE: &str = "usage: epik-app [--headless | --version | mcp]";
+const USAGE: &str = "usage: epik-app [--headless | --version | mcp | stdio]";
 
 fn main() -> ExitCode {
     find_epiks_tools();
@@ -45,6 +45,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("mcp") => mcp(),
+        Some("stdio") => stdio(),
         Some("--headless") => headless(),
         #[cfg(feature = "desktop")]
         None => tray::run(),
@@ -87,6 +88,25 @@ fn mcp() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("epik-app mcp: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Relays requests from stdin to this machine's app, and its answers to
+/// stdout, one line each, until stdin ends. A local app reaches this one
+/// through it over `ssh`. Stdout is the protocol, so everything else goes
+/// to stderr.
+fn stdio() -> ExitCode {
+    let Some(root) = record::default_root() else {
+        eprintln!("epik-app: there is no home directory to find the app's socket in");
+        return ExitCode::FAILURE;
+    };
+    let address = Address::in_root(&root);
+    match epik_core::ipc::bridge(&address, std::io::stdin().lock(), std::io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("epik-app stdio: {error}");
             ExitCode::FAILURE
         }
     }
