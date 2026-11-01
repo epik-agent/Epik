@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Local, Utc};
 use epik_core::builds::Builds;
+use epik_core::hosted::{HostedKey, HostedRun};
+use epik_core::hosts;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
@@ -30,7 +32,8 @@ use crate::{navigation, pages};
 pub struct Window {
     pub root: PathBuf,
     pub builds: Arc<Builds>,
-    /// The runs of the monitored repositories, which the tray reads too.
+    /// The runs of the monitored repositories, on every host, which the
+    /// tray reads too.
     pub runs: Arc<Runs>,
     /// When this Epik started, for the sidebar's status line and the tray
     /// menu.
@@ -40,8 +43,22 @@ pub struct Window {
 /// The main window's label.
 pub const LABEL: &str = "main";
 
-fn key(run: &str) -> Result<RunKey, String> {
+fn key(run: &str) -> Result<HostedKey, String> {
     run.parse()
+}
+
+/// The run named `run`, which must be on this computer: a remote host owns
+/// its runs, and rerunning or deleting one there isn't done from here yet.
+fn here(run: &str) -> Result<RunKey, String> {
+    match key(run)? {
+        HostedKey { host: None, run } => Ok(run),
+        HostedKey {
+            host: Some(host),
+            run,
+        } => Err(format!(
+            "{run} builds on {host}, and only {host} can change it"
+        )),
+    }
 }
 
 fn failed(error: impl std::fmt::Display) -> String {
@@ -50,16 +67,16 @@ fn failed(error: impl std::fmt::Display) -> String {
 
 #[tauri::command]
 pub fn home(window: State<'_, Window>) -> Result<Home, String> {
-    let runs = window.runs.monitored().map_err(failed)?;
-    Ok(pages::home(&runs, Utc::now()))
+    let shown = window.runs.monitored().map_err(failed)?;
+    Ok(pages::home(&shown, Utc::now()))
 }
 
 #[tauri::command]
 pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
-    let runs = window.runs.monitored().map_err(failed)?;
+    let shown = window.runs.monitored().map_err(failed)?;
     let monitored = repositories::list(&window.root).map_err(failed)?;
     Ok(pages::sidebar(
-        &runs,
+        &shown,
         &monitored,
         window.started,
         Utc::now(),
@@ -68,16 +85,29 @@ pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
 
 #[tauri::command]
 pub fn popover(window: State<'_, Window>) -> Result<Popover, String> {
-    let runs = window.runs.monitored().map_err(failed)?;
-    Ok(pages::popover(&runs, window.started, Utc::now()))
+    let shown = window.runs.monitored().map_err(failed)?;
+    Ok(pages::popover(&shown, window.started, Utc::now()))
 }
 
 #[tauri::command]
 pub fn run_page(run: String, window: State<'_, Window>) -> Result<RunPage, String> {
-    let key = key(&run)?;
-    let state = run::read(&window.root, &key).map_err(failed)?;
-    let others = window.runs.monitored().map_err(failed)?;
-    let builds = record::list_builds(&window.root, &key).map_err(failed)?;
+    let named = key(&run)?;
+    let shown = window.runs.monitored().map_err(failed)?;
+    let host = match &named.host {
+        Some(destination) => Some(
+            shown
+                .hosts
+                .iter()
+                .find(|host| host.destination == *destination)
+                .cloned()
+                .ok_or_else(|| format!("{destination} isn't a host"))?,
+        ),
+        None => None,
+    };
+    let root = named.root(&window.root);
+    let key = named.run;
+    let state = run::read(&root, &key).map_err(failed)?;
+    let builds = record::list_builds(&root, &key).map_err(failed)?;
     let merged_by_build: Vec<Vec<u64>> = builds
         .iter()
         .map(|build| {
@@ -92,10 +122,10 @@ pub fn run_page(run: String, window: State<'_, Window>) -> Result<RunPage, Strin
     let log_dir = state
         .running_build
         .as_deref()
-        .map(|build| record::build_dir(&window.root, &key, build));
+        .map(|build| record::build_dir(&root, &key, build));
     Ok(pages::run_page(
-        &state,
-        &others,
+        &HostedRun { host, state },
+        &shown,
         &merged_by_build,
         log_dir.as_deref(),
         Utc::now(),
@@ -117,7 +147,7 @@ async fn off_main(
 
 #[tauri::command]
 pub async fn rerun(run: String, window: State<'_, Window>) -> Result<(), String> {
-    let key = key(&run)?;
+    let key = here(&run)?;
     let runs = window.runs.clone();
     let rerun = off_main(window, move |builds| builds.rerun(&key).map(drop)).await;
     runs.forget();
@@ -126,7 +156,7 @@ pub async fn rerun(run: String, window: State<'_, Window>) -> Result<(), String>
 
 #[tauri::command]
 pub async fn delete_run(run: String, window: State<'_, Window>) -> Result<(), String> {
-    let key = key(&run)?;
+    let key = here(&run)?;
     let runs = window.runs.clone();
     let deleted = off_main(window, move |builds| builds.delete(&key)).await;
     runs.forget();
@@ -261,18 +291,24 @@ pub fn open_github(url: String) -> Result<(), String> {
 }
 
 /// The stream in the agent log at `path`, which must be one of Epik's
-/// records. A log not written yet has nothing in it.
+/// records, this computer's or a remote host's mirror's. A log not written
+/// yet has nothing in it.
 fn stream(root: &Path, path: &str) -> Result<Stream, String> {
     let path = Path::new(path);
     let refused = || format!("{} isn't an agent's log", path.display());
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(refused());
     };
-    let runs = record::runs_dir(root)
-        .canonicalize()
-        .map_err(|_| refused())?;
     let dir = dir.canonicalize().map_err(|_| refused())?;
-    if !dir.starts_with(runs) {
+    let mirrors = hosts::list(root)
+        .map_err(failed)?
+        .into_iter()
+        .map(|host| hosts::dir(root, &host.destination));
+    let within = std::iter::once(root.to_owned())
+        .chain(mirrors)
+        .filter_map(|root| record::runs_dir(&root).canonicalize().ok())
+        .any(|runs| dir.starts_with(runs));
+    if !within {
         return Err(refused());
     }
     match epik_core::stream::read(&dir.join(name)) {
@@ -322,8 +358,9 @@ pub fn follow(handle: &AppHandle, label: &str, change: Change) {
 }
 
 /// Opens the main window at `route` (`""` for Home, `run/<owner/name#n>`
-/// for a run's page, `settings` for Settings), or brings it forward there,
-/// and puts Epik in the Dock while it is open.
+/// for a run's page on this computer and `run/<host>:<owner/name#n>` for
+/// one on a remote host, `settings` for Settings), or brings it forward
+/// there, and puts Epik in the Dock while it is open.
 pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
     // A run's `#` would end the URL's fragment.
     let hash = format!("#/{}", route.replace('#', "%23"));
@@ -383,6 +420,46 @@ mod tests {
             stream(root.path(), log.to_str().unwrap()),
             Ok(Stream::default())
         );
+    }
+
+    #[test]
+    fn the_stream_is_read_from_a_log_in_a_hosts_mirror() {
+        let root = tempfile::tempdir().unwrap();
+        hosts::add(root.path(), "devbox", Utc::now()).unwrap();
+        let build = hosts::dir(root.path(), "devbox").join("runs/acme/widgets/13/b1");
+        fs::create_dir_all(&build).unwrap();
+        let log = build.join("2.jsonl");
+        fs::write(&log, format!("{LINE}\n")).unwrap();
+
+        let stream = stream(root.path(), log.to_str().unwrap()).unwrap();
+
+        assert_eq!(stream.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_path_in_a_mirror_outside_its_records_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        hosts::add(root.path(), "devbox", Utc::now()).unwrap();
+        let mirror = hosts::dir(root.path(), "devbox");
+        fs::create_dir_all(mirror.join("runs")).unwrap();
+        let stray = mirror.join("secret.jsonl");
+        fs::write(&stray, format!("{LINE}\n")).unwrap();
+        let gone = root.path().join("hosts/gone/runs/acme/widgets/13/b1");
+        fs::create_dir_all(&gone).unwrap();
+        let unlisted = gone.join("2.jsonl");
+        fs::write(&unlisted, format!("{LINE}\n")).unwrap();
+
+        for path in [stray, unlisted] {
+            let refused = stream(root.path(), path.to_str().unwrap());
+            assert!(refused.unwrap_err().ends_with("isn't an agent's log"));
+        }
+    }
+
+    #[test]
+    fn a_hosts_run_cant_be_rerun_or_deleted_from_here_yet() {
+        assert_eq!(here("acme/widgets#13"), Ok(RunKey::new("acme/widgets", 13)));
+        let refused = here("devbox:acme/widgets#13").unwrap_err();
+        assert!(refused.contains("devbox"), "{refused}");
     }
 
     #[test]

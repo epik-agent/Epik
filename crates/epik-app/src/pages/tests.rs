@@ -1,6 +1,7 @@
 use super::*;
 use chrono::TimeZone;
 use epik_core::activity::Activity;
+use epik_core::hosts::{Host, State};
 use epik_core::record::Issue;
 use epik_core::run::RunKey;
 use rust_decimal::Decimal;
@@ -155,6 +156,72 @@ fn failed_run() -> RunState {
     run
 }
 
+/// `run` on this computer.
+fn local(state: RunState) -> HostedRun {
+    HostedRun { host: None, state }
+}
+
+/// The runs, all on this computer, with no remote hosts.
+fn here(runs: impl IntoIterator<Item = RunState>) -> Shown {
+    Shown {
+        hosts: vec![],
+        runs: runs.into_iter().map(local).collect(),
+    }
+}
+
+/// The host `devbox`, last heard from as `state`.
+fn devbox(state: Option<State>) -> Host {
+    Host {
+        destination: "devbox".to_owned(),
+        added_at: time(-7200),
+        heard_at: match &state {
+            Some(State::Reachable { at, .. }) => Some(*at),
+            _ => Some(time(-600)),
+        },
+        state,
+    }
+}
+
+/// `devbox`, which answered a second ago.
+fn reachable() -> Host {
+    devbox(Some(State::Reachable {
+        version: "0.4.0".to_owned(),
+        at: time(119),
+    }))
+}
+
+/// `devbox`, which last answered ten minutes ago, and not since.
+fn unreachable() -> Host {
+    devbox(Some(State::Unreachable {
+        error: "ssh: connect to host devbox port 22: Connection refused".to_owned(),
+        at: time(118),
+    }))
+}
+
+/// `state` on `host`.
+fn on(host: &Host, state: RunState) -> HostedRun {
+    HostedRun {
+        host: Some(host.clone()),
+        state,
+    }
+}
+
+/// `devbox` as `host`, and the runs.
+fn with(host: &Host, runs: Vec<HostedRun>) -> Shown {
+    Shown {
+        hosts: vec![host.clone()],
+        runs,
+    }
+}
+
+/// Exponentiation, numbered `number`.
+fn numbered(number: u64) -> RunState {
+    let mut run = exponentiation();
+    run.run = RunKey::new("wpm/epik-test", number);
+    run.number = number;
+    run
+}
+
 #[test]
 fn a_building_run_says_what_is_running_next_and_done() {
     let card = run_card(&exponentiation(), now());
@@ -266,7 +333,7 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
     second.run = RunKey::new("wpm/tic-tac-toe", 4);
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
 
-    let home = home(&runs, now());
+    let home = home(&here(runs), now());
 
     let keys = |cards: &[RunCard]| cards.iter().map(|c| c.run.clone()).collect::<Vec<_>>();
     assert_eq!(
@@ -282,7 +349,10 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
         home.headline
     );
     assert!(home.headline.ends_with(" awake until they finish."));
-    assert_eq!(super::home(&[], now()).headline, "Nothing is building.");
+    assert_eq!(
+        super::home(&here([]), now()).headline,
+        "Nothing is building."
+    );
 }
 
 #[test]
@@ -292,7 +362,7 @@ fn the_sidebar_lists_runs_needing_attention_then_building_then_waiting() {
     second.title = "Tic-tac-toe".to_owned();
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
 
-    let sidebar = sidebar(&runs, &[], time(0), now());
+    let sidebar = sidebar(&here(runs), &[], time(0), now());
 
     let listed: Vec<(&str, &str, epik_view::Disposition)> = sidebar
         .runs
@@ -336,12 +406,12 @@ fn the_sidebar_marks_settings_while_a_repository_is_missing() {
         missing: true,
     };
 
-    assert!(sidebar(&[], &[missing], time(0), now()).missing_repository);
+    assert!(sidebar(&here([]), &[missing], time(0), now()).missing_repository);
 }
 
 #[test]
 fn the_status_line_says_how_long_epik_has_been_running() {
-    let up = |seconds: i64| sidebar(&[], &[], time(0), time(seconds)).status;
+    let up = |seconds: i64| sidebar(&here([]), &[], time(0), time(seconds)).status;
     assert_eq!(up(0), "Epik running · up 0s");
     assert_eq!(up(4 * 3600 + 12 * 60 + 30), "Epik running · up 4h 12m");
 }
@@ -381,7 +451,7 @@ fn an_agent_is_active_for_a_minute_then_quiet() {
 fn the_tray_menu_counts_the_runs_and_agents_and_says_how_long_epik_has_been_up() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&runs, time(0), time(4 * 3600 + 12 * 60 + 30));
+    let menu = popover(&here(runs), time(0), time(4 * 3600 + 12 * 60 + 30));
 
     assert_eq!(menu.about, "3 runs · 2 agents · up 4h 12m");
 }
@@ -406,10 +476,13 @@ fn restarting_warns_of_the_builds_it_interrupts() {
 fn the_tray_menu_asks_before_interrupting_its_building_runs() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
     assert_eq!(
-        popover(&runs, time(0), time(5)).restart,
+        popover(&here(runs), time(0), time(5)).restart,
         "Interrupt one build?"
     );
-    assert_eq!(popover(&[], time(0), time(5)).restart, "Restart Epik?");
+    assert_eq!(
+        popover(&here([]), time(0), time(5)).restart,
+        "Restart Epik?"
+    );
 }
 
 #[test]
@@ -417,11 +490,11 @@ fn the_tray_menus_counts_read_as_english() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.issue.number != 17);
     assert_eq!(
-        popover(&[run], time(0), time(5)).about,
+        popover(&here([run]), time(0), time(5)).about,
         "1 run · 1 agent · up 5s"
     );
     assert_eq!(
-        popover(&[], time(0), time(0)).about,
+        popover(&here([]), time(0), time(0)).about,
         "0 runs · 0 agents · up 0s"
     );
 }
@@ -430,7 +503,7 @@ fn the_tray_menus_counts_read_as_english() {
 fn the_tray_menu_lists_each_building_run_with_its_progress() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&runs, time(0), now());
+    let menu = popover(&here(runs), time(0), now());
 
     assert_eq!(menu.runs.len(), 1);
     let run = &menu.runs[0];
@@ -457,7 +530,7 @@ fn a_tray_menu_row_times_its_longest_running_issue() {
     run.issues[2].started_at = Some(time(60));
     run.issues[3].started_at = Some(time(30));
 
-    let menu = popover(&[run], time(0), now());
+    let menu = popover(&here([run]), time(0), now());
 
     assert_eq!(
         menu.runs[0].line,
@@ -470,14 +543,14 @@ fn a_tray_menu_row_with_nothing_running_is_starting() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.status != IssueStatus::Running);
 
-    let menu = popover(&[run], time(0), now());
+    let menu = popover(&here([run]), time(0), now());
 
     assert_eq!(menu.runs[0].line, "starting · wpm/epik-test#13");
 }
 
 #[test]
 fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
-    let menu = popover(&[waiting_run(), failed_run()], time(0), now());
+    let menu = popover(&here([waiting_run(), failed_run()]), time(0), now());
 
     assert!(menu.runs.is_empty());
 }
@@ -489,8 +562,8 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     let dir = std::path::Path::new("/runs/wpm/epik-test/13/b0");
 
     let page = run_page(
-        &exponentiation(),
-        &[waiting_run()],
+        &local(exponentiation()),
+        &here([waiting_run()]),
         &merged_by_build,
         Some(dir),
         now(),
@@ -667,5 +740,256 @@ fn uninstalling_reports_each_step_by_its_title_with_any_error() {
                 error: None,
             },
         ]
+    );
+}
+
+#[test]
+fn with_no_hosts_where_a_run_builds_goes_without_saying() {
+    let home = home(&here([exponentiation()]), now());
+
+    assert_eq!(home.building[0].place, None);
+}
+
+#[test]
+fn a_hosts_run_says_it_builds_there() {
+    let shown = with(&reachable(), vec![on(&reachable(), exponentiation())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(home.building[0].run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some("Building on devbox")
+    );
+}
+
+#[test]
+fn with_a_host_this_computers_runs_say_so() {
+    let shown = with(
+        &reachable(),
+        vec![local(exponentiation()), local(waiting_run())],
+    );
+
+    let home = home(&shown, now());
+
+    let building = home.building[0].place.as_deref().unwrap();
+    assert!(building.starts_with("Building on this "), "{building}");
+    let waiting = home.waiting[0].place.as_deref().unwrap();
+    assert!(waiting.starts_with("Built on this "), "{waiting}");
+}
+
+#[test]
+fn a_finished_run_on_a_host_was_built_there() {
+    let shown = with(&reachable(), vec![on(&reachable(), failed_run())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(home.attention[0].place.as_deref(), Some("Built on devbox"));
+}
+
+#[test]
+fn an_unreachable_hosts_run_says_when_it_was_last_heard_from() {
+    let shown = with(
+        &unreachable(),
+        vec![
+            on(&unreachable(), exponentiation()),
+            on(&unreachable(), waiting_run()),
+        ],
+    );
+
+    let home = home(&shown, now());
+
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    assert_eq!(
+        home.waiting[0].place.as_deref(),
+        Some("Built on devbox, last heard from 12m 00s ago.")
+    );
+}
+
+#[test]
+fn a_host_never_heard_from_says_so() {
+    let mut host = unreachable();
+    host.heard_at = None;
+    let shown = with(&host, vec![on(&host, exponentiation())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some(
+            "Building on devbox, which hasn't answered yet. \
+             The build may still be going on there."
+        )
+    );
+}
+
+#[test]
+fn the_headline_keeps_awake_only_for_builds_here() {
+    let host = reachable();
+    let remote = |n| on(&host, numbered(n));
+
+    let only_remote = home(&with(&host, vec![remote(1), remote(2)]), now());
+    assert!(
+        only_remote
+            .headline
+            .starts_with("Two runs building on devbox. This "),
+        "{}",
+        only_remote.headline
+    );
+    assert!(only_remote.headline.ends_with(" can sleep."));
+
+    let one_remote = home(&with(&host, vec![remote(1)]), now());
+    assert!(
+        one_remote
+            .headline
+            .starts_with("One run building on devbox. This "),
+        "{}",
+        one_remote.headline
+    );
+
+    let elsewhere = Host {
+        destination: "me@build.example.com".to_owned(),
+        ..reachable()
+    };
+    let two_hosts = Shown {
+        hosts: vec![host.clone(), elsewhere.clone()],
+        runs: vec![remote(1), on(&elsewhere, numbered(2))],
+    };
+    assert!(
+        home(&two_hosts, now())
+            .headline
+            .starts_with("Two runs building on other hosts. This "),
+    );
+
+    let both = home(
+        &with(&host, vec![remote(1), remote(2), local(numbered(3))]),
+        now(),
+    );
+    assert!(
+        both.headline
+            .starts_with("Three runs building. Keeping this "),
+        "{}",
+        both.headline
+    );
+    assert!(
+        both.headline
+            .ends_with(" awake until the one here finishes."),
+        "{}",
+        both.headline
+    );
+
+    let two_here = home(
+        &with(
+            &host,
+            vec![remote(1), local(numbered(2)), local(numbered(3))],
+        ),
+        now(),
+    );
+    assert!(
+        two_here
+            .headline
+            .ends_with(" awake until the two here finish."),
+        "{}",
+        two_here.headline
+    );
+}
+
+#[test]
+fn a_run_on_a_host_and_one_here_are_listed_apart() {
+    let shown = with(
+        &reachable(),
+        vec![on(&reachable(), exponentiation()), local(exponentiation())],
+    );
+
+    let sidebar = sidebar(&shown, &[], time(0), now());
+
+    let listed: Vec<&str> = sidebar.runs.iter().map(|r| r.run.as_str()).collect();
+    assert_eq!(listed, ["devbox:wpm/epik-test#13", "wpm/epik-test#13"]);
+}
+
+#[test]
+fn the_tray_menu_says_where_each_run_builds() {
+    let shown = with(
+        &unreachable(),
+        vec![on(&unreachable(), exponentiation()), local(numbered(4))],
+    );
+
+    let menu = popover(&shown, time(0), now());
+
+    assert_eq!(menu.runs[0].run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        menu.runs[0].place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    let here = menu.runs[1].place.as_deref().unwrap();
+    assert!(here.starts_with("Building on this "), "{here}");
+}
+
+#[test]
+fn restarting_interrupts_only_the_builds_here() {
+    let host = reachable();
+    let shown = with(&host, vec![on(&host, numbered(1)), local(numbered(2))]);
+    assert_eq!(
+        popover(&shown, time(0), now()).restart,
+        "Interrupt one build?"
+    );
+
+    let only_remote = with(&host, vec![on(&host, numbered(1))]);
+    assert_eq!(
+        popover(&only_remote, time(0), now()).restart,
+        "Restart Epik?"
+    );
+}
+
+#[test]
+fn a_hosts_run_page_says_where_it_builds_and_links_to_the_others_by_host() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let host = unreachable();
+    let run = on(&host, exponentiation());
+    let shown = with(&host, vec![run.clone(), on(&host, numbered(4))]);
+
+    let page = run_page(&run, &shown, &[], None, now(), &zone);
+
+    assert_eq!(page.run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        page.place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    assert_eq!(
+        page.also_building,
+        [(
+            "devbox:wpm/epik-test#4".to_owned(),
+            "Exponentiation".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_run_here_doesnt_count_a_hosts_run_of_the_same_epic_as_itself() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let host = reachable();
+    let here = local(exponentiation());
+    let shown = with(&host, vec![here.clone(), on(&host, exponentiation())]);
+
+    let page = run_page(&here, &shown, &[], None, now(), &zone);
+
+    assert_eq!(
+        page.also_building,
+        [(
+            "devbox:wpm/epik-test#13".to_owned(),
+            "Exponentiation".to_owned()
+        )]
     );
 }

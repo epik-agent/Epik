@@ -7,6 +7,8 @@
 
 use chrono::{DateTime, FixedOffset, Utc};
 use epik_core::graph::Graph;
+use epik_core::hosted::{HostedRun, Shown};
+use epik_core::hosts::State;
 use epik_core::record::{BuildStatus, IssueState, IssueStatus, Kind};
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
@@ -21,7 +23,7 @@ use epik_view::{
 const ACTIVE_FOR: i64 = 60;
 
 /// A run's disposition, as the windows are given it.
-fn shown(disposition: Disposition) -> epik_view::Disposition {
+fn disposition(disposition: Disposition) -> epik_view::Disposition {
     match disposition {
         Disposition::Building => epik_view::Disposition::Building,
         Disposition::WaitingForReview => epik_view::Disposition::WaitingForReview,
@@ -142,6 +144,33 @@ fn this_machine() -> &'static str {
     } else {
         "this computer"
     }
+}
+
+/// How long from `then` to `now`, in words: "12m 00s".
+fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    duration(u64::try_from((now - then).num_milliseconds()).unwrap_or(0))
+}
+
+/// Where `run` builds, when there are remote hosts: "Building on devbox"
+/// or "Built on this Mac", and for a host that couldn't be reached when
+/// last asked, when it was last heard from.
+fn place(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> Option<String> {
+    let building = run.state.disposition == Disposition::Building;
+    let verb = if building { "Building" } else { "Built" };
+    let Some(host) = &run.host else {
+        return (!shown.hosts.is_empty()).then(|| format!("{verb} on {}", this_machine()));
+    };
+    let mut place = format!("{verb} on {}", host.destination);
+    if let Some(State::Unreachable { .. }) = host.state {
+        match host.heard_at {
+            Some(at) => place.push_str(&format!(", last heard from {} ago.", since(at, now))),
+            None => place.push_str(", which hasn't answered yet."),
+        }
+        if building {
+            place.push_str(" The build may still be going on there.");
+        }
+    }
+    Some(place)
 }
 
 /// "active 2s ago" while the agent logged within the last minute, else
@@ -372,7 +401,7 @@ fn attention_words(run: &RunState) -> Words {
     }
 }
 
-/// The run's card at `now`.
+/// The run's card at `now`, as if it were on this computer.
 pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
     let building = run.disposition == Disposition::Building;
     let running: Vec<&IssueState> = run
@@ -435,9 +464,10 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
     RunCard {
         run: run.run.to_string(),
         title: run.title.clone(),
+        place: None,
         epic: link(run.run.to_string(), epic),
         count: count_words(run),
-        disposition: shown(run.disposition),
+        disposition: disposition(run.disposition),
         elapsed: duration(u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0)),
         cost: dollars(run.cost_usd),
         graph: mini_graph(run),
@@ -451,35 +481,83 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
     }
 }
 
-/// "Two runs building. Keeping this Mac awake until they finish."
-fn headline(building: usize) -> String {
-    match building {
-        0 => "Nothing is building.".to_owned(),
-        1 => format!(
-            "One run building. Keeping {} awake until it finishes.",
-            this_machine()
-        ),
-        n => format!(
-            "{} runs building. Keeping {} awake until they finish.",
-            number_word(n),
-            this_machine()
-        ),
+/// "One run building" or "Two runs building".
+fn runs_building(n: usize) -> String {
+    match n {
+        1 => "One run building".to_owned(),
+        n => format!("{} runs building", number_word(n)),
     }
 }
 
-/// Home, for the runs of the monitored repositories, newest activity first,
-/// at `now`.
-pub fn home(runs: &[RunState], now: DateTime<Utc>) -> Home {
+/// "Two runs building. Keeping this Mac awake until they finish.", for
+/// the runs building here and on `hosts`. Only builds here keep this
+/// computer awake.
+fn headline(here: usize, hosts: &[&str]) -> String {
+    let elsewhere = hosts.len();
+    let until = match here {
+        1 if elsewhere > 0 => "the one here finishes".to_owned(),
+        1 => "it finishes".to_owned(),
+        n if elsewhere > 0 => format!("the {} here finish", lowercased_first(&number_word(n))),
+        _ => "they finish".to_owned(),
+    };
+    if here > 0 {
+        return format!(
+            "{}. Keeping {} awake until {until}.",
+            runs_building(here + elsewhere),
+            this_machine()
+        );
+    }
+    if elsewhere == 0 {
+        return "Nothing is building.".to_owned();
+    }
+    let mut on: Vec<&str> = hosts.to_vec();
+    on.sort_unstable();
+    on.dedup();
+    let on = match on.as_slice() {
+        [host] => (*host).to_owned(),
+        _ => "other hosts".to_owned(),
+    };
+    format!(
+        "{} on {on}. {} can sleep.",
+        runs_building(elsewhere),
+        capitalized(this_machine())
+    )
+}
+
+/// `run`'s card among the runs `shown`, at `now`: named by its host, and
+/// saying where it builds.
+fn hosted_card(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> RunCard {
+    RunCard {
+        run: run.key().to_string(),
+        place: place(run, shown, now),
+        ..run_card(&run.state, now)
+    }
+}
+
+/// Home, for the runs `shown`, newest activity first, at `now`.
+pub fn home(shown: &Shown, now: DateTime<Utc>) -> Home {
     let cards = |wanted: Disposition| -> Vec<RunCard> {
-        runs.iter()
-            .filter(|run| run.disposition == wanted)
-            .map(|run| run_card(run, now))
+        shown
+            .runs
+            .iter()
+            .filter(|run| run.state.disposition == wanted)
+            .map(|run| hosted_card(run, shown, now))
             .collect()
     };
-    let building = cards(Disposition::Building);
+    let building: Vec<&HostedRun> = shown
+        .runs
+        .iter()
+        .filter(|run| run.state.disposition == Disposition::Building)
+        .collect();
+    let here = building.iter().filter(|run| run.host.is_none()).count();
+    let hosts: Vec<&str> = building
+        .iter()
+        .filter_map(|run| run.host.as_ref())
+        .map(|host| host.destination.as_str())
+        .collect();
     Home {
-        headline: headline(building.len()),
-        building,
+        headline: headline(here, &hosts),
+        building: cards(Disposition::Building),
         waiting: cards(Disposition::WaitingForReview),
         attention: cards(Disposition::NeedsAttention),
     }
@@ -488,7 +566,7 @@ pub fn home(runs: &[RunState], now: DateTime<Utc>) -> Home {
 /// The main window's sidebar, for the same runs as Home and the monitored
 /// `repositories`, at `now`, for an Epik that started at `started`.
 pub fn sidebar(
-    runs: &[RunState],
+    shown: &Shown,
     repositories: &[Repository],
     started: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -502,11 +580,16 @@ pub fn sidebar(
     Sidebar {
         runs: order
             .iter()
-            .flat_map(|&wanted| runs.iter().filter(move |run| run.disposition == wanted))
+            .flat_map(|&wanted| {
+                shown
+                    .runs
+                    .iter()
+                    .filter(move |run| run.state.disposition == wanted)
+            })
             .map(|run| SidebarRun {
-                run: run.run.to_string(),
-                title: run.title.clone(),
-                disposition: shown(run.disposition),
+                run: run.key().to_string(),
+                title: run.state.title.clone(),
+                disposition: disposition(run.state.disposition),
             })
             .collect(),
         missing_repository: repositories.iter().any(|r| r.missing),
@@ -515,23 +598,31 @@ pub fn sidebar(
 }
 
 /// The tray menu, for the same runs as Home, at `now`, for an Epik that
-/// started at `started`.
-pub fn popover(runs: &[RunState], started: DateTime<Utc>, now: DateTime<Utc>) -> Popover {
-    let building: Vec<&RunState> = runs
+/// started at `started`. Restarting interrupts only the builds here.
+pub fn popover(shown: &Shown, started: DateTime<Utc>, now: DateTime<Utc>) -> Popover {
+    let building: Vec<&HostedRun> = shown
+        .runs
         .iter()
-        .filter(|run| run.disposition == Disposition::Building)
+        .filter(|run| run.state.disposition == Disposition::Building)
         .collect();
-    let agents = building.iter().map(|run| progress(run).running).sum();
+    let agents = building
+        .iter()
+        .map(|run| progress(&run.state).running)
+        .sum();
+    let here = building.iter().filter(|run| run.host.is_none()).count();
     let up = u64::try_from((now - started).num_milliseconds()).unwrap_or(0);
     Popover {
         about: format!(
             "{} · {} · up {}",
-            plural(runs.len(), "run", "runs"),
+            plural(shown.runs.len(), "run", "runs"),
             plural(agents, "agent", "agents"),
             duration(up)
         ),
-        restart: restart_question(building.len()),
-        runs: building.iter().map(|run| tray_run(run, now)).collect(),
+        restart: restart_question(here),
+        runs: building
+            .iter()
+            .map(|run| tray_run(run, shown, now))
+            .collect(),
     }
 }
 
@@ -559,8 +650,10 @@ pub fn restart_warning(building: usize) -> String {
     }
 }
 
-/// A building run's row in the tray menu at `now`.
-fn tray_run(run: &RunState, now: DateTime<Utc>) -> TrayRun {
+/// A building run's row in the tray menu, among the runs `shown`, at
+/// `now`.
+fn tray_run(hosted: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> TrayRun {
+    let run = &hosted.state;
     let running: Vec<&IssueState> = run
         .issues
         .iter()
@@ -579,8 +672,9 @@ fn tray_run(run: &RunState, now: DateTime<Utc>) -> TrayRun {
     }
     line.push(run.run.to_string());
     TrayRun {
-        run: run.run.to_string(),
+        run: hosted.key().to_string(),
         title: run.title.clone(),
+        place: place(hosted, shown, now),
         count: format!("{}/{}", progress(run).merged, run.issues.len()),
         segments: run.issues.iter().map(node_state).collect(),
         line: line.join(" · "),
@@ -808,16 +902,17 @@ fn build_sentence(n: usize, build: &BuildSummary, merged: &[u64], zone: &FixedOf
     }
 }
 
-/// The run page for `run` at `now`, with the other runs building, and the
+/// The run page for `hosted` among the runs `shown` at `now`, with the
 /// directory of its running build's record, where agents' logs are.
 pub fn run_page(
-    run: &RunState,
-    others: &[RunState],
+    hosted: &HostedRun,
+    shown: &Shown,
     merged_by_build: &[Vec<u64>],
     log_dir: Option<&std::path::Path>,
     now: DateTime<Utc>,
     zone: &FixedOffset,
 ) -> RunPage {
+    let run = &hosted.state;
     let layout = layout(&run.issues);
     let p = progress(run);
     let total = run.issues.len();
@@ -876,18 +971,20 @@ pub fn run_page(
         })
         .collect();
     RunPage {
-        run: run.run.to_string(),
+        run: hosted.key().to_string(),
         title: run.title.clone(),
+        place: place(hosted, shown, now),
         epic: link(run.run.to_string(), issue_url(&run.repo, run.number)),
         about,
         sentence,
-        disposition: shown(run.disposition),
+        disposition: disposition(run.disposition),
         elapsed: duration(u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0)),
         cost: dollars(run.cost_usd),
-        also_building: others
+        also_building: shown
+            .runs
             .iter()
-            .filter(|o| o.disposition == Disposition::Building && o.run != run.run)
-            .map(|o| (o.run.to_string(), o.title.clone()))
+            .filter(|o| o.state.disposition == Disposition::Building && o.key() != hosted.key())
+            .map(|o| (o.key().to_string(), o.state.title.clone()))
             .collect(),
         builds,
         columns: layout.columns,

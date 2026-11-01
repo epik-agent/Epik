@@ -78,9 +78,13 @@ pub struct NowLine {
 /// A run, as Home shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCard {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     /// The epic issue, `owner/name#number`, linked.
     pub epic: Span,
     /// "6 issues, 2 merged" or "1 issue".
@@ -117,7 +121,7 @@ pub struct Home {
 /// A run, as the main window's sidebar lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarRun {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
     pub disposition: Disposition,
@@ -139,9 +143,13 @@ pub struct Sidebar {
 /// A building run, as the tray menu lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrayRun {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     /// How many of its issues are merged, of all of them: "3/7".
     pub count: String,
     /// Each issue's state, in the run's order: a segment each of its
@@ -194,8 +202,13 @@ pub struct IssueCard {
 /// The run page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPage {
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     pub epic: Span,
     /// "6 issues · merging into epic/13-exponentiation".
     pub about: Words,
@@ -204,7 +217,7 @@ pub struct RunPage {
     pub disposition: Disposition,
     pub elapsed: String,
     pub cost: String,
-    /// Another run building, to link to: its key and title.
+    /// Another run building, to link to: its name and title.
     pub also_building: Vec<(String, String)>,
     /// Each build in a sentence, the current one first.
     pub builds: Vec<String>,
