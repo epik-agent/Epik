@@ -14,11 +14,15 @@
 #   Epik_amd64.AppImage   Linux, x86-64
 #   Epik_amd64.deb        Linux, x86-64 (Debian, Ubuntu)
 #
-# The app is built with Tauri's bundler through the Tauri CLI, so every
-# step is visible here.
+# The app is built with Tauri's bundler through the Tauri CLI. On macOS
+# the build and its check are `cargo xtask dmg` (crates/xtask), so a Mac
+# can run the same thing.
 #
 # macOS signing is armed by secrets and skipped without them: without them
-# the workflow still runs and produces an unsigned .dmg.
+# the workflow still runs and produces an unsigned .dmg. The check after
+# the build demands what the secrets promised: a verified signature when
+# there was an identity, a notarized and stapled app when there were
+# notarization credentials, and a universal binary always.
 #
 #   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD  the .p12's password
@@ -82,13 +86,13 @@ jobs:
         include:
           - os: macos-latest
             targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
-            args: --target universal-apple-darwin --bundles dmg
+            build: cargo xtask dmg
           - os: windows-latest
             targets: wasm32-unknown-unknown
-            args: --bundles msi
+            build: cargo tauri build --bundles msi
           - os: ubuntu-24.04
             targets: wasm32-unknown-unknown
-            args: --bundles appimage,deb
+            build: cargo tauri build --bundles appimage,deb
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -172,25 +176,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
           # linuxdeploy's own strip fails on newer Ubuntu libraries.
           NO_STRIP: true
-        run: cargo tauri build ${{ matrix.args }}
-
-      # With only the dmg bundle asked for, the bundler deletes the .app it
-      # put in the .dmg, so the app is checked inside the .dmg.
-      - name: Signature and architectures
-        if: runner.os == 'macOS'
-        run: |
-          dmg=$(echo target/universal-apple-darwin/release/bundle/dmg/*.dmg)
-          hdiutil attach -nobrowse -readonly -mountpoint /tmp/epik "$dmg"
-          app=/tmp/epik/Epik.app
-          codesign --verify --deep --strict --verbose=2 "$app" || echo "::notice::unsigned bundle"
-          codesign -dvv "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|Signature)' || true
-          archs=$(lipo -archs "$app/Contents/MacOS/epik-app")
-          hdiutil detach /tmp/epik
-          echo "Architectures: $archs"
-          case "$archs" in
-            *x86_64*arm64* | *arm64*x86_64*) ;;
-            *) echo "::error::The app is not universal: $archs"; exit 1 ;;
-          esac
+        run: ${{ matrix.build }}
 
       # Version-free names, so the latest release's download links never
       # change. Each glob must match exactly one file.
