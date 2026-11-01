@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod prompt;
 pub mod reconcile;
 pub mod record;
+pub mod remote;
 pub mod repositories;
 pub mod review;
 pub mod run;
