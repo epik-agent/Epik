@@ -3,7 +3,8 @@
 //! [`Builds`] starts each build on its own thread, says once it has started
 //! (its run recorded, its repository cloned), knows which are still running,
 //! tells an observer whenever how many are running changes, and cancels and
-//! waits for them all when the app shuts down.
+//! waits for them all when the app shuts down. A build for a remote host is
+//! forwarded to that host's app, which runs it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{AcpClient, Agent, AgentProfile};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
+use crate::hosts;
+use crate::ipc;
+use crate::mirrors::Mirrors;
 use crate::reconcile;
 use crate::record::{self, Kind};
 use crate::repositories;
@@ -34,8 +38,12 @@ pub struct Started {
     pub build_id: String,
     pub kind: Kind,
     pub branch: String,
-    /// The build's record directory, inside its run's.
+    /// The build's record directory, inside its run's, on the machine
+    /// building it.
     pub build_dir: PathBuf,
+    /// The remote host building it, or `None` for this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// The builds the app is running, each on its own thread.
@@ -54,6 +62,8 @@ pub struct Builds {
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// Checks what Epik needs on the machine, under the root.
     setup: Arc<SetupCheck>,
+    /// Reaches the remote hosts, if this app does.
+    hosts: Option<Arc<Mirrors>>,
 }
 
 /// Checks Epik's setup under a root.
@@ -80,7 +90,15 @@ impl Builds {
             on_active: Arc::new(|_| {}),
             threads: Mutex::default(),
             setup: Arc::new(|_| Vec::new()),
+            hosts: None,
         }
+    }
+
+    /// Forwards builds for a remote host through `mirrors`, which keep the
+    /// hosts' mirrors. Without them, a build for a remote host is refused.
+    pub fn reaching(mut self, mirrors: Arc<Mirrors>) -> Self {
+        self.hosts = Some(mirrors);
+        self
     }
 
     /// Checks Epik's setup with `check` before each build, and for
@@ -221,6 +239,7 @@ impl Builds {
                         kind: build.kind(),
                         branch: build.branch().to_owned(),
                         build_dir: build.dir().to_owned(),
+                        host: None,
                     }));
                     build.run(&cancel);
                     change(&active, &*on_active, |active| {
@@ -236,6 +255,122 @@ impl Builds {
         starting
             .recv()
             .unwrap_or_else(|_| Err("the build stopped before it started".to_owned()))
+    }
+
+    /// Starts building `number` in `repo` on `host`, or on the default host
+    /// for none, and returns once the build has started, or with why it
+    /// couldn't, as a sentence. A run on one host isn't built on another.
+    ///
+    /// On this computer it is [`Builds::start`]. A remote host is sent the
+    /// build with `roles`, or this computer's settings, since it has
+    /// settings of its own; it refuses a build it can't run. Once it has
+    /// started, the repository is monitored here too, and the host's mirror
+    /// synced.
+    pub fn build(
+        &self,
+        host: Option<&str>,
+        repo: &str,
+        number: u64,
+        branch: Option<String>,
+        roles: Option<Settings>,
+    ) -> Result<Started, String> {
+        let host = match host {
+            Some(host) => Some(host.to_owned()),
+            None => hosts::default(&self.root)
+                .map_err(|error| format!("couldn't build {repo}#{number}: {error}"))?,
+        };
+        let failed = |why: String| match &host {
+            Some(host) => format!("couldn't build {repo}#{number} on {host}: {why}"),
+            None => format!("couldn't build {repo}#{number}: {why}"),
+        };
+        if let Some(host) = &host {
+            let listed = hosts::list(&self.root)
+                .map_err(|error| failed(format!("couldn't read the hosts: {error}")))?;
+            if !listed.iter().any(|listed| &listed.destination == host) {
+                return Err(format!(
+                    "couldn't build {repo}#{number}: {host:?} is not a host: add it in Settings"
+                ));
+            }
+        }
+        if repositories::is_repo(repo)
+            && let Some(elsewhere) = self.host_of(&RunKey::new(repo, number), host.as_deref())
+        {
+            let key = RunKey::new(repo, number);
+            return Err(failed(format!(
+                "{key} is on {}: rerun or delete it there",
+                elsewhere.as_deref().unwrap_or("this computer")
+            )));
+        }
+        match &host {
+            None => self.start(repo, number, branch, roles).map_err(failed),
+            Some(host) => self
+                .forward(host, repo, number, branch, roles)
+                .map_err(failed),
+        }
+    }
+
+    /// The host other than `building_on` that has a run `key`, `None` within
+    /// for this computer, if any does.
+    fn host_of(&self, key: &RunKey, building_on: Option<&str>) -> Option<Option<String>> {
+        let has = |root: &Path| run::run_dir(root, key).is_dir();
+        if building_on.is_some() && has(&self.root) {
+            return Some(None);
+        }
+        let listed = hosts::list(&self.root).unwrap_or_default();
+        listed
+            .into_iter()
+            .map(|host| host.destination)
+            .filter(|host| Some(host.as_str()) != building_on)
+            .find(|host| has(&hosts::dir(&self.root, host)))
+            .map(Some)
+    }
+
+    /// Sends the build to `host`, with `roles` or this computer's settings.
+    fn forward(
+        &self,
+        host: &str,
+        repo: &str,
+        number: u64,
+        branch: Option<String>,
+        roles: Option<Settings>,
+    ) -> Result<Started, String> {
+        let mirrors = self
+            .hosts
+            .as_ref()
+            .ok_or_else(|| "this Epik app doesn't reach other hosts".to_owned())?;
+        let roles = match roles {
+            Some(roles) => roles,
+            None => settings::read(&self.root)
+                .map_err(|error| format!("couldn't read the settings: {error}"))?,
+        };
+        let request = ipc::Request::Build {
+            repo: repo.to_owned(),
+            number,
+            branch,
+            roles: Some(roles),
+            host: None,
+        };
+        let started = match mirrors.request(host, &request) {
+            Ok(ipc::Response::Started(started)) => started,
+            // The host says what it couldn't build: say only why.
+            Ok(ipc::Response::Error { message }) => {
+                let prefix = format!("couldn't build {repo}#{number}: ");
+                return Err(match message.strip_prefix(&prefix) {
+                    Some(why) => why.to_owned(),
+                    None => message,
+                });
+            }
+            Ok(other) => return Err(format!("{host} answered the build with {other:?}")),
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Err(error) = repositories::add(&self.root, repo, false, Utc::now()) {
+            eprintln!("epik: couldn't monitor {repo}: {error}");
+        }
+        mirrors.sync_now(host);
+        Ok(Started {
+            host: Some(host.to_owned()),
+            ..started
+        })
     }
 
     /// Starts a new build of `run`, which needs attention, as its last
@@ -384,6 +519,8 @@ pub(crate) fn fake_github() -> crate::github::FakeGitHub {
 mod tests {
     use super::*;
     use crate::github::State;
+    use crate::hosts;
+    use crate::mirrors::Mirrors;
     use crate::record::{self, BuildStatus};
 
     fn builds(root: &Path, github: crate::github::FakeGitHub) -> Builds {
@@ -848,5 +985,286 @@ mod tests {
 
         assert_eq!(error, "the Epik app is shutting down");
         assert!(!root.path().join("runs").exists());
+    }
+
+    /// A host's app that records the builds it is asked for, and refuses
+    /// them with `refusal` when there is one.
+    struct Remote {
+        root: tempfile::TempDir,
+        refusal: Option<String>,
+        builds: Mutex<Vec<crate::ipc::Request>>,
+        syncs: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Remote {
+        fn new(refusal: Option<&str>) -> Arc<Self> {
+            Arc::new(Self {
+                root: tempfile::tempdir().unwrap(),
+                refusal: refusal.map(str::to_owned),
+                builds: Mutex::default(),
+                syncs: Default::default(),
+            })
+        }
+
+        fn builds(&self) -> Vec<crate::ipc::Request> {
+            self.builds.lock().unwrap().clone()
+        }
+
+        fn syncs(&self) -> usize {
+            self.syncs.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::remote::Client for Remote {
+        fn request(&self, request: &crate::ipc::Request) -> std::io::Result<crate::ipc::Response> {
+            use crate::ipc::{Request, Response};
+            Ok(match request {
+                Request::Build { repo, number, .. } => {
+                    self.builds.lock().unwrap().push(request.clone());
+                    match &self.refusal {
+                        Some(why) => Response::Error {
+                            message: format!("couldn't build {repo}#{number}: {why}"),
+                        },
+                        None => Response::Started(Started {
+                            run: RunKey::new(repo, *number),
+                            build_id: "20261101T120000Z-abcd".to_owned(),
+                            kind: Kind::Issue,
+                            branch: "main".to_owned(),
+                            build_dir: "/home/me/.epik/runs/owner/repo/7/20261101T120000Z-abcd"
+                                .into(),
+                            host: None,
+                        }),
+                    }
+                }
+                Request::Ping => Response::Pong {
+                    version: crate::version().to_owned(),
+                },
+                Request::Runs => {
+                    self.syncs.fetch_add(1, Ordering::SeqCst);
+                    crate::ipc::records(self.root.path(), request.clone())
+                }
+                other => crate::ipc::records(self.root.path(), other.clone()),
+            })
+        }
+    }
+
+    /// Builds under `root`, which lists the host `devbox`, reached as
+    /// `remote`.
+    fn on_hosts(root: &Path, remote: &Arc<Remote>) -> (Builds, Arc<Mirrors>) {
+        hosts::add(root, "devbox", Utc::now()).unwrap();
+        let mut mirrors = Mirrors::new(root, {
+            let remote = remote.clone();
+            move |_| remote.clone()
+        });
+        mirrors.idle = std::time::Duration::from_secs(3600);
+        let mirrors = Arc::new(mirrors);
+        let builds = builds(root, fake_github()).reaching(mirrors.clone());
+        (builds, mirrors)
+    }
+
+    fn opus() -> Settings {
+        Settings {
+            coding: Role {
+                agent: "claude".to_owned(),
+                model: Some("opus".to_owned()),
+            },
+            review: None,
+        }
+    }
+
+    /// The request a build of `owner/repo#7` forwarded with `roles` is.
+    fn forwarded(roles: Settings) -> crate::ipc::Request {
+        crate::ipc::Request::Build {
+            repo: "owner/repo".to_owned(),
+            number: 7,
+            branch: None,
+            roles: Some(roles),
+            host: None,
+        }
+    }
+
+    #[test]
+    fn a_build_on_a_host_is_forwarded_with_this_computers_roles() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+        settings::write(root.path(), &opus()).unwrap();
+
+        let started = builds
+            .build(Some("devbox"), "owner/repo", 7, None, None)
+            .unwrap();
+
+        assert_eq!(remote.builds(), [forwarded(opus())]);
+        assert_eq!(started.host.as_deref(), Some("devbox"));
+        assert_eq!(started.run, RunKey::new("owner/repo", 7));
+        assert_eq!(started.build_id, "20261101T120000Z-abcd");
+        assert!(builds.active().is_empty(), "nothing builds here");
+        assert!(run::keys(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_build_with_its_own_roles_forwards_those() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+
+        builds
+            .build(Some("devbox"), "owner/repo", 7, None, Some(opus()))
+            .unwrap();
+
+        assert_eq!(remote.builds(), [forwarded(opus())]);
+    }
+
+    #[test]
+    fn a_build_without_a_host_goes_to_the_default_host() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+        hosts::set_default(root.path(), Some("devbox")).unwrap();
+
+        let started = builds.build(None, "owner/repo", 7, None, None).unwrap();
+
+        assert_eq!(remote.builds(), [forwarded(Settings::default())]);
+        assert_eq!(started.host.as_deref(), Some("devbox"));
+    }
+
+    #[test]
+    fn a_build_without_a_host_or_a_default_builds_here() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+
+        let started = builds.build(None, "owner/repo", 7, None, None).unwrap();
+
+        assert_eq!(started.host, None);
+        assert!(remote.builds().is_empty());
+        assert_eq!(builds.active(), [RunKey::new("owner/repo", 7)]);
+    }
+
+    #[test]
+    fn a_build_on_a_host_monitors_its_repository_here_and_syncs_the_host() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, mirrors) = on_hosts(root.path(), &remote);
+        mirrors.refresh().unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while remote.syncs() < 1 && std::time::Instant::now() < until {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(remote.syncs(), 1);
+
+        builds
+            .build(Some("devbox"), "owner/repo", 7, None, None)
+            .unwrap();
+
+        let monitored = repositories::list(root.path()).unwrap();
+        assert_eq!(monitored.len(), 1);
+        assert_eq!(monitored[0].repo, "owner/repo");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while remote.syncs() < 2 && std::time::Instant::now() < until {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(remote.syncs(), 2, "synced at once");
+    }
+
+    #[test]
+    fn a_hosts_refusal_is_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(Some("the coding agent can't run: no model opus"));
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+
+        let error = builds
+            .build(Some("devbox"), "owner/repo", 7, None, Some(opus()))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "couldn't build owner/repo#7 on devbox: the coding agent can't run: no model opus"
+        );
+        assert!(repositories::list(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_host_that_isnt_listed_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+
+        let error = builds
+            .build(Some("elsewhere"), "owner/repo", 7, None, None)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "couldn't build owner/repo#7: \"elsewhere\" is not a host: add it in Settings"
+        );
+        assert!(remote.builds().is_empty());
+    }
+
+    /// Records a finished build of `owner/repo#7` under `root`.
+    fn recorded_run(root: &Path) {
+        let at = Utc::now();
+        let key = RunKey::new("owner/repo", 7);
+        let mut writer = record::BuildWriter::create_new(root, &key, at).unwrap();
+        writer
+            .append(&record::Event::BuildStarted {
+                at,
+                build_id: writer.build_id().to_owned(),
+                repo: "owner/repo".to_owned(),
+                number: 7,
+                title: "An issue".to_owned(),
+                kind: Kind::Issue,
+                branch: "main".to_owned(),
+                issues: Vec::new(),
+                closed: Vec::new(),
+                roles: Settings::default(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_run_on_this_computer_is_not_built_on_a_host() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+        recorded_run(root.path());
+
+        let error = builds
+            .build(Some("devbox"), "Owner/Repo", 7, None, None)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "couldn't build Owner/Repo#7 on devbox: owner/repo#7 is on this computer: \
+             rerun or delete it there"
+        );
+        assert!(remote.builds().is_empty());
+    }
+
+    #[test]
+    fn a_run_on_a_host_is_built_only_there() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+        hosts::add(root.path(), "other", Utc::now()).unwrap();
+        recorded_run(&hosts::dir(root.path(), "devbox"));
+
+        let here = builds.build(None, "owner/repo", 7, None, None).unwrap_err();
+        let other = builds
+            .build(Some("other"), "owner/repo", 7, None, None)
+            .unwrap_err();
+        let there = builds.build(Some("devbox"), "owner/repo", 7, None, None);
+
+        assert_eq!(
+            here,
+            "couldn't build owner/repo#7: owner/repo#7 is on devbox: rerun or delete it there"
+        );
+        assert_eq!(
+            other,
+            "couldn't build owner/repo#7 on other: owner/repo#7 is on devbox: \
+             rerun or delete it there"
+        );
+        assert!(there.is_ok(), "{there:?}");
+        assert!(builds.active().is_empty());
     }
 }

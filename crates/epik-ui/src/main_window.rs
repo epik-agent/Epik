@@ -1,5 +1,6 @@
 //! The main window: a sidebar beside Home (`#/`), a run's page
-//! (`#/run/<owner/name%23n>`), or Settings (`#/settings`). It asks the app
+//! (`#/run/<owner/name%23n>`, or `#/run/<host>:<owner/name%23n>` for a
+//! run on a remote host), or Settings (`#/settings`). It asks the app
 //! what to show every second and draws it. Its only controls are Rerun and
 //! Delete on a run that needs attention, and Settings, which can also
 //! uninstall Epik.
@@ -31,7 +32,8 @@ const REFRESH: Duration = Duration::from_secs(1);
 pub enum Page {
     /// `#/`, and any hash that isn't another page's.
     Home,
-    /// `#/run/<owner/name%23n>`: the run's page.
+    /// `#/run/<owner/name%23n>`, after `<host>:` for a run on a remote
+    /// host: the run's page.
     Run(String),
     /// `#/settings`.
     Settings,
@@ -74,7 +76,7 @@ fn decode(text: &str) -> String {
 }
 
 /// The hash for `path`: `""` for Home, `run/<owner/name#n>` for a run's
-/// page, `settings` for Settings. A run's `#` would end the URL's
+/// page (after `<host>:` on a remote host), `settings` for Settings. A run's `#` would end the URL's
 /// fragment, so it is escaped.
 pub fn href(path: &str) -> String {
     format!("#/{}", path.replace('#', "%23"))

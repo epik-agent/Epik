@@ -59,6 +59,7 @@ pub fn card(now: Vec<NowLine>) -> RunCard {
     RunCard {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         epic: link(
             "acme/widgets#13",
             "https://github.com/acme/widgets/issues/13",
@@ -92,6 +93,7 @@ pub fn tray_run() -> TrayRun {
     TrayRun {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         count: "1/3".into(),
         segments: vec![NodeState::Merged, NodeState::Running, NodeState::NotStarted],
         line: "building #2 · 2m 00s · acme/widgets#13".into(),
@@ -176,6 +178,7 @@ pub fn run_page() -> RunPage {
     RunPage {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         epic: link(
             "acme/widgets#13",
             "https://github.com/acme/widgets/issues/13",

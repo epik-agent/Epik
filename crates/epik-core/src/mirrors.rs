@@ -4,7 +4,8 @@
 //! A host is synced with [`mirror::sync`] every [`BUILDING`] while any of
 //! its mirrored runs is building, else every [`IDLE`], and at once when
 //! asked. A sync that fails records the host as unreachable and leaves its
-//! mirror as it was. Nothing on this computer acts on a mirror: sweeping
+//! mirror as it was. Each host has one client, which its thread and the
+//! requests forwarded to the host share. Nothing on this computer acts on a mirror: sweeping
 //! clones, interrupting builds, reconciling and the closing comment use only
 //! the local root. The decision record
 //! `docs/design-history/2026-10-31-remote-hosts.md` says why.
@@ -37,8 +38,11 @@ pub const IDLE: Duration = Duration::from_secs(60);
 /// How often [`Mirrors::follow_until`] reads the list of hosts again.
 const REFRESH: Duration = Duration::from_secs(5);
 
+/// The client that reaches a host's app.
+type HostClient = Arc<dyn Client + Send + Sync>;
+
 /// Makes the client that reaches a host's app, by its destination.
-type Connect = dyn Fn(&str) -> Box<dyn Client + Send> + Send + Sync;
+type Connect = dyn Fn(&str) -> HostClient + Send + Sync;
 
 /// A thread for each remote host, keeping its mirror current.
 pub struct Mirrors {
@@ -51,13 +55,15 @@ pub struct Mirrors {
     /// What wakes each followed host's thread, by destination. Dropping
     /// one ends its thread.
     followed: Mutex<HashMap<String, Sender<()>>>,
+    /// Each host's client, by destination, made when first wanted.
+    clients: Mutex<HashMap<String, HostClient>>,
 }
 
 impl Mirrors {
     /// Mirrors for the hosts listed under `root`, reached with `connect`.
     pub fn new(
         root: impl Into<PathBuf>,
-        connect: impl Fn(&str) -> Box<dyn Client + Send> + Send + Sync + 'static,
+        connect: impl Fn(&str) -> HostClient + Send + Sync + 'static,
     ) -> Self {
         Self {
             root: root.into(),
@@ -65,12 +71,26 @@ impl Mirrors {
             building: BUILDING,
             idle: IDLE,
             followed: Mutex::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
         }
     }
 
     /// Mirrors for the hosts listed under `root`, reached with `ssh`.
     pub fn real(root: impl Into<PathBuf>) -> Self {
-        Self::new(root, |destination| Box::new(Ssh::new(destination)))
+        Self::new(root, |destination| Arc::new(Ssh::new(destination)))
+    }
+
+    /// Sends `request` to `host`'s app through the client its mirror uses.
+    pub fn request(&self, host: &str, request: &Request) -> io::Result<Response> {
+        self.client(host).request(request)
+    }
+
+    /// `host`'s client, made if it has none.
+    fn client(&self, host: &str) -> HostClient {
+        lock(&self.clients)
+            .entry(host.to_owned())
+            .or_insert_with(|| (self.connect)(host))
+            .clone()
     }
 
     /// Starts a thread for each listed host that has none, which syncs it at
@@ -80,6 +100,7 @@ impl Mirrors {
             .into_iter()
             .map(|host| host.destination)
             .collect();
+        lock(&self.clients).retain(|destination, _| listed.contains(destination));
         let mut followed = lock(&self.followed);
         followed.retain(|destination, _| listed.contains(destination));
         for destination in listed {
@@ -123,10 +144,9 @@ impl Mirrors {
         let (wake, woken) = mpsc::channel();
         let root = self.root.clone();
         let destination = destination.to_owned();
-        let connect = self.connect.clone();
+        let client = self.client(&destination);
         let (building, idle) = (self.building, self.idle);
         thread::spawn(move || {
-            let client = connect(&destination);
             let mirror = hosts::dir(&root, &destination);
             loop {
                 if let Err(error) = sync(&root, &destination, &client, Utc::now()) {
@@ -279,7 +299,7 @@ mod tests {
         }
     }
 
-    impl Client for Arc<Host> {
+    impl Client for Host {
         fn request(&self, request: &Request) -> io::Result<Response> {
             if self.down.load(Ordering::SeqCst) {
                 return Err(io::Error::new(
@@ -315,7 +335,7 @@ mod tests {
     /// every `building` while building and hourly otherwise.
     fn mirrors(root: &Path, host: &Arc<Host>, building: Duration) -> Mirrors {
         let host = host.clone();
-        let mut mirrors = Mirrors::new(root, move |_| Box::new(host.clone()));
+        let mut mirrors = Mirrors::new(root, move |_| host.clone());
         mirrors.building = building;
         mirrors.idle = Duration::from_secs(3600);
         mirrors
@@ -467,5 +487,37 @@ mod tests {
         let after = host.syncs();
         thread::sleep(Duration::from_millis(200));
         assert!(host.syncs() <= after + 1, "{after} then {}", host.syncs());
+    }
+
+    #[test]
+    fn a_request_to_a_host_shares_its_mirrors_client() {
+        let root = local();
+        let host = Host::new();
+        let connected = Arc::new(AtomicUsize::new(0));
+        let mut mirrors = Mirrors::new(root.path(), {
+            let host = host.clone();
+            let connected = connected.clone();
+            move |_| {
+                connected.fetch_add(1, Ordering::SeqCst);
+                host.clone()
+            }
+        });
+        mirrors.idle = Duration::from_secs(3600);
+        mirrors.refresh().unwrap();
+        assert!(eventually(|| host.syncs() == 1));
+
+        let reply = mirrors.request("devbox", &Request::Ping).unwrap();
+
+        assert_eq!(
+            reply,
+            Response::Pong {
+                version: "0.4.1".to_owned()
+            }
+        );
+        assert_eq!(
+            connected.load(Ordering::SeqCst),
+            1,
+            "one client for the host"
+        );
     }
 }

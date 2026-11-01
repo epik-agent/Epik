@@ -202,6 +202,7 @@ mod headless {
                 number: 1,
                 branch: None,
                 roles: None,
+                host: None,
             },
         )
         .unwrap();

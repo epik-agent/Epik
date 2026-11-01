@@ -38,6 +38,12 @@ impl<C: Client + ?Sized> Client for Box<C> {
     }
 }
 
+impl<C: Client + ?Sized> Client for std::sync::Arc<C> {
+    fn request(&self, request: &Request) -> io::Result<Response> {
+        (**self).request(request)
+    }
+}
+
 /// A host's app, reached through `ssh <destination>`.
 pub struct Ssh {
     destination: String,

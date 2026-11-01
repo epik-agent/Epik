@@ -70,6 +70,7 @@ pub fn start(context: &Context, args: &Args) -> Result<Reply, String> {
         number: integer(args, "number").unwrap_or_default() as u64,
         branch: string(args, "branch").map(str::to_owned),
         roles: None,
+        host: None,
     };
     match request(context, &build, true)? {
         Response::Started(started) => Ok(Reply::Json(json!({
