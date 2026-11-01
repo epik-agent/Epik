@@ -14,6 +14,7 @@ pub mod install;
 pub mod ipc;
 pub mod mcp;
 pub mod mirror;
+pub mod mirrors;
 pub mod prompt;
 pub mod reconcile;
 pub mod record;
