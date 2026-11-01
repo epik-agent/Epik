@@ -578,7 +578,18 @@ mod tests {
         let second = builds(root.path(), github());
         second.rerun(&started.run).unwrap();
 
-        let run = run::read(root.path(), &started.run).unwrap();
+        // `rerun` returns once the build has started; its thread starts issue 3 a moment later.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let run = loop {
+            let run = run::read(root.path(), &started.run).unwrap();
+            let running = run
+                .issue(3)
+                .is_some_and(|issue| issue.status == record::IssueStatus::Running);
+            if running || std::time::Instant::now() >= deadline {
+                break run;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        };
         assert_eq!(run.builds.len(), 2);
         assert_eq!(run.issue(2).unwrap().status, record::IssueStatus::Closed);
         assert_eq!(run.issue(3).unwrap().status, record::IssueStatus::Running);
