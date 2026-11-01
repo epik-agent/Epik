@@ -19,6 +19,7 @@ pub mod repositories;
 pub mod review;
 pub mod run;
 pub mod self_link;
+pub mod settings;
 pub mod setup;
 pub mod stream;
 mod tail;
