@@ -1,0 +1,34 @@
+name: CodeQL
+
+# CodeQL's Rust analysis takes about ten minutes, so it runs once a night
+# instead of on every pull request. This replaces GitHub's default setup,
+# whose triggers (every push, every pull request, weekly) can't be changed.
+on:
+  schedule:
+    # 09:00 UTC is the small hours in the U.S.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    # GitHub appends the matrix's language to the name: "Analyze (rust)".
+    name: Analyze
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Uploading results to the Security tab.
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python, rust]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          # Every language here is analyzed from source, without a build.
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
