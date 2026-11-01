@@ -950,9 +950,8 @@ pub fn run_page(
             let log = log_dir
                 .filter(|_| issue.status == IssueStatus::Running)
                 .map(|dir| {
-                    dir.join(format!("{}.jsonl", issue.issue.number))
-                        .display()
-                        .to_string()
+                    let build_id = run.running_build.as_deref().unwrap_or_default();
+                    dir.join(issue.log(build_id)).display().to_string()
                 });
             issue_card(run, issue, (*column, *row), now, log)
         })
