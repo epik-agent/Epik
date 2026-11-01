@@ -41,3 +41,21 @@ itself at `~/.epik/bin/epik-app`, which is where the plugin finds Epik's
 tools. Where there is no tray, such as a server without a desktop, the app
 runs without one and builds the same. To try the plugin from a clone, see
 [`plugin/README.md`](plugin/README.md).
+
+### The macOS installer
+
+The release workflow builds the universal `.dmg` with `cargo xtask dmg`,
+which a Mac with the Tauri CLI and both Apple targets can run too:
+
+```
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo install tauri-cli --version 2.12.4 --locked
+cargo xtask dmg
+```
+
+The build signs when `APPLE_SIGNING_IDENTITY` is set and notarizes when
+`APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` are, and the check that
+follows demands each of those the environment promised. Notarization
+credentials are repository secrets, so a local build is signed at most;
+`cargo xtask check-dmg [path]` checks a `.dmg` already built, such as
+one downloaded from a release.
