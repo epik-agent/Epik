@@ -29,6 +29,9 @@ pub struct Host {
     /// What was last heard from it, if anything has been.
     #[serde(default)]
     pub state: Option<State>,
+    /// When it last answered, if it ever has.
+    #[serde(default)]
+    pub heard_at: Option<DateTime<Utc>>,
 }
 
 /// What was last heard from a host.
@@ -175,6 +178,7 @@ pub fn add(root: &Path, destination: &str, now: DateTime<Utc>) -> io::Result<boo
             destination: destination.to_owned(),
             added_at: now,
             state: None,
+            heard_at: None,
         });
         Ok((true, true))
     })
@@ -200,7 +204,8 @@ pub fn remove(root: &Path, destination: &str) -> io::Result<()> {
     })
 }
 
-/// Records what was last heard from `destination`.
+/// Records what was last heard from `destination`, and when it last
+/// answered if it did.
 pub fn set_state(root: &Path, destination: &str, state: State) -> io::Result<()> {
     change(root, |hosts| {
         let host = hosts
@@ -209,6 +214,9 @@ pub fn set_state(root: &Path, destination: &str, state: State) -> io::Result<()>
             .find(|h| h.destination == destination)
             .ok_or_else(|| not_a_host(destination))?;
         let changed = host.state.as_ref() != Some(&state);
+        if let State::Reachable { at, .. } = &state {
+            host.heard_at = Some(*at);
+        }
         host.state = Some(state);
         Ok((changed, ()))
     })
@@ -268,11 +276,13 @@ mod tests {
                     destination: "devbox".to_owned(),
                     added_at: time(1),
                     state: None,
+                    heard_at: None,
                 },
                 Host {
                     destination: "me@build.example.com".to_owned(),
                     added_at: time(2),
                     state: None,
+                    heard_at: None,
                 },
             ]
         );
@@ -377,6 +387,26 @@ mod tests {
         assert_eq!(list(root.path()).unwrap()[0].state, Some(reachable));
         set_state(root.path(), "devbox", unreachable.clone()).unwrap();
         assert_eq!(list(root.path()).unwrap()[0].state, Some(unreachable));
+    }
+
+    #[test]
+    fn a_host_was_last_heard_from_when_it_last_answered() {
+        let root = tempfile::tempdir().unwrap();
+        add(root.path(), "devbox", time(1)).unwrap();
+        assert_eq!(list(root.path()).unwrap()[0].heard_at, None);
+
+        let reachable = State::Reachable {
+            version: "0.4.0".to_owned(),
+            at: time(2),
+        };
+        set_state(root.path(), "devbox", reachable).unwrap();
+        let unreachable = State::Unreachable {
+            error: "ssh: connect to host devbox port 22: Connection refused".to_owned(),
+            at: time(3),
+        };
+        set_state(root.path(), "devbox", unreachable).unwrap();
+
+        assert_eq!(list(root.path()).unwrap()[0].heard_at, Some(time(2)));
     }
 
     #[test]

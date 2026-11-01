@@ -554,3 +554,32 @@ fn a_runs_page_streams_the_chosen_issues_log() {
     assert!(!html.contains("Thinking"), "{html}");
     assert!(html.contains("Nothing yet."), "{html}");
 }
+
+#[test]
+fn a_hosts_runs_page_says_where_it_builds_under_its_sentence() {
+    let mut page = run_page();
+    page.run = "devbox:acme/widgets#13".into();
+    page.place = Some("Building on devbox".into());
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(
+        html.contains(r#"</p><p class="place">Building on devbox</p></div>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_runs_page_with_nowhere_to_say_says_nothing_of_it() {
+    let html = render(|| view! { <RunView page=run_page() chosen=None/> });
+    assert!(!html.contains(r#"class="place""#), "{html}");
+}
+
+#[test]
+fn another_run_building_on_a_host_is_linked_by_its_host() {
+    let mut page = run_page();
+    page.also_building = vec![("devbox:acme/tools#2".into(), "Lint".into())];
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(
+        html.contains(r##"<a href="#/run/devbox:acme/tools%232">Lint</a>"##),
+        "{html}"
+    );
+}

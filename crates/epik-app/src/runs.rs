@@ -1,5 +1,5 @@
-//! The runs of the monitored repositories, as the window and the tray see
-//! them.
+//! The runs of the monitored repositories, this computer's and each remote
+//! host's, as the window and the tray see them.
 //!
 //! The sidebar, the page beside it and the tray icon each ask for the runs
 //! every second or two, and reading them means reading every run's record.
@@ -12,17 +12,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use epik_core::repositories;
-use epik_core::run::RunState;
+use epik_core::hosted::{self, Shown};
 
 /// How long the runs read are kept.
 const FRESH: Duration = Duration::from_secs(1);
 
-/// The runs of the monitored repositories under `root`, read at most once
-/// a second.
+/// The runs of the repositories monitored under `root`, on every host,
+/// read at most once a second.
 pub struct Runs {
     root: PathBuf,
-    kept: Mutex<Option<(Instant, Arc<Vec<RunState>>)>>,
+    kept: Mutex<Option<(Instant, Arc<Shown>)>>,
 }
 
 impl Runs {
@@ -34,11 +33,11 @@ impl Runs {
     }
 
     /// The runs, as read in the last second, or read now.
-    pub fn monitored(&self) -> io::Result<Arc<Vec<RunState>>> {
+    pub fn monitored(&self) -> io::Result<Arc<Shown>> {
         self.monitored_at(Instant::now())
     }
 
-    fn monitored_at(&self, now: Instant) -> io::Result<Arc<Vec<RunState>>> {
+    fn monitored_at(&self, now: Instant) -> io::Result<Arc<Shown>> {
         let mut kept = self
             .kept
             .lock()
@@ -48,7 +47,7 @@ impl Runs {
         {
             return Ok(runs.clone());
         }
-        let runs = Arc::new(repositories::monitored_runs(&self.root)?);
+        let runs = Arc::new(hosted::monitored(&self.root)?);
         *kept = Some((now, runs.clone()));
         Ok(runs)
     }

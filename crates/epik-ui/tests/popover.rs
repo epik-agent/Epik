@@ -183,3 +183,29 @@ fn until_chosen_restart_is_an_item() {
     assert!(html.contains(r#"<button type="button" id="restart" class="item"><span class="label">Restart</span></button>"#), "{html}");
     assert!(!html.contains("Interrupt"), "{html}");
 }
+
+#[test]
+fn a_run_row_says_where_it_builds() {
+    let mut run = tray_run();
+    run.run = "devbox:acme/widgets#13".into();
+    run.place = Some("Building on devbox".into());
+    let html = render(|| view! { <RunRow run/> });
+    assert!(
+        html.contains(r#"<div class="place">Building on devbox</div><div class="line">"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_run_row_with_nowhere_to_say_says_nothing_of_it() {
+    let html = render(|| view! { <RunRow run=tray_run()/> });
+    assert!(!html.contains(r#"class="place""#), "{html}");
+}
+
+#[test]
+fn a_hosts_run_row_opens_its_run_page_by_host() {
+    assert_eq!(
+        Command::open_run("devbox:acme/widgets#13"),
+        Command::OpenMain("run/devbox:acme/widgets#13".into())
+    );
+}

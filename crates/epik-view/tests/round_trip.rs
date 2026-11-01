@@ -39,6 +39,7 @@ fn card(disposition: Disposition) -> RunCard {
     RunCard {
         run: "o/r#13".to_owned(),
         title: "Exponentiation".to_owned(),
+        place: None,
         epic: link("o/r#13", "https://github.com/o/r/issues/13"),
         count: "2 issues, 1 merged".to_owned(),
         disposition,
@@ -89,7 +90,7 @@ fn home() {
 fn sidebar() {
     round_trip(Sidebar {
         runs: vec![SidebarRun {
-            run: "o/r#13".to_owned(),
+            run: "devbox:o/r#13".to_owned(),
             title: "Exponentiation".to_owned(),
             disposition: Disposition::NeedsAttention,
         }],
@@ -104,8 +105,9 @@ fn popover() {
         about: "1 run · 2 agents · up 4h 12m".to_owned(),
         restart: "Interrupt one build?".to_owned(),
         runs: vec![TrayRun {
-            run: "o/r#13".to_owned(),
+            run: "devbox:o/r#13".to_owned(),
             title: "Exponentiation".to_owned(),
+            place: Some("Building on devbox".to_owned()),
             count: "1/3".to_owned(),
             segments: vec![NodeState::Merged, NodeState::Running, NodeState::Failed],
             line: "building #2 · 2m 00s · o/r#13".to_owned(),
@@ -118,6 +120,7 @@ fn run_page() {
     round_trip(RunPage {
         run: "o/r#13".to_owned(),
         title: "Exponentiation".to_owned(),
+        place: Some("Building on devbox, last heard from 12m 00s ago.".to_owned()),
         epic: link("o/r#13", "https://github.com/o/r/issues/13"),
         about: vec![text("2 issues · merging into "), code("epic/13")],
         sentence: "First build running.".to_owned(),

@@ -104,7 +104,8 @@ fn line(label: &'static str, sentence: Memo<Option<Sentence>>) -> impl IntoView 
     }
 }
 
-/// A run's row: its title and repository, graph and progress, a dot and
+/// A run's row: its title and repository, and where it builds if there is
+/// more than one host; its graph and progress, a dot and
 /// its sentence, its time and cost, and Rerun and Delete if it needs
 /// attention or else Open ›. A building run's row unfolds to its Now, Next
 /// and Done lines.
@@ -134,6 +135,7 @@ fn run_row(
     let page = part(card, |card| href(&format!("run/{}", card.run)));
     let title = part(card, |card| card.title.clone());
     let epic = part(card, |card| card.epic.clone());
+    let place = part(card, |card| card.place.clone());
     let graph = part(card, |card| card.graph.clone());
     let progress = part(card, |card| card.progress);
     let sentence = part(card, |card| {
@@ -208,6 +210,7 @@ fn run_row(
                             view! { <GithubLink text=epic.text url=epic.url.unwrap_or_default()/> }
                         }}
                     </div>
+                    {move || place.get().map(|place| view! { <div class="place">{place}</div> })}
                 </td>
                 <td class="progress-cell">
                     {move || view! { <MiniGraph graph=graph.get()/> }}

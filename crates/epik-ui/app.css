@@ -100,6 +100,7 @@ table.run-table {
 .run-table .fold { border: none; background: none; padding: 0 4px; font-size: 10px; color: var(--muted); }
 .run-cell .title { display: block; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-cell .repo a { font: 11px var(--mono); color: var(--secondary); text-decoration: underline dotted; }
+.run-cell .place { margin-top: 2px; font-size: 11px; color: var(--secondary); }
 .progress-cell .progress { margin: 6px 0 0; }
 .run-table .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); }
 .run-table .status .dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent-fill); }
@@ -156,6 +157,7 @@ table.run-table {
 .run-head h1 { margin: 6px 0 4px; font-size: 22px; font-weight: 600; }
 .sentence { margin: 0; color: var(--accent); }
 .sentence.needs_attention { color: var(--error); }
+.run-head .place { margin: 4px 0 0; color: var(--secondary); }
 .totals { display: grid; grid-template-columns: auto auto; gap: 2px 28px; margin: 0; text-align: right; }
 .totals dt { grid-row: 1; font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .totals dd { grid-row: 2; margin: 0; font: 600 17px var(--mono); }

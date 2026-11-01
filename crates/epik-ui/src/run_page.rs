@@ -271,6 +271,7 @@ pub fn RunView(
     let about = part(page, |page| page.about.clone());
     let title = part(page, |page| page.title.clone());
     let sentence = part(page, |page| page.sentence.clone());
+    let place = part(page, |page| page.place.clone());
     let disposition = part(page, |page| page.disposition);
     let elapsed = part(page, |page| page.elapsed.clone());
     let cost = part(page, |page| page.cost.clone());
@@ -319,6 +320,7 @@ pub fn RunView(
                 <div class="about">{link(epic)}" · "{words(about, None)}</div>
                 <h1>{title}</h1>
                 <p class=move || format!("sentence {}", disposition_class(disposition.get()))>{sentence}</p>
+                {move || place.get().map(|place| view! { <p class="place">{place}</p> })}
             </div>
             <dl class="totals">
                 <dt>"Elapsed"</dt>

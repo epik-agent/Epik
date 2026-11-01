@@ -27,6 +27,7 @@ button.run:hover, button.item:hover { background: var(--raised); }
 .segments .merged { background: #6ee7b7; }
 .segments .running { background: var(--accent); }
 .segments .failed { background: var(--error); }
+.place { font-size: 11px; color: var(--secondary); }
 .line { font: 11px var(--mono); color: var(--secondary); }
 .items { padding-top: 4px; }
 hr { border: none; border-top: 1px solid var(--border); margin: 4px; }
