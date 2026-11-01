@@ -272,3 +272,19 @@ Whether the app is there, and its version.
 ```json
 {"type": "pong", "version": "0.3.0"}
 ```
+
+## Reaching an app on another machine
+
+`epik-app stdio` carries the protocol over its stdin and stdout, so a client reaches the app on another machine by
+running it there, as `ssh host epik-app stdio`. A command works with every `ssh`, where forwarding a socket doesn't with
+Windows' OpenSSH.
+
+Each line it reads is a request, sent as it is to the app on its own machine over a connection of its own. Each reply is
+written to stdout as one line and flushed, in the order the requests came. Nothing else goes to stdout. It stops at the
+end of its input.
+
+`stdio` doesn't start the app. While the app isn't running, each request is answered with an error saying so:
+
+```json
+{"type": "error", "message": "no Epik app is running at /home/me/.epik/epik.sock on this machine: start it with `epik-app --headless`, or start its service"}
+```

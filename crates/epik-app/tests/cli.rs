@@ -200,7 +200,6 @@ mod headless {
                 repo: "epik-agent/nothing".to_owned(),
                 number: 1,
                 branch: None,
-                plugin_dir: home.path().to_owned(),
             },
         )
         .unwrap();
@@ -326,5 +325,112 @@ mod mcp {
         let expected: Value =
             serde_json::from_str(include_str!("../../epik-core/src/mcp/tools.json")).unwrap();
         assert_eq!(Value::from(listed), expected);
+    }
+}
+
+/// `epik-app stdio` with its home in a temporary directory, relaying to a
+/// test server bound there; on macOS and Linux only, since Windows's pipe
+/// is shared by every app on the machine.
+#[cfg(unix)]
+mod stdio {
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Command, Output, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    use epik_core::builds::Builds;
+    use epik_core::ipc::{Address, Server};
+    use serde_json::Value;
+
+    /// Runs `epik-app stdio` with its home in `home`, writes `input` to its
+    /// stdin, and waits for it to end.
+    fn relay(home: &Path, input: &str) -> Output {
+        let mut stdio = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .arg("stdio")
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        stdio
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        stdio.wait_with_output().unwrap()
+    }
+
+    /// Serves the socket in `home` while `f` runs.
+    fn with_server<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let root = home.join(".epik");
+        let server = Server::bind(&Address::in_root(&root)).unwrap();
+        let builds = Arc::new(Builds::real(&root));
+        let stop = Arc::new(AtomicBool::new(false));
+        let serving = thread::spawn({
+            let stop = stop.clone();
+            move || server.serve(builds, &stop)
+        });
+        let result = f();
+        stop.store(true, Ordering::SeqCst);
+        serving.join().unwrap();
+        result
+    }
+
+    /// Each line of `output`'s stdout, as JSON.
+    fn replies(output: &Output) -> Vec<Value> {
+        String::from_utf8(output.stdout.clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn it_answers_each_request_in_order() {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = with_server(home.path(), || {
+            relay(home.path(), "{\"type\": \"ping\"}\n{\"type\": \"runs\"}\n")
+        });
+
+        assert!(output.status.success(), "{output:?}");
+        let replies = replies(&output);
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0]["type"], "pong", "{replies:?}");
+        assert_eq!(replies[0]["version"], epik_core::version());
+        assert_eq!(replies[1]["type"], "run_keys", "{replies:?}");
+    }
+
+    #[test]
+    fn a_line_that_isnt_json_gets_the_servers_bad_request() {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = with_server(home.path(), || relay(home.path(), "not json\n"));
+
+        assert!(output.status.success(), "{output:?}");
+        let replies = replies(&output);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["type"], "error", "{replies:?}");
+        let message = replies[0]["message"].as_str().unwrap();
+        assert!(message.starts_with("bad request: "), "{message}");
+    }
+
+    #[test]
+    fn with_no_app_running_the_error_says_how_to_start_one() {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = relay(home.path(), "{\"type\": \"ping\"}\n");
+
+        assert!(output.status.success(), "{output:?}");
+        let replies = replies(&output);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["type"], "error", "{replies:?}");
+        let message = replies[0]["message"].as_str().unwrap();
+        assert!(message.contains("epik-app --headless"), "{message}");
+        assert!(message.contains("service"), "{message}");
     }
 }

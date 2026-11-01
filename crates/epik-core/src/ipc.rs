@@ -517,11 +517,54 @@ fn write_line(stream: &mut Stream, value: &impl Serialize) -> io::Result<()> {
 
 /// Sends `request` to the app at `address` and returns its answer.
 pub fn request(address: &Address, request: &Request) -> io::Result<Response> {
-    let mut stream = Stream::connect(address.name()?)?;
-    write_line(&mut stream, request)?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
-    Ok(serde_json::from_str(&line)?)
+    let stream = Stream::connect(address.name()?)?;
+    let reply = exchange(stream, &serde_json::to_string(request)?)?;
+    Ok(serde_json::from_str(&reply)?)
+}
+
+/// Relays each line of `input` to the app at `address` as it is, and
+/// writes each answer to `output` as a line, flushed, until `input` ends.
+/// When the app can't be reached, the answer is an error saying why. This
+/// is how a client on another machine reaches the app: `epik-app stdio`,
+/// run over `ssh`.
+pub fn bridge(address: &Address, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+    for line in input.lines() {
+        let line = line?;
+        let reply = match address.name().and_then(Stream::connect) {
+            Err(_) => serde_json::to_string(&Response::error(format!(
+                "no Epik app is running at {address} on this machine: start it with \
+                 `epik-app --headless`, or start its service"
+            )))?,
+            Ok(stream) => match exchange(stream, &line) {
+                Ok(reply) => reply,
+                Err(error) => serde_json::to_string(&Response::error(format!(
+                    "couldn't reach the Epik app at {address}: {error}"
+                )))?,
+            },
+        };
+        output.write_all(reply.as_bytes())?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+/// Writes `line`, a request as JSON, to `stream`, and returns the answer,
+/// a line of JSON without its `\n`.
+fn exchange(mut stream: Stream, line: &str) -> io::Result<String> {
+    stream.write_all(line.trim_end_matches(['\r', '\n']).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    if !reply.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the app closed the connection without answering",
+        ));
+    }
+    reply.truncate(reply.trim_end_matches(['\r', '\n']).len());
+    Ok(reply)
 }
 
 #[cfg(test)]
