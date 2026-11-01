@@ -488,6 +488,7 @@ mod tests {
                 },
             ],
             closed: closed.to_vec(),
+            roles: Default::default(),
         }
     }
 
@@ -771,6 +772,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
+                roles: Default::default(),
             })
             .unwrap();
         std::fs::create_dir_all(run_dir(root.path(), &RunKey::new("wpm/empty", 1))).unwrap();

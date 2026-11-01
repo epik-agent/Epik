@@ -218,6 +218,7 @@ mod tests {
                     blocked_by: vec![],
                 }],
                 closed: vec![],
+                roles: Default::default(),
             },
             Event::IssueStarted {
                 at: time(1),

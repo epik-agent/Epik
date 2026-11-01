@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 pub use epik_view::{AgentSettings as Settings, Role};
 
+use crate::agent::AgentProfile;
+
 /// The file the settings are kept in.
 pub const FILE: &str = "settings.json";
 
@@ -28,19 +30,26 @@ fn path(root: &Path) -> PathBuf {
     root.join(FILE)
 }
 
+/// The profile of the agent `role` runs, or why there is none: it is an
+/// agent Epik doesn't know.
+pub fn profile(role: &Role) -> Result<AgentProfile, String> {
+    match role.agent.as_str() {
+        "claude" => Ok(AgentProfile::claude()),
+        agent => Err(format!(
+            "{agent:?} is not an agent Epik knows: the agents are {}",
+            AGENTS.join(", ")
+        )),
+    }
+}
+
 /// Why `settings` can't be used, if an agent in them is one Epik doesn't
 /// know.
 fn unknown_agent(settings: &Settings) -> Option<String> {
     let roles = [Some(&settings.coding), settings.review.as_ref()];
-    roles.into_iter().flatten().find_map(|role| {
-        (!AGENTS.contains(&role.agent.as_str())).then(|| {
-            format!(
-                "{:?} is not an agent Epik knows: the agents are {}",
-                role.agent,
-                AGENTS.join(", ")
-            )
-        })
-    })
+    roles
+        .into_iter()
+        .flatten()
+        .find_map(|role| profile(role).err())
 }
 
 /// The settings, or the defaults if they have never been written. A file

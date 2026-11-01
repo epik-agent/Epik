@@ -47,6 +47,15 @@ Starts building an epic or a single issue.
 - `number`: the epic or issue. An issue with sub-issues is built as an epic.
 - `branch` (optional): the branch the issues' pull requests merge into. By default `epic/<number>-<slug of title>` for
   an epic, and the repository's default branch for a single issue.
+- `roles` (optional): the agent and model each role runs with, in the shape of `~/.epik/settings.json`:
+  `{"coding": {"agent": "claude", "model": "opus"}, "review": null}`. `review` is `null` while review is off, and a
+  `null` model is the agent's default. Without `roles`, the build runs with the app's settings. A build forwarded from
+  another machine sends the roles it was started with.
+
+Before anything is recorded, the app opens a session, without a prompt, with the coding agent and, when review is on,
+the review agent, to check that each runs unattended and offers its model. An agent that can't refuses the build with an
+error naming the agent, the model and the models it offers, as a missing setup item does. The build's roles are
+recorded in its `build_started`; a record from before roles ran Claude Code with its default model and no review.
 
 The app replies once the build has started: the issue is read, the repository cloned, and `build_started` written to
 the build's record. That can take as long as the clone. The build then goes on in the app. When the epic issue already
@@ -220,8 +229,8 @@ over from 0. An unknown run or file is an error.
 
 ### `rerun`
 
-Starts a new build of a run that needs attention, with the branch and plugin its last build had. The build skips the
-issues already closed.
+Starts a new build of a run that needs attention, with the branch and roles its last build had, whatever the settings
+now say. The build skips the issues already closed.
 
 ```json
 {"type": "rerun", "run": "owner/name#356"}
