@@ -9,9 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use chrono::{DateTime, Utc};
+
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethod, MergeMethods, PullRequest, PullState, PullStatus, Result, State, SubIssue,
+    MergeMethod, MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
     closing_pull_request,
 };
 
@@ -47,6 +49,10 @@ pub struct FakePull {
     pub merged_with: Option<MergeMethod>,
     /// Its merge commit, once it is merged: see [`FakeGitHub::merge_commit`].
     pub merge_commit: Option<String>,
+    /// The reviews submitted on it, oldest first.
+    pub reviews: Vec<Review>,
+    /// How many of its review threads are unresolved.
+    pub open_review_threads: usize,
 }
 
 /// A repository the fake holds.
@@ -112,7 +118,7 @@ fn not_found() -> Error {
 
 /// The name of each [`GitHub`] operation, which [`FakeGitHub::fail`]
 /// takes.
-const OPERATIONS: [&str; 15] = [
+const OPERATIONS: [&str; 17] = [
     "issue",
     "sub_issues",
     "blocked_by",
@@ -128,6 +134,8 @@ const OPERATIONS: [&str; 15] = [
     "comment",
     "pull_request",
     "repo_exists",
+    "reviews",
+    "open_review_threads",
 ];
 
 /// [`GitHub`] in memory.
@@ -206,6 +214,21 @@ impl FakeGitHub {
     /// Sets pull request `pr`'s checks.
     pub fn set_checks(&self, repo: &str, pr: u64, checks: Checks) {
         self.arrange_pull(repo, pr, |pull| pull.checks = checks);
+    }
+
+    /// Submits a review of pull request `pr` with `body` at
+    /// `submitted_at`.
+    pub fn add_review(&self, repo: &str, pr: u64, body: &str, submitted_at: DateTime<Utc>) {
+        let review = Review {
+            body: body.to_owned(),
+            submitted_at,
+        };
+        self.arrange_pull(repo, pr, |pull| pull.reviews.push(review));
+    }
+
+    /// Sets how many of pull request `pr`'s review threads are unresolved.
+    pub fn set_open_review_threads(&self, repo: &str, pr: u64, open: usize) {
+        self.arrange_pull(repo, pr, |pull| pull.open_review_threads = open);
     }
 
     /// The merge commit the fake gives pull request `pr` when it merges
@@ -449,9 +472,23 @@ impl GitHub for FakeGitHub {
             checks: Checks::None,
             merged_with: None,
             merge_commit: None,
+            reviews: Vec::new(),
+            open_review_threads: 0,
         };
         fake.pulls.insert(number, pull);
         Ok(number)
+    }
+
+    fn reviews(&self, repo: &str, pr: u64) -> Result<Vec<Review>> {
+        let world = self.enter("reviews")?;
+        let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
+        Ok(pull.reviews.clone())
+    }
+
+    fn open_review_threads(&self, repo: &str, pr: u64) -> Result<usize> {
+        let world = self.enter("open_review_threads")?;
+        let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
+        Ok(pull.open_review_threads)
     }
 }
 
@@ -716,5 +753,30 @@ mod tests {
         assert!(dir.is_dir());
         assert_eq!(github.clones(), [(REPO.to_owned(), dir.clone())]);
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn reviews_and_open_threads_start_empty_and_can_be_added() {
+        let github = epic();
+        let pr = github
+            .open_pull_request(REPO, "issue-2", "epic/1", "First", "Closes #2")
+            .unwrap();
+        assert_eq!(github.reviews(REPO, pr).unwrap(), []);
+        assert_eq!(github.open_review_threads(REPO, pr).unwrap(), 0);
+        let first: DateTime<Utc> = "2026-11-01T12:00:00Z".parse().unwrap();
+        let second: DateTime<Utc> = "2026-11-01T12:05:00Z".parse().unwrap();
+        github.add_review(REPO, pr, "First look.", first);
+        github.add_review(REPO, pr, "Second look.", second);
+        github.set_open_review_threads(REPO, pr, 2);
+        let bodies: Vec<String> = github
+            .reviews(REPO, pr)
+            .unwrap()
+            .into_iter()
+            .map(|review| review.body)
+            .collect();
+        assert_eq!(bodies, ["First look.", "Second look."]);
+        assert_eq!(github.open_review_threads(REPO, pr).unwrap(), 2);
+        assert!(github.reviews(REPO, 99).is_err());
+        assert!(github.open_review_threads(REPO, 99).is_err());
     }
 }
