@@ -831,6 +831,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrors_running_build_is_not_interrupted() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = crate::hosts::dir(root.path(), "devbox");
+        write(&mirror, &interrupted()[..5]);
+        let before = record::list_builds(&mirror, &key()).unwrap();
+
+        interrupt_unfinished(root.path()).unwrap();
+
+        assert_eq!(record::list_builds(&mirror, &key()).unwrap(), before);
+        assert_eq!(
+            read(&mirror, &key()).unwrap().disposition,
+            Disposition::Building
+        );
+    }
+
+    #[test]
     fn unfinished_builds_are_recorded_as_interrupted() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), &interrupted());

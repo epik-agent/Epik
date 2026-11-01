@@ -287,6 +287,26 @@ mod tests {
     }
 
     #[test]
+    fn a_hosts_mirrored_run_is_neither_commented_on_nor_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = crate::hosts::dir(root.path(), "devbox");
+        record(&mirror, true);
+        repositories::add(root.path(), REPO, false, time(0)).unwrap();
+        let github = github();
+        github.set_pull_state(REPO, 3, PullState::Closed);
+        github.set_state(REPO, 1, State::Closed);
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        assert_eq!(report, Report::default());
+        assert!(github.repo(REPO).issues[&1].comments.is_empty());
+        assert_eq!(
+            run::read(&mirror, &key()).unwrap().disposition,
+            Disposition::WaitingForReview
+        );
+    }
+
+    #[test]
     fn a_closed_epic_issue_ends_a_run_that_needs_attention_too() {
         let root = tempfile::tempdir().unwrap();
         record(root.path(), true);

@@ -29,6 +29,7 @@ use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
 use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
+use epik_core::mirrors::Mirrors;
 use epik_core::{record, run, self_link};
 
 /// How often the app checks GitHub for runs whose epic issue closed or
@@ -175,6 +176,8 @@ struct App {
     /// stops serving, and so stops the app.
     stop: Arc<AtomicBool>,
     builds: Arc<Builds>,
+    /// Keeps each remote host's mirror of its runs current.
+    mirrors: Arc<Mirrors>,
 }
 
 impl App {
@@ -200,7 +203,8 @@ impl App {
         };
         // Only now that this app holds the socket is no other app building,
         // so every clone left, and every build recorded as running, is
-        // from a build that never ended.
+        // from a build that never ended. Both read only this computer's
+        // runs: a host's mirror is the host's to change.
         if let Err(error) = cleanup::sweep_builds(&root) {
             eprintln!("epik-app: couldn't remove leftover builds: {error}");
         }
@@ -230,6 +234,7 @@ impl App {
             }
             on_active(active);
         }));
+        let mirrors = Arc::new(Mirrors::real(&root));
         Ok(Self {
             #[cfg(feature = "desktop")]
             root,
@@ -237,6 +242,7 @@ impl App {
             server,
             stop,
             builds,
+            mirrors,
         })
     }
 
@@ -253,8 +259,14 @@ impl App {
             let stop = self.stop.clone();
             move || reconcile_until(&builds, &stop)
         });
+        let mirroring = thread::spawn({
+            let mirrors = self.mirrors.clone();
+            let stop = self.stop.clone();
+            move || mirrors.follow_until(&stop)
+        });
         self.server.serve(self.builds.clone(), &self.stop);
         let _ = reconciler.join();
+        let _ = mirroring.join();
 
         let running = self.builds.active().len();
         eprintln!("epik-app: stopping, interrupting {running} build(s)");
