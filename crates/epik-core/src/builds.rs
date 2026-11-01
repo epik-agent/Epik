@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{Agent, ClaudeAcp};
+use crate::agent::{AcpClient, Agent, AgentProfile};
 use crate::build::{self, Request};
 use crate::github::{GhCli, GitHub};
 use crate::reconcile;
@@ -99,10 +99,15 @@ impl Builds {
         self
     }
 
-    /// Builds under `root` with [`GhCli`] and [`ClaudeAcp`], checking the
-    /// machine's setup before each.
+    /// Builds under `root` with [`GhCli`] and Claude Code through
+    /// [`AcpClient`], checking the machine's setup before each.
     pub fn real(root: impl Into<PathBuf>) -> Self {
-        Self::new(root, Arc::new(GhCli::new()), Arc::new(ClaudeAcp::new())).check_setup(|root| {
+        Self::new(
+            root,
+            Arc::new(GhCli::new()),
+            Arc::new(AcpClient::new(AgentProfile::claude())),
+        )
+        .check_setup(|root| {
             let latest = crate::install::Cached {
                 root: root.to_owned(),
                 sources: crate::install::Sources::from_env(),
@@ -321,6 +326,10 @@ impl Agent for HangingAgent {
             cost_usd: None,
             error: None,
         }
+    }
+
+    fn check(&self, _cwd: &std::path::Path, _model: Option<&str>) -> Result<(), String> {
+        Ok(())
     }
 }
 

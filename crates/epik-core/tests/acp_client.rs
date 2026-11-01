@@ -1,29 +1,36 @@
-//! `ClaudeAcp` run against the fake ACP agent in `src/bin/fake-acp-agent.rs`.
+//! `AcpClient`, with the Claude Code profile, run against the fake ACP agent in `src/bin/fake-acp-agent.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use epik_core::agent::{Agent, AgentOutcome, AgentRequest, ClaudeAcp};
+use epik_core::agent::{AcpClient, Agent, AgentOutcome, AgentProfile, AgentRequest};
 use serde_json::Value;
 
 /// A fresh, empty directory for one test, under the target directory.
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("claude_acp")
+        .join("acp_client")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-fn fake(flags: &[&str]) -> ClaudeAcp {
+/// The Claude Code profile, running the fake agent with `flags`.
+fn fake_profile(flags: &[&str]) -> AgentProfile {
     let mut command = vec![env!("CARGO_BIN_EXE_fake-acp-agent").to_string()];
     command.extend(flags.iter().map(|flag| flag.to_string()));
-    ClaudeAcp::new()
-        .command(command)
-        .quiet_period(Duration::from_millis(500))
+    AgentProfile {
+        command,
+        quiet_period: Duration::from_millis(500),
+        ..AgentProfile::claude()
+    }
+}
+
+fn fake(flags: &[&str]) -> AcpClient {
+    AcpClient::new(fake_profile(flags))
 }
 
 fn request(dir: &Path) -> AgentRequest {
@@ -34,10 +41,11 @@ fn request(dir: &Path) -> AgentRequest {
         cwd: dir.to_path_buf(),
         jsonl_path: dir.join("7.jsonl"),
         err_path: dir.join("7.err"),
+        model: None,
     }
 }
 
-fn run(agent: &ClaudeAcp, request: &AgentRequest) -> AgentOutcome {
+fn run(agent: &AcpClient, request: &AgentRequest) -> AgentOutcome {
     agent.run(request, &AtomicBool::new(false))
 }
 
@@ -173,6 +181,7 @@ fn a_session_without_auto_mode_stops_before_prompting() {
     assert!(!outcome.exited_cleanly);
     assert_eq!(outcome.stop_reason, "no_auto_mode");
     let error = outcome.error.unwrap();
+    assert!(error.contains("Claude Code"), "{error}");
     assert!(error.contains("auto"), "{error}");
     assert!(error.contains("default, plan"), "{error}");
     assert!(sent(&log(&request), "session/prompt").is_empty());
@@ -219,11 +228,172 @@ fn an_agent_that_exits_early_is_reported_with_its_stderr_kept() {
 fn an_agent_command_that_cannot_start_is_reported() {
     let dir = scratch("no_command");
     let request = request(&dir);
-    let agent = ClaudeAcp::new().command(vec![dir.join("no-such-agent").display().to_string()]);
+    let agent = AcpClient::new(AgentProfile {
+        command: vec![dir.join("no-such-agent").display().to_string()],
+        ..AgentProfile::claude()
+    });
 
     let outcome = run(&agent, &request);
 
     assert!(!outcome.exited_cleanly);
     assert_eq!(outcome.stop_reason, "agent_failed");
     assert!(outcome.error.is_some());
+}
+
+#[test]
+fn the_claude_profile_is_claude_code_through_its_pinned_adapter() {
+    let profile = AgentProfile::claude();
+
+    assert_eq!(profile.id, "claude");
+    assert_eq!(profile.name, "Claude Code");
+    assert_eq!(
+        profile.command.last().unwrap(),
+        "@agentclientprotocol/claude-agent-acp@0.99.0"
+    );
+    assert_eq!(profile.unattended_mode, "auto");
+    assert!(profile.reports_cost);
+    assert_eq!(profile.quiet_period, Duration::from_secs(300));
+}
+
+#[test]
+fn an_offered_model_is_set_before_prompting() {
+    let dir = scratch("set_model");
+    let request = AgentRequest {
+        model: Some("opus".into()),
+        ..request(&dir)
+    };
+
+    let outcome = run(&fake(&["--models", "sonnet,opus"]), &request);
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    let log = log(&request);
+    let set = &sent(&log, "session/set_config_option")[0];
+    assert_eq!(set["params"]["configId"], "model");
+    assert_eq!(set["params"]["value"], "opus");
+    let err = std::fs::read_to_string(&request.err_path).unwrap();
+    assert!(err.contains("set \"model\" to opus"), "{err}");
+    let position = |method: &str| {
+        log.iter()
+            .position(|line| line["to_agent"]["method"] == method)
+            .unwrap()
+    };
+    assert!(position("session/set_config_option") < position("session/prompt"));
+}
+
+#[test]
+fn no_model_sets_nothing() {
+    let dir = scratch("no_model");
+    let request = request(&dir);
+
+    let outcome = run(&fake(&["--models", "sonnet,opus"]), &request);
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    assert!(sent(&log(&request), "session/set_config_option").is_empty());
+}
+
+#[test]
+fn a_model_not_offered_stops_before_prompting() {
+    let dir = scratch("model_not_offered");
+    let request = AgentRequest {
+        model: Some("gpt-5".into()),
+        ..request(&dir)
+    };
+
+    let outcome = run(&fake(&["--models", "sonnet,opus"]), &request);
+
+    assert!(!outcome.exited_cleanly);
+    assert_eq!(outcome.stop_reason, "no_model");
+    let error = outcome.error.unwrap();
+    assert!(error.contains("gpt-5"), "{error}");
+    assert!(error.contains("sonnet, opus"), "{error}");
+    assert!(sent(&log(&request), "session/prompt").is_empty());
+}
+
+#[test]
+fn a_profile_that_does_not_report_cost_reports_none() {
+    let dir = scratch("no_cost");
+    let request = request(&dir);
+    let agent = AcpClient::new(AgentProfile {
+        reports_cost: false,
+        ..fake_profile(&["--cost", "1.25"])
+    });
+
+    let outcome = run(&agent, &request);
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    assert_eq!(outcome.cost_usd, None);
+}
+
+#[test]
+fn the_profile_s_environment_reaches_the_agent() {
+    let dir = scratch("env");
+    let request = request(&dir);
+    let agent = AcpClient::new(AgentProfile {
+        env: vec![("EPIK_FAKE".into(), "from the profile".into())],
+        ..fake_profile(&["--echo-env", "EPIK_FAKE"])
+    });
+
+    let outcome = run(&agent, &request);
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    let err = std::fs::read_to_string(&request.err_path).unwrap();
+    assert!(err.contains("EPIK_FAKE=from the profile"), "{err}");
+}
+
+#[test]
+fn check_passes_for_an_offered_model_or_none() {
+    let dir = scratch("check_ok");
+    let agent = fake(&["--models", "sonnet,opus"]);
+
+    assert_eq!(agent.check(&dir, Some("opus")), Ok(()));
+    assert_eq!(agent.check(&dir, None), Ok(()));
+}
+
+#[test]
+fn check_with_a_model_not_offered_fails_listing_the_models() {
+    let dir = scratch("check_model");
+
+    let error = fake(&["--models", "sonnet,opus"])
+        .check(&dir, Some("gpt-5"))
+        .unwrap_err();
+
+    assert!(error.contains("Claude Code"), "{error}");
+    assert!(error.contains("gpt-5"), "{error}");
+    assert!(error.contains("sonnet, opus"), "{error}");
+}
+
+#[test]
+fn check_with_a_model_and_no_model_option_fails() {
+    let dir = scratch("check_no_option");
+
+    let error = fake(&[]).check(&dir, Some("opus")).unwrap_err();
+
+    assert!(error.contains("Claude Code"), "{error}");
+    assert!(error.contains("opus"), "{error}");
+}
+
+#[test]
+fn check_without_the_unattended_mode_fails_naming_it() {
+    let dir = scratch("check_no_auto");
+
+    let error = fake(&["--mode", "default", "--modes", "default,plan"])
+        .check(&dir, None)
+        .unwrap_err();
+
+    assert!(error.contains("Claude Code"), "{error}");
+    assert!(error.contains("auto"), "{error}");
+    assert!(error.contains("default, plan"), "{error}");
+}
+
+#[test]
+fn check_with_an_agent_that_cannot_start_fails() {
+    let dir = scratch("check_no_command");
+    let agent = AcpClient::new(AgentProfile {
+        command: vec![dir.join("no-such-agent").display().to_string()],
+        ..AgentProfile::claude()
+    });
+
+    let error = agent.check(&dir, None).unwrap_err();
+
+    assert!(error.contains("Claude Code"), "{error}");
 }
