@@ -10,6 +10,7 @@ mod pages;
 mod popover;
 #[cfg(feature = "desktop")]
 mod runs;
+mod setup_command;
 #[cfg(feature = "desktop")]
 mod setup_window;
 #[cfg(feature = "desktop")]
@@ -34,7 +35,7 @@ use epik_core::{record, run, self_link};
 /// whose pull request was closed. Modest to start with; tune it.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 
-const USAGE: &str = "usage: epik-app [--headless | --version | mcp | stdio]";
+const USAGE: &str = "usage: epik-app [--headless | --version | mcp | stdio | setup]";
 
 fn main() -> ExitCode {
     find_epiks_tools();
@@ -46,6 +47,7 @@ fn main() -> ExitCode {
         }
         Some("mcp") => mcp(),
         Some("stdio") => stdio(),
+        Some("setup") => setup_command::run(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("--headless") => headless(),
         #[cfg(feature = "desktop")]
         None => tray::run(),

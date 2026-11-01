@@ -128,6 +128,17 @@ impl Item {
         }
     }
 
+    /// The item whose id is `id`.
+    pub fn from_id(id: &str) -> Option<Item> {
+        Item::ALL.into_iter().find(|item| item.id() == id)
+    }
+
+    /// Whether Epik installs a private copy of it, as it does `gh` and
+    /// Node.
+    pub fn installable(self) -> bool {
+        matches!(self, Item::Gh | Item::Node)
+    }
+
     /// Whether a build needs it. A build loads the plugin from the
     /// directory it is given, so it doesn't need the plugin installed.
     pub fn needed_to_build(self) -> bool {
@@ -586,7 +597,7 @@ pub fn run_step(root: &Path, step: &Step, on_line: &(dyn Fn(String) + Sync)) -> 
         Action::Install(item) => {
             let platform = crate::install::Platform::current()
                 .ok_or("Epik installs no tools for this machine")?;
-            let sources = crate::install::Sources::default();
+            let sources = crate::install::Sources::from_env();
             on_line(format!("Downloading {}…", item.title()));
             let version = match item {
                 Item::Gh => crate::install::install_gh(root, &sources, platform)?,
@@ -1079,6 +1090,23 @@ pub(crate) mod tests {
             error.starts_with("couldn't run no-such-program-epik"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn items_are_found_by_id() {
+        for item in Item::ALL {
+            assert_eq!(Item::from_id(item.id()), Some(item));
+        }
+        assert_eq!(Item::from_id("emacs"), None);
+    }
+
+    #[test]
+    fn only_gh_and_node_are_installable() {
+        let installable: Vec<Item> = Item::ALL
+            .into_iter()
+            .filter(|item| item.installable())
+            .collect();
+        assert_eq!(installable, [Item::Gh, Item::Node]);
     }
 
     #[test]

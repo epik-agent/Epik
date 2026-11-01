@@ -110,7 +110,7 @@ impl Builds {
         .check_setup(|root| {
             let latest = crate::install::Cached {
                 root: root.to_owned(),
-                sources: crate::install::Sources::default(),
+                sources: crate::install::Sources::from_env(),
             };
             setup::check_all(root, &setup::System, &latest)
         })
