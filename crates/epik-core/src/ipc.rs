@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, Listener, ListenerNonblockingMode, ListenerOptions, Name,
@@ -22,6 +23,7 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
+use crate::record;
 use crate::run::{self, RunKey, RunState};
 use crate::setup;
 
@@ -30,6 +32,9 @@ pub const DEFAULT_LIMIT: usize = 20;
 
 /// The longest request read. A build request is a few hundred bytes.
 const MAX_REQUEST: u64 = 64 * 1024;
+
+/// The most `read` returns, unless the first line alone is longer.
+pub const MAX_CHUNK: usize = 1024 * 1024;
 
 /// How long a client has to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,6 +61,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Every run's key, with no limit.
+    Runs,
+    /// Every regular file in a run's record directory.
+    Files { run: RunKey },
+    /// The whole lines of a run's record file from a byte offset.
+    Read {
+        run: RunKey,
+        path: String,
+        offset: u64,
+    },
     /// Start a new build of a run that needs attention, as its last build
     /// was started.
     Rerun { run: RunKey },
@@ -78,6 +93,17 @@ pub enum Response {
     Runs {
         runs: Vec<RunState>,
     },
+    /// Every run's key, and when it last changed.
+    RunKeys {
+        runs: Vec<RunLatest>,
+    },
+    /// A run's record files.
+    Files {
+        run: RunKey,
+        files: Vec<RecordFile>,
+    },
+    /// Whole lines of a record file.
+    Chunk(Chunk),
     /// Every setup item's state.
     Setup {
         items: Vec<setup::Check>,
@@ -92,6 +118,35 @@ pub enum Response {
     Error {
         message: String,
     },
+}
+
+/// A run, and when it last changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunLatest {
+    pub run: RunKey,
+    pub latest_at: DateTime<Utc>,
+}
+
+/// A regular file in a run's record directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordFile {
+    /// Relative to the run's directory, separated by `/`.
+    pub path: String,
+    /// In bytes.
+    pub size: u64,
+}
+
+/// The whole lines of a record file from `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chunk {
+    pub path: String,
+    pub offset: u64,
+    /// The lines, decoded lossily where they aren't UTF-8.
+    pub data: String,
+    /// The offset after the lines read, from which to read next.
+    pub end: u64,
+    /// The file's size.
+    pub size: u64,
 }
 
 impl Response {
@@ -122,6 +177,9 @@ fn handle(builds: &Builds, request: Request) -> Response {
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
         },
+        Request::Runs => run_keys(builds.root()),
+        Request::Files { run } => files(builds.root(), &run),
+        Request::Read { run, path, offset } => read(builds.root(), &run, path, offset),
         Request::Rerun { run } => match builds.rerun(&run) {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
@@ -155,6 +213,140 @@ fn status(root: &Path, key: &RunKey) -> Response {
         }
         Err(error) => Response::error(format!("couldn't read run {key}: {error}")),
     }
+}
+
+fn run_keys(root: &Path) -> Response {
+    let latest = || -> io::Result<Vec<RunLatest>> {
+        let mut runs = Vec::new();
+        for key in run::keys(root)? {
+            if let Some(state) = run::fold(&record::list_builds(root, &key)?) {
+                runs.push(RunLatest {
+                    run: key,
+                    latest_at: state.latest_at,
+                });
+            }
+        }
+        runs.sort_by(|a, b| a.run.cmp(&b.run));
+        Ok(runs)
+    };
+    match latest() {
+        Ok(runs) => Response::RunKeys { runs },
+        Err(error) => Response::error(format!("couldn't list the runs: {error}")),
+    }
+}
+
+/// `run`'s record directory, or `None` if it has none.
+fn existing_run_dir(root: &Path, key: &RunKey) -> Option<PathBuf> {
+    let dir = run::run_dir(root, key);
+    dir.is_dir().then_some(dir)
+}
+
+fn files(root: &Path, key: &RunKey) -> Response {
+    let Some(dir) = existing_run_dir(root, key) else {
+        return Response::error(format!("no run {key}"));
+    };
+    let mut files = Vec::new();
+    match walk(&dir, "", &mut files) {
+        Ok(()) => {
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            Response::Files {
+                run: key.clone(),
+                files,
+            }
+        }
+        Err(error) => Response::error(format!("couldn't list run {key}'s files: {error}")),
+    }
+}
+
+/// Adds every regular file under `dir`, named `prefix` from the run's
+/// directory, to `files`. Symbolic links aren't followed.
+fn walk(dir: &Path, prefix: &str, files: &mut Vec<RecordFile>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{prefix}{name}");
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            walk(&entry.path(), &format!("{path}/"), files)?;
+        } else if kind.is_file() {
+            files.push(RecordFile {
+                path,
+                size: entry.metadata()?.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read(root: &Path, key: &RunKey, path: String, offset: u64) -> Response {
+    let Some(dir) = existing_run_dir(root, key) else {
+        return Response::error(format!("no run {key}"));
+    };
+    let Some(relative) = within(&path) else {
+        return Response::error(format!(
+            "bad request: {path:?} is not a path in the run's directory"
+        ));
+    };
+    match read_lines(&dir.join(relative), offset) {
+        Ok((data, end, size)) => Response::Chunk(Chunk {
+            path,
+            offset,
+            data,
+            end,
+            size,
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Response::error(format!("run {key} has no file {path}"))
+        }
+        Err(error) => Response::error(format!("couldn't read {path} of run {key}: {error}")),
+    }
+}
+
+/// `path` as a relative path that stays below where it is joined: not
+/// empty, not absolute, and without `..`.
+fn within(path: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let path = Path::new(path);
+    let stays = path
+        .components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
+    (stays
+        && path
+            .components()
+            .any(|part| matches!(part, Component::Normal(_))))
+    .then(|| path.to_path_buf())
+}
+
+/// The whole lines of the file at `path` from `offset`, up to
+/// [`MAX_CHUNK`] bytes unless the first line alone is longer, with the
+/// offset after them and the file's size. A trailing line without its
+/// newline is still being written, and is left for the next read.
+fn read_lines(path: &Path, offset: u64) -> io::Result<(String, u64, u64)> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if offset >= size {
+        return Ok((String::new(), offset, size));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut reader)
+        .take(MAX_CHUNK as u64)
+        .read_to_end(&mut bytes)?;
+    match bytes.iter().rposition(|&byte| byte == b'\n') {
+        Some(last) => bytes.truncate(last + 1),
+        None if bytes.len() == MAX_CHUNK => {
+            // The first line is longer than a chunk: finish it.
+            reader.read_until(b'\n', &mut bytes)?;
+            if bytes.last() != Some(&b'\n') {
+                bytes.clear();
+            }
+        }
+        None => bytes.clear(),
+    }
+    let end = offset + bytes.len() as u64;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), end, size))
 }
 
 /// Where the socket is.
@@ -580,6 +772,206 @@ mod tests {
                 plugin_dir: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn runs_answers_with_every_runs_key_past_the_list_limit() {
+        let app = Running::new(fake_github());
+        let count = DEFAULT_LIMIT as u64 + 5;
+        for n in 1..=count {
+            write_build(app.root.path(), n, n as u32);
+        }
+
+        let reply = app.send(r#"{"type": "runs"}"#);
+
+        assert_eq!(reply["type"], "run_keys", "{reply}");
+        let runs = reply["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), count as usize);
+        let key = RunKey::new("owner/repo", 3);
+        let three = runs
+            .iter()
+            .find(|run| run["run"] == "owner/repo#3")
+            .unwrap();
+        let state = run::read(app.root.path(), &key).unwrap();
+        assert_eq!(
+            three,
+            &json!({"run": "owner/repo#3", "latest_at": state.latest_at})
+        );
+    }
+
+    #[test]
+    fn files_answers_with_every_file_of_a_runs_builds() {
+        let app = Running::new(fake_github());
+        let root = app.root.path();
+        write_build(root, 7, 1);
+        write_build(root, 7, 2);
+        let key = RunKey::new("owner/repo", 7);
+        let builds = record::list_builds(root, &key).unwrap();
+        let first = &builds[0].build_id;
+        fs::write(
+            record::build_dir(root, &key, first).join("8.err"),
+            b"oops\n",
+        )
+        .unwrap();
+
+        let reply = app.send(r#"{"type": "files", "run": "owner/repo#7"}"#);
+
+        assert_eq!(reply["type"], "files", "{reply}");
+        assert_eq!(reply["run"], "owner/repo#7");
+        let mut expected = Vec::new();
+        for build in &builds {
+            let dir = record::build_dir(root, &key, &build.build_id);
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                expected.push(json!({
+                    "path": format!("{}/{}", build.build_id, entry.file_name().to_string_lossy()),
+                    "size": entry.metadata().unwrap().len(),
+                }));
+            }
+        }
+        expected.sort_by_key(|file| file["path"].as_str().unwrap().to_owned());
+        assert_eq!(reply["files"], json!(expected));
+        assert!(
+            expected
+                .iter()
+                .any(|file| file["path"] == format!("{first}/8.err") && file["size"] == 5)
+        );
+        assert_eq!(builds.len(), 2);
+    }
+
+    #[test]
+    fn files_and_read_of_an_unknown_run_are_errors() {
+        let app = Running::new(fake_github());
+
+        let files = app.send(r#"{"type": "files", "run": "owner/repo#9"}"#);
+        let read = app.send(
+            r#"{"type": "read", "run": "owner/repo#9", "path": "b/events.jsonl", "offset": 0}"#,
+        );
+
+        assert_eq!(
+            files,
+            json!({"type": "error", "message": "no run owner/repo#9"})
+        );
+        assert_eq!(
+            read,
+            json!({"type": "error", "message": "no run owner/repo#9"})
+        );
+    }
+
+    /// A server with run `owner/repo#7` whose file `b/log` holds `contents`.
+    fn with_log(contents: &[u8]) -> Running {
+        let app = Running::new(fake_github());
+        let dir = run::run_dir(app.root.path(), &RunKey::new("owner/repo", 7)).join("b");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("log"), contents).unwrap();
+        app
+    }
+
+    fn read_log(app: &Running, offset: u64) -> Value {
+        app.send(
+            &json!({"type": "read", "run": "owner/repo#7", "path": "b/log", "offset": offset})
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn read_answers_with_the_whole_lines_from_an_offset() {
+        let app = with_log(b"one\ntwo\nthree\n");
+
+        assert_eq!(
+            read_log(&app, 0),
+            json!({"type": "chunk", "path": "b/log", "offset": 0, "data": "one\ntwo\nthree\n", "end": 14, "size": 14})
+        );
+        assert_eq!(read_log(&app, 4)["data"], "two\nthree\n");
+        assert_eq!(read_log(&app, 4)["end"], 14);
+        assert_eq!(read_log(&app, 14)["data"], "");
+        assert_eq!(read_log(&app, 14)["end"], 14);
+    }
+
+    #[test]
+    fn read_holds_back_a_trailing_partial_line() {
+        let app = with_log(b"one\ntw");
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"], "one\n");
+        assert_eq!(reply["end"], 4);
+        assert_eq!(reply["size"], 6);
+        assert_eq!(read_log(&app, 4)["data"], "");
+        assert_eq!(read_log(&app, 4)["end"], 4);
+    }
+
+    #[test]
+    fn read_cuts_at_the_last_whole_line_under_the_chunk_size() {
+        let line = format!("{}\n", "x".repeat(999));
+        let lines = MAX_CHUNK / line.len() + 2;
+        let app = with_log(line.repeat(lines).as_bytes());
+
+        let first = read_log(&app, 0);
+        let fitting = MAX_CHUNK / line.len() * line.len();
+        assert_eq!(first["data"].as_str().unwrap().len(), fitting);
+        assert_eq!(first["end"], fitting);
+        let rest = read_log(&app, fitting as u64);
+        assert_eq!(
+            rest["data"].as_str().unwrap().len(),
+            (lines * line.len()) - fitting
+        );
+    }
+
+    #[test]
+    fn read_returns_a_line_over_the_chunk_size_whole() {
+        let long = format!("{}\n", "y".repeat(MAX_CHUNK + 10));
+        let app = with_log(format!("{long}short\n").as_bytes());
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"].as_str().unwrap(), long);
+        assert_eq!(reply["end"], long.len());
+    }
+
+    #[test]
+    fn read_decodes_bytes_that_are_not_utf8_lossily() {
+        let app = with_log(b"ok\xff\n");
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"], "ok\u{fffd}\n");
+        assert_eq!(reply["end"], 4, "the offset counts bytes, not characters");
+    }
+
+    #[test]
+    fn read_past_the_end_returns_nothing() {
+        let app = with_log(b"one\n");
+
+        let reply = read_log(&app, 100);
+
+        assert_eq!(
+            reply,
+            json!({"type": "chunk", "path": "b/log", "offset": 100, "data": "", "end": 100, "size": 4})
+        );
+    }
+
+    #[test]
+    fn read_refuses_a_path_that_leaves_the_runs_directory() {
+        let app = with_log(b"one\n");
+        let outside = app.root.path().join("secret");
+        fs::write(&outside, b"secret\n").unwrap();
+
+        for path in [
+            "../../../../secret",
+            "b/../../8/b/log",
+            outside.to_str().unwrap(),
+            "",
+        ] {
+            let reply = app.send(
+                &json!({"type": "read", "run": "owner/repo#7", "path": path, "offset": 0})
+                    .to_string(),
+            );
+
+            assert_eq!(reply["type"], "error", "{path}: {reply}");
+            let message = reply["message"].as_str().unwrap();
+            assert!(message.starts_with("bad request: "), "{path}: {message}");
+        }
     }
 
     #[test]

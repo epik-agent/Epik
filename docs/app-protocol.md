@@ -162,6 +162,61 @@ The runs, newest activity first.
 {"type": "runs", "runs": [{"run": "owner/name#356", "disposition": "building", ...}]}
 ```
 
+### `runs`
+
+Every run's key, with no limit, and when it last changed: what a client mirroring the app's runs needs to tell which
+runs it still has.
+
+```json
+{"type": "runs"}
+```
+
+```json
+{"type": "run_keys", "runs": [{"run": "owner/name#356", "latest_at": "2026-10-28T21:38:59Z"}, ...]}
+```
+
+`latest_at` is the run's, as `status` gives it. The runs are in order of their keys.
+
+### `files`
+
+Every regular file in a run's record directory, `~/.epik/runs/<owner>/<name>/<number>/`.
+
+```json
+{"type": "files", "run": "owner/name#356"}
+```
+
+```json
+{"type": "files", "run": "owner/name#356", "files": [{"path": "20261028T212859Z-k3f9/events.jsonl", "size": 5678}, ...]}
+```
+
+Each `path` is relative to the run's directory, separated by `/`, and each `size` is in bytes. Symbolic links aren't
+followed. An unknown run is an error.
+
+### `read`
+
+The whole lines appended to one of a run's record files since a byte offset, so that a copy of the record can be kept
+current.
+
+```json
+{"type": "read", "run": "owner/name#356", "path": "20261028T212859Z-k3f9/events.jsonl", "offset": 1234}
+```
+
+```json
+{"type": "chunk", "path": "20261028T212859Z-k3f9/events.jsonl", "offset": 1234, "data": "...", "end": 2345, "size": 5678}
+```
+
+- `path`: as `files` gives it. A path that is empty, absolute, or climbs out of the run's directory with `..` is a
+  `bad request`.
+- `data`: whole lines from `offset`, up to 1 MiB, never part of a line. A last line without its newline is still being
+  written, and is left for a later read. If the first line alone is over 1 MiB, it is returned whole. `data` is text,
+  so bytes that aren't UTF-8, as in an agent's `.err` file, its raw standard error, are decoded lossily.
+- `end`: the byte offset after `data`, from which to read next. Because of the lossy decoding, it is not always
+  `offset` plus the length of `data`.
+- `size`: the file's size in bytes. When `end` is less than `size`, there is more to read.
+
+An offset at or past the size returns empty `data`. Past it, the file has been rewritten, and the client starts it
+over from 0. An unknown run or file is an error.
+
 ### `rerun`
 
 Starts a new build of a run that needs attention, with the branch and plugin its last build had. The build skips the
