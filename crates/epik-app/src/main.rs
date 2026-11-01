@@ -1,11 +1,18 @@
 //! The Epik app, which runs Epik's builds.
 
+#[cfg(feature = "desktop")]
 mod main_window;
+#[cfg(feature = "desktop")]
 mod navigation;
+#[cfg(feature = "desktop")]
 mod pages;
+#[cfg(feature = "desktop")]
 mod popover;
+#[cfg(feature = "desktop")]
 mod runs;
+#[cfg(feature = "desktop")]
 mod setup_window;
+#[cfg(feature = "desktop")]
 mod tray;
 
 use std::path::PathBuf;
@@ -15,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "desktop")]
 use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
 use epik_core::cleanup;
@@ -36,15 +44,27 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("mcp") => mcp(),
-        Some("--headless") => match App::start(|_| {}) {
-            Ok(app) => app.serve(),
-            Err(code) => code,
-        },
+        Some("--headless") => headless(),
+        #[cfg(feature = "desktop")]
         None => tray::run(),
+        // A server has no tray to run in.
+        #[cfg(not(feature = "desktop"))]
+        None => {
+            eprintln!("epik-app: built without the desktop, so running headless");
+            headless()
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Runs the app without a tray until SIGINT or SIGTERM.
+fn headless() -> ExitCode {
+    match App::start(|_| {}) {
+        Ok(app) => app.serve(),
+        Err(code) => code,
     }
 }
 
@@ -124,6 +144,7 @@ fn link_self() {
 
 /// The app's socket and builds, which run the same with a tray or without.
 struct App {
+    #[cfg(feature = "desktop")]
     root: PathBuf,
     address: Address,
     server: Server,
@@ -135,7 +156,7 @@ struct App {
 
 impl App {
     /// Binds the socket and readies the builds, keeping the machine awake
-    /// while any run, and telling `on_active` too how many are running each
+    /// while any run if built with the desktop, and telling `on_active` too how many are running each
     /// time that changes. Says why on stderr if it can't.
     fn start(on_active: impl Fn(usize) + Send + Sync + 'static) -> Result<Self, ExitCode> {
         let Some(root) = record::default_root() else {
@@ -171,9 +192,13 @@ impl App {
             eprintln!("epik-app: couldn't handle signals: {error}");
             return Err(ExitCode::FAILURE);
         }
+        // Without the desktop, as on a server, the machine's own settings
+        // decide whether it sleeps.
+        #[cfg(feature = "desktop")]
         let keep_awake = KeepAwake::new(awake::System);
         let builds = Arc::new(Builds::real(&root).on_active(move |active| {
             eprintln!("epik-app: {active} build(s) running");
+            #[cfg(feature = "desktop")]
             match keep_awake.follow(active) {
                 Ok(Some(Change::Held)) => eprintln!("epik-app: keeping the machine awake"),
                 Ok(Some(Change::Released)) => eprintln!("epik-app: letting the machine sleep"),
@@ -183,6 +208,7 @@ impl App {
             on_active(active);
         }));
         Ok(Self {
+            #[cfg(feature = "desktop")]
             root,
             address,
             server,
