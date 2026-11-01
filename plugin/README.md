@@ -17,6 +17,9 @@ plugin/
     issue/
       SKILL.md          # /epik:issue — implement one issue end to end
       procedure.md      # the per-issue procedure
+    review/
+      SKILL.md          # /epik:review — review one pull request
+      procedure.md      # reviewing a pull request, and addressing a review
   .mcp.json             # runs the epik server: the Epik app's `epik-app mcp`
 ```
 
@@ -56,8 +59,12 @@ The tools are the Epik app's, so trying a change to them means building the app 
 
 ## Usage
 
-- **The assistant skill (`epik:assistant`) loads itself.** It is not a command you run. The server's instructions point every session at it, so any conversation with the plugin enabled knows it is Epik. It is the exception to the explicit-invocation rule because it only shapes how Claude plans and writes. `issue` takes actions (branches, pull requests), so it stays explicit.
+- **The assistant skill (`epik:assistant`) loads itself.** It is not a command you run. The server's instructions point every session at it, so any conversation with the plugin enabled knows it is Epik. It is the exception to the explicit-invocation rule because it only shapes how Claude plans and writes. `issue` and `review` take actions (branches, pull requests, reviews), so they stay explicit.
 
 The Epik app builds epics: it runs each issue's agent, merges each issue's pull request into the epic branch, and opens the epic's pull request. Each agent runs:
 
 - **`/epik:issue [issue number or GitHub URL] [target branch]`** — implement a single issue: work in a git worktree, write tests first and get them passing, open a pull request into the target branch whose body says `Closes #<issue number>`, and drive it until every check passes. It never merges the pull request or closes the issue; it removes its worktree and leaves the branch for the open pull request.
+
+To review a pull request by hand:
+
+- **`/epik:review [pull request number or GitHub URL] [round]`** — read the issue the pull request closes and the pull request from GitHub, judge the change against them and Epik's rules, and post one GitHub review with a comment on each line to change and a verdict marker as its body's last line. It never pushes, merges, closes or edits.
