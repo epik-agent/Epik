@@ -15,7 +15,6 @@ mod setup_window;
 #[cfg(feature = "desktop")]
 mod tray;
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +144,7 @@ fn link_self() {
 /// The app's socket and builds, which run the same with a tray or without.
 struct App {
     #[cfg(feature = "desktop")]
-    root: PathBuf,
+    root: std::path::PathBuf,
     address: Address,
     server: Server,
     /// Set by SIGINT or SIGTERM (Ctrl-C on Windows), or by the tray's Quit:
