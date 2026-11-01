@@ -53,6 +53,16 @@ optionally the pull request it is about. Two kinds, to start:
   No new pull request. This is the agents record's §6 round-2 header
   with the user as the reviewer.
 
+**A task about a run belongs to that run.** When the task's pull request
+is a run's pull request (an epic's into the default branch, or a single
+issue's), or the task names the run, the task is a **new build of that
+run**, not a run of its own: it works on the run's branch, it is
+recorded with the run's other builds, its time and cost add into the
+run's totals and closing comment, and the tray shows it under the epic.
+"Address the comments on the epic's pull request" is a build of the
+epic's run, exactly as a rerun after a failure is. Only a task with no
+run behind it is a run of its own.
+
 A task is still a statement of work that someone wrote down before an
 agent read it. What it drops is the issue, not the writing. An agent
 told to "fix the thing" gets a task saying "fix the thing"; the user
@@ -62,18 +72,22 @@ today.
 ### 2. The assistant starts tasks instead of coding
 
 The MCP server gains `task_start`: repository, the task's words, an
-optional pull request to address, an optional target branch, and (after
-the remote record) an optional host. The assistant's skill is amended:
+optional pull request to address, an optional target branch, an optional
+run the task belongs to (inferred from the pull request when that is a
+run's), and (after the remote record) an optional host. A task that
+belongs to a run runs on the run's host. The assistant's skill is amended:
 when the user asks for code to be changed, Epik starts a task; it does
 not edit the code itself. The user sees the task in the tray and its
 pull request on GitHub, and reviews or merges it as they would an
 issue's.
 
-### 3. A task is a run, named by its first build
+### 3. A task on its own is a run, named by its first build
 
 The protocol gains a `task` request beside `build`, replied to with the
-same `started`. A task's run key is `owner/name@<build id>`, the id of
-its first build, which is already unique and sorts by time. Its record
+same `started`. A task that belongs to a run is a build of that run and
+needs no key of its own; `started` names the run. A task on its own is a
+run whose key is `owner/name@<build id>`, the id of its first build,
+which is already unique and sorts by time. Its record
 lives at `runs/<owner>/<name>/@<build id>/`, in the layout every run has.
 Its title, wherever runs are shown, is the first line of its words.
 
@@ -84,7 +98,9 @@ the mirror on a remote host. The one place the key's form matters is
 
 ### 4. A task's build is a single issue's build with a different header
 
-`Kind` gains `Task`. The build's prompt is the agents record's §1 prompt
+A build gains a `work` field saying what it did: the run's issue or epic
+(every build today), or a task's words; `Kind` gains `Task` for a run
+that is only a task. The build's prompt is the agents record's §1 prompt
 with a header for the kind of task: for **do this**, the repository, the
 words, the target branch, and that the pull request's body is to be the
 words; for **address this pull request**, the pull request, its branch,
@@ -98,10 +114,11 @@ and leaves it for the user. Its pull request is found by branch (a
 task's branch is `task/<build id>`), not by a `Closes` line, since there
 is nothing to close.
 
-### 5. A task leaves when its pull request does
+### 5. A task on its own leaves when its pull request does
 
+A task that belongs to a run leaves with the run, as its other builds do.
 Reconcile, which today finishes a run when its epic issue closes, finishes
-a task when its pull request merges or closes. The closing comment, with
+a task run when its pull request merges or closes. The closing comment, with
 the run's time and cost, goes on the pull request. A task whose pull
 request was closed unmerged needs attention, as an issue's does.
 
@@ -115,11 +132,17 @@ request was closed unmerged needs attention, as an issue's does.
 | Name a task by its pull request number | Rejected | A new task has no pull request until its agent opens one, so the run would be nameless while it most needs a name. A task addressing a pull request could use its number, but then two key forms would mean two things. |
 | Let a task push to the default branch | Rejected | Every change arrives as a pull request, from an agent or from Epik. The one-line fix is where the habit matters most. |
 | Several tasks on one pull request at once | Out | While a task on a pull request is building, another on the same one is refused, as a second build of a run is. |
+| Every task is a run of its own, even one about an epic | Rejected | The user asked (2026-10-31) that work on an epic be tracked as part of the epic. A separate run would split the epic's cost, record and tray entry in two. |
 
 ## Consequences
 
 - **The assistant stops writing code.** The skill's sentence becomes
   true. A quick job costs a run and a pull request, which is the point.
+- **Work on an epic after its build stays with the epic.** Fixes to the
+  epic's pull request, whether asked for by a reviewer (the agents
+  record's §6) or by the user (a task), are builds of the epic's run,
+  and the epic's totals, record and tray entry include them. Nothing
+  about an epic is ever tracked somewhere else.
 - **Every run has a key, and not every key has a number.** `run.rs`
   parses two forms; everything else is unchanged, including the remote
   mirror.
