@@ -511,7 +511,7 @@ pub fn MainWindow() -> impl IntoView {
             dialog.close();
         }
     });
-    let on_quit = Callback::new(move |()| tauri::run("quit", ()));
+    let on_quit = Callback::new(move |()| tauri::run("quit_to_remove", ()));
     // Escape only closes the dialog while it asks.
     let escape = move |event: leptos::ev::Event| {
         if !matches!(stage.get_untracked(), Uninstalling::Asking(_)) {

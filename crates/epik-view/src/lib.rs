@@ -6,6 +6,8 @@
 //! functions that build them are in `epik-app`, and in `epik-core` for
 //! [`Stream`].
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// A piece of a sentence: text, which may link somewhere, and may be code.
@@ -322,6 +324,24 @@ pub struct Uninstall {
     pub runs: usize,
     /// Whether a build is running, which keeps Epik from being uninstalled.
     pub building: bool,
+    /// How the user removes the app once Epik's files are gone.
+    pub removal: Removal,
+}
+
+/// How the user removes the app, the way their platform removes any app.
+/// The app doesn't remove itself: each platform's installer owns it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Removal {
+    /// The bundle at this path, e.g. /Applications/Epik.app.
+    MacApp(PathBuf),
+    /// Installed with the .msi.
+    WindowsApp,
+    /// The AppImage at this path, from $APPIMAGE.
+    AppImage(PathBuf),
+    /// Installed with the .deb.
+    #[default]
+    Deb,
 }
 
 /// How one step of uninstalling went.
