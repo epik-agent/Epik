@@ -51,6 +51,18 @@ Starts building an epic or a single issue.
   `{"coding": {"agent": "claude", "model": "opus"}, "review": null}`. `review` is `null` while review is off, and a
   `null` model is the agent's default. Without `roles`, the build runs with the app's settings. A build forwarded from
   another machine sends the roles it was started with.
+- `host` (optional): the remote host to build on, by its SSH destination as listed in Settings (`devbox`). Without
+  `host`, the build goes to the default host, which is this computer unless the user picked another. A host that isn't
+  listed is an error.
+
+For a remote host, the app sends the request on to that host's app over `ssh`, without `host`, and with `roles` set:
+those given, or else this app's settings, since the host has settings of its own. The host checks the build as it
+would its own, and its refusal is the error, naming the host:
+`couldn't build owner/name#356 on devbox: the coding agent can't run: …`. Once the host has started the build, this app
+adds the repository to its monitored repositories and syncs its mirror of the host's runs at once.
+
+A run is built on one host only: while `owner/name#356` has a run on this computer or another host, building it
+elsewhere is an error naming where it is: `owner/name#356 is on devbox: rerun or delete it there`.
 
 Before anything is recorded, the app opens a session, without a prompt, with the coding agent and, when review is on,
 the review agent, to check that each runs unattended and offers its model. An agent that can't refuses the build with an
@@ -70,7 +82,8 @@ sent by an older client is ignored.
 - `build_id`: the build's id, unique within its run: the UTC time it started and 4 random characters.
 - `kind`: `epic` or `issue`.
 - `build_dir`: the build's record, holding `events.jsonl`, each issue's agent output, and `summary.json` once the
-  build ends.
+  build ends. For a build on a remote host it is the path there.
+- `host` (only for a remote host): the host building it, `"host": "devbox"`.
 
 A pull request, a closed issue, or a failure before the build starts is an error, and leaves no record.
 
