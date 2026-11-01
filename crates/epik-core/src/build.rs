@@ -32,6 +32,7 @@ use crate::cleanup;
 use crate::comment;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
+use crate::prompt::{self, Work};
 use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
 use crate::run::{self, RunKey};
 
@@ -55,8 +56,6 @@ pub struct Request {
     /// Epik's root, normally `~/.epik`. Clones go under `builds`, records
     /// under `runs`.
     pub root: PathBuf,
-    /// Epik's Claude Code plugin, which each agent loads.
-    pub plugin_dir: PathBuf,
 }
 
 /// Why a build couldn't start.
@@ -251,7 +250,6 @@ pub fn start<'a>(
         branch: branch.clone(),
         issues,
         closed: closed.iter().copied().collect(),
-        plugin_dir: Some(request.plugin_dir.clone()),
     });
     Ok(Build {
         github,
@@ -267,7 +265,6 @@ pub fn start<'a>(
         build_id,
         clone,
         dir,
-        plugin_dir: request.plugin_dir.clone(),
         graph,
         closed,
         problems,
@@ -293,7 +290,6 @@ pub struct Build<'a> {
     clone: PathBuf,
     /// The run's record directory.
     dir: PathBuf,
-    plugin_dir: PathBuf,
     /// The run's issues and the issues blocking each.
     graph: Graph,
     /// The issues closed when the build started.
@@ -354,7 +350,8 @@ impl Build<'_> {
     /// also written to `summary.json`.
     ///
     /// Every ready issue's agent starts at once, each on its own thread,
-    /// with the prompt `/epik:issue <number> <branch>`. As each finishes,
+    /// with a prompt saying what the work is, Epik's rules and the procedure
+    /// for implementing an issue. As each finishes,
     /// its issue is finished, and for an epic merged and closed, and the
     /// issues it unblocks start. When nothing is running or ready, an epic
     /// whose issues are all closed gets its pull request into the default
@@ -466,11 +463,13 @@ impl Build<'_> {
     fn build_issue(&self, number: u64, cancel: &AtomicBool) -> Finished {
         let dir = &self.dir;
         let request = AgentRequest {
-            prompt: format!("/epik:issue {number} {}", self.branch),
+            prompt: prompt::prompt(&self.repo, Work::Issue(number), &self.branch),
+            issue: number,
+            branch: self.branch.clone(),
             cwd: self.clone.clone(),
-            plugin_dir: self.plugin_dir.clone(),
             jsonl_path: dir.join(format!("{number}.jsonl")),
             err_path: dir.join(format!("{number}.err")),
+            model: None,
         };
         let outcome = self.agent.run(&request, cancel);
         if cancel.load(Ordering::SeqCst) {
@@ -704,7 +703,8 @@ mod tests {
         Hang,
     }
 
-    /// An [`Agent`] that acts on a [`FakeGitHub`] as `/epik:issue` would.
+    /// An [`Agent`] that acts on a [`FakeGitHub`] as an agent following the
+    /// issue procedure would.
     struct FakeAgent<'a> {
         github: &'a FakeGitHub,
         acts: BTreeMap<u64, Act>,
@@ -724,18 +724,17 @@ mod tests {
             }
         }
 
-        fn prompts(&self) -> Vec<String> {
+        /// Each agent's issue and target branch, in the order they ran.
+        fn issues(&self) -> Vec<(u64, String)> {
             let requests = self.requests.lock().unwrap();
-            requests.iter().map(|r| r.prompt.clone()).collect()
+            requests
+                .iter()
+                .map(|r| (r.issue, r.branch.clone()))
+                .collect()
         }
 
-        fn act(&self, prompt: &str, cancel: &AtomicBool) -> Option<String> {
-            let words: Vec<&str> = prompt.split(' ').collect();
-            let [command, number, branch] = words[..] else {
-                panic!("unexpected prompt {prompt}");
-            };
-            assert_eq!(command, "/epik:issue");
-            let number: u64 = number.parse().unwrap();
+        fn act(&self, request: &AgentRequest, cancel: &AtomicBool) -> Option<String> {
+            let (number, branch) = (request.issue, request.branch.as_str());
             match self
                 .acts
                 .get(&number)
@@ -777,7 +776,7 @@ mod tests {
             self.most_running.fetch_max(now, Ordering::SeqCst);
             // Long enough for issues started together to overlap.
             thread::sleep(Duration::from_millis(50));
-            let stopped = self.act(&request.prompt, cancel);
+            let stopped = self.act(request, cancel);
             self.running.fetch_sub(1, Ordering::SeqCst);
             AgentOutcome {
                 exited_cleanly: stopped.is_none(),
@@ -786,6 +785,10 @@ mod tests {
                 duration_ms: 1_000,
                 cost_usd: Some(0.25),
             }
+        }
+
+        fn check(&self, _cwd: &std::path::Path, _model: Option<&str>) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -811,7 +814,6 @@ mod tests {
             number,
             branch: None,
             root: root.to_owned(),
-            plugin_dir: PathBuf::from("/plugin"),
         }
     }
 
@@ -1004,9 +1006,13 @@ mod tests {
             panic!("one agent ran");
         };
         let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
-        assert_eq!(request.prompt, format!("/epik:issue 2 {EPIC_BRANCH}"));
+        assert_eq!(request.issue, 2);
+        assert_eq!(request.branch, EPIC_BRANCH);
+        assert_eq!(
+            request.prompt,
+            prompt::prompt(REPO, Work::Issue(2), EPIC_BRANCH)
+        );
         assert_eq!(request.cwd, clone);
-        assert_eq!(request.plugin_dir, Path::new("/plugin"));
         assert_eq!(request.jsonl_path, dir.join("2.jsonl"));
         assert_eq!(request.err_path, dir.join("2.err"));
 
@@ -1025,7 +1031,7 @@ mod tests {
         request.branch = Some("daemon".to_owned());
         let state = run(&github, &agent, &request, &cancel).unwrap();
         assert_eq!(state.branch, "daemon");
-        assert_eq!(agent.prompts(), ["/epik:issue 2 daemon"]);
+        assert_eq!(agent.issues(), [(2, "daemon".to_owned())]);
         assert_eq!(github.repo(REPO).pulls[&pr_of(&github, 2)].base, "daemon");
     }
 
@@ -1058,7 +1064,7 @@ mod tests {
             events[6..],
             ["build_finished Failed (failed: #2; stuck: #3, #4)"]
         );
-        assert_eq!(agent.prompts().len(), 2);
+        assert_eq!(agent.issues().len(), 2);
         let repo = github.repo(REPO);
         assert_eq!(repo.issues[&2].state, State::Open);
         assert_eq!(repo.issues[&5].state, State::Closed);
@@ -1155,7 +1161,7 @@ mod tests {
                 "build_finished Failed (a dependency cycle: #2, #3)".to_owned(),
             ]
         );
-        assert!(agent.prompts().is_empty());
+        assert!(agent.issues().is_empty());
     }
 
     #[test]
@@ -1171,7 +1177,7 @@ mod tests {
             events(root.path(), &state)[1..],
             ["build_finished Failed (sub-issues in another repository: other/repo#9)"]
         );
-        assert!(agent.prompts().is_empty());
+        assert!(agent.issues().is_empty());
     }
 
     #[test]
@@ -1188,7 +1194,7 @@ mod tests {
             format!("build_started Epic {EPIC_BRANCH} x2[] 3[2]")
         );
         assert_eq!(events[1], "issue_started 3");
-        assert_eq!(agent.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        assert_eq!(agent.issues(), [(3, EPIC_BRANCH.to_owned())]);
         assert_eq!(state.status, BuildStatus::Succeeded);
     }
 
@@ -1211,7 +1217,7 @@ mod tests {
                 format!("build_finished Succeeded #{pr}"),
             ]
         );
-        assert_eq!(agent.prompts(), ["/epik:issue 7 main"]);
+        assert_eq!(agent.issues(), [(7, "main".to_owned())]);
         let repo = github.repo(REPO);
         assert_eq!(repo.pulls[&pr].state, PullState::Open);
         assert_eq!(repo.pulls[&pr].base, "main");
@@ -1242,7 +1248,7 @@ mod tests {
             ]
         );
         assert_eq!(events[5..], ["build_interrupted (cancelled)"]);
-        assert_eq!(agent.prompts().len(), 2);
+        assert_eq!(agent.issues().len(), 2);
         assert_eq!(state.status, BuildStatus::Interrupted);
         assert_eq!(state.cost_usd, Decimal::from_str("0.50").unwrap());
         assert!(github.repo(REPO).pulls.is_empty());
@@ -1324,7 +1330,7 @@ mod tests {
         let second = FakeAgent::new(&github, []);
         let finished = build(&github, &second, root.path(), 1);
 
-        assert_eq!(second.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        assert_eq!(second.issues(), [(3, EPIC_BRANCH.to_owned())]);
         let run = run::read(root.path(), &RunKey::new(REPO, 1)).unwrap();
         assert_eq!(run.builds.len(), 2);
         assert_eq!(run.disposition, run::Disposition::WaitingForReview);

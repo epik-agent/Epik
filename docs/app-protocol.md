@@ -40,18 +40,19 @@ A run leaves when its epic issue closes: the app comments its totals on the issu
 Starts building an epic or a single issue.
 
 ```json
-{"type": "build", "repo": "owner/name", "number": 356, "branch": "daemon", "plugin_dir": "/path/to/epik/plugin"}
+{"type": "build", "repo": "owner/name", "number": 356, "branch": "daemon"}
 ```
 
 - `repo`: the repository, `owner/name`.
 - `number`: the epic or issue. An issue with sub-issues is built as an epic.
 - `branch` (optional): the branch the issues' pull requests merge into. By default `epic/<number>-<slug of title>` for
   an epic, and the repository's default branch for a single issue.
-- `plugin_dir`: Epik's Claude Code plugin, which each agent loads.
 
 The app replies once the build has started: the issue is read, the repository cloned, and `build_started` written to
 the build's record. That can take as long as the clone. The build then goes on in the app. When the epic issue already
-has a run, the build is added to it; while one of its builds is running, another is refused.
+has a run, the build is added to it; while one of its builds is running, another is refused. Each issue's agent is
+prompted with the issue, the target branch, Epik's rules and the issue procedure, so it loads no plugin. A `plugin_dir`
+sent by an older client is ignored.
 
 ```json
 {"type": "started", "run": "owner/name#356", "build_id": "20261028T212859Z-k3f9", "kind": "epic", "branch": "daemon", "build_dir": "/Users/me/.epik/runs/owner/name/356/20261028T212859Z-k3f9"}
@@ -162,6 +163,61 @@ The runs, newest activity first.
 {"type": "runs", "runs": [{"run": "owner/name#356", "disposition": "building", ...}]}
 ```
 
+### `runs`
+
+Every run's key, with no limit, and when it last changed: what a client mirroring the app's runs needs to tell which
+runs it still has.
+
+```json
+{"type": "runs"}
+```
+
+```json
+{"type": "run_keys", "runs": [{"run": "owner/name#356", "latest_at": "2026-10-28T21:38:59Z"}, ...]}
+```
+
+`latest_at` is the run's, as `status` gives it. The runs are in order of their keys.
+
+### `files`
+
+Every regular file in a run's record directory, `~/.epik/runs/<owner>/<name>/<number>/`.
+
+```json
+{"type": "files", "run": "owner/name#356"}
+```
+
+```json
+{"type": "files", "run": "owner/name#356", "files": [{"path": "20261028T212859Z-k3f9/events.jsonl", "size": 5678}, ...]}
+```
+
+Each `path` is relative to the run's directory, separated by `/`, and each `size` is in bytes. Symbolic links aren't
+followed. An unknown run is an error.
+
+### `read`
+
+The whole lines appended to one of a run's record files since a byte offset, so that a copy of the record can be kept
+current.
+
+```json
+{"type": "read", "run": "owner/name#356", "path": "20261028T212859Z-k3f9/events.jsonl", "offset": 1234}
+```
+
+```json
+{"type": "chunk", "path": "20261028T212859Z-k3f9/events.jsonl", "offset": 1234, "data": "...", "end": 2345, "size": 5678}
+```
+
+- `path`: as `files` gives it. A path that is empty, absolute, or climbs out of the run's directory with `..` is a
+  `bad request`.
+- `data`: whole lines from `offset`, up to 1 MiB, never part of a line. A last line without its newline is still being
+  written, and is left for a later read. If the first line alone is over 1 MiB, it is returned whole. `data` is text,
+  so bytes that aren't UTF-8, as in an agent's `.err` file, its raw standard error, are decoded lossily.
+- `end`: the byte offset after `data`, from which to read next. Because of the lossy decoding, it is not always
+  `offset` plus the length of `data`.
+- `size`: the file's size in bytes. When `end` is less than `size`, there is more to read.
+
+An offset at or past the size returns empty `data`. Past it, the file has been rewritten, and the client starts it
+over from 0. An unknown run or file is an error.
+
 ### `rerun`
 
 Starts a new build of a run that needs attention, with the branch and plugin its last build had. The build skips the
@@ -215,4 +271,20 @@ Whether the app is there, and its version.
 
 ```json
 {"type": "pong", "version": "0.3.0"}
+```
+
+## Reaching an app on another machine
+
+`epik-app stdio` carries the protocol over its stdin and stdout, so a client reaches the app on another machine by
+running it there, as `ssh host epik-app stdio`. A command works with every `ssh`, where forwarding a socket doesn't with
+Windows' OpenSSH.
+
+Each line it reads is a request, sent as it is to the app on its own machine over a connection of its own. Each reply is
+written to stdout as one line and flushed, in the order the requests came. Nothing else goes to stdout. It stops at the
+end of its input.
+
+`stdio` doesn't start the app. While the app isn't running, each request is answered with an error saying so:
+
+```json
+{"type": "error", "message": "no Epik app is running at /home/me/.epik/epik.sock on this machine: start it with `epik-app --headless`, or start its service"}
 ```

@@ -65,15 +65,10 @@ fn unexpected(reply: &Response) -> String {
 }
 
 pub fn start(context: &Context, args: &Args) -> Result<Reply, String> {
-    let plugin_dir = context
-        .plugin_dir
-        .clone()
-        .ok_or("CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin.")?;
     let build = Request::Build {
         repo: string(args, "repo").unwrap_or_default().to_owned(),
         number: integer(args, "number").unwrap_or_default() as u64,
         branch: string(args, "branch").map(str::to_owned),
-        plugin_dir,
     };
     match request(context, &build, true)? {
         Response::Started(started) => Ok(Reply::Json(json!({
@@ -177,7 +172,6 @@ mod tests {
                     Ok(())
                 }),
                 start_timeout: Duration::from_secs(10),
-                plugin_dir: Some(PathBuf::from("/plugin")),
             })
         }
     }
@@ -276,24 +270,5 @@ mod tests {
         assert_eq!(message, "no run owner/repo#9");
         let (message, _) = text(&mcp.call("build_status", json!({"run_id": "nope"})).unwrap());
         assert!(message.contains("is not a run"), "{message}");
-    }
-
-    #[test]
-    fn build_start_needs_the_plugin() {
-        let app = FakeApp::new();
-        let mut context_less = app.mcp();
-        Arc::get_mut(&mut context_less.context).unwrap().plugin_dir = None;
-
-        let (message, error) = text(
-            &context_less
-                .call("build_start", json!({"repo": "owner/repo", "number": 7}))
-                .unwrap(),
-        );
-
-        assert!(error);
-        assert_eq!(
-            message,
-            "CLAUDE_PLUGIN_ROOT is not set, so the build cannot load the Epik plugin."
-        );
     }
 }

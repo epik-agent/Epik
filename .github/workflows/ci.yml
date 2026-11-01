@@ -82,6 +82,27 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  rust-headless:
+    # A server with no desktop builds the app without its tray and windows.
+    # This job installs none of the GUI packages the Linux job above does,
+    # so between them they prove the app builds both with Tauri and without.
+    name: Rust (headless)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy -p epik-app --no-default-features --all-targets -- -D warnings
+      - run: cargo test -p epik-app --no-default-features
+
   deploy-website:
     # The website is the deployed version of this project: every push to
     # main that passes CI redeploys it to GitHub Pages.

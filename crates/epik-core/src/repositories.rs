@@ -166,7 +166,6 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
-                plugin_dir: None,
             })
             .unwrap();
     }

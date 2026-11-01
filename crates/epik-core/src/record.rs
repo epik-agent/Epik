@@ -111,10 +111,6 @@ pub enum Event {
         /// skips.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         closed: Vec<u64>,
-        /// Epik's Claude Code plugin, which the agents load. A rerun loads
-        /// it again.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plugin_dir: Option<PathBuf>,
     },
     IssueStarted {
         at: DateTime<Utc>,
@@ -378,9 +374,6 @@ pub struct BuildState {
     pub title: String,
     pub kind: Kind,
     pub branch: String,
-    /// Epik's plugin, as the build was started with it.
-    #[serde(default)]
-    pub plugin_dir: Option<PathBuf>,
     pub status: BuildStatus,
     pub reason: Option<String>,
     /// The pull request into the default branch: the epic's, or a single
@@ -438,7 +431,6 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         branch,
         issues,
         closed,
-        plugin_dir,
     } = first
     else {
         return None;
@@ -450,7 +442,6 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         title: title.clone(),
         kind: *kind,
         branch: branch.clone(),
-        plugin_dir: plugin_dir.clone(),
         status: BuildStatus::Running,
         reason: None,
         pull_request: None,
@@ -621,7 +612,6 @@ mod tests {
             branch: "epic-12".to_owned(),
             issues: vec![issue(13, &[]), issue(14, &[13])],
             closed: Vec::new(),
-            plugin_dir: None,
         }
     }
 
@@ -855,7 +845,6 @@ mod tests {
             branch,
             issues,
             closed: vec![13],
-            plugin_dir: None,
         };
         let state = fold(&[started]).unwrap();
         assert_eq!(state.issue(13).unwrap().status, IssueStatus::Closed);
@@ -974,7 +963,6 @@ mod tests {
             branch: "main".to_owned(),
             issues: vec![issue(7, &[])],
             closed: Vec::new(),
-            plugin_dir: None,
         }];
         let state = fold(&events).unwrap();
         assert_eq!(state.kind, Kind::Issue);
@@ -992,6 +980,22 @@ mod tests {
             }]),
             None
         );
+    }
+
+    #[test]
+    fn a_record_from_before_builds_stopped_loading_the_plugin_still_reads() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}],
+            "plugin_dir": "/plugin"}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+
+        let mut summary = serde_json::to_value(&state).unwrap();
+        summary["plugin_dir"] = "/plugin".into();
+        let read: BuildState = serde_json::from_value(summary).unwrap();
+        assert_eq!(read, state);
     }
 
     #[test]

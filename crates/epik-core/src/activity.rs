@@ -49,12 +49,151 @@ pub fn read(path: &Path) -> io::Result<Activity> {
     })
 }
 
-/// A tool call, as its updates arrive.
+/// A tool call, as its updates arrive. Claude Code names its tools in
+/// `_meta.claudeCode`; any other agent's calls are known by ACP's own
+/// fields: their kind, title, locations and diffs.
 #[derive(Default)]
 pub(crate) struct Call {
+    /// Claude Code's name for the tool.
     pub(crate) tool: Option<String>,
+    /// ACP's kind of call: `read`, `edit`, `execute`, `think`, ….
+    pub(crate) kind: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) input: Option<Value>,
+    /// The paths it works on, from its `locations`.
+    pub(crate) locations: Vec<String>,
+    /// The changes it makes to files, from its `diff` content.
+    pub(crate) diffs: Vec<Diff>,
+    /// Its output so far: its latest `rawOutput`, or what Codex's terminal
+    /// has printed, which arrives in pieces.
+    pub(crate) output: String,
+    /// Whether it has completed or failed.
+    pub(crate) finished: bool,
+}
+
+/// A change to a file, as ACP's `diff` content gives it.
+pub(crate) struct Diff {
+    pub(crate) path: String,
+    /// The text it replaced: None for a new file.
+    pub(crate) old: Option<String>,
+    pub(crate) new: String,
+}
+
+impl Call {
+    /// Takes in one of its updates, whose fields replace those before,
+    /// except terminal output, which adds to it.
+    pub(crate) fn apply(&mut self, update: &Value) {
+        let text = |name: &str| update.get(name).and_then(Value::as_str).map(str::to_owned);
+        if let Some(tool) = update.pointer("/_meta/claudeCode/toolName") {
+            self.tool = tool.as_str().map(str::to_owned);
+        }
+        if let Some(kind) = text("kind") {
+            self.kind = Some(kind);
+        }
+        if let Some(title) = text("title") {
+            self.title = Some(title);
+        }
+        if has_input(update) {
+            self.input = update.get("rawInput").cloned();
+        }
+        if let Some(locations) = update.get("locations").and_then(Value::as_array) {
+            self.locations = locations
+                .iter()
+                .filter_map(|location| location.get("path")?.as_str())
+                .map(str::to_owned)
+                .collect();
+        }
+        if let Some(content) = update.get("content").and_then(Value::as_array) {
+            let diffs: Vec<Diff> = content
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("diff"))
+                .filter_map(|diff| {
+                    Some(Diff {
+                        path: diff.get("path")?.as_str()?.to_owned(),
+                        old: diff
+                            .get("oldText")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        new: diff.get("newText")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            if !diffs.is_empty() {
+                self.diffs = diffs;
+            }
+        }
+        if let Some(output) = update.get("rawOutput") {
+            self.output = text_of(output);
+        }
+        if let Some(data) = update
+            .pointer("/_meta/terminal_output_delta/data")
+            .and_then(Value::as_str)
+        {
+            self.output.push_str(data);
+        }
+        if matches!(
+            update.get("status").and_then(Value::as_str),
+            Some("completed" | "failed")
+        ) || update.pointer("/_meta/terminal_exit").is_some()
+        {
+            self.finished = true;
+        }
+    }
+
+    /// Whether it is one of the agent's actions, with enough known to say
+    /// what it does: a Claude Code tool once its input arrives, any other
+    /// agent's call once its kind does. Thinking, such as Codex's automatic
+    /// reviewer, is not an action.
+    pub(crate) fn is_action(&self) -> bool {
+        match (&self.tool, self.kind.as_deref()) {
+            (Some(_), _) => self.input.is_some(),
+            (None, Some(kind)) => kind != "think",
+            (None, None) => false,
+        }
+    }
+
+    /// The command it runs, without the shell it may be wrapped in.
+    pub(crate) fn command(&self) -> Option<&str> {
+        let command = self.input.as_ref()?.get("command")?.as_str()?;
+        Some(unwrap_shell(command))
+    }
+
+    /// The directories it says it works in: those its command `cd`s into,
+    /// and the one it runs in.
+    pub(crate) fn dirs(&self) -> Vec<String> {
+        let mut dirs: Vec<String> = self
+            .input
+            .as_ref()
+            .and_then(|input| input.get("cwd"))
+            .and_then(Value::as_str)
+            .filter(|cwd| cwd.starts_with('/'))
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
+        dirs.extend(self.command().map(cd_targets).unwrap_or_default());
+        dirs
+    }
+}
+
+/// Whether an update gives its call's input.
+pub(crate) fn has_input(update: &Value) -> bool {
+    update
+        .get("rawInput")
+        .and_then(Value::as_object)
+        .is_some_and(|input| !input.is_empty())
+}
+
+/// A `rawOutput` as text: a string, or the text of its content blocks.
+fn text_of(output: &Value) -> String {
+    match output {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// An agent log's activity, read a line at a time.
@@ -106,31 +245,20 @@ impl Reader {
             return;
         };
         let call = self.calls.entry(id.to_owned()).or_default();
-        if let Some(tool) = update.pointer("/_meta/claudeCode/toolName") {
-            call.tool = tool.as_str().map(str::to_owned);
+        let was_action = call.is_action();
+        call.apply(update);
+        if !was_action && call.is_action() {
+            self.actions.push(id.to_owned());
         }
-        if let Some(title) = update.get("title").and_then(Value::as_str) {
-            call.title = Some(title.to_owned());
+        if has_input(update) {
+            self.dirs.extend(call.dirs());
         }
-        if let Some(input) = update.get("rawInput")
-            && input.as_object().is_some_and(|input| !input.is_empty())
-        {
-            if call.input.is_none() {
-                self.actions.push(id.to_owned());
-            }
-            call.input = Some(input.clone());
-            if let Some(command) = input.get("command").and_then(Value::as_str) {
-                self.dirs.extend(cd_targets(command));
-            }
-        }
-        if update.get("status").and_then(Value::as_str) == Some("completed")
-            && let Some(command) = call
-                .input
-                .as_ref()
-                .and_then(|input| input.get("command"))
-                .and_then(Value::as_str)
+        if matches!(
+            update.get("status").and_then(Value::as_str),
+            Some("completed" | "failed")
+        ) && let Some(command) = call.command()
             && is_test_command(command)
-            && let Some(result) = test_result(&output(update))
+            && let Some(result) = test_result(&output(update, call))
         {
             self.last_test = Some(result);
         }
@@ -156,11 +284,13 @@ impl Reader {
     }
 }
 
-/// A completed tool call's output: its `rawOutput` if that is text, else
-/// what Claude Code says the tool printed.
-fn output(update: &Value) -> String {
-    if let Some(text) = update.get("rawOutput").and_then(Value::as_str) {
-        return text.to_owned();
+/// A completed tool call's output: what Claude Code says the tool printed,
+/// if it says, else what the call has printed so far.
+fn output(update: &Value, call: &Call) -> String {
+    if update.get("rawOutput").is_some()
+        || update.pointer("/_meta/claudeCode/toolResponse").is_none()
+    {
+        return call.output.clone();
     }
     ["stdout", "stderr"]
         .iter()
@@ -182,8 +312,11 @@ pub(crate) fn describe(call: &Call, dirs: &[String]) -> String {
             .or_else(|| field("notebook_path"))
             .map(|p| relative(p, dirs))
     };
+    if call.tool.is_none() {
+        return describe_acp(call, dirs);
+    }
     match call.tool.as_deref() {
-        Some("Bash") => match field("command") {
+        Some("Bash") => match call.command() {
             Some(command) => format!("Running {}", program(command)),
             None => "Running a command".to_owned(),
         },
@@ -216,6 +349,54 @@ pub(crate) fn describe(call: &Call, dirs: &[String]) -> String {
             .or_else(|| call.tool.clone())
             .unwrap_or_else(|| "Working".to_owned()),
     }
+}
+
+/// A call from an agent other than Claude Code in words, from ACP's
+/// fields: what it runs, the file it changes or reads, else its title.
+fn describe_acp(call: &Call, dirs: &[String]) -> String {
+    let title = || call.title.clone();
+    let location = || call.locations.first().map(|path| relative(path, dirs));
+    let text = match call.kind.as_deref() {
+        Some("execute") => Some(match call.command() {
+            Some(command) => format!("Running {}", program(command)),
+            None => "Running a command".to_owned(),
+        }),
+        Some("edit") => call.diffs.first().map(|diff| {
+            let path = relative(&diff.path, dirs);
+            if call.diffs.iter().all(|diff| diff.old.is_none()) {
+                format!("Writing {path}")
+            } else {
+                format!("Editing {path}")
+            }
+        }),
+        Some("read") => location().map(|path| format!("Reading {path}")),
+        Some("search") => title().or_else(|| location().map(|path| format!("Searching {path}"))),
+        _ => None,
+    };
+    text.or_else(title).unwrap_or_else(|| "Working".to_owned())
+}
+
+/// `command` without a shell running it, as Codex wraps some commands:
+/// `/bin/zsh -lc 'gh issue view 13'` is `gh issue view 13`.
+pub(crate) fn unwrap_shell(command: &str) -> &str {
+    let mut words = command.trim_start().splitn(3, ' ');
+    let (Some(shell), Some(flags), Some(rest)) = (words.next(), words.next(), words.next()) else {
+        return command;
+    };
+    let shell = shell.rsplit('/').next().unwrap_or(shell);
+    if !matches!(shell, "sh" | "bash" | "zsh") || !matches!(flags, "-c" | "-lc") {
+        return command;
+    }
+    let rest = rest.trim();
+    for quote in ['\'', '"'] {
+        if let Some(inner) = rest
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    rest
 }
 
 /// `path` relative to the longest of `dirs` it is inside, or as it is.
@@ -253,6 +434,7 @@ pub(crate) fn cd_targets(command: &str) -> Vec<String> {
 /// What a command runs: its first program that isn't `cd`, and that
 /// program's subcommand if it has one: "cargo test", "git worktree", "cat".
 fn program(command: &str) -> String {
+    let command = unwrap_shell(command);
     let segment = segments(command)
         .into_iter()
         .find(|segment| !segment.starts_with("cd ") && *segment != "cd")
@@ -360,6 +542,59 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_log_gives_its_actions_without_its_reviews() {
+        let path = format!("{}/src/fixtures/codex.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let activity = parse(&fs::read_to_string(&path).unwrap());
+
+        assert_eq!(activity.last_action.as_deref(), Some("Editing src/main.rs"));
+        assert_eq!(activity.last_test.as_deref(), Some("15 passed, 2 failed"));
+        assert_eq!(activity.cost_usd, None);
+        assert_eq!(
+            activity.recent,
+            [
+                "Running gh issue",
+                "Running git fetch",
+                "Editing tests/cli.rs",
+                "Writing tests/power.rs",
+                "Running cargo test",
+                "Editing src/main.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn another_agents_calls_are_named_from_their_kind() {
+        let line = |fields: &str| {
+            format!(
+                r#"{{"from_agent":{{"params":{{"update":{{"sessionUpdate":"tool_call","toolCallId":"c1",{fields}}}}}}}}}"#
+            )
+        };
+        let action = |fields: &str| parse(&line(fields)).last_action;
+
+        assert_eq!(
+            action(r#""kind":"read","title":"Read eval.rs","locations":[{"path":"/x/eval.rs"}]"#)
+                .as_deref(),
+            Some("Reading /x/eval.rs")
+        );
+        assert_eq!(
+            action(r#""kind":"search","title":"Search for fn eval","locations":[]"#).as_deref(),
+            Some("Search for fn eval")
+        );
+        assert_eq!(
+            action(
+                r#""kind":"execute","title":"x","rawInput":{"command":"bash -c \"cargo build\""}"#
+            )
+            .as_deref(),
+            Some("Running cargo build")
+        );
+        assert_eq!(
+            action(r#""kind":"fetch","title":"Fetching example.com""#).as_deref(),
+            Some("Fetching example.com")
+        );
+        assert_eq!(action(r#""kind":"think","title":"Guardian Review""#), None);
+    }
+
+    #[test]
     fn the_last_event_is_when_the_log_last_grew() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("14.jsonl");
@@ -407,6 +642,8 @@ mod tests {
         assert_eq!(program("/usr/bin/git status"), "git status");
         assert_eq!(program("npm --prefix x test"), "npm");
         assert_eq!(program(""), "a command");
+        assert_eq!(program("/bin/zsh -lc 'gh issue view 13'"), "gh issue");
+        assert_eq!(program("bash -c \"cd /x && make\""), "make");
     }
 
     #[test]
