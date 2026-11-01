@@ -542,3 +542,180 @@ fn a_recorded_log_reads_as_a_stream() {
     assert!(stream.entries.iter().all(|entry| entry.at.is_none()));
     assert!(stream.working);
 }
+
+/// A call from an agent other than Claude Code: ACP's fields, without
+/// `_meta.claudeCode`.
+fn acp(fields: Value) -> String {
+    let mut update =
+        json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "status": "in_progress"});
+    update
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    self::update(update)
+}
+
+#[test]
+fn another_agents_command_shows_its_terminal_output() {
+    let delta = |data: &str| {
+        update(json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "c1",
+            "_meta": {"terminal_output_delta": {"data": data, "terminal_id": "c1"}},
+        }))
+    };
+    let stream = parse(&log(&[
+        acp(json!({"kind": "execute", "title": "cargo test",
+            "rawInput": {"command": "/bin/zsh -lc 'cargo test'", "cwd": "/wt"}})),
+        delta("running 2 tests\n"),
+        delta("test result: ok. 2 passed\n"),
+    ]));
+
+    assert_eq!(
+        stream.entries[0].what,
+        Entry::Command {
+            command: "cargo test".to_owned(),
+            output: all(&["running 2 tests", "test result: ok. 2 passed"]),
+        }
+    );
+    assert!(stream.working);
+
+    let finished = parse(&log(&[
+        acp(json!({"kind": "execute", "rawInput": {"command": "true"}})),
+        update(json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "c1",
+            "_meta": {"terminal_exit": {"exit_code": 0, "signal": null, "terminal_id": "c1"}},
+        })),
+    ]));
+    assert_eq!(
+        finished.entries[0].what,
+        Entry::Command {
+            command: "true".to_owned(),
+            output: Excerpt::default(),
+        }
+    );
+    assert!(!finished.working);
+}
+
+#[test]
+fn another_agents_reads_and_searches_are_named_from_locations_and_title() {
+    assert_eq!(
+        entries(&[acp(json!({"kind": "read", "title": "Read eval.rs",
+            "locations": [{"path": "/wt/src/eval.rs"}]}))]),
+        [Entry::Read {
+            path: "src/eval.rs".to_owned(),
+            lines: None,
+        }]
+    );
+    assert_eq!(
+        entries(
+            &[acp(json!({"kind": "search", "title": "Search for fn eval",
+            "locations": [{"path": "/wt/src"}]}))]
+        ),
+        [Entry::Other {
+            text: "Search for fn eval".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn a_codex_log_reads_as_a_stream() {
+    let path = format!("{}/src/fixtures/codex.jsonl", env!("CARGO_MANIFEST_DIR"));
+    let stream = read(Path::new(&path)).unwrap();
+    let entries: Vec<Entry> = stream.entries.into_iter().map(|entry| entry.what).collect();
+
+    let kinds: Vec<String> = entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Narration { text } => format!("said {text}"),
+            Entry::Command { command, output } => {
+                format!(
+                    "ran {} ({} lines)",
+                    command.lines().next().unwrap(),
+                    output.head.len() + output.more + output.tail.len()
+                )
+            }
+            Entry::Edit { path, changes } => format!(
+                "edited {path} ({} lines)",
+                changes.head.len() + changes.more + changes.tail.len()
+            ),
+            Entry::NewFile { path, .. } => format!("added {path}"),
+            Entry::Other { text } => text.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "said I’ll read issue #13 and the repository instructions, implement it in a separate worktree with tests first, then open a PR and wait for its checks.",
+            "ran gh issue view 13 (19 lines)",
+            "Guardian Review",
+            "ran git fetch origin main; git worktree add /private/tmp/epik-issue-13 -b issue/13-exponentiation-rebuild origin/main (5 lines)",
+            "Guardian Review",
+            "edited tests/cli.rs (24 lines)",
+            "added tests/power.rs",
+            "ran cargo test (49 lines)",
+            "edited src/main.rs (5 lines)",
+        ]
+    );
+    assert_eq!(
+        entries[1],
+        Entry::Command {
+            command: "gh issue view 13".to_owned(),
+            output: Excerpt {
+                head: strings(&[
+                    "title:\tExponentiation",
+                    "state:\tCLOSED",
+                    "author:\twpm (W.P. McNeill)",
+                    "labels:\t",
+                    "comments:\t1",
+                    "assignees:\t",
+                ]),
+                more: 8,
+                tail: strings(&[
+                    "number:\t13",
+                    "--",
+                    "Add exponentiation with `^` to the calculator (e.g. \"2^3\" prints 8, \"2^-1\" prints 0.5). Follow the existing integer/real printing rule.",
+                    "",
+                    "(Filed to test running a build through the Agent Client Protocol adapter.)",
+                ]),
+            },
+        }
+    );
+    assert_eq!(
+        entries[6],
+        Entry::NewFile {
+            path: "tests/power.rs".to_owned(),
+            content: all(&[
+                "use std::process::Command;",
+                "",
+                "#[test]",
+                "fn two_cubed() {",
+                "    assert!(Command::new(env!(\"CARGO_BIN_EXE_calc\")).arg(\"2^3\").status().unwrap().success());",
+                "}",
+            ]),
+        }
+    );
+    let removed = |text: &str| Change::Removed(text.to_owned());
+    let added = |text: &str| Change::Added(text.to_owned());
+    assert_eq!(
+        entries[8],
+        Entry::Edit {
+            path: "src/main.rs".to_owned(),
+            changes: Excerpt {
+                head: vec![
+                    added("    Power,"),
+                    added("            '^' => Some(Self::Power),"),
+                    added("            Self::Power => Ok(left.powf(right)),"),
+                    removed(
+                        "/// Evaluates a binary expression such as \"3+2\", \"10-7\", \"3*2\" or \"100/2\"."
+                    ),
+                    added(
+                        "/// Evaluates a binary expression such as \"3+2\", \"10-7\", \"3*2\", \"100/2\" or \"2^3\"."
+                    ),
+                ],
+                ..Excerpt::default()
+            },
+        }
+    );
+    assert!(!stream.working);
+}
