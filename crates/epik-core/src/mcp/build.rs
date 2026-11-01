@@ -69,6 +69,7 @@ pub fn start(context: &Context, args: &Args) -> Result<Reply, String> {
         repo: string(args, "repo").unwrap_or_default().to_owned(),
         number: integer(args, "number").unwrap_or_default() as u64,
         branch: string(args, "branch").map(str::to_owned),
+        roles: None,
     };
     match request(context, &build, true)? {
         Response::Started(started) => Ok(Reply::Json(json!({
@@ -106,6 +107,7 @@ fn to_json(value: &impl serde::Serialize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentProfile;
     use crate::builds::{Builds, HangingAgent, fake_github};
     use crate::ipc::{Address, Server};
     use crate::mcp::gh::Gh;
@@ -144,7 +146,7 @@ mod tests {
                 builds: Arc::new(Builds::new(
                     root.path(),
                     Arc::new(fake_github()),
-                    Arc::new(HangingAgent),
+                    |_: &AgentProfile| Arc::new(HangingAgent),
                 )),
                 root,
                 stop: Arc::new(AtomicBool::new(false)),

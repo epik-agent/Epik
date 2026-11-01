@@ -22,6 +22,7 @@ use crate::reconcile;
 use crate::record::{self, Kind};
 use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
+use crate::settings::{self, Role, Settings};
 use crate::setup;
 
 /// A build that has started.
@@ -41,7 +42,8 @@ pub struct Started {
 pub struct Builds {
     root: PathBuf,
     github: Arc<dyn GitHub>,
-    agent: Arc<dyn Agent + Send + Sync>,
+    /// Makes the agent a profile describes.
+    make_agent: Arc<MakeAgent>,
     /// Set on shutdown: stops every build, and refuses new ones.
     cancel: Arc<AtomicBool>,
     /// The runs with a build still running.
@@ -57,18 +59,22 @@ pub struct Builds {
 /// Checks Epik's setup under a root.
 type SetupCheck = dyn Fn(&Path) -> Vec<setup::Check> + Send + Sync;
 
+/// Makes the agent a profile describes.
+type MakeAgent = dyn Fn(&AgentProfile) -> Arc<dyn Agent + Send + Sync> + Send + Sync;
+
 impl Builds {
     /// Builds under `root`, normally `~/.epik`, reaching GitHub through
-    /// `github` and running each issue with `agent`.
+    /// `github` and running each role with the agent `make_agent` makes
+    /// from the role's profile.
     pub fn new(
         root: impl Into<PathBuf>,
         github: Arc<dyn GitHub>,
-        agent: Arc<dyn Agent + Send + Sync>,
+        make_agent: impl Fn(&AgentProfile) -> Arc<dyn Agent + Send + Sync> + Send + Sync + 'static,
     ) -> Self {
         Self {
             root: root.into(),
             github,
-            agent,
+            make_agent: Arc::new(make_agent),
             cancel: Arc::new(AtomicBool::new(false)),
             active: Arc::default(),
             on_active: Arc::new(|_| {}),
@@ -99,14 +105,12 @@ impl Builds {
         self
     }
 
-    /// Builds under `root` with [`GhCli`] and Claude Code through
+    /// Builds under `root` with [`GhCli`] and each role's agent through
     /// [`AcpClient`], checking the machine's setup before each.
     pub fn real(root: impl Into<PathBuf>) -> Self {
-        Self::new(
-            root,
-            Arc::new(GhCli::new()),
-            Arc::new(AcpClient::new(AgentProfile::claude())),
-        )
+        Self::new(root, Arc::new(GhCli::new()), |profile: &AgentProfile| {
+            Arc::new(AcpClient::new(profile.clone()))
+        })
         .check_setup(|root| {
             let latest = crate::install::Cached {
                 root: root.to_owned(),
@@ -126,24 +130,40 @@ impl Builds {
     /// couldn't start. A build of an epic issue that already has a run adds
     /// a build to it; while one of its builds is running, another is
     /// refused.
+    ///
+    /// The build runs with `roles`, or without them, with the settings.
+    /// Before anything is recorded, the coding agent, and the review agent
+    /// when review is on, are checked: an agent that can't run unattended
+    /// with its model refuses the build.
     pub fn start(
         &self,
         repo: &str,
         number: u64,
         branch: Option<String>,
+        roles: Option<Settings>,
     ) -> Result<Started, String> {
-        let request = Request {
-            repo: repo.to_owned(),
-            number,
-            branch,
-            root: self.root.clone(),
-        };
         if !repositories::is_repo(repo) {
             return Err(format!("{repo:?} is not a repository: write owner/name"));
         }
         if let Some(refusal) = setup::refusal(&self.setup()) {
             return Err(refusal);
         }
+        let roles = match roles {
+            Some(roles) => roles,
+            None => settings::read(&self.root)
+                .map_err(|error| format!("couldn't read the settings: {error}"))?,
+        };
+        let agent = self.checked_agent("coding", &roles.coding)?;
+        if let Some(review) = &roles.review {
+            self.checked_agent("review", review)?;
+        }
+        let request = Request {
+            repo: repo.to_owned(),
+            number,
+            branch,
+            root: self.root.clone(),
+            roles,
+        };
         let key = RunKey::new(repo, number);
         let (started, starting) = mpsc::channel();
         {
@@ -164,7 +184,6 @@ impl Builds {
                 (self.on_active)(active.len());
             }
             let github = self.github.clone();
-            let agent = self.agent.clone();
             let cancel = self.cancel.clone();
             let active = self.active.clone();
             let on_active = self.on_active.clone();
@@ -220,15 +239,34 @@ impl Builds {
     }
 
     /// Starts a new build of `run`, which needs attention, as its last
-    /// build was started: with the same branch. Like any build,
-    /// it skips the issues already closed.
+    /// build was started: with the same branch and roles, whatever the
+    /// settings now say. Like any build, it skips the issues already closed.
     pub fn rerun(&self, run: &RunKey) -> Result<Started, String> {
         let state = self.needing_attention(run)?;
         let latest = record::list_builds(&self.root, run)
             .ok()
             .and_then(|builds| builds.into_iter().last())
             .ok_or_else(|| format!("couldn't read {run}'s builds"))?;
-        self.start(&state.repo, state.number, Some(latest.branch))
+        self.start(
+            &state.repo,
+            state.number,
+            Some(latest.branch),
+            Some(latest.roles),
+        )
+    }
+
+    /// The agent for `role`, called `name`, once it has checked that it can
+    /// run unattended with the role's model.
+    fn checked_agent(
+        &self,
+        name: &str,
+        role: &Role,
+    ) -> Result<Arc<dyn Agent + Send + Sync>, String> {
+        let agent = (self.make_agent)(&settings::profile(role)?);
+        agent
+            .check(&self.root, role.model.as_deref())
+            .map_err(|why| format!("the {name} agent can't run: {why}"))?;
+        Ok(agent)
     }
 
     /// Deletes `run`, which needs attention: every build's clone and
@@ -349,7 +387,9 @@ mod tests {
     use crate::record::{self, BuildStatus};
 
     fn builds(root: &Path, github: crate::github::FakeGitHub) -> Builds {
-        Builds::new(root, Arc::new(github), Arc::new(HangingAgent))
+        Builds::new(root, Arc::new(github), |_: &AgentProfile| {
+            Arc::new(HangingAgent)
+        })
     }
 
     #[test]
@@ -357,7 +397,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
-        let started = builds.start("owner/repo", 7, None).unwrap();
+        let started = builds.start("owner/repo", 7, None, None).unwrap();
 
         assert_eq!(started.run, RunKey::new("owner/repo", 7));
         assert!(started.build_id.starts_with("20"), "{started:?}");
@@ -390,8 +430,8 @@ mod tests {
             move |n| heard.lock().unwrap().push(n)
         });
 
-        builds.start("owner/repo", 7, None).unwrap();
-        builds.start("owner/repo", 8, None).unwrap();
+        builds.start("owner/repo", 7, None, None).unwrap();
+        builds.start("owner/repo", 8, None, None).unwrap();
         assert_eq!(*heard.lock().unwrap(), [1, 2]);
 
         builds.shutdown();
@@ -404,7 +444,7 @@ mod tests {
         let builds = builds(root.path(), fake_github());
 
         let started = builds
-            .start("owner/repo", 7, Some("topic".to_owned()))
+            .start("owner/repo", 7, Some("topic".to_owned()), None)
             .unwrap();
 
         assert_eq!(started.branch, "topic");
@@ -417,7 +457,7 @@ mod tests {
         github.set_state("owner/repo", 7, State::Closed);
         let builds = builds(root.path(), github);
 
-        let error = builds.start("owner/repo", 7, None).unwrap_err();
+        let error = builds.start("owner/repo", 7, None, None).unwrap_err();
 
         assert_eq!(error, "it is closed");
         assert!(builds.active().is_empty());
@@ -428,7 +468,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
-        builds.start("owner/repo", 7, None).unwrap();
+        builds.start("owner/repo", 7, None, None).unwrap();
 
         let monitored = repositories::list(root.path()).unwrap();
         assert_eq!(monitored.len(), 1);
@@ -443,7 +483,7 @@ mod tests {
         let builds = builds(root.path(), fake_github())
             .check_setup(move |root| setup::check_all(root, &no_node, &setup::Unknown));
 
-        let error = builds.start("owner/repo", 7, None).unwrap_err();
+        let error = builds.start("owner/repo", 7, None, None).unwrap_err();
 
         assert_eq!(
             error,
@@ -459,7 +499,7 @@ mod tests {
         let builds = builds(root.path(), fake_github());
 
         for bad in ["github.com/owner/repo", "owner", "../owner/repo"] {
-            let error = builds.start(bad, 7, None).unwrap_err();
+            let error = builds.start(bad, 7, None, None).unwrap_err();
             assert!(
                 error.ends_with("is not a repository: write owner/name"),
                 "{error}"
@@ -472,9 +512,9 @@ mod tests {
     fn one_epic_spelled_two_ways_is_one_run() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        builds.start("owner/repo", 7, None).unwrap();
+        builds.start("owner/repo", 7, None, None).unwrap();
 
-        let error = builds.start("Owner/Repo", 7, None).unwrap_err();
+        let error = builds.start("Owner/Repo", 7, None, None).unwrap_err();
 
         assert_eq!(error, "a build of owner/repo#7 is already running");
     }
@@ -483,9 +523,9 @@ mod tests {
     fn a_second_build_of_a_running_run_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        builds.start("owner/repo", 7, None).unwrap();
+        builds.start("owner/repo", 7, None, None).unwrap();
 
-        let error = builds.start("owner/repo", 7, None).unwrap_err();
+        let error = builds.start("owner/repo", 7, None, None).unwrap_err();
 
         assert_eq!(error, "a build of owner/repo#7 is already running");
         assert_eq!(builds.active().len(), 1);
@@ -495,12 +535,14 @@ mod tests {
     fn building_a_run_again_adds_a_build_to_it() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        let first = builds.start("owner/repo", 7, None).unwrap();
+        let first = builds.start("owner/repo", 7, None, None).unwrap();
         builds.shutdown();
         let builds =
-            super::Builds::new(root.path(), Arc::new(fake_github()), Arc::new(HangingAgent));
+            super::Builds::new(root.path(), Arc::new(fake_github()), |_: &AgentProfile| {
+                Arc::new(HangingAgent)
+            });
 
-        let second = builds.start("owner/repo", 7, None).unwrap();
+        let second = builds.start("owner/repo", 7, None, None).unwrap();
 
         assert_eq!(first.run, second.run);
         assert_ne!(first.build_id, second.build_id);
@@ -514,7 +556,7 @@ mod tests {
     fn interrupted(root: &Path) -> Started {
         let builds = builds(root, fake_github());
         let started = builds
-            .start("owner/repo", 7, Some("topic".to_owned()))
+            .start("owner/repo", 7, Some("topic".to_owned()), None)
             .unwrap();
         builds.shutdown();
         started
@@ -549,7 +591,7 @@ mod tests {
             github
         };
         let first = builds(root.path(), github());
-        let started = first.start("owner/repo", 1, None).unwrap();
+        let started = first.start("owner/repo", 1, None, None).unwrap();
         first.shutdown();
 
         let second = builds(root.path(), github());
@@ -576,7 +618,7 @@ mod tests {
     fn a_running_or_unknown_run_is_not_rerun_or_deleted() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        let started = builds.start("owner/repo", 7, None).unwrap();
+        let started = builds.start("owner/repo", 7, None, None).unwrap();
 
         let rerun = builds.rerun(&started.run).unwrap_err();
         let delete = builds.delete(&started.run).unwrap_err();
@@ -602,13 +644,207 @@ mod tests {
         assert!(!clones.exists() || std::fs::read_dir(clones).unwrap().count() == 0);
     }
 
+    /// What a [`Recording`] agent was asked, in order.
+    #[derive(Debug, Default)]
+    struct Asked {
+        /// The profile of each agent made.
+        made: Vec<String>,
+        /// The model of each check.
+        checked: Vec<Option<String>>,
+        /// The model of each run.
+        ran: Vec<Option<String>>,
+    }
+
+    /// An [`Agent`] that keeps what it is asked, refuses one model in its
+    /// check, and runs until cancelled.
+    struct Recording {
+        asked: Arc<Mutex<Asked>>,
+        refused: Option<String>,
+    }
+
+    impl Agent for Recording {
+        fn run(
+            &self,
+            request: &crate::agent::AgentRequest,
+            cancel: &AtomicBool,
+        ) -> crate::agent::AgentOutcome {
+            self.asked.lock().unwrap().ran.push(request.model.clone());
+            HangingAgent.run(request, cancel)
+        }
+
+        fn check(&self, _cwd: &Path, model: Option<&str>) -> Result<(), String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .checked
+                .push(model.map(str::to_owned));
+            match model {
+                Some(model) if Some(model) == self.refused.as_deref() => Err(format!(
+                    "Claude Code doesn't offer the model `{model}`; its models are: sonnet, opus"
+                )),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// Builds under `root` whose agents are [`Recording`]s refusing
+    /// `refused`, and what they are asked.
+    fn recording(root: &Path, refused: Option<&str>) -> (Builds, Arc<Mutex<Asked>>) {
+        let asked = Arc::new(Mutex::new(Asked::default()));
+        let builds = Builds::new(root, Arc::new(fake_github()), {
+            let asked = asked.clone();
+            let refused = refused.map(str::to_owned);
+            move |profile: &AgentProfile| {
+                asked.lock().unwrap().made.push(profile.id.clone());
+                Arc::new(Recording {
+                    asked: asked.clone(),
+                    refused: refused.clone(),
+                })
+            }
+        });
+        (builds, asked)
+    }
+
+    fn roles(coding: Option<&str>, review: Option<Option<&str>>) -> Settings {
+        let role = |model: Option<&str>| settings::Role {
+            agent: "claude".to_owned(),
+            model: model.map(str::to_owned),
+        };
+        Settings {
+            coding: role(coding),
+            review: review.map(role),
+        }
+    }
+
+    /// The models the agents ran, once one has.
+    fn ran(asked: &Mutex<Asked>) -> Vec<Option<String>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ran = asked.lock().unwrap().ran.clone();
+            if !ran.is_empty() || std::time::Instant::now() >= deadline {
+                return ran;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The roles `started` recorded.
+    fn recorded(root: &Path, started: &Started) -> Settings {
+        let events = record::read_events(root, &started.run, &started.build_id).unwrap();
+        record::fold(&events).unwrap().roles
+    }
+
+    #[test]
+    fn a_build_without_roles_uses_the_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = roles(Some("opus"), None);
+        settings::write(root.path(), &settings).unwrap();
+        let (builds, asked) = recording(root.path(), None);
+
+        let started = builds.start("owner/repo", 7, None, None).unwrap();
+
+        assert_eq!(ran(&asked), [Some("opus".to_owned())]);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.made, ["claude"]);
+        assert_eq!(asked.checked, [Some("opus".to_owned())]);
+        assert_eq!(recorded(root.path(), &started), settings);
+    }
+
+    #[test]
+    fn a_build_with_roles_uses_those() {
+        let root = tempfile::tempdir().unwrap();
+        settings::write(root.path(), &roles(Some("opus"), None)).unwrap();
+        let (builds, asked) = recording(root.path(), None);
+        let given = roles(Some("sonnet"), Some(Some("haiku")));
+
+        let started = builds
+            .start("owner/repo", 7, None, Some(given.clone()))
+            .unwrap();
+
+        assert_eq!(ran(&asked), [Some("sonnet".to_owned())]);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.made, ["claude", "claude"]);
+        assert_eq!(
+            asked.checked,
+            [Some("sonnet".to_owned()), Some("haiku".to_owned())]
+        );
+        assert_eq!(recorded(root.path(), &started), given);
+    }
+
+    #[test]
+    fn a_rerun_uses_the_roles_its_last_build_recorded() {
+        let root = tempfile::tempdir().unwrap();
+        let first_roles = roles(Some("opus"), Some(None));
+        settings::write(root.path(), &first_roles).unwrap();
+        let (builds, _) = recording(root.path(), None);
+        let first = builds.start("owner/repo", 7, None, None).unwrap();
+        builds.shutdown();
+        settings::write(root.path(), &roles(Some("sonnet"), None)).unwrap();
+        let (builds, asked) = recording(root.path(), None);
+
+        let second = builds.rerun(&first.run).unwrap();
+
+        assert_eq!(ran(&asked), [Some("opus".to_owned())]);
+        assert_eq!(
+            asked.lock().unwrap().checked,
+            [Some("opus".to_owned()), None]
+        );
+        assert_eq!(recorded(root.path(), &second), first_roles);
+    }
+
+    #[test]
+    fn an_agent_that_fails_its_check_refuses_the_build() {
+        let root = tempfile::tempdir().unwrap();
+        let (builds, asked) = recording(root.path(), Some("gpt-5"));
+
+        for (given, role) in [
+            (roles(Some("gpt-5"), None), "coding"),
+            (roles(None, Some(Some("gpt-5"))), "review"),
+        ] {
+            let error = builds
+                .start("owner/repo", 7, None, Some(given))
+                .unwrap_err();
+
+            assert_eq!(
+                error,
+                format!(
+                    "the {role} agent can't run: Claude Code doesn't offer the model `gpt-5`; \
+                     its models are: sonnet, opus"
+                )
+            );
+        }
+        assert!(asked.lock().unwrap().ran.is_empty());
+        assert!(builds.active().is_empty());
+        assert!(run::list(root.path()).unwrap().is_empty());
+        assert!(!crate::cleanup::builds_dir(root.path()).exists());
+    }
+
+    #[test]
+    fn a_role_naming_an_agent_epik_does_not_know_refuses_the_build() {
+        let root = tempfile::tempdir().unwrap();
+        let (builds, asked) = recording(root.path(), None);
+        let mut given = roles(None, None);
+        given.coding.agent = "aider".to_owned();
+
+        let error = builds
+            .start("owner/repo", 7, None, Some(given))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "\"aider\" is not an agent Epik knows: the agents are claude"
+        );
+        assert!(asked.lock().unwrap().made.is_empty());
+        assert!(run::list(root.path()).unwrap().is_empty());
+    }
+
     #[test]
     fn no_build_starts_after_shutdown() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
         builds.shutdown();
 
-        let error = builds.start("owner/repo", 7, None).unwrap_err();
+        let error = builds.start("owner/repo", 7, None, None).unwrap_err();
 
         assert_eq!(error, "the Epik app is shutting down");
         assert!(!root.path().join("runs").exists());

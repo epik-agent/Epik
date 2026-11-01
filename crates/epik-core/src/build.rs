@@ -35,6 +35,7 @@ use crate::graph::Graph;
 use crate::prompt::{self, Work};
 use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
 use crate::run::{self, RunKey};
+use crate::settings::Settings;
 
 /// How often a pull request's checks are read while they are pending.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,6 +57,9 @@ pub struct Request {
     /// Epik's root, normally `~/.epik`. Clones go under `builds`, records
     /// under `runs`.
     pub root: PathBuf,
+    /// The agent and model each role runs with, recorded in
+    /// `build_started`. Each issue's agent runs the coding role's model.
+    pub roles: Settings,
 }
 
 /// Why a build couldn't start.
@@ -250,6 +254,7 @@ pub fn start<'a>(
         branch: branch.clone(),
         issues,
         closed: closed.iter().copied().collect(),
+        roles: request.roles.clone(),
     });
     Ok(Build {
         github,
@@ -268,6 +273,7 @@ pub fn start<'a>(
         graph,
         closed,
         problems,
+        roles: request.roles.clone(),
         check_interval: CHECK_INTERVAL,
         log: Mutex::new(log),
     })
@@ -296,6 +302,7 @@ pub struct Build<'a> {
     closed: BTreeSet<u64>,
     /// What stops the run before any agent starts.
     problems: Vec<String>,
+    roles: Settings,
     check_interval: Duration,
     log: Mutex<Log>,
 }
@@ -469,7 +476,7 @@ impl Build<'_> {
             cwd: self.clone.clone(),
             jsonl_path: dir.join(format!("{number}.jsonl")),
             err_path: dir.join(format!("{number}.err")),
-            model: None,
+            model: self.roles.coding.model.clone(),
         };
         let outcome = self.agent.run(&request, cancel);
         if cancel.load(Ordering::SeqCst) {
@@ -682,6 +689,7 @@ mod tests {
     use super::*;
     use crate::github::{FakeGitHub, MergeMethods, PullState};
     use crate::record::{BuildStatus, IssueStatus};
+    use crate::settings::Role;
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
@@ -814,6 +822,7 @@ mod tests {
             number,
             branch: None,
             root: root.to_owned(),
+            roles: Settings::default(),
         }
     }
 
@@ -1033,6 +1042,46 @@ mod tests {
         assert_eq!(state.branch, "daemon");
         assert_eq!(agent.issues(), [(2, "daemon".to_owned())]);
         assert_eq!(github.repo(REPO).pulls[&pr_of(&github, 2)].base, "daemon");
+    }
+
+    #[test]
+    fn each_agent_runs_the_coding_model_and_the_build_records_its_roles() {
+        let github = epic([(2, &[]), (3, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let roles = Settings {
+            coding: Role {
+                agent: "claude".to_owned(),
+                model: Some("opus".to_owned()),
+            },
+            review: Some(Role {
+                agent: "claude".to_owned(),
+                model: None,
+            }),
+        };
+        let mut request = request(root.path(), 1);
+        request.roles = roles.clone();
+
+        let state = run(&github, &agent, &request, &cancel).unwrap();
+
+        let models: Vec<Option<String>> = agent
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.model.clone())
+            .collect();
+        assert_eq!(models, [Some("opus".to_owned()), Some("opus".to_owned())]);
+        assert_eq!(state.roles, roles);
+        let events = record::read_events(root.path(), &state.run(), &state.build_id).unwrap();
+        let Event::BuildStarted {
+            roles: recorded, ..
+        } = &events[0]
+        else {
+            panic!("the build starts with build_started");
+        };
+        assert_eq!(*recorded, roles);
     }
 
     #[test]

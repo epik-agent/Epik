@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::builds::{Builds, Started};
 use crate::record;
 use crate::run::{self, RunKey, RunState};
+use crate::settings::Settings;
 use crate::setup;
 
 /// How many runs `list` returns when it isn't given a limit.
@@ -52,6 +53,10 @@ pub enum Request {
         number: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+        /// The agent and model each role runs with, or `None` for the
+        /// app's settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roles: Option<Settings>,
     },
     /// A run's state.
     Status { run: RunKey },
@@ -163,7 +168,8 @@ fn handle(builds: &Builds, request: Request) -> Response {
             repo,
             number,
             branch,
-        } => match builds.start(&repo, number, branch) {
+            roles,
+        } => match builds.start(&repo, number, branch, roles) {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
         },
@@ -581,6 +587,7 @@ fn exchange(mut stream: Stream, line: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentProfile;
     use crate::builds::{HangingAgent, fake_github};
     use crate::github::FakeGitHub;
     use crate::record::{self, Kind};
@@ -621,7 +628,7 @@ mod tests {
             let builds = Arc::new(Builds::new(
                 root.path(),
                 Arc::new(github),
-                Arc::new(HangingAgent),
+                |_: &AgentProfile| Arc::new(HangingAgent),
             ));
             let stop = Arc::new(AtomicBool::new(false));
             let thread = thread::spawn({
@@ -711,6 +718,24 @@ mod tests {
             app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7, "branch": "topic"}"#);
 
         assert_eq!(reply["branch"], "topic", "{reply}");
+    }
+
+    #[test]
+    fn build_takes_the_roles_to_run() {
+        let app = Running::new(fake_github());
+
+        let roles = r#""roles": {"coding": {"agent": "claude", "model": "opus"}, "review": null}"#;
+        let reply = app.send(&format!(
+            r#"{{"type": "build", "repo": "owner/repo", "number": 7, {roles}}}"#
+        ));
+
+        assert_eq!(reply["type"], "started", "{reply}");
+        let key = RunKey::new("owner/repo", 7);
+        let events =
+            record::read_events(app.root.path(), &key, reply["build_id"].as_str().unwrap())
+                .unwrap();
+        let roles = record::fold(&events).unwrap().roles;
+        assert_eq!(roles.coding.model.as_deref(), Some("opus"));
     }
 
     #[test]
@@ -825,6 +850,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: Vec::new(),
                 closed: Vec::new(),
+                roles: Default::default(),
             })
             .unwrap();
     }
@@ -1205,6 +1231,7 @@ mod tests {
             repo: "owner/repo".to_owned(),
             number: 7,
             branch: None,
+            roles: None,
         };
         assert_eq!(
             serde_json::to_value(&build).unwrap(),
