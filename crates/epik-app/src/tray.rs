@@ -100,6 +100,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::stop_monitoring,
             main_window::uninstall_plan,
             main_window::uninstall,
+            main_window::quit_to_remove,
             main_window::open_github,
             main_window::agent_stream,
             popover::open_main,

@@ -16,9 +16,12 @@ use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
 use epik_core::run::{self, RunKey};
 use epik_core::{setup, uninstall};
-use epik_view::{Home, Popover, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep};
+use epik_view::{
+    Home, Popover, Removal, RunPage, Settings, Sidebar, Stream, Uninstall, UninstallStep,
+};
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
+use crate::popover::Quit;
 use crate::runs::Runs;
 use crate::{navigation, pages};
 
@@ -156,13 +159,63 @@ pub fn stop_monitoring(repo: String, window: State<'_, Window>) -> Result<(), St
 const BUILDING: &str = "Wait for the running build to finish, or stop it first.";
 
 /// What the confirmation to uninstall Epik says: how many runs' history
-/// goes, and whether a build is running.
+/// goes, whether a build is running, and how the user removes the app.
 #[tauri::command]
 pub fn uninstall_plan(window: State<'_, Window>) -> Result<Uninstall, String> {
     Ok(Uninstall {
         runs: run::list(&window.root).map_err(failed)?.len(),
         building: !window.builds.active().is_empty(),
+        removal: this_removal()?,
     })
+}
+
+/// How the user removes this app, which runs from `exe` on `os`, from the
+/// AppImage at `appimage` if `APPIMAGE` names one. Each platform's
+/// installer owns the app, so the platform removes it, not Epik.
+fn removal(os: &str, exe: &Path, appimage: Option<PathBuf>) -> Removal {
+    match os {
+        "macos" => {
+            let bundle = exe
+                .ancestors()
+                .find(|path| path.extension().is_some_and(|extension| extension == "app"));
+            Removal::MacApp(bundle.unwrap_or(exe).to_owned())
+        }
+        "windows" => Removal::WindowsApp,
+        _ => match appimage {
+            Some(appimage) if !appimage.as_os_str().is_empty() => Removal::AppImage(appimage),
+            _ => Removal::Deb,
+        },
+    }
+}
+
+/// How the user removes the running app.
+fn this_removal() -> Result<Removal, String> {
+    let exe = std::env::current_exe().map_err(failed)?;
+    let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+    Ok(removal(std::env::consts::OS, &exe, appimage))
+}
+
+/// Takes the user to where they remove the app, revealing it or opening
+/// Installed Apps, then quits through the tray's Quit. It quits even if
+/// it couldn't take them there.
+#[tauri::command]
+pub fn quit_to_remove(quit: State<'_, Quit>) {
+    let opened = this_removal().and_then(|removal| {
+        match removal {
+            Removal::MacApp(path) | Removal::AppImage(path) => {
+                tauri_plugin_opener::reveal_item_in_dir(path)
+            }
+            Removal::WindowsApp => {
+                tauri_plugin_opener::open_url("ms-settings:appsfeatures", None::<&str>)
+            }
+            Removal::Deb => Ok(()),
+        }
+        .map_err(failed)
+    });
+    if let Err(error) = opened {
+        eprintln!("epik-app: couldn't show where to remove Epik: {error}");
+    }
+    quit.quit();
 }
 
 /// Removes what Epik put on the machine, unless a build is running, and
@@ -327,6 +380,48 @@ mod tests {
             assert!(refused.unwrap_err().ends_with("isn't an agent's log"));
         }
         assert!(stream(root.path(), "").is_err());
+    }
+
+    #[test]
+    fn on_macos_the_app_is_the_bundle_around_the_executable() {
+        let exe = Path::new("/Applications/Epik.app/Contents/MacOS/epik-app");
+        assert_eq!(
+            removal("macos", exe, None),
+            Removal::MacApp("/Applications/Epik.app".into())
+        );
+    }
+
+    #[test]
+    fn on_macos_an_executable_outside_a_bundle_is_the_app() {
+        let exe = Path::new("/Users/me/Epik/target/debug/epik-app");
+        assert_eq!(removal("macos", exe, None), Removal::MacApp(exe.into()));
+    }
+
+    #[test]
+    fn on_windows_the_app_was_installed_with_the_msi() {
+        let exe = Path::new(r"C:\Program Files\Epik\epik-app.exe");
+        assert_eq!(removal("windows", exe, None), Removal::WindowsApp);
+    }
+
+    #[test]
+    fn on_linux_the_app_is_the_appimage_when_run_from_one() {
+        let exe = Path::new("/tmp/.mount_EpikXyz/usr/bin/epik-app");
+        let appimage = PathBuf::from("/home/me/Apps/Epik.AppImage");
+        assert_eq!(
+            removal("linux", exe, Some(appimage.clone())),
+            Removal::AppImage(appimage)
+        );
+    }
+
+    #[test]
+    fn on_linux_the_app_was_otherwise_installed_with_the_deb() {
+        let exe = Path::new("/usr/bin/epik-app");
+        assert_eq!(removal("linux", exe, None), Removal::Deb);
+        assert_eq!(
+            removal("linux", exe, Some(PathBuf::new())),
+            Removal::Deb,
+            "an empty APPIMAGE"
+        );
     }
 
     #[test]

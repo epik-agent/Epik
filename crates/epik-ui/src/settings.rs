@@ -1,7 +1,9 @@
 //! Settings, a page of the main window: the monitored repositories, a form
 //! to monitor another, and a button to uninstall Epik.
 
-use epik_view::{RepositoryRow, Settings, Uninstall, UninstallStep};
+use std::path::Path;
+
+use epik_view::{Removal, RepositoryRow, Settings, Uninstall, UninstallStep};
 use leptos::ev::SubmitEvent;
 use leptos::html::Input;
 use leptos::prelude::*;
@@ -187,8 +189,42 @@ pub enum Uninstalling {
     Done(Vec<UninstallStep>),
 }
 
-/// The dialog that uninstalls Epik: what goes, what stays, and that you
-/// delete the app yourself, then how each step went, then Quit. Uninstall is disabled while a build runs.
+/// How to remove the app the way the platform removes any app, the second
+/// of uninstalling's two steps, as the end of a sentence.
+fn removal_line(removal: &Removal) -> AnyView {
+    match removal {
+        Removal::MacApp(bundle) => {
+            let folder = match bundle.parent() {
+                Some(folder) if folder == Path::new("/Applications") => "Applications".to_owned(),
+                Some(folder) => folder.display().to_string(),
+                None => "its folder".to_owned(),
+            };
+            view! { {format!("drag Epik from {folder} to the Trash.")} }.into_any()
+        }
+        Removal::WindowsApp => {
+            view! { "open Settings › Apps › Installed apps, and uninstall Epik there." }.into_any()
+        }
+        Removal::AppImage(_) => view! { "delete the AppImage." }.into_any(),
+        Removal::Deb => view! { "run "<code>"sudo apt remove epik"</code>"." }.into_any(),
+    }
+}
+
+/// What the Done button says: it does the platform's step for the user
+/// where it can, then quits.
+fn quit_label(removal: &Removal) -> &'static str {
+    match removal {
+        Removal::MacApp(_) => "Quit and Show in Finder",
+        Removal::WindowsApp => "Quit and Open Installed Apps",
+        Removal::AppImage(_) => "Quit and Show the AppImage",
+        Removal::Deb => "Quit",
+    }
+}
+
+/// The dialog that uninstalls Epik, in two steps: Epik removes its own
+/// files, then the user quits and removes the app the way their platform
+/// removes any app. It says what goes, what stays, and how to remove the
+/// app, then how each step went, then offers to quit, doing the platform's
+/// step first where it can. Uninstall is disabled while a build runs.
 #[component]
 pub fn UninstallBody(
     plan: Uninstall,
@@ -236,7 +272,11 @@ pub fn UninstallBody(
                     <li>"Claude Code, and your sign-in to it"</li>
                     <li>"gh on your PATH, your sign-in to GitHub, and git pushing with gh"</li>
                 </ul>
-                <p>"Afterward, quit Epik and delete the app yourself."</p>
+                <p>
+                    "Uninstalling has two steps. First Epik removes its own files, listed above. \
+                     Then you quit Epik and remove the app the way you'd remove any app: "
+                    {removal_line(&plan.removal)}
+                </p>
                 {history}
                 {building}
                 {error}
@@ -259,12 +299,12 @@ pub fn UninstallBody(
             let (title, text) = if failed {
                 (
                     "Epik is partly uninstalled",
-                    "Epik couldn't remove everything. Remove what failed yourself, then quit Epik and delete the app to finish.",
+                    "Epik couldn't remove everything. Remove what failed yourself, then quit Epik and ",
                 )
             } else {
                 (
-                    "Epik is uninstalled",
-                    "Epik's files are removed. Quit Epik and delete the app to finish.",
+                    "Epik's files are removed",
+                    "One step left: quit Epik, then ",
                 )
             };
             let steps = steps
@@ -285,9 +325,11 @@ pub fn UninstallBody(
             view! {
                 <h2>{title}</h2>
                 <ul class="uninstall-steps">{steps}</ul>
-                <p>{text}</p>
+                <p>{text}{removal_line(&plan.removal)}</p>
                 <div class="buttons">
-                    <button class="primary" on:click=call(on_quit)>"Quit"</button>
+                    <button class="primary" on:click=call(on_quit)>
+                        {quit_label(&plan.removal)}
+                    </button>
                 </div>
             }
             .into_any()
