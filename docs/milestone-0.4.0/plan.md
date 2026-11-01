@@ -174,6 +174,14 @@ OpenAI's API, or need a machine:
 
 Findings 1, 2 and 2a finish the agents record, and are done; 2b finishes
 epic C's plan, and is done; 3 and 4 finish the remote one.
+
+**Filed 2026-10-31.** Both records are accepted as
+`docs/design-history/2026-10-31-agents-and-roles.md` and
+`2026-10-31-remote-hosts.md` (PR #475). Epic A is #476 with sub-issues
+#477–#492 (A1–A7 = #477–#483, A9–A17 = #484–#492; A8 was dropped). Epic
+R is #493 with sub-issues #494–#508 (R1–R15 in order). Both on milestone
+0.4.0, graphs checked with `epic_status`, no cycles. The filing script is
+`~/Projects/Epik/milestone-0.4.0/file_epic.py`. Epic C is not filed.
 Then the records merge, and the issues are filed with `blocked-by` links as
 drawn, checked with `epic_status`.
 
