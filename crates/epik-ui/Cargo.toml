@@ -21,3 +21,6 @@ wasm-bindgen-futures = "0.4.79"
 
 [dev-dependencies]
 leptos = { version = "0.8.22", features = ["ssr"] }
+
+[lints]
+workspace = true

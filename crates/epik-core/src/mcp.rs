@@ -42,7 +42,7 @@ it holds what Epik believes about building software and how Epik writes epics. \
 The user always understands what is going on; that principle outranks speed.";
 
 /// Every tool's name, description and input schema.
-const TOOLS: &str = include_str!("tools.json");
+const TOOLS: &str = include_str!("mcp/tools.json");
 
 /// What a tool gives back.
 #[derive(Debug, Clone, PartialEq)]
