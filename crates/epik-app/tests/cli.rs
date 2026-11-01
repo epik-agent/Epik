@@ -141,7 +141,7 @@ mod headless {
 
     /// With no tray, as on Linux without a display, the app with no flags
     /// says so and runs headless.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
     #[test]
     fn without_a_display_it_runs_headless_and_says_so() {
         let home = tempfile::tempdir().unwrap();
@@ -160,6 +160,102 @@ mod headless {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("there is no tray (no display)"), "{stderr}");
+    }
+
+    /// Built without the desktop, the app with no flags runs headless.
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn without_the_desktop_no_argument_runs_headless() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = Command::new(env!("CARGO_BIN_EXE_epik-app"))
+            .env("HOME", home.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let version = wait_for_ping(home.path(), &mut app);
+
+        assert_eq!(version, epik_core::version());
+        let output = terminate(app);
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("running headless"), "{stderr}");
+    }
+
+    /// Built without the desktop, the app doesn't keep the machine awake,
+    /// so a build's start and end say nothing about it.
+    #[cfg(not(feature = "desktop"))]
+    #[test]
+    fn without_the_desktop_a_build_says_nothing_about_keeping_awake() {
+        let home = tempfile::tempdir().unwrap();
+        set_up_fakes(home.path());
+        let mut app = headless(home.path()).spawn().unwrap();
+        wait_for_ping(home.path(), &mut app);
+
+        // The fake gh finds no issue, so the build starts and ends at once.
+        let response = ipc::request(
+            &address(home.path()),
+            &ipc::Request::Build {
+                repo: "epik-agent/nothing".to_owned(),
+                number: 1,
+                branch: None,
+                plugin_dir: home.path().to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            matches!(response, ipc::Response::Error { .. }),
+            "{response:?}"
+        );
+        let output = terminate(app);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("1 build(s) running"), "{stderr}");
+        assert!(stderr.contains("0 build(s) running"), "{stderr}");
+        assert!(!stderr.contains("awake"), "{stderr}");
+        assert!(!stderr.contains("sleep"), "{stderr}");
+    }
+
+    /// Puts fake `gh`, `claude` and `node` in `home`'s `~/.local/bin`, and
+    /// has git push with gh, so that the setup Epik checks before a build
+    /// is complete. The fake gh answers nothing else.
+    #[cfg(not(feature = "desktop"))]
+    fn set_up_fakes(home: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fakes = [
+            (
+                "gh",
+                r#"case "$*" in
+  --version) echo "gh version 2.63.0 (2024-11-27)" ;;
+  "auth status") echo "  - Token scopes: 'project', 'repo'" ;;
+  *) echo "no such thing" >&2; exit 1 ;;
+esac"#,
+            ),
+            (
+                "claude",
+                r#"case "$*" in
+  --version) echo "2.1.312 (Claude Code)" ;;
+  "auth status") echo '{"loggedIn": true}' ;;
+  "plugin list --json") echo '[]' ;;
+  *) exit 1 ;;
+esac"#,
+            ),
+            ("node", "echo v26.0.0"),
+        ];
+        for (name, body) in fakes {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[credential \"https://github.com\"]\n\thelper = !gh auth git-credential\n",
+        )
+        .unwrap();
     }
 }
 

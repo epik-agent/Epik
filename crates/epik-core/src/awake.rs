@@ -3,7 +3,8 @@
 //! [`KeepAwake`] follows the number of active builds: it holds an
 //! idle-sleep assertion while there is at least one, and releases it when
 //! there are none. The assertion itself comes from a [`Waker`], so tests
-//! can follow the hold without holding a real one.
+//! can follow the hold without holding a real one. The operating system's,
+//! [`System`], comes with the feature `awake`.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -19,8 +20,10 @@ pub trait Waker: Send + Sync {
 
 /// The operating system's idle-sleep assertion, through the `keepawake`
 /// crate. The display may still sleep.
+#[cfg(feature = "awake")]
 pub struct System;
 
+#[cfg(feature = "awake")]
 impl Waker for System {
     fn hold(&self) -> Result<Assertion, String> {
         keepawake::Builder::default()
