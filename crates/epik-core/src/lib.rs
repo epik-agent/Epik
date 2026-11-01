@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod reconcile;
 pub mod record;
 pub mod repositories;
+pub mod review;
 pub mod run;
 pub mod self_link;
 pub mod setup;
