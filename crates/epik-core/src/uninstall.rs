@@ -5,7 +5,11 @@
 //! itself, the build clones and the run history. It leaves alone what the
 //! user may also use without Epik: Claude Code and its sign-in, `gh` on
 //! the `PATH`, the `gh` sign-in, and git's use of `gh` as its credential
-//! helper. The app doesn't delete itself; the user does that last.
+//! helper.
+//!
+//! This is the first of uninstalling's two steps. In the second, the user
+//! quits the app and removes it the way their platform removes any app:
+//! each platform's installer owns it, so the app doesn't remove itself.
 
 use std::fs;
 use std::io;

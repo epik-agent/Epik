@@ -181,9 +181,9 @@ fn handle(builds: &Builds, request: Request) -> Response {
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
         },
-        Request::Runs => run_keys(builds.root()),
-        Request::Files { run } => files(builds.root(), &run),
-        Request::Read { run, path, offset } => read(builds.root(), &run, path, offset),
+        Request::Runs | Request::Files { .. } | Request::Read { .. } => {
+            records(builds.root(), request)
+        }
         Request::Rerun { run } => match builds.rerun(&run) {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
@@ -216,6 +216,17 @@ fn status(root: &Path, key: &RunKey) -> Response {
             Response::error(format!("no run {key}"))
         }
         Err(error) => Response::error(format!("couldn't read run {key}: {error}")),
+    }
+}
+
+/// Answers `runs`, `files` and `read` from the records under `root`.
+/// Any other request is a `bad request`.
+pub(crate) fn records(root: &Path, request: Request) -> Response {
+    match request {
+        Request::Runs => run_keys(root),
+        Request::Files { run } => files(root, &run),
+        Request::Read { run, path, offset } => read(root, &run, path, offset),
+        other => Response::error(format!("bad request: {other:?} is not about records")),
     }
 }
 

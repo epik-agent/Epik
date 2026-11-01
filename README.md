@@ -32,8 +32,11 @@ do when something goes wrong.
 
 ## Uninstalling
 
-Open Epik's Settings, press **Uninstall Epik…**, then delete the app. This
-also deletes Epik's run history; Claude Code, `gh` and their sign-ins stay.
+Open Epik's Settings and press **Uninstall Epik…**. When it finishes, quit
+Epik and remove the app the usual way for your platform: drag it to the Trash
+on macOS, uninstall it from Installed apps on Windows, or delete the AppImage
+or `sudo apt remove epik` on Linux. Uninstalling also deletes Epik's run
+history; Claude Code, `gh` and their sign-ins stay.
 
 ## Contributing
 

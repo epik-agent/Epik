@@ -103,6 +103,22 @@ Setup in the README becomes: download Epik, open it, follow the checklist.
 Installing from source (`cargo install`) moves to a short section for
 contributors.
 
+### 6. Uninstalling is two steps, and the app doesn't remove itself
+
+The app's Settings uninstall Epik: it removes the Epik plugin and
+everything in `~/.epik`. Then the user quits the app and removes it the
+way their platform removes any app, and the uninstall dialog says how.
+
+Each platform's installer owns the app: the `.dmg` puts it in
+`/Applications`, the `.msi` registers it with Windows, a `.deb` is owned by
+dpkg and needs root to remove, and an AppImage lives wherever the user put
+it. Removing the app any other way is non-standard and, on Windows, leaves
+an orphaned installer registration. A running app also can't cleanly
+remove itself: Windows locks the running `.exe`. So Epik removes `~/.epik`
+and its plugin, and the platform removes the app. The dialog's last button
+takes the user most of the way: it reveals the app in Finder or the file
+manager, or opens Windows' Installed apps, then quits.
+
 ## Options considered
 
 | Option | Verdict | Reason |
