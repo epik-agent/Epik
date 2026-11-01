@@ -26,6 +26,12 @@ const STDERR_GRACE: Duration = Duration::from_secs(1);
 /// The app on the host, from the remote user's home.
 const REMOTE_APP: &str = ".epik/bin/epik-app";
 
+/// Something that answers the app's requests, such as a host's app.
+pub trait Client {
+    /// Sends `request` and returns its reply.
+    fn request(&self, request: &Request) -> io::Result<Response>;
+}
+
 /// A host's app, reached through `ssh <destination>`.
 pub struct Ssh {
     destination: String,
@@ -162,6 +168,12 @@ impl Ssh {
             ),
             Failure::Io(error) => error,
         }
+    }
+}
+
+impl Client for Ssh {
+    fn request(&self, request: &Request) -> io::Result<Response> {
+        Ssh::request(self, request)
     }
 }
 
