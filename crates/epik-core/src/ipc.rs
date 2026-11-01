@@ -52,7 +52,6 @@ pub enum Request {
         number: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
-        plugin_dir: PathBuf,
     },
     /// A run's state.
     Status { run: RunKey },
@@ -164,8 +163,7 @@ fn handle(builds: &Builds, request: Request) -> Response {
             repo,
             number,
             branch,
-            plugin_dir,
-        } => match builds.start(&repo, number, branch, plugin_dir) {
+        } => match builds.start(&repo, number, branch) {
             Ok(started) => Response::Started(started),
             Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
         },
@@ -634,9 +632,7 @@ mod tests {
     fn build_answers_once_the_build_has_started() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        let reply = app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
 
         assert_eq!(reply["type"], "started", "{reply}");
         assert_eq!(reply["run"], "owner/repo#7");
@@ -657,20 +653,28 @@ mod tests {
     fn build_takes_a_branch() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "branch": "topic", "plugin_dir": "/plugin"}"#,
-        );
+        let reply =
+            app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7, "branch": "topic"}"#);
 
         assert_eq!(reply["branch"], "topic", "{reply}");
+    }
+
+    #[test]
+    fn a_build_request_from_a_client_that_still_sends_a_plugin_is_answered() {
+        let app = Running::new(fake_github());
+
+        let reply = app.send(
+            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
+        );
+
+        assert_eq!(reply["type"], "started", "{reply}");
     }
 
     #[test]
     fn a_build_that_cannot_start_is_an_error() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 8, "plugin_dir": "/plugin"}"#,
-        );
+        let reply = app.send(r#"{"type": "build", "repo": "owner/repo", "number": 8}"#);
 
         assert_eq!(reply["type"], "error", "{reply}");
         let message = reply["message"].as_str().unwrap();
@@ -684,9 +688,7 @@ mod tests {
     #[test]
     fn status_answers_with_the_runs_folded_state() {
         let app = Running::new(fake_github());
-        app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
 
         let reply = app.send(r#"{"type": "status", "run": "owner/repo#7"}"#);
 
@@ -769,7 +771,6 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: Vec::new(),
                 closed: Vec::new(),
-                plugin_dir: None,
             })
             .unwrap();
     }
@@ -977,9 +978,7 @@ mod tests {
     #[test]
     fn a_run_that_needs_attention_is_rerun_and_deleted() {
         let app = Running::new(fake_github());
-        app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
         let refused = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
         assert_eq!(
             refused,
@@ -1152,11 +1151,10 @@ mod tests {
             repo: "owner/repo".to_owned(),
             number: 7,
             branch: None,
-            plugin_dir: "/plugin".into(),
         };
         assert_eq!(
             serde_json::to_value(&build).unwrap(),
-            json!({"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"})
+            json!({"type": "build", "repo": "owner/repo", "number": 7})
         );
         assert_eq!(
             serde_json::to_value(Request::List { limit: None }).unwrap(),

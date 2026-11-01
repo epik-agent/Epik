@@ -40,18 +40,19 @@ A run leaves when its epic issue closes: the app comments its totals on the issu
 Starts building an epic or a single issue.
 
 ```json
-{"type": "build", "repo": "owner/name", "number": 356, "branch": "daemon", "plugin_dir": "/path/to/epik/plugin"}
+{"type": "build", "repo": "owner/name", "number": 356, "branch": "daemon"}
 ```
 
 - `repo`: the repository, `owner/name`.
 - `number`: the epic or issue. An issue with sub-issues is built as an epic.
 - `branch` (optional): the branch the issues' pull requests merge into. By default `epic/<number>-<slug of title>` for
   an epic, and the repository's default branch for a single issue.
-- `plugin_dir`: Epik's Claude Code plugin, which each agent loads.
 
 The app replies once the build has started: the issue is read, the repository cloned, and `build_started` written to
 the build's record. That can take as long as the clone. The build then goes on in the app. When the epic issue already
-has a run, the build is added to it; while one of its builds is running, another is refused.
+has a run, the build is added to it; while one of its builds is running, another is refused. Each issue's agent is
+prompted with the issue, the target branch, Epik's rules and the issue procedure, so it loads no plugin. A `plugin_dir`
+sent by an older client is ignored.
 
 ```json
 {"type": "started", "run": "owner/name#356", "build_id": "20261028T212859Z-k3f9", "kind": "epic", "branch": "daemon", "build_dir": "/Users/me/.epik/runs/owner/name/356/20261028T212859Z-k3f9"}

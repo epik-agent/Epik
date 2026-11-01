@@ -28,9 +28,10 @@ fn fake(flags: &[&str]) -> ClaudeAcp {
 
 fn request(dir: &Path) -> AgentRequest {
     AgentRequest {
-        prompt: "/epik:issue 7 epic/1-thing".into(),
+        prompt: "Implement issue #7.".into(),
+        issue: 7,
+        branch: "epic/1-thing".into(),
         cwd: dir.to_path_buf(),
-        plugin_dir: dir.join("plugin"),
         jsonl_path: dir.join("7.jsonl"),
         err_path: dir.join("7.err"),
     }
@@ -89,14 +90,12 @@ fn a_clean_run_logs_every_message_in_both_directions() {
     let new_session = &sent(&log, "session/new")[0];
     assert_eq!(new_session["params"]["cwd"], dir.to_str().unwrap());
     assert_eq!(
-        new_session["params"]["_meta"]["claudeCode"]["options"]["plugins"][0],
-        serde_json::json!({"type": "local", "path": dir.join("plugin").to_str().unwrap()})
+        new_session["params"]["_meta"]["claudeCode"]["options"]["plugins"],
+        Value::Null,
+        "the prompt carries the procedure, so no plugin is loaded"
     );
     let prompt = &sent(&log, "session/prompt")[0];
-    assert_eq!(
-        prompt["params"]["prompt"][0]["text"],
-        "/epik:issue 7 epic/1-thing"
-    );
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "Implement issue #7.");
     let received: Vec<&Value> = log.iter().filter_map(|l| l.get("from_agent")).collect();
     assert!(
         received

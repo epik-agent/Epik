@@ -27,12 +27,15 @@ use serde_json::{Value, json};
 /// One prompt for an agent to run.
 #[derive(Debug, Clone)]
 pub struct AgentRequest {
-    /// What to ask, such as `/epik:issue 7 epic/1-thing`.
+    /// What to ask: what the work is, Epik's rules, and the procedure, from
+    /// [`crate::prompt::prompt`].
     pub prompt: String,
+    /// The issue the work is for.
+    pub issue: u64,
+    /// The branch the work's pull request goes into.
+    pub branch: String,
     /// The directory the agent works in.
     pub cwd: PathBuf,
-    /// The Claude Code plugin to load, Epik's, so the prompt can use it.
-    pub plugin_dir: PathBuf,
     /// Where every message in both directions goes, one JSON object per
     /// line: `{"to_agent": ...}`, `{"from_agent": ...}`, or `{"note": ...}`
     /// for something Epik did on its own, such as refusing a permission,
@@ -180,14 +183,8 @@ impl ClaudeAcp {
             .block_task()
             .await?;
 
-        let plugins = json!({"options": {"plugins": [
-            {"type": "local", "path": request.plugin_dir},
-        ]}});
         let session = connection
-            .send_request(
-                NewSessionRequest::new(&request.cwd)
-                    .meta(serde_json::Map::from_iter([("claudeCode".into(), plugins)])),
-            )
+            .send_request(NewSessionRequest::new(&request.cwd))
             .block_task()
             .await?;
 
@@ -376,8 +373,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let request = AgentRequest {
             prompt: String::new(),
+            issue: 1,
+            branch: "main".into(),
             cwd: dir.path().to_owned(),
-            plugin_dir: dir.path().to_owned(),
             jsonl_path: dir.path().join("1.jsonl"),
             err_path: dir.path().join("1.err"),
         };

@@ -218,7 +218,6 @@ mod tests {
                     blocked_by: vec![],
                 }],
                 closed: vec![],
-                plugin_dir: None,
             },
             Event::IssueStarted {
                 at: time(1),

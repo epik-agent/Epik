@@ -126,14 +126,12 @@ impl Builds {
         repo: &str,
         number: u64,
         branch: Option<String>,
-        plugin_dir: PathBuf,
     ) -> Result<Started, String> {
         let request = Request {
             repo: repo.to_owned(),
             number,
             branch,
             root: self.root.clone(),
-            plugin_dir,
         };
         if !repositories::is_repo(repo) {
             return Err(format!("{repo:?} is not a repository: write owner/name"));
@@ -217,7 +215,7 @@ impl Builds {
     }
 
     /// Starts a new build of `run`, which needs attention, as its last
-    /// build was started: with the same branch and plugin. Like any build,
+    /// build was started: with the same branch. Like any build,
     /// it skips the issues already closed.
     pub fn rerun(&self, run: &RunKey) -> Result<Started, String> {
         let state = self.needing_attention(run)?;
@@ -225,10 +223,7 @@ impl Builds {
             .ok()
             .and_then(|builds| builds.into_iter().last())
             .ok_or_else(|| format!("couldn't read {run}'s builds"))?;
-        let plugin_dir = latest
-            .plugin_dir
-            .ok_or_else(|| format!("{run}'s last build didn't record Epik's plugin"))?;
-        self.start(&state.repo, state.number, Some(latest.branch), plugin_dir)
+        self.start(&state.repo, state.number, Some(latest.branch))
     }
 
     /// Deletes `run`, which needs attention: every build's clone and
@@ -353,9 +348,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
-        let started = builds
-            .start("owner/repo", 7, None, PathBuf::from("/plugin"))
-            .unwrap();
+        let started = builds.start("owner/repo", 7, None).unwrap();
 
         assert_eq!(started.run, RunKey::new("owner/repo", 7));
         assert!(started.build_id.starts_with("20"), "{started:?}");
@@ -388,12 +381,8 @@ mod tests {
             move |n| heard.lock().unwrap().push(n)
         });
 
-        builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
-        builds
-            .start("owner/repo", 8, None, "/plugin".into())
-            .unwrap();
+        builds.start("owner/repo", 7, None).unwrap();
+        builds.start("owner/repo", 8, None).unwrap();
         assert_eq!(*heard.lock().unwrap(), [1, 2]);
 
         builds.shutdown();
@@ -406,7 +395,7 @@ mod tests {
         let builds = builds(root.path(), fake_github());
 
         let started = builds
-            .start("owner/repo", 7, Some("topic".to_owned()), "/plugin".into())
+            .start("owner/repo", 7, Some("topic".to_owned()))
             .unwrap();
 
         assert_eq!(started.branch, "topic");
@@ -419,9 +408,7 @@ mod tests {
         github.set_state("owner/repo", 7, State::Closed);
         let builds = builds(root.path(), github);
 
-        let error = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap_err();
+        let error = builds.start("owner/repo", 7, None).unwrap_err();
 
         assert_eq!(error, "it is closed");
         assert!(builds.active().is_empty());
@@ -432,9 +419,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
 
-        builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        builds.start("owner/repo", 7, None).unwrap();
 
         let monitored = repositories::list(root.path()).unwrap();
         assert_eq!(monitored.len(), 1);
@@ -449,9 +434,7 @@ mod tests {
         let builds = builds(root.path(), fake_github())
             .check_setup(move |root| setup::check_all(root, &no_node, &setup::Unknown));
 
-        let error = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap_err();
+        let error = builds.start("owner/repo", 7, None).unwrap_err();
 
         assert_eq!(
             error,
@@ -467,7 +450,7 @@ mod tests {
         let builds = builds(root.path(), fake_github());
 
         for bad in ["github.com/owner/repo", "owner", "../owner/repo"] {
-            let error = builds.start(bad, 7, None, "/plugin".into()).unwrap_err();
+            let error = builds.start(bad, 7, None).unwrap_err();
             assert!(
                 error.ends_with("is not a repository: write owner/name"),
                 "{error}"
@@ -480,13 +463,9 @@ mod tests {
     fn one_epic_spelled_two_ways_is_one_run() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        builds.start("owner/repo", 7, None).unwrap();
 
-        let error = builds
-            .start("Owner/Repo", 7, None, "/plugin".into())
-            .unwrap_err();
+        let error = builds.start("Owner/Repo", 7, None).unwrap_err();
 
         assert_eq!(error, "a build of owner/repo#7 is already running");
     }
@@ -495,13 +474,9 @@ mod tests {
     fn a_second_build_of_a_running_run_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        builds.start("owner/repo", 7, None).unwrap();
 
-        let error = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap_err();
+        let error = builds.start("owner/repo", 7, None).unwrap_err();
 
         assert_eq!(error, "a build of owner/repo#7 is already running");
         assert_eq!(builds.active().len(), 1);
@@ -511,16 +486,12 @@ mod tests {
     fn building_a_run_again_adds_a_build_to_it() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        let first = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        let first = builds.start("owner/repo", 7, None).unwrap();
         builds.shutdown();
         let builds =
             super::Builds::new(root.path(), Arc::new(fake_github()), Arc::new(HangingAgent));
 
-        let second = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        let second = builds.start("owner/repo", 7, None).unwrap();
 
         assert_eq!(first.run, second.run);
         assert_ne!(first.build_id, second.build_id);
@@ -534,14 +505,14 @@ mod tests {
     fn interrupted(root: &Path) -> Started {
         let builds = builds(root, fake_github());
         let started = builds
-            .start("owner/repo", 7, Some("topic".to_owned()), "/plugin".into())
+            .start("owner/repo", 7, Some("topic".to_owned()))
             .unwrap();
         builds.shutdown();
         started
     }
 
     #[test]
-    fn rerunning_adds_a_build_with_the_same_branch_and_plugin() {
+    fn rerunning_adds_a_build_with_the_same_branch() {
         let root = tempfile::tempdir().unwrap();
         let first = interrupted(root.path());
         let builds = builds(root.path(), fake_github());
@@ -552,7 +523,6 @@ mod tests {
         assert_eq!(second.branch, "topic");
         let latest = record::list_builds(root.path(), &first.run).unwrap();
         assert_eq!(latest.len(), 2);
-        assert_eq!(latest[1].plugin_dir, Some(PathBuf::from("/plugin")));
         assert_eq!(builds.active(), std::slice::from_ref(&first.run));
     }
 
@@ -570,9 +540,7 @@ mod tests {
             github
         };
         let first = builds(root.path(), github());
-        let started = first
-            .start("owner/repo", 1, None, "/plugin".into())
-            .unwrap();
+        let started = first.start("owner/repo", 1, None).unwrap();
         first.shutdown();
 
         let second = builds(root.path(), github());
@@ -599,9 +567,7 @@ mod tests {
     fn a_running_or_unknown_run_is_not_rerun_or_deleted() {
         let root = tempfile::tempdir().unwrap();
         let builds = builds(root.path(), fake_github());
-        let started = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap();
+        let started = builds.start("owner/repo", 7, None).unwrap();
 
         let rerun = builds.rerun(&started.run).unwrap_err();
         let delete = builds.delete(&started.run).unwrap_err();
@@ -633,9 +599,7 @@ mod tests {
         let builds = builds(root.path(), fake_github());
         builds.shutdown();
 
-        let error = builds
-            .start("owner/repo", 7, None, "/plugin".into())
-            .unwrap_err();
+        let error = builds.start("owner/repo", 7, None).unwrap_err();
 
         assert_eq!(error, "the Epik app is shutting down");
         assert!(!root.path().join("runs").exists());
