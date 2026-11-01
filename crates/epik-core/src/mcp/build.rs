@@ -87,7 +87,7 @@ pub fn start(context: &Context, args: &Args) -> Result<Reply, String> {
 
 pub fn status(context: &Context, args: &Args) -> Result<Reply, String> {
     let run: RunKey = string(args, "run_id").unwrap_or_default().parse()?;
-    match request(context, &Request::Status { run }, false)? {
+    match request(context, &Request::Status { run, host: None }, false)? {
         Response::Run(run) => Ok(Reply::Json(to_json(&run))),
         reply => Err(unexpected(&reply)),
     }
