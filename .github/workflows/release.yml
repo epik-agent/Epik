@@ -14,6 +14,16 @@
 #   Epik_amd64.AppImage   Linux, x86-64
 #   Epik_amd64.deb        Linux, x86-64 (Debian, Ubuntu)
 #
+# and, for running builds on a Linux server (see the record "Remote hosts"
+# in docs/design-history), the app without its tray and windows:
+#
+#   epik-app-linux-x64.tar.gz     Linux, x86-64
+#   epik-app-linux-arm64.tar.gz   Linux, ARM64
+#
+# Each tarball holds the one binary, epik-app, and comes with a .sha256
+# that `sha256sum -c` checks. The website doesn't link them; the docs for
+# setting up a host do.
+#
 # The app is built with Tauri's bundler through the Tauri CLI. On macOS
 # the build and its check are `cargo xtask dmg` (crates/xtask), so a Mac
 # can run the same thing.
@@ -214,9 +224,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The headless app: epik-app without its default `desktop` feature, so
+  # no Tauri, GTK or WebKit, and no trunk to build the windows. Each
+  # architecture builds on its own runner rather than cross-compiling.
+  headless:
+    name: Headless (${{ matrix.arch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p epik-app --no-default-features
+      # The tarball and its checksum, named for the architecture and not
+      # the version. The binary must start on a runner with no GUI
+      # packages installed.
+      - name: Package
+        env:
+          NAME: epik-app-linux-${{ matrix.arch }}.tar.gz
+        run: |
+          mkdir dist
+          ./target/release/epik-app --version
+          tar -czf "dist/$NAME" -C target/release epik-app
+          (cd dist && sha256sum "$NAME" > "$NAME.sha256" && sha256sum -c "$NAME.sha256")
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-headless-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: Draft the release
-    needs: build
+    needs: [build, headless]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -231,7 +279,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           ls -l dist
-          for f in Epik.dmg Epik.msi Epik_amd64.AppImage Epik_amd64.deb; do
+          for f in Epik.dmg Epik.msi Epik_amd64.AppImage Epik_amd64.deb \
+            epik-app-linux-x64.tar.gz epik-app-linux-x64.tar.gz.sha256 \
+            epik-app-linux-arm64.tar.gz epik-app-linux-arm64.tar.gz.sha256; do
             test -f "dist/$f" || { echo "::error::dist/$f is missing"; exit 1; }
           done
           # A rerun replaces the files on the release it already made.

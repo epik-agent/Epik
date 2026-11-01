@@ -469,6 +469,7 @@ impl Build<'_> {
             cwd: self.clone.clone(),
             jsonl_path: dir.join(format!("{number}.jsonl")),
             err_path: dir.join(format!("{number}.err")),
+            model: None,
         };
         let outcome = self.agent.run(&request, cancel);
         if cancel.load(Ordering::SeqCst) {
@@ -784,6 +785,10 @@ mod tests {
                 duration_ms: 1_000,
                 cost_usd: Some(0.25),
             }
+        }
+
+        fn check(&self, _cwd: &std::path::Path, _model: Option<&str>) -> Result<(), String> {
+            Ok(())
         }
     }
 
