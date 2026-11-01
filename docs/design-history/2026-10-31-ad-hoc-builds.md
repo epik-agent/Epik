@@ -1,12 +1,12 @@
 # A task is a block of work given in words, and the app builds it like an issue
 
-- Status: Proposed (draft, 2026-10-31; for the release after 0.4.0, not in the repository)
+- Status: Proposed, for the release after 0.4.0
 - Date: 2026-10-31
 - Builds on: [A run is whatever it takes to finish a block of work](2026-10-28-a-run-finishes-a-block-of-work.md);
   [An Epik app runs builds, one agent per issue, and records every run](2026-10-28-epik-runs-the-epic.md);
-  [Agents and roles: each role is an agent and a model, and Codex is the second agent](../design-history/2026-10-31-agents-and-roles.md), whose
+  [Agents and roles: each role is an agent and a model, and Codex is the second agent](2026-10-31-agents-and-roles.md), whose
   §1 puts the procedure in the prompt and whose §6 sends a coding agent back to a pull request;
-  [Builds can run on another machine, which is a headless Epik app reached over SSH](../design-history/2026-10-31-remote-hosts.md),
+  [Builds can run on another machine, which is a headless Epik app reached over SSH](2026-10-31-remote-hosts.md),
   whose mirror names runs by their key
 - Refines: §4 ("One agent process per issue") of "An Epik app runs builds, one agent per issue, and records every run",
   which assumes every block of work is an issue
@@ -32,7 +32,7 @@ The October record defined a run as "whatever it takes to finish a block
 of work", and then, everywhere it got concrete, the block of work was an
 issue: runs are named `owner/name#number`, a build starts by reading an
 issue, a pull request is found by `Closes #n`, and a run leaves when its
-issue closes. The 0.4.0 plans were written to leave this open (see the
+issue closes. The 0.4.0 records were written to leave this open (see the
 agents record's §1, and the remote record's mirror, which treats a run's
 key as an opaque string). This record says what fills the opening.
 
