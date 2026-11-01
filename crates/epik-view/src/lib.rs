@@ -313,12 +313,21 @@ pub struct Output {
 pub enum Disposition {
     /// A build is running.
     Building,
+    /// A build is running, and is reviewing the run's pull request.
+    Reviewing,
     /// Every issue merged, and its pull request into the default branch
     /// waits for the user.
     WaitingForReview,
     /// Its latest build failed or was interrupted, or its pull request was
     /// closed without merging.
     NeedsAttention,
+}
+
+impl Disposition {
+    /// Whether a build of the run is running, reviewing or not.
+    pub fn is_building(self) -> bool {
+        matches!(self, Disposition::Building | Disposition::Reviewing)
+    }
 }
 
 /// Where a setup item stands.

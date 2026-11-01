@@ -21,7 +21,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::activity;
 use crate::cleanup;
 use crate::record::{
-    self, BuildState, BuildStatus, BuildWriter, Event, IssueState, IssueStatus, Kind, Session,
+    self, BuildState, BuildStatus, BuildWriter, Event, IssueState, IssueStatus, Kind,
+    ReviewVerdict, Session,
 };
 
 /// A run's identity: its epic issue, written `owner/name#number`.
@@ -119,12 +120,21 @@ pub fn clone_dir(root: &Path, run: &RunKey, build_id: &str) -> PathBuf {
 pub enum Disposition {
     /// A build is running.
     Building,
+    /// A build is running, and is reviewing the run's pull request.
+    Reviewing,
     /// Every issue merged, and its pull request into the default branch
     /// waits for the user.
     WaitingForReview,
     /// Its latest build failed or was interrupted, or its pull request was
     /// closed without merging.
     NeedsAttention,
+}
+
+impl Disposition {
+    /// Whether a build of the run is running, reviewing or not.
+    pub fn is_building(self) -> bool {
+        matches!(self, Disposition::Building | Disposition::Reviewing)
+    }
 }
 
 /// One build of a run, in brief.
@@ -155,6 +165,14 @@ pub struct RunState {
     pub reason: Option<String>,
     /// The latest build's pull request into the default branch.
     pub pull_request: Option<u64>,
+    /// What the latest build's review of that pull request concluded, if
+    /// it was reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewVerdict>,
+    /// How many of its review threads were unresolved when the latest
+    /// build finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_threads: Option<usize>,
     /// Every issue of the run, including ones merged in earlier builds.
     /// Each one's duration and cost are summed over the builds, and its
     /// sessions are every build's.
@@ -242,6 +260,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
         }
     }
     let (disposition, reason) = match latest.status {
+        BuildStatus::Running if latest.reviewing() => (Disposition::Reviewing, None),
         BuildStatus::Running => (Disposition::Building, None),
         BuildStatus::Succeeded if !latest.pull_request_closed => {
             (Disposition::WaitingForReview, None)
@@ -267,6 +286,8 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
         disposition,
         reason,
         pull_request: latest.pull_request,
+        review: latest.review,
+        open_threads: latest.open_threads,
         issues: order
             .into_iter()
             .filter_map(|number| issues.remove(&number))
@@ -630,6 +651,8 @@ mod tests {
                 outcome: Outcome::Succeeded,
                 reason: None,
                 pull_request: Some(200),
+                review: None,
+                open_threads: None,
             },
         ]
     }
@@ -754,6 +777,8 @@ mod tests {
             outcome: Outcome::Failed,
             reason: Some("failed: #15".to_owned()),
             pull_request: None,
+            review: None,
+            open_threads: None,
         });
         let builds = [build(&first), build(&finished())];
 
@@ -801,6 +826,8 @@ mod tests {
             outcome: Outcome::Failed,
             reason: Some("failed: #15".to_owned()),
             pull_request: None,
+            review: None,
+            open_threads: None,
         });
         let mut second = finished();
         second.truncate(1);

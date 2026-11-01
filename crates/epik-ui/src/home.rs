@@ -116,7 +116,7 @@ fn run_row(
 ) -> AnyView {
     let run = card.with_untracked(|card| card.run.clone());
     let disposition = part(card, |card| card.disposition);
-    let building = Memo::new(move |_| disposition.get() == Disposition::Building);
+    let building = Memo::new(move |_| disposition.get().is_building());
     let open = {
         let run = run.clone();
         Memo::new(move |_| building.get() && unfolded.with(|unfolded| unfolded.contains(&run)))
@@ -140,7 +140,7 @@ fn run_row(
     let progress = part(card, |card| card.progress);
     let sentence = part(card, |card| {
         match card.disposition {
-            Disposition::Building => card.summary.clone(),
+            Disposition::Building | Disposition::Reviewing => card.summary.clone(),
             _ => card.sentence.clone(),
         }
         .unwrap_or_default()

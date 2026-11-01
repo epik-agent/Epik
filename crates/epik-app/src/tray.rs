@@ -255,7 +255,7 @@ pub(crate) fn building(runs: &Runs) -> usize {
         shown
             .runs
             .iter()
-            .filter(|run| run.state.disposition == Disposition::Building)
+            .filter(|run| run.state.disposition.is_building())
             .count()
     })
 }
@@ -267,7 +267,7 @@ fn building_here(runs: &Runs) -> usize {
         shown
             .runs
             .iter()
-            .filter(|run| run.host.is_none() && run.state.disposition == Disposition::Building)
+            .filter(|run| run.host.is_none() && run.state.disposition.is_building())
             .count()
     })
 }

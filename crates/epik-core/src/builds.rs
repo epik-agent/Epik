@@ -172,9 +172,10 @@ impl Builds {
                 .map_err(|error| format!("couldn't read the settings: {error}"))?,
         };
         let agent = self.checked_agent("coding", &roles.coding)?;
-        if let Some(review) = &roles.review {
-            self.checked_agent("review", review)?;
-        }
+        let reviewer = match &roles.review {
+            Some(review) => self.checked_agent("review", review)?,
+            None => agent.clone(),
+        };
         let request = Request {
             repo: repo.to_owned(),
             number,
@@ -219,7 +220,7 @@ impl Builds {
                 .name(format!("build {repo}#{number}"))
                 .spawn(move || {
                     let build = match build::start(&*github, &*agent, &request) {
-                        Ok(build) => build,
+                        Ok(build) => build.reviewer(&*reviewer),
                         Err(error) => {
                             change(&active, &*on_active, |active| {
                                 active.remove(&key);
@@ -424,7 +425,9 @@ impl Builds {
         })?;
         match state.disposition {
             Disposition::NeedsAttention => Ok(state),
-            Disposition::Building => Err(format!("a build of {run} is running")),
+            Disposition::Building | Disposition::Reviewing => {
+                Err(format!("a build of {run} is running"))
+            }
             Disposition::WaitingForReview => Err(format!(
                 "{run} is waiting for review, and leaves by itself when its issue closes"
             )),
