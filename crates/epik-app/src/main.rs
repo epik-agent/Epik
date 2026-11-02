@@ -1,13 +1,22 @@
 //! The Epik app, which runs Epik's builds.
 
+#[cfg(feature = "desktop")]
 mod main_window;
+#[cfg(feature = "desktop")]
 mod navigation;
+#[cfg(feature = "desktop")]
 mod pages;
+#[cfg(feature = "desktop")]
 mod popover;
+#[cfg(feature = "desktop")]
 mod runs;
+mod setup_command;
+#[cfg(feature = "desktop")]
 mod setup_window;
+#[cfg(feature = "desktop")]
 mod tray;
 
+#[cfg(feature = "desktop")]
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,17 +24,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "desktop")]
 use epik_core::awake::{self, Change, KeepAwake};
 use epik_core::builds::Builds;
 use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
+use epik_core::mirrors::Mirrors;
 use epik_core::{record, run, self_link};
 
 /// How often the app checks GitHub for runs whose epic issue closed or
 /// whose pull request was closed. Modest to start with; tune it.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(180);
 
-const USAGE: &str = "usage: epik-app [--headless | --version | mcp]";
+const USAGE: &str = "usage: epik-app [--headless | --version | mcp | stdio | setup]";
 
 fn main() -> ExitCode {
     find_epiks_tools();
@@ -36,15 +47,29 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("mcp") => mcp(),
-        Some("--headless") => match App::start(|_| {}) {
-            Ok(app) => app.serve(),
-            Err(code) => code,
-        },
+        Some("stdio") => stdio(),
+        Some("setup") => setup_command::run(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("--headless") => headless(),
+        #[cfg(feature = "desktop")]
         None => tray::run(),
+        // A server has no tray to run in.
+        #[cfg(not(feature = "desktop"))]
+        None => {
+            eprintln!("epik-app: built without the desktop, so running headless");
+            headless()
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Runs the app without a tray until SIGINT or SIGTERM.
+fn headless() -> ExitCode {
+    match App::start(|_| {}) {
+        Ok(app) => app.serve(),
+        Err(code) => code,
     }
 }
 
@@ -61,12 +86,30 @@ fn mcp() -> ExitCode {
         root,
         start_app: Box::new(start_detached),
         start_timeout: Duration::from_secs(15),
-        plugin_dir: std::env::var_os("CLAUDE_PLUGIN_ROOT").map(PathBuf::from),
     });
     match server.serve_stdio() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("epik-app mcp: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Relays requests from stdin to this machine's app, and its answers to
+/// stdout, one line each, until stdin ends. A local app reaches this one
+/// through it over `ssh`. Stdout is the protocol, so everything else goes
+/// to stderr.
+fn stdio() -> ExitCode {
+    let Some(root) = record::default_root() else {
+        eprintln!("epik-app: there is no home directory to find the app's socket in");
+        return ExitCode::FAILURE;
+    };
+    let address = Address::in_root(&root);
+    match epik_core::ipc::bridge(&address, std::io::stdin().lock(), std::io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("epik-app stdio: {error}");
             ExitCode::FAILURE
         }
     }
@@ -125,6 +168,7 @@ fn link_self() {
 
 /// The app's socket and builds, which run the same with a tray or without.
 struct App {
+    #[cfg(feature = "desktop")]
     root: PathBuf,
     address: Address,
     server: Server,
@@ -132,11 +176,13 @@ struct App {
     /// stops serving, and so stops the app.
     stop: Arc<AtomicBool>,
     builds: Arc<Builds>,
+    /// Keeps each remote host's mirror of its runs current.
+    mirrors: Arc<Mirrors>,
 }
 
 impl App {
     /// Binds the socket and readies the builds, keeping the machine awake
-    /// while any run, and telling `on_active` too how many are running each
+    /// while any run if built with the desktop, and telling `on_active` too how many are running each
     /// time that changes. Says why on stderr if it can't.
     fn start(on_active: impl Fn(usize) + Send + Sync + 'static) -> Result<Self, ExitCode> {
         let Some(root) = record::default_root() else {
@@ -157,7 +203,8 @@ impl App {
         };
         // Only now that this app holds the socket is no other app building,
         // so every clone left, and every build recorded as running, is
-        // from a build that never ended.
+        // from a build that never ended. Both read only this computer's
+        // runs: a host's mirror is the host's to change.
         if let Err(error) = cleanup::sweep_builds(&root) {
             eprintln!("epik-app: couldn't remove leftover builds: {error}");
         }
@@ -172,23 +219,32 @@ impl App {
             eprintln!("epik-app: couldn't handle signals: {error}");
             return Err(ExitCode::FAILURE);
         }
+        // Without the desktop, as on a server, the machine's own settings
+        // decide whether it sleeps.
+        #[cfg(feature = "desktop")]
         let keep_awake = KeepAwake::new(awake::System);
-        let builds = Arc::new(Builds::real(&root).on_active(move |active| {
-            eprintln!("epik-app: {active} build(s) running");
-            match keep_awake.follow(active) {
-                Ok(Some(Change::Held)) => eprintln!("epik-app: keeping the machine awake"),
-                Ok(Some(Change::Released)) => eprintln!("epik-app: letting the machine sleep"),
-                Ok(None) => {}
-                Err(error) => eprintln!("epik-app: couldn't keep the machine awake: {error}"),
-            }
-            on_active(active);
-        }));
+        let mirrors = Arc::new(Mirrors::real(&root));
+        let builds = Arc::new(Builds::real(&root).reaching(mirrors.clone()).on_active(
+            move |active| {
+                eprintln!("epik-app: {active} build(s) running");
+                #[cfg(feature = "desktop")]
+                match keep_awake.follow(active) {
+                    Ok(Some(Change::Held)) => eprintln!("epik-app: keeping the machine awake"),
+                    Ok(Some(Change::Released)) => eprintln!("epik-app: letting the machine sleep"),
+                    Ok(None) => {}
+                    Err(error) => eprintln!("epik-app: couldn't keep the machine awake: {error}"),
+                }
+                on_active(active);
+            },
+        ));
         Ok(Self {
+            #[cfg(feature = "desktop")]
             root,
             address,
             server,
             stop,
             builds,
+            mirrors,
         })
     }
 
@@ -205,8 +261,14 @@ impl App {
             let stop = self.stop.clone();
             move || reconcile_until(&builds, &stop)
         });
+        let mirroring = thread::spawn({
+            let mirrors = self.mirrors.clone();
+            let stop = self.stop.clone();
+            move || mirrors.follow_until(&stop)
+        });
         self.server.serve(self.builds.clone(), &self.stop);
         let _ = reconciler.join();
+        let _ = mirroring.join();
 
         let running = self.builds.active().len();
         eprintln!("epik-app: stopping, interrupting {running} build(s)");

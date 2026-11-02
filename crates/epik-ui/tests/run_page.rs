@@ -1,9 +1,9 @@
-use epik_ui::run_page::{Detail, Edges, Issue, RunView};
+use epik_ui::run_page::{Detail, Edges, Issue, RunView, shown_log};
 use epik_view::{Change, Entry, Excerpt, LineRange, NodeState, Stream, StreamEntry};
 use leptos::prelude::*;
 
 mod fixtures;
-use fixtures::{issue, link, render, run_page};
+use fixtures::{issue, link, render, run_page, session};
 
 #[test]
 fn an_issue_card_is_placed_by_its_column_and_row() {
@@ -553,4 +553,214 @@ fn a_runs_page_streams_the_chosen_issues_log() {
     );
     assert!(!html.contains("Thinking"), "{html}");
     assert!(html.contains("Nothing yet."), "{html}");
+}
+
+#[test]
+fn a_hosts_runs_page_says_where_it_builds_under_its_sentence() {
+    let mut page = run_page();
+    page.run = "devbox:acme/widgets#13".into();
+    page.place = Some("Building on devbox".into());
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(
+        html.contains(r#"</p><p class="place">Building on devbox</p></div>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_runs_page_with_nowhere_to_say_says_nothing_of_it() {
+    let html = render(|| view! { <RunView page=run_page() chosen=None/> });
+    assert!(!html.contains(r#"class="place""#), "{html}");
+}
+
+#[test]
+fn another_run_building_on_a_host_is_linked_by_its_host() {
+    let mut page = run_page();
+    page.also_building = vec![("devbox:acme/tools#2".into(), "Lint".into())];
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(
+        html.contains(r##"<a href="#/run/devbox:acme/tools%232">Lint</a>"##),
+        "{html}"
+    );
+}
+
+#[test]
+fn the_detail_panel_lists_the_issues_sessions_in_order() {
+    let mut card = issue(2, NodeState::Merged, 1, 0);
+    card.sessions = vec![
+        session("Coding", 1, None, "/logs/2.jsonl"),
+        session(
+            "Review",
+            1,
+            Some("changes requested"),
+            "/logs/2-review-1.jsonl",
+        ),
+    ];
+    let html =
+        render(|| view! { <Detail issue=card shown=Some("/logs/2-review-1.jsonl".to_owned())/> });
+    assert!(html.contains(concat!(
+        r#"<ol class="sessions">"#,
+        r#"<li class="session"><button aria-pressed="false"><span class="what">Coding · round 1</span><span class="who">Claude Code · default model</span><span class="figures">1m 00s · $0.30</span></button></li>"#,
+        r#"<li class="session"><button aria-pressed="true"><span class="what">Review · round 1</span><span class="who">Claude Code · default model</span><span class="figures">1m 00s · $0.30</span></button><span class="verdict">changes requested</span></li>"#,
+        "</ol>",
+    )), "{html}");
+}
+
+#[test]
+fn a_running_session_has_its_time_so_far_and_no_cost_yet() {
+    let mut card = issue(2, NodeState::Running, 1, 0);
+    let mut row = session("Coding", 1, None, "/logs/2.jsonl");
+    row.time = "2m 00s so far".into();
+    row.cost = None;
+    row.running = true;
+    card.sessions = vec![row];
+    let html = render(|| view! { <Detail issue=card/> });
+    assert!(html.contains(r#"<li class="session running"><button aria-pressed="false"><span class="what">Coding · round 1</span><span class="who">Claude Code · default model</span><span class="figures">2m 00s so far</span></button></li>"#), "{html}");
+}
+
+#[test]
+fn a_codex_session_that_reported_no_cost_says_not_reported() {
+    let mut card = issue(2, NodeState::Merged, 1, 0);
+    let mut row = session("Coding", 1, None, "/logs/2.jsonl");
+    row.agent = "Codex".into();
+    row.model = "gpt-5.5".into();
+    row.cost = Some("not reported".into());
+    card.sessions = vec![row];
+    let html = render(|| view! { <Detail issue=card/> });
+    assert!(html.contains(r#"<span class="who">Codex · gpt-5.5</span><span class="figures">1m 00s · not reported</span>"#), "{html}");
+}
+
+/// The run page of a run reviewed twice, the fix between, with two threads
+/// left open.
+fn reviewed() -> epik_view::RunPage {
+    let mut page = run_page();
+    page.disposition = epik_view::Disposition::WaitingForReview;
+    let mut last = session("Review", 2, Some("approved"), "/logs/13-review-2.jsonl");
+    last.threads = Some(link(
+        "2 threads open",
+        "https://github.com/acme/widgets/pull/30/files",
+    ));
+    page.sessions = vec![
+        session(
+            "Review",
+            1,
+            Some("changes requested"),
+            "/logs/13-review-1.jsonl",
+        ),
+        session("Coding", 2, None, "/logs/13-coding-2.jsonl"),
+        last,
+    ];
+    page
+}
+
+#[test]
+fn a_reviewed_runs_sessions_are_listed_in_order_under_its_header() {
+    let page = reviewed();
+    let html = render(|| view! { <RunView page chosen=None/> });
+    let head = html
+        .find(r#"</section><div class="run-sessions">"#)
+        .expect(&html);
+    let builds = html.find(r#"<div class="builds">"#).expect(&html);
+    assert!(head < builds, "{html}");
+    let sessions = &html[head..builds];
+    let review_1 = sessions.find("Review · round 1").expect(&html);
+    let fix = sessions.find("Coding · round 2").expect(&html);
+    let review_2 = sessions.find("Review · round 2").expect(&html);
+    assert!(review_1 < fix && fix < review_2, "{html}");
+    assert!(
+        sessions.contains(r#"<span class="verdict">changes requested</span>"#),
+        "{html}"
+    );
+    assert!(sessions.ends_with(r#"</button><span class="verdict">approved</span><span class="threads"><a href="https://github.com/acme/widgets/pull/30/files">2 threads open</a></span></li></ol></div>"#), "{html}");
+}
+
+#[test]
+fn a_run_with_no_sessions_of_its_own_lists_none() {
+    let html = render(|| view! { <RunView page=run_page() chosen=None/> });
+    assert!(!html.contains("run-sessions"), "{html}");
+}
+
+#[test]
+fn a_reviewing_run_says_so_in_its_header() {
+    let mut page = run_page();
+    page.disposition = epik_view::Disposition::Reviewing;
+    page.sentence = "First build running, reviewing its pull request.".into();
+    let html = render(|| view! { <RunView page chosen=None/> });
+    assert!(
+        html.contains(
+            r#"<p class="sentence building">First build running, reviewing its pull request.</p>"#
+        ),
+        "{html}"
+    );
+}
+
+#[test]
+fn the_stream_shows_the_chosen_issues_latest_session_by_default() {
+    let mut page = reviewed();
+    page.issues[1].log = Some("/logs/2.jsonl".into());
+    assert_eq!(
+        shown_log(&page, Some(2), None).as_deref(),
+        Some("/logs/2.jsonl")
+    );
+    assert_eq!(shown_log(&page, None, None), None);
+}
+
+#[test]
+fn the_stream_shows_the_session_picked_of_the_issue_or_the_run() {
+    let mut page = reviewed();
+    page.issues[1].log = Some("/logs/2-coding-2.jsonl".into());
+    page.issues[1].sessions = vec![
+        session("Coding", 1, None, "/logs/2.jsonl"),
+        session("Coding", 2, None, "/logs/2-coding-2.jsonl"),
+    ];
+    let shown = |picked| shown_log(&page, Some(2), Some(picked));
+    assert_eq!(shown("/logs/2.jsonl").as_deref(), Some("/logs/2.jsonl"));
+    assert_eq!(
+        shown("/logs/13-review-1.jsonl").as_deref(),
+        Some("/logs/13-review-1.jsonl")
+    );
+    // A session no longer on the page, such as another issue's.
+    assert_eq!(
+        shown("/logs/3.jsonl").as_deref(),
+        Some("/logs/2-coding-2.jsonl")
+    );
+}
+
+#[test]
+fn while_the_run_reviews_the_stream_shows_the_review() {
+    let mut page = run_page();
+    let mut review = session("Review", 1, None, "/logs/13-review-1.jsonl");
+    review.running = true;
+    page.sessions = vec![review];
+    page.issues[1].log = Some("/logs/2.jsonl".into());
+    assert_eq!(
+        shown_log(&page, Some(2), None).as_deref(),
+        Some("/logs/13-review-1.jsonl")
+    );
+}
+
+#[test]
+fn a_runs_page_streams_the_session_picked() {
+    let page = reviewed();
+    let path = "/logs/13-review-1.jsonl".to_owned();
+    let streamed = Some((
+        path.clone(),
+        stream(
+            vec![Entry::Other {
+                text: "Reviewing".into(),
+            }],
+            false,
+        ),
+    ));
+    let html = render(move || {
+        view! { <RunView page chosen=Some(2) picked=Some(path) streamed/> }
+    });
+    assert!(
+        html.contains(r#"<div class="what">Reviewing</div>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<button aria-pressed="true"><span class="what">Review · round 1</span>"#),
+        "{html}"
+    );
 }

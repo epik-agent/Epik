@@ -100,6 +100,7 @@ table.run-table {
 .run-table .fold { border: none; background: none; padding: 0 4px; font-size: 10px; color: var(--muted); }
 .run-cell .title { display: block; font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-cell .repo a { font: 11px var(--mono); color: var(--secondary); text-decoration: underline dotted; }
+.run-cell .place { margin-top: 2px; font-size: 11px; color: var(--secondary); }
 .progress-cell .progress { margin: 6px 0 0; }
 .run-table .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); }
 .run-table .status .dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent-fill); }
@@ -156,9 +157,36 @@ table.run-table {
 .run-head h1 { margin: 6px 0 4px; font-size: 22px; font-weight: 600; }
 .sentence { margin: 0; color: var(--accent); }
 .sentence.needs_attention { color: var(--error); }
+.run-head .place { margin: 4px 0 0; color: var(--secondary); }
 .totals { display: grid; grid-template-columns: auto auto; gap: 2px 28px; margin: 0; text-align: right; }
 .totals dt { grid-row: 1; font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .totals dd { grid-row: 2; margin: 0; font: 600 17px var(--mono); }
+
+/* Agent sessions: a run's own under its header, and an issue's in its panel. */
+.run-sessions { display: flex; gap: 12px; align-items: baseline; margin: 16px 0 0; }
+.run-sessions .label { width: auto; color: var(--muted); }
+.sessions { margin: 0; padding: 0; list-style: none; }
+.detail .sessions { margin-top: 14px; }
+.session { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 2px 0; }
+.session button {
+  display: flex;
+  gap: 10px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  text-align: left;
+}
+.session button:hover { background: var(--raised); }
+.session button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+.session .what { color: var(--text); font-weight: 500; }
+.session .figures { font: 12px var(--mono); color: var(--muted); }
+.session.running .what::before { content: "●"; color: var(--accent); margin-right: 6px; }
+.session .verdict { color: var(--secondary); }
+.session .threads a { color: var(--warning); }
 
 .builds {
   display: flex;
@@ -293,6 +321,14 @@ dialog {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.15); }
+#agents .role { display: grid; grid-template-columns: 70px 140px 1fr; gap: 8px; align-items: center; margin-top: 10px; }
+#agents label { color: var(--secondary); }
+#agents select { font: inherit; padding: 6px 8px; border: 1px solid var(--strong); border-radius: 6px; }
+#agents input { font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
+#agents .row { display: flex; gap: 10px; align-items: center; }
+.agent-list { margin: 8px 0 12px; padding-left: 18px; }
+.agent-list .why { color: var(--error); }
+button.link { padding: 0; border: none; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; }
 #repositories { list-style: none; margin: 12px 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; }
 .repository { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: center; padding: 10px 14px; }
 .repository + .repository { border-top: 1px solid var(--border); }
@@ -306,6 +342,22 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.15); }
 #add label { display: block; margin-bottom: 4px; color: var(--secondary); }
 #add .row { display: flex; gap: 8px; }
 #add input { flex: 1; font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
+#hosts { list-style: none; margin: 12px 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; }
+.host { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: start; padding: 10px 14px; }
+.host + .host { border-top: 1px solid var(--border); }
+.host > .status-dot, .host > .status-none { margin-top: 5px; }
+.host-name { font-family: var(--mono); }
+.host .why { color: var(--error); font: 12px var(--mono); }
+.host-buttons { display: flex; gap: 6px; align-items: center; }
+.host .default { color: var(--secondary); font-size: 12px; }
+.status-none { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--strong); box-sizing: border-box; }
+.status-warn { width: 16px; height: 16px; border-radius: 50%; background: #f59e0b; color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
+.fixes { margin: 6px 0 0; padding-left: 18px; }
+.fixes pre { margin: 4px 0 6px; padding: 6px 8px; border-radius: 6px; background: var(--error-muted); white-space: pre-wrap; }
+.fixes code { display: block; font: 12px var(--mono); user-select: all; }
+#add-host label { display: block; margin-bottom: 4px; color: var(--secondary); }
+#add-host .row { display: flex; gap: 8px; }
+#add-host input { flex: 1; font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
 #confirm, #uninstall { padding: 20px 22px; width: min(460px, 92vw); }
 #confirm h2, #uninstall h2 { margin: 0 0 8px; font-size: 16px; }
 #confirm .buttons, #uninstall .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
@@ -318,6 +370,7 @@ section.uninstall button { margin-top: 6px; }
 .uninstall-steps { list-style: none; margin: 8px 0 12px; padding: 0; }
 .uninstall-steps .removed { color: var(--secondary); }
 .uninstall-steps .failed { color: var(--error); }
-.uninstall-steps .why { margin-left: 18px; font: 12px var(--mono); }
+.uninstall-steps .skipped { color: var(--secondary); }
+.uninstall-steps .why, .uninstall-steps .note { margin-left: 18px; font: 12px var(--mono); }
 #uninstall .warning { font-weight: 600; }
 #uninstall .why { color: var(--error); }

@@ -84,7 +84,7 @@ pub fn reconcile(root: &Path, github: &dyn GitHub, building: &[RunKey]) -> Repor
             }
         }
         for state in runs.iter().filter(|r| r.repo.eq_ignore_ascii_case(&repo)) {
-            if building.contains(&state.run) || state.disposition == Disposition::Building {
+            if building.contains(&state.run) || state.disposition.is_building() {
                 continue;
             }
             if let Err(error) = check(root, github, state, &mut report) {
@@ -218,7 +218,7 @@ mod tests {
                     blocked_by: vec![],
                 }],
                 closed: vec![],
-                plugin_dir: None,
+                roles: Default::default(),
             },
             Event::IssueStarted {
                 at: time(1),
@@ -233,7 +233,7 @@ mod tests {
                     outcome: Outcome::Succeeded,
                     reason: None,
                     pull_request: Some(4),
-                    duration_ms: 59_000,
+                    duration_ms: Some(59_000),
                     cost_usd: Some(Decimal::new(125, 2)),
                 },
                 Event::IssueMerged {
@@ -247,6 +247,8 @@ mod tests {
                     outcome: Outcome::Succeeded,
                     reason: None,
                     pull_request: Some(3),
+                    review: None,
+                    open_threads: None,
                 },
             ]);
         }
@@ -285,6 +287,26 @@ mod tests {
             "{comment}"
         );
         assert!(!run::run_dir(root.path(), &key()).exists());
+    }
+
+    #[test]
+    fn a_hosts_mirrored_run_is_neither_commented_on_nor_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = crate::hosts::dir(root.path(), "devbox");
+        record(&mirror, true);
+        repositories::add(root.path(), REPO, false, time(0)).unwrap();
+        let github = github();
+        github.set_pull_state(REPO, 3, PullState::Closed);
+        github.set_state(REPO, 1, State::Closed);
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        assert_eq!(report, Report::default());
+        assert!(github.repo(REPO).issues[&1].comments.is_empty());
+        assert_eq!(
+            run::read(&mirror, &key()).unwrap().disposition,
+            Disposition::WaitingForReview
+        );
     }
 
     #[test]

@@ -1,16 +1,19 @@
+#[cfg(feature = "desktop")]
 use std::path::Path;
 
 fn main() {
-    if !windows_built() {
-        return;
+    // Without the desktop there are no windows to embed, and no Tauri.
+    #[cfg(feature = "desktop")]
+    if windows_built() {
+        tauri_build::build()
     }
-    tauri_build::build()
 }
 
 /// Whether the windows trunk builds, which the app embeds as it compiles,
 /// are there. Without them `tauri::generate_context!` panics with a
 /// message that doesn't say how to build them, so this says it instead,
 /// and fails the build.
+#[cfg(feature = "desktop")]
 fn windows_built() -> bool {
     let config =
         std::fs::read_to_string("tauri.conf.json").expect("epik-app has a tauri.conf.json");

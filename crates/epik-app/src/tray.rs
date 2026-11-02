@@ -98,8 +98,16 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::settings,
             main_window::monitor,
             main_window::stop_monitoring,
+            main_window::add_host,
+            main_window::check_host,
+            main_window::remove_host,
+            main_window::set_default_host,
+            main_window::agent_settings,
+            main_window::set_agent_settings,
+            main_window::unready_agents,
             main_window::uninstall_plan,
             main_window::uninstall,
+            main_window::quit_to_remove,
             main_window::open_github,
             main_window::agent_stream,
             popover::open_main,
@@ -231,7 +239,7 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
         // Only Linux's native tray menu has Restart, and it can't ask first.
         RESTART => {
             let runs = &handle.state::<main_window::Window>().runs;
-            popover::ask_to_restart(handle, building(runs));
+            popover::ask_to_restart(handle, building_here(runs));
             Ok(())
         }
         QUIT => {
@@ -245,12 +253,26 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// How many runs of a monitored repository are building, for the tray menu
-/// to make room for. If the runs can't be read, none is.
+/// How many runs of a monitored repository are building, on any host, for
+/// the tray menu to make room for. If the runs can't be read, none is.
 pub(crate) fn building(runs: &Runs) -> usize {
-    runs.monitored().map_or(0, |runs| {
-        runs.iter()
-            .filter(|run| run.disposition == Disposition::Building)
+    runs.monitored().map_or(0, |shown| {
+        shown
+            .runs
+            .iter()
+            .filter(|run| run.state.disposition.is_building())
+            .count()
+    })
+}
+
+/// How many runs are building on this computer, which restarting
+/// interrupts. If the runs can't be read, none is.
+fn building_here(runs: &Runs) -> usize {
+    runs.monitored().map_or(0, |shown| {
+        shown
+            .runs
+            .iter()
+            .filter(|run| run.host.is_none() && run.state.disposition.is_building())
             .count()
     })
 }
@@ -304,7 +326,11 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
                     }
                 });
             }
-            if setup_window::opens_at_start(&root, &builds.setup()) {
+            // Settings that can't be read open it too, which says why.
+            let opens = builds
+                .setup(None)
+                .map_or(true, |checks| setup_window::opens_at_start(&root, &checks));
+            if opens {
                 let opener = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
                     if let Err(error) = setup_window::open(&opener) {
@@ -356,9 +382,11 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
 /// Whether any run of a monitored repository needs attention. If the runs
 /// can't be read, none is said to.
 fn needs_attention(runs: &Runs) -> bool {
-    runs.monitored().is_ok_and(|runs| {
-        runs.iter()
-            .any(|run| run.disposition == Disposition::NeedsAttention)
+    runs.monitored().is_ok_and(|shown| {
+        shown
+            .runs
+            .iter()
+            .any(|run| run.state.disposition == Disposition::NeedsAttention)
     })
 }
 

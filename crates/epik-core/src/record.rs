@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::activity::Activity;
 use crate::run::{self, RunKey};
+use crate::settings::Settings;
 
 /// The file a build's events are appended to.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -83,6 +84,25 @@ pub enum Outcome {
     Failed,
 }
 
+/// The work an agent session does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRole {
+    Coding,
+    Review,
+}
+
+/// What the review of a run's pull request concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Approve,
+    Changes,
+    /// The reviewer left no verdict for its round.
+    #[serde(rename = "none")]
+    NoVerdict,
+}
+
 /// An issue of a run: an epic sub-issue, or the epic issue of an epic
 /// with none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,14 +131,46 @@ pub enum Event {
         /// skips.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         closed: Vec<u64>,
-        /// Epik's Claude Code plugin, which the agents load. A rerun loads
-        /// it again.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plugin_dir: Option<PathBuf>,
+        /// The agent and model each role runs with. A record from before
+        /// roles has none, and ran Claude Code with its default model and
+        /// no review.
+        #[serde(default)]
+        roles: Settings,
     },
     IssueStarted {
         at: DateTime<Utc>,
         number: u64,
+    },
+    /// An agent started a session on issue `number`. The run's own
+    /// sessions, such as a review of its pull request, carry the run's
+    /// number, which for an epic is the epic issue's.
+    SessionStarted {
+        at: DateTime<Utc>,
+        number: u64,
+        role: SessionRole,
+        /// Which session of its role on the issue this is, from 1.
+        round: u32,
+        /// The agent's id, such as `claude`.
+        agent: String,
+        /// The model, or `None` for the agent's default.
+        #[serde(default)]
+        model: Option<String>,
+        /// The session's log, a file name in the build's directory.
+        log: String,
+    },
+    SessionFinished {
+        at: DateTime<Utc>,
+        number: u64,
+        role: SessionRole,
+        round: u32,
+        duration_ms: u64,
+        /// US dollars, as the agent reported them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<Decimal>,
+        /// What a review concluded, read from its pull request when it
+        /// finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<ReviewVerdict>,
     },
     IssueFinished {
         at: DateTime<Utc>,
@@ -128,8 +180,12 @@ pub enum Event {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull_request: Option<u64>,
-        duration_ms: u64,
-        /// US dollars, as the agent reported them.
+        /// The agent's time, in a record from before sessions. Since, the
+        /// issue's sessions have it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// US dollars, as the agent reported them, in a record from before
+        /// sessions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<Decimal>,
     },
@@ -150,6 +206,14 @@ pub enum Event {
         /// single issue's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull_request: Option<u64>,
+        /// What the review of that pull request concluded, when review
+        /// was on and the review ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<ReviewVerdict>,
+        /// How many of its review threads were unresolved at the finish,
+        /// when it was reviewed and they could be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_threads: Option<usize>,
     },
     BuildInterrupted {
         at: DateTime<Utc>,
@@ -169,6 +233,8 @@ impl Event {
         match self {
             Event::BuildStarted { at, .. }
             | Event::IssueStarted { at, .. }
+            | Event::SessionStarted { at, .. }
+            | Event::SessionFinished { at, .. }
             | Event::IssueFinished { at, .. }
             | Event::IssueMerged { at, .. }
             | Event::BuildFinished { at, .. }
@@ -347,6 +413,26 @@ impl From<Outcome> for BuildStatus {
     }
 }
 
+/// An agent session, as a build's events leave it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Session {
+    /// The build it ran in, whose directory holds its log.
+    pub build_id: String,
+    pub role: SessionRole,
+    pub round: u32,
+    pub agent: String,
+    pub model: Option<String>,
+    /// Its log's file name in the build's directory.
+    pub log: String,
+    pub started_at: DateTime<Utc>,
+    /// `None` while it runs.
+    pub duration_ms: Option<u64>,
+    pub cost_usd: Option<Decimal>,
+    /// What a review concluded, once it has finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ReviewVerdict>,
+}
+
 /// An issue, as a build's events leave it, or as a run's builds do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueState {
@@ -361,12 +447,128 @@ pub struct IssueState {
     /// Its pull request's merge commit, once Epik has merged it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
+    /// The sum of its sessions' times, or, in a record from before
+    /// sessions, its agent's.
     pub duration_ms: Option<u64>,
+    /// The sum of its sessions' costs, or, in a record from before
+    /// sessions, its agent's.
     pub cost_usd: Option<Decimal>,
+    /// The agent sessions it took, oldest first.
+    #[serde(default)]
+    pub sessions: Vec<Session>,
     /// What its agent is doing, while it runs. Read from the agent's log
     /// by [`crate::run::read`] and [`crate::run::list`], never recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<Activity>,
+}
+
+impl IssueState {
+    /// The agents of its finished sessions that reported no cost, each
+    /// once, oldest first. Its cost is only theirs to report, so while
+    /// there are any, its `cost_usd` is less than it spent.
+    pub fn cost_not_reported_by(&self) -> Vec<&str> {
+        not_reported_by(&self.sessions)
+    }
+
+    /// The file name of its agent's log in build `build_id`: its latest
+    /// session's, if that session ran in the build, or else `<issue>.jsonl`,
+    /// as a record from before sessions has it.
+    pub fn log(&self, build_id: &str) -> String {
+        self.sessions
+            .last()
+            .filter(|session| session.build_id == build_id)
+            .map_or_else(
+                || format!("{}.jsonl", self.issue.number),
+                |session| session.log.clone(),
+            )
+    }
+}
+
+/// Adds `event`'s session to `sessions`, if it is `session_started`, or
+/// finishes the session it ends, if it is `session_finished`.
+fn record_session(sessions: &mut Vec<Session>, build_id: &str, event: &Event) {
+    match event {
+        Event::SessionStarted {
+            at,
+            role,
+            round,
+            agent,
+            model,
+            log,
+            ..
+        } => sessions.push(Session {
+            build_id: build_id.to_owned(),
+            role: *role,
+            round: *round,
+            agent: agent.clone(),
+            model: model.clone(),
+            log: log.clone(),
+            started_at: *at,
+            duration_ms: None,
+            cost_usd: None,
+            verdict: None,
+        }),
+        Event::SessionFinished {
+            role,
+            round,
+            duration_ms,
+            cost_usd,
+            verdict,
+            ..
+        } => {
+            if let Some(session) = sessions
+                .iter_mut()
+                .rev()
+                .find(|s| s.role == *role && s.round == *round)
+            {
+                session.duration_ms = Some(*duration_ms);
+                session.cost_usd = *cost_usd;
+                session.verdict = *verdict;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The sum of `sessions`' times, or `None` if none has finished.
+pub(crate) fn sessions_duration(sessions: &[Session]) -> Option<u64> {
+    sessions
+        .iter()
+        .filter_map(|s| s.duration_ms)
+        .reduce(|a, b| a + b)
+}
+
+/// The sum of `sessions`' costs, or `None` if none reported one.
+pub(crate) fn sessions_cost(sessions: &[Session]) -> Option<Decimal> {
+    sessions
+        .iter()
+        .filter_map(|s| s.cost_usd)
+        .reduce(|a, b| a + b)
+}
+
+/// The agents of `sessions` that finished without reporting a cost, each
+/// once, oldest first.
+pub(crate) fn not_reported_by(sessions: &[Session]) -> Vec<&str> {
+    let mut agents: Vec<&str> = Vec::new();
+    for session in sessions {
+        if session.duration_ms.is_some()
+            && session.cost_usd.is_none()
+            && !agents.contains(&session.agent.as_str())
+        {
+            agents.push(&session.agent);
+        }
+    }
+    agents
+}
+
+/// How many of `issues` have a session that reported no cost, counting the
+/// run's own `sessions` as one more issue, the epic's.
+pub(crate) fn cost_unreported(issues: &[IssueState], sessions: &[Session]) -> usize {
+    issues
+        .iter()
+        .filter(|issue| !issue.cost_not_reported_by().is_empty())
+        .count()
+        + usize::from(!not_reported_by(sessions).is_empty())
 }
 
 /// A build, as its events leave it. `summary.json` is this, serialized.
@@ -378,9 +580,6 @@ pub struct BuildState {
     pub title: String,
     pub kind: Kind,
     pub branch: String,
-    /// Epik's plugin, as the build was started with it.
-    #[serde(default)]
-    pub plugin_dir: Option<PathBuf>,
     pub status: BuildStatus,
     pub reason: Option<String>,
     /// The pull request into the default branch: the epic's, or a single
@@ -389,7 +588,22 @@ pub struct BuildState {
     /// Whether that pull request was closed without merging.
     #[serde(default)]
     pub pull_request_closed: bool,
+    /// What the review of that pull request concluded, if it was
+    /// reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewVerdict>,
+    /// How many of its review threads were unresolved when the build
+    /// finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_threads: Option<usize>,
     pub issues: Vec<IssueState>,
+    /// The run's own agent sessions, such as reviews of its pull request,
+    /// when the run's number is not one of its issues', oldest first.
+    #[serde(default)]
+    pub sessions: Vec<Session>,
+    /// The agent and model each role runs with.
+    #[serde(default)]
+    pub roles: Settings,
     pub started_at: DateTime<Utc>,
     /// When the build finished or was interrupted.
     pub ended_at: Option<DateTime<Utc>>,
@@ -398,8 +612,12 @@ pub struct BuildState {
     /// From the start to the end, or to the latest event while running. For
     /// a clock that keeps going between events, use [`BuildState::elapsed`].
     pub elapsed_ms: u64,
-    /// The sum of the issues' costs so far.
+    /// The sum of the issues' and the run's own sessions' costs so far.
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported, which `cost_usd` lacks.
+    /// See [`IssueState::cost_not_reported_by`].
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 impl BuildState {
@@ -415,6 +633,17 @@ impl BuildState {
     /// The run the build belongs to.
     pub fn run(&self) -> RunKey {
         RunKey::new(&self.repo, self.number)
+    }
+
+    /// Whether a review of the run's pull request is running.
+    pub fn reviewing(&self) -> bool {
+        self.status == BuildStatus::Running
+            && self
+                .issues
+                .iter()
+                .flat_map(|issue| &issue.sessions)
+                .chain(&self.sessions)
+                .any(|s| s.role == SessionRole::Review && s.duration_ms.is_none())
     }
 
     /// How long the build has taken: to its end, or to `now` while it runs.
@@ -438,7 +667,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         branch,
         issues,
         closed,
-        plugin_dir,
+        roles,
     } = first
     else {
         return None;
@@ -450,11 +679,12 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         title: title.clone(),
         kind: *kind,
         branch: branch.clone(),
-        plugin_dir: plugin_dir.clone(),
         status: BuildStatus::Running,
         reason: None,
         pull_request: None,
         pull_request_closed: false,
+        review: None,
+        open_threads: None,
         issues: issues
             .iter()
             .map(|issue| IssueState {
@@ -470,14 +700,18 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 merge_commit: None,
                 duration_ms: None,
                 cost_usd: None,
+                sessions: Vec::new(),
                 activity: None,
             })
             .collect(),
+        sessions: Vec::new(),
+        roles: roles.clone(),
         started_at: *at,
         ended_at: None,
         latest_at: *at,
         elapsed_ms: 0,
         cost_usd: Decimal::ZERO,
+        cost_unreported: 0,
     };
     for event in rest {
         state.latest_at = state.latest_at.max(event.at());
@@ -487,6 +721,15 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 if let Some(issue) = state.issue_mut(*number) {
                     issue.status = IssueStatus::Running;
                     issue.started_at = Some(*at);
+                }
+            }
+            Event::SessionStarted { number, .. } | Event::SessionFinished { number, .. } => {
+                let build_id = state.build_id.clone();
+                let own = state.number == *number;
+                if let Some(issue) = state.issue_mut(*number) {
+                    record_session(&mut issue.sessions, &build_id, event);
+                } else if own {
+                    record_session(&mut state.sessions, &build_id, event);
                 }
             }
             Event::IssueFinished {
@@ -502,8 +745,10 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                     issue.status = (*outcome).into();
                     issue.reason = reason.clone();
                     issue.pull_request = *pull_request;
-                    issue.duration_ms = Some(*duration_ms);
-                    issue.cost_usd = *cost_usd;
+                    if issue.sessions.is_empty() {
+                        issue.duration_ms = *duration_ms;
+                        issue.cost_usd = *cost_usd;
+                    }
                 }
             }
             Event::IssueMerged {
@@ -523,10 +768,14 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 outcome,
                 reason,
                 pull_request,
+                review,
+                open_threads,
             } => {
                 state.status = (*outcome).into();
                 state.reason = reason.clone();
                 state.pull_request = *pull_request;
+                state.review = *review;
+                state.open_threads = *open_threads;
                 state.ended_at = Some(*at);
             }
             Event::BuildInterrupted { at, reason } => {
@@ -543,7 +792,19 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
     }
     let end = state.ended_at.unwrap_or(state.latest_at);
     state.elapsed_ms = u64::try_from((end - state.started_at).num_milliseconds()).unwrap_or(0);
-    state.cost_usd = state.issues.iter().filter_map(|m| m.cost_usd).sum();
+    for issue in &mut state.issues {
+        if !issue.sessions.is_empty() {
+            issue.duration_ms = sessions_duration(&issue.sessions);
+            issue.cost_usd = sessions_cost(&issue.sessions);
+        }
+    }
+    state.cost_usd = state
+        .issues
+        .iter()
+        .filter_map(|m| m.cost_usd)
+        .sum::<Decimal>()
+        + sessions_cost(&state.sessions).unwrap_or_default();
+    state.cost_unreported = cost_unreported(&state.issues, &state.sessions);
     Some(state)
 }
 
@@ -621,7 +882,7 @@ mod tests {
             branch: "epic-12".to_owned(),
             issues: vec![issue(13, &[]), issue(14, &[13])],
             closed: Vec::new(),
-            plugin_dir: None,
+            roles: Default::default(),
         }
     }
 
@@ -632,7 +893,7 @@ mod tests {
             outcome,
             reason: (outcome == Outcome::Failed).then(|| "tests failed".to_owned()),
             pull_request: (outcome == Outcome::Succeeded).then_some(number + 100),
-            duration_ms: 1_000,
+            duration_ms: Some(1_000),
             cost_usd: Some(dollars(cost)),
         }
     }
@@ -667,6 +928,8 @@ mod tests {
                 outcome: Outcome::Succeeded,
                 reason: None,
                 pull_request: Some(200),
+                review: None,
+                open_threads: None,
             },
         ]
     }
@@ -855,7 +1118,7 @@ mod tests {
             branch,
             issues,
             closed: vec![13],
-            plugin_dir: None,
+            roles: Default::default(),
         };
         let state = fold(&[started]).unwrap();
         assert_eq!(state.issue(13).unwrap().status, IssueStatus::Closed);
@@ -922,6 +1185,8 @@ mod tests {
                 outcome: Outcome::Failed,
                 reason: Some("#13 failed".to_owned()),
                 pull_request: None,
+                review: None,
+                open_threads: None,
             },
         ];
         let state = fold(&events).unwrap();
@@ -974,7 +1239,7 @@ mod tests {
             branch: "main".to_owned(),
             issues: vec![issue(7, &[])],
             closed: Vec::new(),
-            plugin_dir: None,
+            roles: Default::default(),
         }];
         let state = fold(&events).unwrap();
         assert_eq!(state.kind, Kind::Issue);
@@ -992,6 +1257,352 @@ mod tests {
             }]),
             None
         );
+    }
+
+    #[test]
+    fn a_record_from_before_builds_stopped_loading_the_plugin_still_reads() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}],
+            "plugin_dir": "/plugin"}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+
+        let mut summary = serde_json::to_value(&state).unwrap();
+        summary["plugin_dir"] = "/plugin".into();
+        let read: BuildState = serde_json::from_value(summary).unwrap();
+        assert_eq!(read, state);
+    }
+
+    #[test]
+    fn a_build_keeps_the_roles_it_started_with() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}],
+            "roles": {"coding": {"agent": "claude", "model": "opus"},
+                      "review": {"agent": "claude", "model": null}}}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+
+        let role = |model: Option<&str>| crate::settings::Role {
+            agent: "claude".to_owned(),
+            model: model.map(str::to_owned),
+        };
+        assert_eq!(
+            state.roles,
+            Settings {
+                coding: role(Some("opus")),
+                review: Some(role(None)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_record_from_before_roles_ran_claude_code_with_no_review() {
+        let started = r#"{"type": "build_started", "at": "2026-10-01T00:00:00Z",
+            "build_id": "build", "repo": "epik-agent/Epik", "number": 7,
+            "title": "One issue", "kind": "issue", "branch": "main",
+            "issues": [{"number": 7, "title": "Issue 7", "blocked_by": []}]}"#;
+        let started: Event = serde_json::from_str(started).unwrap();
+        let state = fold(&[started]).unwrap();
+        assert_eq!(state.roles, Settings::default());
+
+        let mut summary = serde_json::to_value(&state).unwrap();
+        summary.as_object_mut().unwrap().remove("roles");
+        let read: BuildState = serde_json::from_value(summary).unwrap();
+        assert_eq!(read, state);
+    }
+
+    fn session_started(at: u32, number: u64, role: SessionRole, round: u32, log: &str) -> Event {
+        Event::SessionStarted {
+            at: time(at),
+            number,
+            role,
+            round,
+            agent: "claude".to_owned(),
+            model: Some("opus".to_owned()),
+            log: log.to_owned(),
+        }
+    }
+
+    fn session_finished(at: u32, number: u64, role: SessionRole, round: u32, ms: u64) -> Event {
+        Event::SessionFinished {
+            at: time(at),
+            number,
+            role,
+            round,
+            duration_ms: ms,
+            cost_usd: Some(dollars("0.25")),
+            verdict: None,
+        }
+    }
+
+    /// Issue 13 of the epic, coded in one session that finished, without
+    /// `issue_finished` carrying any figures.
+    fn one_session() -> Vec<Event> {
+        vec![
+            epic_started("build", time(0)),
+            Event::IssueStarted {
+                at: time(1),
+                number: 13,
+            },
+            session_started(1, 13, SessionRole::Coding, 1, "13.jsonl"),
+            session_finished(10, 13, SessionRole::Coding, 1, 9_000),
+            Event::IssueFinished {
+                at: time(10),
+                number: 13,
+                outcome: Outcome::Succeeded,
+                reason: None,
+                pull_request: Some(113),
+                duration_ms: None,
+                cost_usd: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn session_events_are_tagged_by_type_in_snake_case() {
+        let started = session_started(1, 13, SessionRole::Review, 2, "13-review-2.jsonl");
+        assert_eq!(
+            serde_json::to_value(started).unwrap(),
+            serde_json::json!({
+                "type": "session_started",
+                "at": "2026-10-28T17:08:01Z",
+                "number": 13,
+                "role": "review",
+                "round": 2,
+                "agent": "claude",
+                "model": "opus",
+                "log": "13-review-2.jsonl",
+            })
+        );
+        let finished = session_finished(10, 13, SessionRole::Coding, 1, 9_000);
+        assert_eq!(
+            serde_json::to_value(finished).unwrap(),
+            serde_json::json!({
+                "type": "session_finished",
+                "at": "2026-10-28T17:08:10Z",
+                "number": 13,
+                "role": "coding",
+                "round": 1,
+                "duration_ms": 9000,
+                "cost_usd": 0.25,
+            })
+        );
+    }
+
+    #[test]
+    fn fold_of_one_coding_session_gives_the_issues_figures() {
+        let state = fold(&one_session()).unwrap();
+        let issue = state.issue(13).unwrap();
+        assert_eq!(issue.status, IssueStatus::Succeeded);
+        assert_eq!(issue.duration_ms, Some(9_000));
+        assert_eq!(issue.cost_usd, Some(dollars("0.25")));
+        assert_eq!(state.cost_usd, dollars("0.25"));
+        assert_eq!(
+            issue.sessions,
+            vec![Session {
+                build_id: "build".to_owned(),
+                role: SessionRole::Coding,
+                round: 1,
+                agent: "claude".to_owned(),
+                model: Some("opus".to_owned()),
+                log: "13.jsonl".to_owned(),
+                started_at: time(1),
+                duration_ms: Some(9_000),
+                cost_usd: Some(dollars("0.25")),
+                verdict: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn fold_of_a_session_still_running_has_no_figures_yet() {
+        let state = fold(&one_session()[..3]).unwrap();
+        let issue = state.issue(13).unwrap();
+        assert_eq!(issue.sessions.len(), 1);
+        assert_eq!(issue.sessions[0].duration_ms, None);
+        assert_eq!(issue.duration_ms, None);
+        assert_eq!(issue.cost_usd, None);
+        assert_eq!(issue.log("build"), "13.jsonl");
+    }
+
+    #[test]
+    fn fold_sums_an_issues_sessions() {
+        let mut events = one_session();
+        events.extend([
+            session_started(11, 13, SessionRole::Review, 1, "13-review-1.jsonl"),
+            session_finished(15, 13, SessionRole::Review, 1, 4_000),
+            session_started(16, 13, SessionRole::Coding, 2, "13-coding-2.jsonl"),
+            session_finished(20, 13, SessionRole::Coding, 2, 4_000),
+        ]);
+        let state = fold(&events).unwrap();
+        let issue = state.issue(13).unwrap();
+        let rounds: Vec<(SessionRole, u32)> =
+            issue.sessions.iter().map(|s| (s.role, s.round)).collect();
+        assert_eq!(
+            rounds,
+            [
+                (SessionRole::Coding, 1),
+                (SessionRole::Review, 1),
+                (SessionRole::Coding, 2)
+            ]
+        );
+        assert_eq!(issue.duration_ms, Some(17_000));
+        assert_eq!(issue.cost_usd, Some(dollars("0.75")));
+        assert_eq!(state.cost_usd, dollars("0.75"));
+        assert_eq!(issue.log("build"), "13-coding-2.jsonl");
+        assert_eq!(issue.log("other build"), "13.jsonl");
+    }
+
+    #[test]
+    fn a_reviews_verdict_is_its_sessions() {
+        let mut events = one_session();
+        events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
+        let finished = Event::SessionFinished {
+            at: time(15),
+            number: 13,
+            role: SessionRole::Review,
+            round: 1,
+            duration_ms: 4_000,
+            cost_usd: None,
+            verdict: Some(ReviewVerdict::Changes),
+        };
+        assert_eq!(
+            serde_json::to_value(&finished).unwrap()["verdict"],
+            "changes"
+        );
+        events.push(finished);
+
+        let issue = fold(&events).unwrap().issue(13).unwrap().clone();
+
+        let verdicts: Vec<Option<ReviewVerdict>> =
+            issue.sessions.iter().map(|s| s.verdict).collect();
+        assert_eq!(verdicts, [None, Some(ReviewVerdict::Changes)]);
+    }
+
+    #[test]
+    fn a_session_that_reports_no_cost_adds_only_its_time() {
+        let mut events = one_session();
+        events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
+        events.push(Event::SessionFinished {
+            at: time(15),
+            number: 13,
+            role: SessionRole::Review,
+            round: 1,
+            duration_ms: 4_000,
+            cost_usd: None,
+            verdict: None,
+        });
+        let issue = fold(&events).unwrap().issue(13).unwrap().clone();
+        assert_eq!(issue.duration_ms, Some(13_000));
+        assert_eq!(issue.cost_usd, Some(dollars("0.25")));
+    }
+
+    /// A Codex session of `number`, `role` and `round`, finished with no
+    /// cost.
+    fn codex_session(at: u32, number: u64, role: SessionRole, round: u32) -> [Event; 2] {
+        [
+            Event::SessionStarted {
+                at: time(at),
+                number,
+                role,
+                round,
+                agent: "codex".to_owned(),
+                model: None,
+                log: format!("{number}-codex-{round}.jsonl"),
+            },
+            Event::SessionFinished {
+                at: time(at + 4),
+                number,
+                role,
+                round,
+                duration_ms: 4_000,
+                cost_usd: None,
+                verdict: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn an_issue_with_a_session_that_reported_no_cost_is_counted_as_not_reported() {
+        let mut events = one_session();
+        events.extend(codex_session(11, 13, SessionRole::Review, 1));
+        events.extend(codex_session(16, 13, SessionRole::Review, 2));
+
+        let state = fold(&events).unwrap();
+
+        let issue = state.issue(13).unwrap();
+        assert_eq!(issue.cost_usd, Some(dollars("0.25")));
+        assert_eq!(issue.cost_not_reported_by(), ["codex"]);
+        assert_eq!(state.cost_usd, dollars("0.25"));
+        assert_eq!(state.cost_unreported, 1);
+    }
+
+    #[test]
+    fn a_session_still_running_is_not_counted_as_not_reported() {
+        let mut events = one_session();
+        events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
+
+        let state = fold(&events).unwrap();
+
+        assert!(state.issue(13).unwrap().cost_not_reported_by().is_empty());
+        assert_eq!(state.cost_unreported, 0);
+    }
+
+    #[test]
+    fn the_runs_own_session_that_reported_no_cost_counts_its_epic_issue() {
+        let mut events = one_session();
+        events.extend(codex_session(11, 12, SessionRole::Review, 1));
+
+        let state = fold(&events).unwrap();
+
+        assert_eq!(state.cost_unreported, 1);
+        assert_eq!(state.cost_usd, dollars("0.25"));
+    }
+
+    #[test]
+    fn the_runs_own_sessions_belong_to_the_build_and_count_in_its_cost() {
+        let mut events = one_session();
+        events.push(session_started(
+            11,
+            12,
+            SessionRole::Review,
+            1,
+            "12-review-1.jsonl",
+        ));
+        events.push(session_finished(15, 12, SessionRole::Review, 1, 4_000));
+        let state = fold(&events).unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].log, "12-review-1.jsonl");
+        assert_eq!(state.sessions[0].duration_ms, Some(4_000));
+        assert_eq!(state.cost_usd, dollars("0.50"));
+    }
+
+    #[test]
+    fn a_record_without_sessions_folds_as_before() {
+        let line = r#"{"type": "issue_finished", "at": "2026-10-28T17:08:10Z",
+            "number": 13, "outcome": "succeeded", "pull_request": 113,
+            "duration_ms": 1000, "cost_usd": 0.1}"#;
+        let finished: Event = serde_json::from_str(line).unwrap();
+        assert_eq!(finished, successful_epic()[2]);
+
+        let state = fold(&successful_epic()).unwrap();
+        let issue = state.issue(13).unwrap();
+        assert!(issue.sessions.is_empty());
+        assert_eq!(issue.duration_ms, Some(1_000));
+        assert_eq!(issue.cost_usd, Some(dollars("0.10")));
+        assert_eq!(issue.log("build"), "13.jsonl");
+
+        let mut summary = serde_json::to_value(&state).unwrap();
+        summary.as_object_mut().unwrap().remove("sessions");
+        for issue in summary["issues"].as_array_mut().unwrap() {
+            issue.as_object_mut().unwrap().remove("sessions");
+        }
+        let read: BuildState = serde_json::from_value(summary).unwrap();
+        assert_eq!(read, state);
     }
 
     #[test]
@@ -1056,5 +1667,34 @@ mod tests {
 
             assert_eq!(error.kind(), io::ErrorKind::NotFound, "{build_id}");
         }
+    }
+
+    #[test]
+    fn build_finished_records_the_review_and_an_old_one_has_none() {
+        let line = r#"{"type":"build_finished","at":"2026-11-01T12:00:00Z","outcome":"succeeded","pull_request":9}"#;
+        let Event::BuildFinished {
+            review,
+            open_threads,
+            ..
+        } = serde_json::from_str(line).unwrap()
+        else {
+            panic!("a build_finished");
+        };
+        assert_eq!((review, open_threads), (None, None));
+
+        let reviewed = Event::BuildFinished {
+            at: time(0),
+            outcome: Outcome::Succeeded,
+            reason: None,
+            pull_request: Some(9),
+            review: Some(ReviewVerdict::NoVerdict),
+            open_threads: Some(3),
+        };
+        let json = serde_json::to_value(&reviewed).unwrap();
+        assert_eq!(json["review"], "none");
+        assert_eq!(json["open_threads"], 3);
+        let state = fold(&[epic_started("b1", time(0)), reviewed]).unwrap();
+        assert_eq!(state.review, Some(ReviewVerdict::NoVerdict));
+        assert_eq!(state.open_threads, Some(3));
     }
 }

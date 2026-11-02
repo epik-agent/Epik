@@ -39,6 +39,7 @@ fn card(disposition: Disposition) -> RunCard {
     RunCard {
         run: "o/r#13".to_owned(),
         title: "Exponentiation".to_owned(),
+        place: None,
         epic: link("o/r#13", "https://github.com/o/r/issues/13"),
         count: "2 issues, 1 merged".to_owned(),
         disposition,
@@ -89,7 +90,7 @@ fn home() {
 fn sidebar() {
     round_trip(Sidebar {
         runs: vec![SidebarRun {
-            run: "o/r#13".to_owned(),
+            run: "devbox:o/r#13".to_owned(),
             title: "Exponentiation".to_owned(),
             disposition: Disposition::NeedsAttention,
         }],
@@ -104,8 +105,9 @@ fn popover() {
         about: "1 run · 2 agents · up 4h 12m".to_owned(),
         restart: "Interrupt one build?".to_owned(),
         runs: vec![TrayRun {
-            run: "o/r#13".to_owned(),
+            run: "devbox:o/r#13".to_owned(),
             title: "Exponentiation".to_owned(),
+            place: Some("Building on devbox".to_owned()),
             count: "1/3".to_owned(),
             segments: vec![NodeState::Merged, NodeState::Running, NodeState::Failed],
             line: "building #2 · 2m 00s · o/r#13".to_owned(),
@@ -118,6 +120,7 @@ fn run_page() {
     round_trip(RunPage {
         run: "o/r#13".to_owned(),
         title: "Exponentiation".to_owned(),
+        place: Some("Building on devbox, last heard from 12m 00s ago.".to_owned()),
         epic: link("o/r#13", "https://github.com/o/r/issues/13"),
         about: vec![text("2 issues · merging into "), code("epic/13")],
         sentence: "First build running.".to_owned(),
@@ -150,6 +153,18 @@ fn run_page() {
                 pull_request: vec![link("PR #20", "https://github.com/o/r/pull/20")],
                 recent: vec!["Ran cargo test".to_owned()],
                 log: Some("the log".to_owned()),
+                sessions: vec![SessionRow {
+                    role: "Coding".to_owned(),
+                    round: 1,
+                    agent: "Codex".to_owned(),
+                    model: "default model".to_owned(),
+                    time: "3m 05s".to_owned(),
+                    cost: Some("not reported".to_owned()),
+                    verdict: None,
+                    threads: None,
+                    running: false,
+                    log: Some("the log".to_owned()),
+                }],
             },
             IssueCard {
                 number: 15,
@@ -169,9 +184,25 @@ fn run_page() {
                 pull_request: vec![],
                 recent: vec![],
                 log: None,
+                sessions: vec![],
             },
         ],
         edges: vec![(14, 15)],
+        sessions: vec![SessionRow {
+            role: "Review".to_owned(),
+            round: 2,
+            agent: "Claude Code".to_owned(),
+            model: "opus".to_owned(),
+            time: "1m 00s so far".to_owned(),
+            cost: None,
+            verdict: Some("approved".to_owned()),
+            threads: Some(link(
+                "2 threads open",
+                "https://github.com/o/r/pull/30/files",
+            )),
+            running: true,
+            log: None,
+        }],
     });
 }
 
@@ -184,6 +215,20 @@ fn settings() {
             about: "1 run · added Oct 20".to_owned(),
             runs: vec![("o/r#13".to_owned(), "Exponentiation".to_owned())],
             missing: false,
+        }],
+        hosts: vec![HostRow {
+            destination: Some("devbox".to_owned()),
+            name: "devbox".to_owned(),
+            status: HostStatus::Incomplete,
+            about: "Epik 0.4.0 · setup incomplete · No runs".to_owned(),
+            why: None,
+            missing: vec![SetupFix {
+                title: "Claude sign-in".to_owned(),
+                detail: "not signed in".to_owned(),
+                commands: vec!["claude auth login".to_owned()],
+            }],
+            default: true,
+            runs: vec![],
         }],
     });
 }
@@ -198,6 +243,7 @@ fn checklist() {
                 state: ItemState::Done,
                 detail: "gh 2.80".to_owned(),
                 button: None,
+                needed: true,
             },
             Row {
                 id: "gh-auth".to_owned(),
@@ -205,6 +251,7 @@ fn checklist() {
                 state: ItemState::Missing,
                 detail: "not signed in".to_owned(),
                 button: Some("Sign in to GitHub".to_owned()),
+                needed: true,
             },
             Row {
                 id: "node".to_owned(),
@@ -212,6 +259,7 @@ fn checklist() {
                 state: ItemState::Outdated,
                 detail: "Node 22".to_owned(),
                 button: Some("Update the private copy".to_owned()),
+                needed: false,
             },
         ],
         complete: false,
@@ -304,6 +352,7 @@ fn the_json_is_what_the_windows_read() {
     let json = serde_json::to_value((
         text("plain"),
         Disposition::WaitingForReview,
+        Disposition::Reviewing,
         ItemState::Outdated,
         NodeState::NotStarted,
     ))
@@ -313,6 +362,7 @@ fn the_json_is_what_the_windows_read() {
         serde_json::json!([
             {"text": "plain"},
             "waiting_for_review",
+            "reviewing",
             "outdated",
             "not_started"
         ])

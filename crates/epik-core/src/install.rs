@@ -80,6 +80,24 @@ impl Default for Sources {
     }
 }
 
+impl Sources {
+    /// The default sources, each replaced by its environment variable if
+    /// set: `EPIK_GITHUB_API_URL`, `EPIK_GITHUB_URL` and
+    /// `EPIK_NODE_DIST_URL`, as for a mirror, or a test's local server.
+    pub fn from_env() -> Self {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+        let default = Self::default();
+        Self {
+            github_api: var("EPIK_GITHUB_API_URL").unwrap_or(default.github_api),
+            github: var("EPIK_GITHUB_URL").unwrap_or(default.github),
+            node_dist: var("EPIK_NODE_DIST_URL").unwrap_or(default.node_dist),
+        }
+    }
+}
+
 /// A release file: its name, where it is, and where its checksum list is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -516,6 +534,17 @@ mod tests {
             ),
         );
         server.serve(&format!("{base}/{}", release.file), archive);
+    }
+
+    #[test]
+    fn each_source_can_be_replaced_by_its_environment_variable() {
+        let sources = Sources::from_vars(|name| {
+            (name == "EPIK_NODE_DIST_URL").then(|| "http://mirror/node".to_owned())
+        });
+
+        assert_eq!(sources.node_dist, "http://mirror/node");
+        assert_eq!(sources.github, Sources::default().github);
+        assert_eq!(sources.github_api, Sources::default().github_api);
     }
 
     #[test]
