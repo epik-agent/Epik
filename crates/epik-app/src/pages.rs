@@ -6,6 +6,7 @@
 //! happening, and every issue or pull request it mentions links to GitHub.
 
 use chrono::{DateTime, FixedOffset, Utc};
+use epik_core::agent::CODEX_ACP;
 use epik_core::graph::Graph;
 use epik_core::hosted::{HostedRun, Shown};
 use epik_core::hosts::{Host, State};
@@ -1071,7 +1072,7 @@ fn host_row(host: &Host, runs: &[RunState], default: Option<&str>) -> HostRow {
         .setup
         .iter()
         .flatten()
-        .filter(|check| check.item.needed_to_build() && !check.usable)
+        .filter(|check| check.blocks_build())
         .map(|check| SetupFix {
             title: check.title.clone(),
             detail: check.detail.clone(),
@@ -1135,9 +1136,11 @@ fn host_row(host: &Host, runs: &[RunState], default: Option<&str>) -> HostRow {
 }
 
 /// What to run on a host, which has no window, for the item `check` says
-/// is missing there: the tools' own sign-ins, and `epik-app setup` for the
-/// tools Epik installs.
+/// is missing there: the tools' own sign-ins, `epik-app setup` for the
+/// tools Epik installs, and the Codex the adapter brings, signing in
+/// without a browser.
 fn host_commands(check: &Check) -> Vec<String> {
+    let codex = |args: &str| vec![format!("npx -y -p {CODEX_ACP} codex {args}")];
     let commands: &[&str] = match check.item {
         Item::Gh | Item::Node => {
             return vec![format!(
@@ -1149,6 +1152,8 @@ fn host_commands(check: &Check) -> Vec<String> {
         Item::GhAuth => &["gh auth login -s project", "gh auth setup-git"],
         Item::Claude => &["curl -fsSL https://claude.ai/install.sh | bash"],
         Item::ClaudeAuth => &["claude auth login"],
+        Item::Codex => return codex("--version"),
+        Item::CodexAuth => return codex("login --device-auth"),
         Item::Plugin => &[],
     };
     commands

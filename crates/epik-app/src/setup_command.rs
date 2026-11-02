@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use epik_core::install::{Cached, Sources};
 use epik_core::record;
+use epik_core::settings;
 use epik_core::setup::{self, Action, Check, Item, State, Step};
 
 pub const USAGE: &str = "usage: epik-app setup [install <item>]";
@@ -35,15 +36,29 @@ fn checks(root: &Path) -> Vec<Check> {
 }
 
 /// Prints each item, its state and detail, and for each not done what to
-/// run. Succeeds when a build could start.
+/// run. Succeeds when a build with the settings' roles could start.
 fn list(root: &Path) -> ExitCode {
-    let checks = checks(root);
+    let roles = match settings::read(root) {
+        Ok(roles) => roles,
+        Err(error) => {
+            eprintln!("epik-app setup: couldn't read the settings: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let checks = setup::needed(checks(root), &roles);
     let width = checks
         .iter()
         .map(|check| check.title.len())
         .max()
         .unwrap_or(0);
     for check in &checks {
+        if !check.needed && check.state != State::Done {
+            println!(
+                "{:width$}  {:8}  Not needed by your agents",
+                check.title, "-"
+            );
+            continue;
+        }
         let state = match check.state {
             State::Done => "done",
             State::Missing => "missing",
@@ -57,7 +72,7 @@ fn list(root: &Path) -> ExitCode {
             println!("    run: {command}");
         }
     }
-    if setup::refusal(&checks).is_none() {
+    if setup::refusal(&checks, &roles).is_none() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

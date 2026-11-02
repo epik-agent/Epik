@@ -325,7 +325,11 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
                     }
                 });
             }
-            if setup_window::opens_at_start(&root, &builds.setup()) {
+            // Settings that can't be read open it too, which says why.
+            let opens = builds
+                .setup(None)
+                .map_or(true, |checks| setup_window::opens_at_start(&root, &checks));
+            if opens {
                 let opener = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
                     if let Err(error) = setup_window::open(&opener) {

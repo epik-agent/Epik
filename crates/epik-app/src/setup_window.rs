@@ -31,7 +31,7 @@ fn shown(state: setup::State) -> ItemState {
 }
 
 /// The checklist for `checks`: each item's state, and the one button of
-/// each that isn't done.
+/// each that isn't done. It is complete when every item needed is done.
 pub fn checklist(checks: &[Check]) -> Checklist {
     Checklist {
         rows: checks
@@ -42,9 +42,13 @@ pub fn checklist(checks: &[Check]) -> Checklist {
                 state: shown(check.state),
                 detail: check.detail.clone(),
                 button: setup::step(check).map(|step| step.label),
+                needed: check.needed,
             })
             .collect(),
-        complete: !checks.is_empty() && checks.iter().all(|c| c.state == setup::State::Done),
+        complete: !checks.is_empty()
+            && checks
+                .iter()
+                .all(|c| !c.needed || c.state == setup::State::Done),
     }
 }
 
@@ -56,10 +60,11 @@ pub struct Setup {
     pub outputs: Arc<Mutex<BTreeMap<String, Output>>>,
 }
 
-/// Checks every item, and once all are done writes `~/.epik/setup-done`.
+/// Checks every item, and once all those needed are done writes
+/// `~/.epik/setup-done`.
 #[tauri::command]
 pub async fn setup_checklist(setup: State<'_, Setup>) -> Result<Checklist, String> {
-    let checks = setup.builds.setup();
+    let checks = setup.builds.setup(None)?;
     let list = checklist(&checks);
     if list.complete {
         mark_done(&setup.root);
@@ -101,7 +106,7 @@ fn start_step(
         .find(|item| item.id() == id)
         .ok_or_else(|| format!("no setup item {id:?}"))?;
     let check = builds
-        .setup()
+        .setup(None)?
         .into_iter()
         .find(|check| check.item == item)
         .ok_or_else(|| format!("no setup item {id:?}"))?;
@@ -162,10 +167,10 @@ pub fn open(handle: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Whether the checklist opens by itself at startup: on the first launch,
-/// before setup was ever completed, or whenever something it needs isn't
-/// done.
+/// before setup was ever completed, or whenever something a build needs,
+/// as `checks` are marked, isn't done.
 pub fn opens_at_start(root: &Path, checks: &[Check]) -> bool {
-    !setup::done_file(root).exists() || setup::refusal(checks).is_some()
+    !setup::done_file(root).exists() || checks.iter().any(Check::blocks_build)
 }
 
 #[cfg(test)]
@@ -179,6 +184,14 @@ mod tests {
             state,
             detail: detail.to_owned(),
             usable: state == setup::State::Done,
+            needed: true,
+        }
+    }
+
+    fn unneeded(check: Check) -> Check {
+        Check {
+            needed: false,
+            ..check
         }
     }
 
@@ -193,7 +206,7 @@ mod tests {
     fn each_item_shows_its_state_and_detail_and_only_undone_ones_a_button() {
         let mut checks = all_done();
         checks[1] = check(Item::GhAuth, setup::State::Missing, "not signed in");
-        checks[4] = check(
+        checks[6] = check(
             Item::Node,
             setup::State::Outdated,
             "Node 22.1.0; Epik needs 26 or later",
@@ -214,12 +227,42 @@ mod tests {
                 ("gh-auth", Some("Sign in to GitHub (opens the browser)")),
                 ("claude", None),
                 ("claude-auth", None),
+                ("codex", None),
+                ("codex-auth", None),
                 ("node", Some("Update the private copy")),
                 ("plugin", None),
             ]
         );
-        assert_eq!(list.rows[4].detail, "Node 22.1.0; Epik needs 26 or later");
-        assert_eq!(list.rows[4].state, ItemState::Outdated);
+        assert_eq!(list.rows[6].detail, "Node 22.1.0; Epik needs 26 or later");
+        assert_eq!(list.rows[6].state, ItemState::Outdated);
+    }
+
+    #[test]
+    fn an_item_not_needed_is_shown_and_doesnt_hold_setup_back() {
+        let mut checks = all_done();
+        checks[4] = unneeded(check(Item::Codex, setup::State::Missing, "npm error"));
+        checks[5] = unneeded(check(
+            Item::CodexAuth,
+            setup::State::Missing,
+            "not signed in",
+        ));
+
+        let list = checklist(&checks);
+
+        assert!(list.complete);
+        let needed: Vec<(&str, bool)> = list
+            .rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.needed))
+            .collect();
+        assert_eq!(needed[4], ("codex", false));
+        assert_eq!(needed[5], ("codex-auth", false));
+        assert!(needed.iter().filter(|(_, needed)| *needed).count() == 6);
+        assert_eq!(
+            list.rows[5].button.as_deref(),
+            Some("Sign in to Codex (opens the browser)"),
+            "it can still be set up"
+        );
     }
 
     #[test]
@@ -240,7 +283,7 @@ mod tests {
         assert!(!opens_at_start(root.path(), &all_done()));
 
         let mut no_plugin = all_done();
-        no_plugin[5] = check(Item::Plugin, setup::State::Missing, "not installed");
+        no_plugin[7] = check(Item::Plugin, setup::State::Missing, "not installed");
         assert!(
             !opens_at_start(root.path(), &no_plugin),
             "builds don't need it"
@@ -249,5 +292,16 @@ mod tests {
         let mut signed_out = all_done();
         signed_out[3] = check(Item::ClaudeAuth, setup::State::Missing, "not signed in");
         assert!(opens_at_start(root.path(), &signed_out));
+
+        let mut unused = all_done();
+        unused[3] = unneeded(check(
+            Item::ClaudeAuth,
+            setup::State::Missing,
+            "not signed in",
+        ));
+        assert!(
+            !opens_at_start(root.path(), &unused),
+            "the roles don't use Claude Code"
+        );
     }
 }

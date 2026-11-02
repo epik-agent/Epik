@@ -827,6 +827,7 @@ fn item(item: setup::Item, detail: Option<&str>) -> setup::Check {
         },
         detail: detail.unwrap_or("fine").to_owned(),
         usable: detail.is_none(),
+        needed: true,
     }
 }
 
@@ -995,6 +996,50 @@ fn a_hosts_missing_setup_items_say_what_to_run_there() {
                 "Node",
                 "not installed",
                 vec!["~/.epik/bin/epik-app setup install node"]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_host_is_told_to_run_codex_through_its_adapter_and_not_what_isnt_needed() {
+    use setup::Item;
+    let unneeded = |check: setup::Check| setup::Check {
+        needed: false,
+        ..check
+    };
+    let host = Host {
+        setup: Some(vec![
+            unneeded(item(Item::Claude, Some("not installed"))),
+            unneeded(item(Item::ClaudeAuth, Some("not signed in"))),
+            item(Item::Codex, Some("npm error 404")),
+            item(Item::CodexAuth, Some("not signed in")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    let missing: Vec<(&str, Vec<&str>)> = rows[1]
+        .missing
+        .iter()
+        .map(|fix| {
+            (
+                fix.title.as_str(),
+                fix.commands.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (
+                "Codex",
+                vec!["npx -y -p @agentclientprotocol/codex-acp@2.5.0 codex --version"]
+            ),
+            (
+                "Codex sign-in",
+                vec!["npx -y -p @agentclientprotocol/codex-acp@2.5.0 codex login --device-auth"]
             ),
         ]
     );

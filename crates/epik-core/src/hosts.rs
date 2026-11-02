@@ -468,6 +468,7 @@ mod tests {
             state: setup::State::Missing,
             detail: "not signed in".to_owned(),
             usable: false,
+            needed: true,
         }];
 
         set_setup(root.path(), "devbox", items.clone()).unwrap();

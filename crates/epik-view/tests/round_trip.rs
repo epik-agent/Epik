@@ -215,6 +215,7 @@ fn checklist() {
                 state: ItemState::Done,
                 detail: "gh 2.80".to_owned(),
                 button: None,
+                needed: true,
             },
             Row {
                 id: "gh-auth".to_owned(),
@@ -222,6 +223,7 @@ fn checklist() {
                 state: ItemState::Missing,
                 detail: "not signed in".to_owned(),
                 button: Some("Sign in to GitHub".to_owned()),
+                needed: true,
             },
             Row {
                 id: "node".to_owned(),
@@ -229,6 +231,7 @@ fn checklist() {
                 state: ItemState::Outdated,
                 detail: "Node 22".to_owned(),
                 button: Some("Update the private copy".to_owned()),
+                needed: false,
             },
         ],
         complete: false,

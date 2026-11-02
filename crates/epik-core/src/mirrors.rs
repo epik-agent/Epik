@@ -28,6 +28,7 @@ use crate::ipc::{Request, Response};
 use crate::mirror;
 use crate::remote::{self, Client, Ssh};
 use crate::run::{self, Disposition};
+use crate::settings;
 
 /// How often a host is synced while any of its mirrored runs is building.
 pub const BUILDING: Duration = Duration::from_secs(3);
@@ -195,11 +196,13 @@ pub fn sync(root: &Path, host: &str, client: &impl Client, now: DateTime<Utc>) -
 }
 
 /// Checks `host` through `client`, without syncing its mirror: records
-/// what was heard from it at `now`, as [`sync`] does, and its setup items.
+/// what was heard from it at `now`, as [`sync`] does, and its setup items,
+/// marked for this computer's roles, which the builds it is sent carry.
 /// A host that can't be reached keeps the setup it last said.
 pub fn check(root: &Path, host: &str, client: &impl Client, now: DateTime<Utc>) -> io::Result<()> {
     heard(root, host, ping(client), now)?;
-    match client.request(&Request::Setup)? {
+    let roles = settings::read(root)?;
+    match client.request(&Request::Setup { roles: Some(roles) })? {
         Response::Setup { items } => hosts::set_setup(root, host, items),
         Response::Error { message } => Err(io::Error::other(message)),
         other => Err(io::Error::new(
@@ -274,6 +277,7 @@ mod tests {
     use crate::record::{BuildWriter, Event, Kind, Outcome};
     use crate::remote::Mismatch;
     use crate::run::RunKey;
+    use crate::settings::Settings;
     use crate::setup::{self, Check, Item};
 
     fn time(seconds: i64) -> DateTime<Utc> {
@@ -326,6 +330,8 @@ mod tests {
         mismatched: AtomicBool,
         /// How many times it has been asked for its runs.
         syncs: AtomicUsize,
+        /// The roles it was asked to mark its setup for, each time.
+        setups: Mutex<Vec<Option<Settings>>>,
     }
 
     impl Host {
@@ -335,6 +341,7 @@ mod tests {
                 down: AtomicBool::new(false),
                 mismatched: AtomicBool::new(false),
                 syncs: AtomicUsize::new(0),
+                setups: Mutex::new(Vec::new()),
             })
         }
 
@@ -362,9 +369,12 @@ mod tests {
                 Request::Ping => Response::Pong {
                     version: "0.4.1".to_owned(),
                 },
-                Request::Setup => Response::Setup {
-                    items: vec![gh_signed_out()],
-                },
+                Request::Setup { roles } => {
+                    self.setups.lock().unwrap().push(roles.clone());
+                    Response::Setup {
+                        items: vec![gh_signed_out()],
+                    }
+                }
                 Request::Runs => {
                     self.syncs.fetch_add(1, Ordering::SeqCst);
                     ipc::records(self.root.path(), request.clone())
@@ -382,6 +392,7 @@ mod tests {
             state: setup::State::Missing,
             detail: "not signed in".to_owned(),
             usable: false,
+            needed: true,
         }
     }
 
@@ -508,6 +519,24 @@ mod tests {
         );
         assert_eq!(listed.setup, Some(vec![gh_signed_out()]));
         assert_eq!(host.syncs(), 0);
+    }
+
+    #[test]
+    fn a_hosts_setup_is_marked_for_this_computers_roles() {
+        let root = local();
+        let host = Host::new();
+        let codex = Settings {
+            coding: settings::Role {
+                agent: "codex".to_owned(),
+                model: None,
+            },
+            review: None,
+        };
+        settings::write(root.path(), &codex).unwrap();
+
+        check(root.path(), "devbox", &host, time(5)).unwrap();
+
+        assert_eq!(*host.setups.lock().unwrap(), [Some(codex)]);
     }
 
     #[test]

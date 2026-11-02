@@ -111,9 +111,19 @@ impl Builds {
         self
     }
 
-    /// Every setup item's state.
-    pub fn setup(&self) -> Vec<setup::Check> {
-        (self.setup)(&self.root)
+    /// Every setup item's state, each marked whether `roles` need it, or
+    /// without them, the settings.
+    pub fn setup(&self, roles: Option<&Settings>) -> Result<Vec<setup::Check>, String> {
+        let roles = match roles {
+            Some(roles) => roles.clone(),
+            None => self.settings()?,
+        };
+        Ok(setup::needed((self.setup)(&self.root), &roles))
+    }
+
+    /// The settings.
+    fn settings(&self) -> Result<Settings, String> {
+        settings::read(&self.root).map_err(|error| format!("couldn't read the settings: {error}"))
     }
 
     /// Calls `observer` with how many builds are running each time that
@@ -149,10 +159,11 @@ impl Builds {
     /// a build to it; while one of its builds is running, another is
     /// refused.
     ///
-    /// The build runs with `roles`, or without them, with the settings.
-    /// Before anything is recorded, the coding agent, and the review agent
-    /// when review is on, are checked: an agent that can't run unattended
-    /// with its model refuses the build.
+    /// The build runs with `roles`, or without them, with the settings,
+    /// and is refused when setup lacks something they need. Before
+    /// anything is recorded, the coding agent, and the review agent when
+    /// review is on, are checked: an agent that can't run unattended with
+    /// its model refuses the build.
     pub fn start(
         &self,
         repo: &str,
@@ -163,14 +174,13 @@ impl Builds {
         if !repositories::is_repo(repo) {
             return Err(format!("{repo:?} is not a repository: write owner/name"));
         }
-        if let Some(refusal) = setup::refusal(&self.setup()) {
-            return Err(refusal);
-        }
         let roles = match roles {
             Some(roles) => roles,
-            None => settings::read(&self.root)
-                .map_err(|error| format!("couldn't read the settings: {error}"))?,
+            None => self.settings()?,
         };
+        if let Some(refusal) = setup::refusal(&(self.setup)(&self.root), &roles) {
+            return Err(refusal);
+        }
         let agent = self.checked_agent("coding", &roles.coding)?;
         let reviewer = match &roles.review {
             Some(review) => self.checked_agent("review", review)?,
@@ -337,8 +347,7 @@ impl Builds {
     ) -> Result<Started, String> {
         let roles = match roles {
             Some(roles) => roles,
-            None => settings::read(&self.root)
-                .map_err(|error| format!("couldn't read the settings: {error}"))?,
+            None => self.settings()?,
         };
         let request = ipc::Request::Build {
             repo: repo.to_owned(),
@@ -710,7 +719,45 @@ mod tests {
             "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
         );
         assert!(run::list(root.path()).unwrap().is_empty());
-        assert_eq!(builds.setup().len(), 6);
+        assert_eq!(builds.setup(None).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn a_build_is_refused_for_what_its_roles_need() {
+        let root = tempfile::tempdir().unwrap();
+        let no_claude = setup::tests::Recorded::complete()
+            .answer("claude --version", false, "")
+            .answer("claude auth status", false, "");
+        let builds = builds(root.path(), fake_github())
+            .check_setup(move |root| setup::check_all(root, &no_claude, &setup::Unknown));
+        let codex = Settings {
+            coding: settings::Role {
+                agent: "codex".to_owned(),
+                model: None,
+            },
+            review: None,
+        };
+
+        let refused = builds.start("owner/repo", 7, None, None).unwrap_err();
+        let started = builds.start("owner/repo", 7, None, Some(codex.clone()));
+
+        assert_eq!(
+            refused,
+            "Epik's setup is incomplete: Claude Code, Claude sign-in. \
+             Choose Check setup in the Epik menu."
+        );
+        assert!(started.is_ok(), "{started:?}");
+        let needed = |roles: Option<&Settings>| -> Vec<(&'static str, bool)> {
+            builds
+                .setup(roles)
+                .unwrap()
+                .iter()
+                .filter(|check| matches!(check.item.id(), "claude" | "codex"))
+                .map(|check| (check.item.id(), check.needed))
+                .collect()
+        };
+        assert_eq!(needed(None), [("claude", true), ("codex", false)]);
+        assert_eq!(needed(Some(&codex)), [("claude", false), ("codex", true)]);
     }
 
     #[test]
@@ -1155,7 +1202,7 @@ mod tests {
                 Request::Ping => Response::Pong {
                     version: crate::version().to_owned(),
                 },
-                Request::Setup => Response::Setup { items: Vec::new() },
+                Request::Setup { .. } => Response::Setup { items: Vec::new() },
                 Request::Runs => {
                     self.syncs.fetch_add(1, Ordering::SeqCst);
                     crate::ipc::records(self.root.path(), request.clone())
