@@ -75,6 +75,7 @@ fn summary(status: BuildStatus, start: i64, elapsed_ms: u64, cost: &str) -> Buil
             .then(|| time(start) + chrono::Duration::milliseconds(elapsed_ms as i64)),
         elapsed_ms,
         cost_usd: dollars_of(cost),
+        cost_unreported: 0,
     }
 }
 
@@ -124,6 +125,7 @@ fn exponentiation() -> RunState {
         latest_at: time(118),
         elapsed_ms: 720_000,
         cost_usd: dollars_of("3.07"),
+        cost_unreported: 0,
     }
 }
 
@@ -617,6 +619,53 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_cost_codex_did_not_report_is_said_to_be_missing() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let mut run = exponentiation();
+    run.issues[1].cost_usd = None;
+    run.issues[1].sessions = vec![Session {
+        build_id: "b-3600".to_owned(),
+        role: SessionRole::Coding,
+        round: 1,
+        agent: "codex".to_owned(),
+        model: None,
+        log: "15.jsonl".to_owned(),
+        started_at: time(-3600),
+        duration_ms: Some(185_000),
+        cost_usd: None,
+    }];
+    run.builds[0].cost_unreported = 1;
+    run.cost_unreported = 1;
+
+    let card = run_card(&run, now());
+    let page = run_page(
+        &local(run),
+        &here([waiting_run()]),
+        &[vec![14], vec![15]],
+        None,
+        now(),
+        &zone,
+    );
+
+    assert_eq!(card.cost, "$3.07 plus 1 issue not reported");
+    assert_eq!(page.cost, "$3.07 plus 1 issue not reported");
+    assert_eq!(
+        page.builds[1],
+        "Build 1, Oct 28, merged #14, then was interrupted · 12m 00s · $1.01 plus 1 issue \
+         not reported"
+    );
+    let figures = |n: u64| {
+        let card = page.issues.iter().find(|c| c.number == n).unwrap();
+        card.figures.clone()
+    };
+    assert_eq!(
+        figures(15).as_deref(),
+        Some("3m 05s · not reported by Codex")
+    );
+    assert_eq!(figures(14).as_deref(), Some("3m 05s · $0.92"));
 }
 
 #[test]

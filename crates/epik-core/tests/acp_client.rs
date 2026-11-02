@@ -1,4 +1,4 @@
-//! `AcpClient`, with the Claude Code profile, run against the fake ACP agent in `src/bin/fake-acp-agent.rs`.
+//! `AcpClient`, with the Claude Code and Codex profiles, run against the fake ACP agent in `src/bin/fake-acp-agent.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,15 @@ fn fake_profile(flags: &[&str]) -> AgentProfile {
         quiet_period: Duration::from_millis(500),
         ..AgentProfile::claude()
     }
+}
+
+/// The Codex profile, running the fake agent with `flags`.
+fn fake_codex(flags: &[&str]) -> AcpClient {
+    AcpClient::new(AgentProfile {
+        command: fake_profile(flags).command,
+        quiet_period: Duration::from_millis(500),
+        ..AgentProfile::codex()
+    })
 }
 
 fn fake(flags: &[&str]) -> AcpClient {
@@ -396,4 +405,101 @@ fn check_with_an_agent_that_cannot_start_fails() {
     let error = agent.check(&dir, None).unwrap_err();
 
     assert!(error.contains("Claude Code"), "{error}");
+}
+
+#[test]
+fn the_codex_profile_is_codex_through_its_pinned_adapter() {
+    let profile = AgentProfile::codex();
+
+    assert_eq!(profile.id, "codex");
+    assert_eq!(profile.name, "Codex");
+    assert_eq!(
+        profile.command.last().unwrap(),
+        "@agentclientprotocol/codex-acp@2.5.0"
+    );
+    assert_eq!(profile.unattended_mode, "agent");
+    assert!(profile.env.is_empty(), "the adapter runs its own Codex");
+    assert!(!profile.reports_cost);
+    assert_eq!(profile.quiet_period, Duration::from_secs(5));
+}
+
+/// Codex's session modes, with `agent` current, as codex-acp 2.5.0 offers
+/// them.
+const CODEX_MODES: [&str; 4] = [
+    "--mode",
+    "agent",
+    "--modes",
+    "read-only,workspace-write,agent,agent-full-access",
+];
+
+#[test]
+fn a_codex_run_in_its_agent_mode_succeeds_with_no_cost() {
+    let dir = scratch("codex");
+    let request = request(&dir);
+    let mut flags = CODEX_MODES.to_vec();
+    flags.push("--no-cost");
+
+    let outcome = run(&fake_codex(&flags), &request);
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    assert_eq!(outcome.stop_reason, "end_turn");
+    assert_eq!(outcome.cost_usd, None);
+    assert!(sent(&log(&request), "session/set_mode").is_empty());
+}
+
+#[test]
+fn a_codex_session_not_in_agent_mode_is_switched_to_it() {
+    let dir = scratch("codex_set_mode");
+    let request = request(&dir);
+
+    let outcome = run(
+        &fake_codex(&[
+            "--mode",
+            "read-only",
+            "--modes",
+            "read-only,agent",
+            "--no-cost",
+        ]),
+        &request,
+    );
+
+    assert!(outcome.exited_cleanly, "{outcome:?}");
+    let set_mode = &sent(&log(&request), "session/set_mode")[0];
+    assert_eq!(set_mode["params"]["modeId"], "agent");
+}
+
+#[test]
+fn check_of_codex_without_its_agent_mode_fails_naming_it() {
+    let dir = scratch("codex_check_no_agent");
+
+    let error = fake_codex(&[
+        "--mode",
+        "read-only",
+        "--modes",
+        "read-only,workspace-write",
+    ])
+    .check(&dir, None)
+    .unwrap_err();
+
+    assert!(error.contains("Codex"), "{error}");
+    assert!(error.contains("`agent`"), "{error}");
+    assert!(error.contains("read-only, workspace-write"), "{error}");
+}
+
+#[test]
+fn a_prompt_that_fails_with_codex_error_info_records_that_reason() {
+    let dir = scratch("codex_error");
+    let request = request(&dir);
+    let mut flags = CODEX_MODES.to_vec();
+    flags.extend(["--codex-error", "usageLimitExceeded"]);
+
+    let outcome = run(&fake_codex(&flags), &request);
+
+    assert!(!outcome.exited_cleanly);
+    assert_eq!(outcome.stop_reason, "usageLimitExceeded");
+    let error = outcome.error.unwrap();
+    assert_eq!(
+        error,
+        "Codex stopped: Quota exceeded. Check your plan and billing details."
+    );
 }

@@ -174,14 +174,16 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
       "started_at": "2026-10-28T21:28:59Z",
       "ended_at": null,
       "elapsed_ms": 600000,
-      "cost_usd": 1.12
+      "cost_usd": 1.12,
+      "cost_unreported": 0
     }
   ],
   "running_build": "20261028T212859Z-k3f9",
   "started_at": "2026-10-28T21:28:59Z",
   "latest_at": "2026-10-28T21:38:59Z",
   "elapsed_ms": 600000,
-  "cost_usd": 1.12
+  "cost_usd": 1.12,
+  "cost_unreported": 0
 }
 ```
 
@@ -198,12 +200,14 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 - Each session has its `role`, `coding` or `review`, and its `round`, from 1 for each role; the `agent` and `model`
   it ran (`model` is `null` for the agent's default); its `log`, a file name in its build's directory, `build_id`;
   when it started; and its `duration_ms` and `cost_usd`. `duration_ms` is `null` while it runs, and `cost_usd` when
-  its agent reported no cost.
+  its agent reported no cost, as Codex never does: an unreported cost is never zero.
 - `sessions`: the run's own sessions, such as reviews of its pull request, over every build. A single issue's run
   has these in its issue's `sessions`.
 - `builds`: oldest first. `running_build` is the one running, if any.
 - `elapsed_ms` and `cost_usd` are summed over the builds so far; a running build's time counts to its latest event.
-  A build's `cost_usd` is its issues' and its own sessions'.
+  A build's `cost_usd` is its issues' and its own sessions'. Each `cost_usd` is what was reported; `cost_unreported`
+  counts the issues with a finished session that reported no cost, which it lacks, the run's own sessions counting
+  as its epic issue's.
 
 An unknown run is an error.
 
