@@ -147,11 +147,7 @@ impl AgentProfile {
         Self {
             id: "codex".into(),
             name: "Codex".into(),
-            command: vec![
-                npx.into(),
-                "-y".into(),
-                "@agentclientprotocol/codex-acp@2.5.0".into(),
-            ],
+            command: vec![npx.into(), "-y".into(), CODEX_ACP.into()],
             unattended_mode: "agent".into(),
             env: Vec::new(),
             reports_cost: false,
@@ -159,6 +155,10 @@ impl AgentProfile {
         }
     }
 }
+
+/// The Codex adapter's npm package, pinned to the version whose behavior
+/// was checked. It brings its own Codex.
+pub const CODEX_ACP: &str = "@agentclientprotocol/codex-acp@2.5.0";
 
 /// Runs the agent an [`AgentProfile`] describes, over ACP.
 #[derive(Debug, Clone)]

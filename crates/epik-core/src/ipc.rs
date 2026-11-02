@@ -100,8 +100,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
     },
-    /// Every setup item's state.
-    Setup,
+    /// Every setup item's state, each marked whether `roles` need it.
+    Setup {
+        /// The roles to mark them for, or `None` for the settings'.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roles: Option<Settings>,
+    },
     /// Whether the app is there, and its version.
     Ping,
 }
@@ -236,8 +240,9 @@ fn handle(builds: &Builds, request: Request) -> Response {
             Ok(()) => Response::Deleted { run },
             Err(why) => Response::error(format!("couldn't delete {}: {why}", on(&run, &host))),
         },
-        Request::Setup => Response::Setup {
-            items: builds.setup(),
+        Request::Setup { roles } => match builds.setup(roles.as_ref()) {
+            Ok(items) => Response::Setup { items },
+            Err(message) => Response::error(message),
         },
         Request::Ping => Response::Pong {
             version: crate::version().to_owned(),
@@ -1224,6 +1229,50 @@ mod tests {
             reply,
             json!({"type": "setup", "items": []}),
             "no check in tests"
+        );
+    }
+
+    #[test]
+    fn setup_marks_each_item_needed_by_the_roles_or_the_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = Builds::new(root.path(), Arc::new(fake_github()), |_: &AgentProfile| {
+            Arc::new(HangingAgent)
+        })
+        .check_setup(|_| {
+            [setup::Item::Claude, setup::Item::Codex]
+                .map(|item| setup::Check {
+                    item,
+                    title: item.title().to_owned(),
+                    state: setup::State::Missing,
+                    detail: "not installed".to_owned(),
+                    usable: false,
+                    needed: true,
+                })
+                .to_vec()
+        });
+        let needed = |request: &str| -> Vec<(String, bool)> {
+            let reply = respond(&builds, request);
+            let Response::Setup { items } = reply else {
+                panic!("{reply:?}");
+            };
+            items
+                .iter()
+                .map(|check| (check.item.id().to_owned(), check.needed))
+                .collect()
+        };
+
+        let by_settings = needed(r#"{"type": "setup"}"#);
+        let by_roles = needed(
+            r#"{"type": "setup", "roles": {"coding": {"agent": "codex", "model": null}, "review": null}}"#,
+        );
+
+        assert_eq!(
+            by_settings,
+            [("claude".to_owned(), true), ("codex".to_owned(), false)]
+        );
+        assert_eq!(
+            by_roles,
+            [("claude".to_owned(), false), ("codex".to_owned(), true)]
         );
     }
 

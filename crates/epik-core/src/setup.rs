@@ -3,7 +3,8 @@
 //! Each [`Item`] is a tool or a sign-in, with a check that runs commands
 //! through a [`Runner`], so tests answer with recorded output. The setup
 //! checklist shows every item's state, and a build is refused up front
-//! when one it needs isn't done.
+//! when one it needs isn't done. What a build needs depends on its roles:
+//! Claude Code when one of them uses it, Codex when one uses Codex.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,9 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::agent::CODEX_ACP;
+use crate::settings::Settings;
 
 /// The oldest Node major version Epik runs on.
 pub const NODE_MAJOR: u64 = 26;
@@ -89,6 +93,10 @@ pub enum Item {
     Claude,
     #[serde(rename = "claude-auth")]
     ClaudeAuth,
+    #[serde(rename = "codex")]
+    Codex,
+    #[serde(rename = "codex-auth")]
+    CodexAuth,
     #[serde(rename = "node")]
     Node,
     #[serde(rename = "plugin")]
@@ -97,11 +105,13 @@ pub enum Item {
 
 impl Item {
     /// Every item, in the checklist's order.
-    pub const ALL: [Item; 6] = [
+    pub const ALL: [Item; 8] = [
         Item::Gh,
         Item::GhAuth,
         Item::Claude,
         Item::ClaudeAuth,
+        Item::Codex,
+        Item::CodexAuth,
         Item::Node,
         Item::Plugin,
     ];
@@ -112,6 +122,8 @@ impl Item {
             Item::GhAuth => "gh-auth",
             Item::Claude => "claude",
             Item::ClaudeAuth => "claude-auth",
+            Item::Codex => "codex",
+            Item::CodexAuth => "codex-auth",
             Item::Node => "node",
             Item::Plugin => "plugin",
         }
@@ -123,6 +135,8 @@ impl Item {
             Item::GhAuth => "GitHub sign-in",
             Item::Claude => "Claude Code",
             Item::ClaudeAuth => "Claude sign-in",
+            Item::Codex => "Codex",
+            Item::CodexAuth => "Codex sign-in",
             Item::Node => "Node",
             Item::Plugin => "The Epik plugin",
         }
@@ -139,10 +153,26 @@ impl Item {
         matches!(self, Item::Gh | Item::Node)
     }
 
-    /// Whether a build needs it. A build loads the plugin from the
-    /// directory it is given, so it doesn't need the plugin installed.
-    pub fn needed_to_build(self) -> bool {
-        self != Item::Plugin
+    /// Whether the user needs it, building with `roles`: an agent and its
+    /// sign-in only when a role uses that agent, everything else always.
+    pub fn needed(self, roles: &Settings) -> bool {
+        let uses = |agent: &str| {
+            std::iter::once(&roles.coding)
+                .chain(roles.review.as_ref())
+                .any(|role| role.agent == agent)
+        };
+        match self {
+            Item::Claude | Item::ClaudeAuth => uses("claude"),
+            Item::Codex | Item::CodexAuth => uses("codex"),
+            _ => true,
+        }
+    }
+
+    /// Whether a build with `roles` needs it. A build loads the plugin
+    /// from the directory it is given, so it doesn't need the plugin
+    /// installed.
+    pub fn needed_to_build(self, roles: &Settings) -> bool {
+        self != Item::Plugin && self.needed(roles)
     }
 }
 
@@ -156,6 +186,14 @@ pub struct Check {
     /// Whether Epik can use it as it is. A private copy behind the latest
     /// release is outdated but usable; Node older than Epik needs is not.
     pub usable: bool,
+    /// Whether the user needs it, for the agents their roles use. One not
+    /// needed doesn't hold setup back from complete.
+    #[serde(default = "needed_by_default")]
+    pub needed: bool,
+}
+
+fn needed_by_default() -> bool {
+    true
 }
 
 impl Check {
@@ -166,8 +204,27 @@ impl Check {
             state,
             detail: detail.into(),
             usable: state == State::Done,
+            needed: true,
         }
     }
+}
+
+impl Check {
+    /// Whether, marked as it is, it keeps a build from starting.
+    pub fn blocks_build(&self) -> bool {
+        self.needed && self.item != Item::Plugin && !self.usable
+    }
+}
+
+/// `checks`, each marked whether `roles` need it.
+pub fn needed(checks: Vec<Check>, roles: &Settings) -> Vec<Check> {
+    checks
+        .into_iter()
+        .map(|check| Check {
+            needed: check.item.needed(roles),
+            ..check
+        })
+        .collect()
 }
 
 /// The directory of Epik's private tools, `<root>/tools`.
@@ -222,6 +279,20 @@ pub fn gh(root: &Path) -> PathBuf {
 /// The `node` Epik runs.
 pub fn node(root: &Path) -> PathBuf {
     located(private_node(root), "node")
+}
+
+/// The `npx` Epik runs: the private copy of Node's, else the `PATH`'s.
+pub fn npx(root: &Path) -> PathBuf {
+    let name = if cfg!(windows) { "npx.cmd" } else { "npx" };
+    located(private_node_bin(root).join(name), name)
+}
+
+/// The arguments to `npx` that run the Codex the adapter brings with
+/// `args`, so it is the Codex builds run.
+fn codex_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut words = vec!["-y", "-p", CODEX_ACP, "codex"];
+    words.extend(args);
+    words
 }
 
 /// The `claude` Epik runs: where Anthropic's installer puts it,
@@ -288,6 +359,8 @@ fn check_found(root: &Path, runner: &dyn Runner, item: Item) -> Check {
                 .map(|v| format!("Claude Code {v}"))
         }),
         Item::ClaudeAuth => claude_auth(root, runner),
+        Item::Codex => codex(root, runner),
+        Item::CodexAuth => codex_auth(root, runner),
         Item::Node => node_check(root, runner),
         Item::Plugin => plugin(root, runner),
     }
@@ -373,6 +446,55 @@ fn claude_auth(root: &Path, runner: &dyn Runner) -> Check {
     }
 }
 
+fn codex(root: &Path, runner: &dyn Runner) -> Check {
+    let item = Item::Codex;
+    match runner.run(&npx(root), &codex_args(&["--version"])) {
+        // "codex-cli 0.165.0"
+        Ok(out) if out.success => {
+            let detail = out
+                .stdout
+                .split_whitespace()
+                .nth(1)
+                .map_or_else(|| "found".to_owned(), |v| format!("Codex {v}"));
+            Check::new(item, State::Done, detail)
+        }
+        Ok(out) => Check::new(
+            item,
+            State::Missing,
+            first_line(&out.stderr, "it doesn't run"),
+        ),
+        Err(_) => Check::new(item, State::Missing, "Node isn't installed"),
+    }
+}
+
+/// Signed in when `~/.codex/auth.json` holds a sign-in, else when Codex
+/// says so.
+fn codex_auth(root: &Path, runner: &dyn Runner) -> Check {
+    let item = Item::CodexAuth;
+    let home = root.parent().unwrap_or(root);
+    let auth: Value = std::fs::read_to_string(home.join(".codex").join("auth.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    if auth["OPENAI_API_KEY"]
+        .as_str()
+        .is_some_and(|key| !key.is_empty())
+    {
+        return Check::new(item, State::Done, "signed in with an API key");
+    }
+    if auth["tokens"].is_object() {
+        return Check::new(item, State::Done, "signed in with ChatGPT");
+    }
+    match runner.run(&npx(root), &codex_args(&["login", "status"])) {
+        Ok(out) if out.success => {
+            let said = format!("{}\n{}", out.stdout, out.stderr);
+            Check::new(item, State::Done, first_line(&said, "signed in"))
+        }
+        Ok(_) => Check::new(item, State::Missing, "not signed in"),
+        Err(_) => Check::new(item, State::Missing, "Node isn't installed"),
+    }
+}
+
 /// Node's major version from `node --version`'s `v26.1.0`.
 fn node_major(version: &str) -> Option<u64> {
     version
@@ -448,12 +570,12 @@ pub fn search_path(root: &Path, current: Option<std::ffi::OsString>) -> std::ffi
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
-/// Why a build can't start, if an item it needs isn't done: naming them,
-/// and saying where to fix it.
-pub fn refusal(checks: &[Check]) -> Option<String> {
+/// Why a build with `roles` can't start, if an item it needs isn't done:
+/// naming them, and saying where to fix it.
+pub fn refusal(checks: &[Check], roles: &Settings) -> Option<String> {
     let missing: Vec<&str> = checks
         .iter()
-        .filter(|check| check.item.needed_to_build() && !check.usable)
+        .filter(|check| check.item.needed_to_build(roles) && !check.usable)
         .map(|check| check.title.as_str())
         .collect();
     (!missing.is_empty()).then(|| {
@@ -550,6 +672,25 @@ pub fn step(check: &Check) -> Option<Step> {
             "Sign in to Claude (opens the browser)".to_owned(),
             Action::Run(vec![command(&["claude", "auth", "login"])]),
         ),
+        // The adapter brings its own Codex, so running it downloads it.
+        Item::Codex => (
+            "Download Codex with its adapter".to_owned(),
+            Action::Run(vec![
+                std::iter::once("npx")
+                    .chain(codex_args(&["--version"]))
+                    .map(str::to_owned)
+                    .collect(),
+            ]),
+        ),
+        Item::CodexAuth => (
+            "Sign in to Codex (opens the browser)".to_owned(),
+            Action::Run(vec![
+                std::iter::once("npx")
+                    .chain(codex_args(&["login"]))
+                    .map(str::to_owned)
+                    .collect(),
+            ]),
+        ),
         Item::Plugin if check.detail == "installed but turned off" => (
             "Turn the plugin on".to_owned(),
             Action::Run(vec![command(&["claude", "plugin", "enable", "epik@epik"])]),
@@ -579,13 +720,14 @@ pub fn step(check: &Check) -> Option<Step> {
     Some(Step { label, action })
 }
 
-/// The program to run for a step's command word: Epik's own `gh` or
-/// `claude` where it would check them, else the word as found on the
-/// `PATH`.
+/// The program to run for a step's command word: Epik's own `gh`,
+/// `claude` or `npx` where it would check them, else the word as found on
+/// the `PATH`.
 pub fn program(root: &Path, word: &str) -> PathBuf {
     match word {
         "gh" => gh(root),
         "claude" => claude(root),
+        "npx" => npx(root),
         other => PathBuf::from(other),
     }
 }
@@ -667,6 +809,7 @@ pub fn done_file(root: &Path) -> PathBuf {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::settings::Role;
     use std::collections::BTreeMap;
 
     /// A runner answering each command, written `program args…`, with a
@@ -687,6 +830,19 @@ pub(crate) mod tests {
             self
         }
 
+        /// Like [`Recorded::answer`], with the output on stderr.
+        pub(crate) fn answer_stderr(mut self, command: &str, success: bool, stderr: &str) -> Self {
+            self.0.insert(
+                command.to_owned(),
+                Output {
+                    success,
+                    stdout: String::new(),
+                    stderr: stderr.to_owned(),
+                },
+            );
+            self
+        }
+
         /// Everything set up, as on a machine where it all works.
         pub(crate) fn complete() -> Self {
             Self::default()
@@ -699,6 +855,8 @@ pub(crate) mod tests {
                 )
                 .answer("claude --version", true, "2.1.312 (Claude Code)\n")
                 .answer("claude auth status", true, CLAUDE_SIGNED_IN)
+                .answer(&codex("--version"), true, "codex-cli 0.165.0\n")
+                .answer_stderr(&codex("login status"), true, "Logged in using ChatGPT\n")
                 .answer("node --version", true, "v26.10.0\n")
                 .answer("claude plugin list --json", true, PLUGINS)
         }
@@ -715,6 +873,22 @@ pub(crate) mod tests {
                 .get(&command)
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, command))
+        }
+    }
+
+    /// The adapter's Codex run with `args`, as [`Recorded`] writes it.
+    fn codex(args: &str) -> String {
+        format!("npx -y -p {} codex {args}", crate::agent::CODEX_ACP)
+    }
+
+    fn roles(coding: &str, review: Option<&str>) -> Settings {
+        let role = |agent: &str| Role {
+            agent: agent.to_owned(),
+            model: None,
+        };
+        Settings {
+            coding: role(coding),
+            review: review.map(role),
         }
     }
 
@@ -745,11 +919,13 @@ pub(crate) mod tests {
                 ("gh-auth", State::Done, "signed in, with git using gh"),
                 ("claude", State::Done, "Claude Code 2.1.312"),
                 ("claude-auth", State::Done, "signed in with claude.ai"),
+                ("codex", State::Done, "Codex 0.165.0"),
+                ("codex-auth", State::Done, "Logged in using ChatGPT"),
                 ("node", State::Done, "Node 26.10.0"),
                 ("plugin", State::Done, "installed"),
             ]
         );
-        assert_eq!(refusal(&checks), None);
+        assert_eq!(refusal(&checks, &roles("claude", Some("codex"))), None);
     }
 
     #[test]
@@ -762,7 +938,7 @@ pub(crate) mod tests {
             "{checks:?}"
         );
         assert_eq!(
-            refusal(&checks).unwrap(),
+            refusal(&checks, &Settings::default()).unwrap(),
             "Epik's setup is incomplete: GitHub CLI, GitHub sign-in, Claude Code, \
              Claude sign-in, Node. Choose Check setup in the Epik menu."
         );
@@ -816,7 +992,7 @@ pub(crate) mod tests {
         );
         let checks = check_all(Path::new("/nowhere/.epik"), &old, &Unknown);
         assert_eq!(
-            refusal(&checks).unwrap(),
+            refusal(&checks, &Settings::default()).unwrap(),
             "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
         );
     }
@@ -841,7 +1017,186 @@ pub(crate) mod tests {
         let root = tempfile::tempdir().unwrap();
         let no_plugin = Recorded::complete().answer("claude plugin list --json", true, "[]");
 
-        assert_eq!(refusal(&check_all(root.path(), &no_plugin, &Unknown)), None);
+        assert_eq!(
+            refusal(
+                &check_all(root.path(), &no_plugin, &Unknown),
+                &Settings::default()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_is_found_through_the_adapters_package() {
+        assert_eq!(
+            state(&Recorded::complete(), Item::Codex),
+            (State::Done, "Codex 0.165.0".into())
+        );
+
+        let failing = Recorded::complete().answer_stderr(
+            &codex("--version"),
+            false,
+            "npm error 404 Not Found\n",
+        );
+        assert_eq!(
+            state(&failing, Item::Codex),
+            (State::Missing, "npm error 404 Not Found".into())
+        );
+
+        let no_node = Recorded::complete();
+        let no_node = Recorded(
+            no_node
+                .0
+                .into_iter()
+                .filter(|(command, _)| !command.starts_with("npx "))
+                .collect(),
+        );
+        assert_eq!(
+            state(&no_node, Item::Codex),
+            (State::Missing, "Node isn't installed".into())
+        );
+        assert_eq!(
+            state(&no_node, Item::CodexAuth),
+            (State::Missing, "Node isn't installed".into())
+        );
+    }
+
+    #[test]
+    fn codex_is_signed_in_by_its_auth_file_or_its_status() {
+        let signed_out =
+            Recorded::complete().answer_stderr(&codex("login status"), false, "Not logged in\n");
+        assert_eq!(
+            state(&signed_out, Item::CodexAuth),
+            (State::Missing, "not signed in".into())
+        );
+
+        for (auth, detail) in [
+            (
+                r#"{"auth_mode": "chatgpt", "OPENAI_API_KEY": null, "tokens": {"id_token": "x"}}"#,
+                "signed in with ChatGPT",
+            ),
+            (
+                r#"{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x"}"#,
+                "signed in with an API key",
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+            std::fs::write(home.path().join(".codex").join("auth.json"), auth).unwrap();
+
+            let check = check(
+                &home.path().join(".epik"),
+                &signed_out,
+                &Unknown,
+                Item::CodexAuth,
+            );
+
+            assert_eq!((check.state, check.detail.as_str()), (State::Done, detail));
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::write(home.path().join(".codex").join("auth.json"), "{}").unwrap();
+        let empty = check(
+            &home.path().join(".epik"),
+            &signed_out,
+            &Unknown,
+            Item::CodexAuth,
+        );
+        assert_eq!(empty.state, State::Missing, "an auth file with no sign-in");
+    }
+
+    #[test]
+    fn a_build_needs_the_agents_its_roles_use() {
+        let needed = |roles: &Settings| -> Vec<&str> {
+            Item::ALL
+                .into_iter()
+                .filter(|item| item.needed_to_build(roles))
+                .map(Item::id)
+                .collect()
+        };
+
+        assert_eq!(
+            needed(&roles("claude", None)),
+            ["gh", "gh-auth", "claude", "claude-auth", "node"]
+        );
+        assert_eq!(
+            needed(&roles("codex", None)),
+            ["gh", "gh-auth", "codex", "codex-auth", "node"]
+        );
+        assert_eq!(
+            needed(&roles("claude", Some("codex"))),
+            [
+                "gh",
+                "gh-auth",
+                "claude",
+                "claude-auth",
+                "codex",
+                "codex-auth",
+                "node"
+            ]
+        );
+        assert_eq!(
+            needed(&roles("codex", Some("claude"))),
+            needed(&roles("claude", Some("codex")))
+        );
+        assert_eq!(
+            needed(&roles("codex", Some("codex"))),
+            needed(&roles("codex", None))
+        );
+    }
+
+    #[test]
+    fn a_build_is_refused_only_for_what_its_roles_need() {
+        let root = tempfile::tempdir().unwrap();
+        let no_claude = Recorded::complete().answer("claude --version", false, "");
+        let no_claude = no_claude.answer("claude auth status", false, "");
+        let checks = check_all(root.path(), &no_claude, &Unknown);
+
+        assert_eq!(refusal(&checks, &roles("codex", None)), None);
+        assert_eq!(
+            refusal(&checks, &roles("codex", Some("claude"))).unwrap(),
+            "Epik's setup is incomplete: Claude Code, Claude sign-in. \
+             Choose Check setup in the Epik menu."
+        );
+
+        let no_codex = Recorded::complete().answer_stderr(&codex("login status"), false, "");
+        let checks = check_all(root.path(), &no_codex, &Unknown);
+        assert_eq!(refusal(&checks, &roles("claude", None)), None);
+        assert_eq!(
+            refusal(&checks, &roles("claude", Some("codex"))).unwrap(),
+            "Epik's setup is incomplete: Codex sign-in. Choose Check setup in the Epik menu."
+        );
+    }
+
+    #[test]
+    fn each_check_is_marked_needed_by_the_roles() {
+        let root = tempfile::tempdir().unwrap();
+        let checks = needed(
+            check_all(root.path(), &Recorded::default(), &Unknown),
+            &roles("codex", None),
+        );
+
+        let marks: Vec<(&str, bool)> = checks.iter().map(|c| (c.item.id(), c.needed)).collect();
+        assert_eq!(
+            marks,
+            [
+                ("gh", true),
+                ("gh-auth", true),
+                ("claude", false),
+                ("claude-auth", false),
+                ("codex", true),
+                ("codex-auth", true),
+                ("node", true),
+                ("plugin", true),
+            ]
+        );
+        let blocking: Vec<&str> = checks
+            .iter()
+            .filter(|check| check.blocks_build())
+            .map(|check| check.item.id())
+            .collect();
+        assert_eq!(blocking, ["gh", "gh-auth", "codex", "codex-auth", "node"]);
     }
 
     #[test]
@@ -894,7 +1249,11 @@ pub(crate) mod tests {
             (State::Outdated, "gh 2.102.0; 2.200.0 is out")
         );
         assert!(private.usable);
-        assert_eq!(refusal(&[private]), None, "a build can use it as it is");
+        assert_eq!(
+            refusal(&[private], &Settings::default()),
+            None,
+            "a build can use it as it is"
+        );
         std::fs::create_dir_all(private_node(root.path()).parent().unwrap()).unwrap();
         std::fs::write(private_node(root.path()), "").unwrap();
         let node = check(root.path(), &runner, &Newest, Item::Node);
@@ -1040,6 +1399,34 @@ pub(crate) mod tests {
             label(Item::Plugin, State::Outdated, "behind"),
             "Update the plugin"
         );
+        assert_eq!(
+            step_of(Item::Codex, State::Missing, "npm error").unwrap(),
+            Step {
+                label: "Download Codex with its adapter".to_owned(),
+                action: Action::Run(vec![command(&[
+                    "npx",
+                    "-y",
+                    "-p",
+                    crate::agent::CODEX_ACP,
+                    "codex",
+                    "--version"
+                ])]),
+            }
+        );
+        assert_eq!(
+            step_of(Item::CodexAuth, State::Missing, "not signed in").unwrap(),
+            Step {
+                label: "Sign in to Codex (opens the browser)".to_owned(),
+                action: Action::Run(vec![command(&[
+                    "npx",
+                    "-y",
+                    "-p",
+                    crate::agent::CODEX_ACP,
+                    "codex",
+                    "login"
+                ])]),
+            }
+        );
     }
 
     #[cfg(unix)]
@@ -1120,6 +1507,7 @@ pub(crate) mod tests {
                 "state": "missing",
                 "detail": "not signed in",
                 "usable": false,
+                "needed": true,
             })
         );
     }

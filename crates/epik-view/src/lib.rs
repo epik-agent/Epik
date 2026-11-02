@@ -339,6 +339,9 @@ pub struct Row {
     pub detail: String,
     /// The button's label, for an item that isn't done.
     pub button: Option<String>,
+    /// Whether the user's agents need it. One not needed doesn't hold the
+    /// checklist back from complete.
+    pub needed: bool,
 }
 
 /// The checklist.

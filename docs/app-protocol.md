@@ -332,20 +332,28 @@ mirror at once, which removes the run here too. The host's refusal is the error,
 
 ### `setup`
 
-Whether everything Epik needs is in place.
+Whether everything Epik needs is in place, for the agents a build's roles use.
 
 ```json
 {"type": "setup"}
+{"type": "setup", "roles": {"coding": {"agent": "codex", "model": null}, "review": null}}
 ```
 
 ```json
-{"type": "setup", "items": [{"item": "gh", "title": "GitHub CLI", "state": "done", "detail": "gh 2.102.0", "usable": true}, {"item": "gh-auth", "title": "GitHub sign-in", "state": "missing", "detail": "signed in without the project scope", "usable": false}, ...]}
+{"type": "setup", "items": [{"item": "gh", "title": "GitHub CLI", "state": "done", "detail": "gh 2.102.0", "usable": true, "needed": true}, {"item": "gh-auth", "title": "GitHub sign-in", "state": "missing", "detail": "signed in without the project scope", "usable": false, "needed": true}, ...]}
 ```
 
-The items, in order, are `gh`, `gh-auth`, `claude`, `claude-auth`, `node` and `plugin`. Each one's `state` is `done`,
-`missing` or `outdated`, and `detail` says more in a line. `usable` says whether Epik can use it as it is: a private
-copy behind the latest release is outdated but usable. A `build` or `rerun` is refused while any item but `plugin` isn't
-usable, with an error naming them.
+The items, in order, are `gh`, `gh-auth`, `claude`, `claude-auth`, `codex`, `codex-auth`, `node` and `plugin`. Each
+one's `state` is `done`, `missing` or `outdated`, and `detail` says more in a line. `usable` says whether Epik can use it
+as it is: a private copy behind the latest release is outdated but usable. `codex` and `codex-auth` reach the Codex the
+adapter brings, through `npx -y -p @agentclientprotocol/codex-acp@<pinned> codex`; Codex is signed in when
+`~/.codex/auth.json` holds a sign-in, or when `codex login status` says so.
+
+`needed` says whether `roles`, or without them the settings', need the item: `claude` and `claude-auth` only when a
+role uses Claude Code, `codex` and `codex-auth` only when one uses Codex, and every other item always. An item not
+needed doesn't hold the checklist back from complete. A `build` or `rerun` is refused while an item its roles need,
+other than `plugin`, isn't usable, with an error naming them. A host is asked for its setup with this computer's
+roles, which the builds forwarded to it carry.
 
 ### `ping`
 
