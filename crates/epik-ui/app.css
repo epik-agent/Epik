@@ -362,6 +362,7 @@ section.uninstall button { margin-top: 6px; }
 .uninstall-steps { list-style: none; margin: 8px 0 12px; padding: 0; }
 .uninstall-steps .removed { color: var(--secondary); }
 .uninstall-steps .failed { color: var(--error); }
-.uninstall-steps .why { margin-left: 18px; font: 12px var(--mono); }
+.uninstall-steps .skipped { color: var(--secondary); }
+.uninstall-steps .why, .uninstall-steps .note { margin-left: 18px; font: 12px var(--mono); }
 #uninstall .warning { font-weight: 600; }
 #uninstall .why { color: var(--error); }
