@@ -242,4 +242,39 @@ mod tests {
 
         assert_eq!(read(root.path()).unwrap(), Settings::default());
     }
+
+    /// The text of the section of `markdown` headed `heading`, up to the
+    /// next heading of its level or higher.
+    fn section<'a>(markdown: &'a str, heading: &str) -> &'a str {
+        let level = heading.len() - heading.trim_start_matches('#').len();
+        let start = markdown
+            .find(&format!("\n{heading}\n"))
+            .unwrap_or_else(|| panic!("no section {heading:?}"))
+            + heading.len()
+            + 2;
+        let rest = &markdown[start..];
+        let end = rest
+            .match_indices("\n#")
+            .find(|(at, _)| {
+                let hashes = rest[at + 1..].len() - rest[at + 1..].trim_start_matches('#').len();
+                hashes <= level
+            })
+            .map_or(rest.len(), |(at, _)| at);
+        &rest[..end]
+    }
+
+    #[test]
+    fn the_user_docs_describe_every_agent_a_role_can_run() {
+        let readme = include_str!("../../../README.md");
+        let how_it_works = include_str!("../../../plugin/skills/assistant/how-it-works.md");
+        for (doc, text) in [
+            ("README.md's Settings", section(readme, "## Settings")),
+            ("how-it-works.md's Roles", section(how_it_works, "## Roles")),
+        ] {
+            for agent in AGENTS {
+                let name = name(agent);
+                assert!(text.contains(&name), "{doc} doesn't mention {name}");
+            }
+        }
+    }
 }

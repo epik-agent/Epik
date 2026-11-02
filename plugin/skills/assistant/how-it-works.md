@@ -12,8 +12,12 @@ When the user opens the app, its **Set up Epik** checklist walks them through:
 - **GitHub sign-in:** signs `gh` in, in their browser, with the `project` scope Epik needs, and lets `git` push with it. That is how Epik acts on GitHub as the user.
 - **Claude Code:** runs Anthropic's installer if it isn't installed.
 - **Claude sign-in:** signs Claude Code in, in their browser.
+- **Codex:** downloads OpenAI's Codex with the adapter Epik runs it through.
+- **Codex sign-in:** signs Codex in, in their browser, with ChatGPT or an API key.
 - **Node:** uses Node 26 or later from their computer, or installs a private copy. It runs the app's coding agents.
 - **The Epik plugin:** adds Epik's marketplace to Claude Code and installs the plugin for the user.
+
+The Claude Code and Codex items are needed only while a role uses that agent (see **Roles**): with the defaults, that is Claude Code alone, and an agent no role uses shows as not needed. Claude Code is still where the user plans with Epik, so they keep it to talk to you.
 
 Each step waits until the user presses its button, and says what it will do first. Private copies go in `~/.epik/tools/`, checked against their published checksums; nothing is installed system-wide, and nothing asks for an administrator's password.
 
@@ -25,9 +29,42 @@ The user creates the GitHub repository themselves. In a Claude Code session, you
 
 ## Builds
 
-To build, the user asks you to build an issue or an epic. You hand the build to the Epik app, which starts if it isn't running. The app clones the repository under `~/.epik/builds/` and runs one Claude Code agent per issue. An issue with sub-issues is built as an epic, its sub-issues in dependency order. The machine must stay awake until the build finishes, unless it builds on another machine (below). GitHub is where the results land: branches, pull requests, CI runs, and closed issues.
+To build, the user asks you to build an issue or an epic. You hand the build to the Epik app, which starts if it isn't running. The app clones the repository under `~/.epik/builds/` and runs one coding agent per issue, with the agent and model the user chose for coding (see **Roles**). Each agent is told the issue, Epik's rules and the procedure for its work in its prompt, so it loads no plugin. An issue with sub-issues is built as an epic, its sub-issues in dependency order. The machine must stay awake until the build finishes, unless it builds on another machine (below). GitHub is where the results land: branches, pull requests, CI runs, and closed issues.
 
-Builds never merge into the default branch. A single issue's build stops at an open pull request into it. For an epic, the app merges each issue's pull request into the epic branch, then opens the epic's pull request into the default branch, which waits for the user. The pull request is where the user decides what merges.
+Builds never merge into the default branch. A single issue's build stops at an open pull request into it. For an epic, the app merges each issue's pull request into the epic branch, then opens the epic's pull request into the default branch, which waits for the user. The pull request is where the user decides what merges. With review on, an agent reviews that pull request first (see **Review**).
+
+## Roles
+
+Epik's work comes in kinds, called **roles**, and the user chooses an agent and a model for each in the app's **Settings…**, under **Agents**:
+
+- **Design:** planning with you, in this conversation. It runs in whatever client the user talks to Epik in, not in the app, so Settings doesn't choose it.
+- **Coding:** implementing one issue, up to a pull request with passing checks. Claude Code with its default model, unless the user changes it.
+- **Review:** reading the build's pull request against its issue and Epik's rules when the build is done, before it reaches the user. **Off** by default, since it adds an agent's time and cost to every run.
+
+Epik can run two agents:
+
+- **Claude Code**, Anthropic's. It runs unattended in its auto mode, where a model approves each risky action, with no sandbox around the rest.
+- **Codex**, OpenAI's, which suits a user with no Anthropic account. It runs unattended in its `agent` mode: its work runs in a sandbox with no network, and Codex's own reviewer approves what leaves it, such as `git push` and `gh`. Those approvals happen out of Epik's sight, but are in the agent's log as "Guardian Review" tool calls. The app runs the Codex that its adapter, `@agentclientprotocol/codex-acp`, brings, at a version Epik pins, and shares its sign-in in `~/.codex` with any Codex the user runs themselves.
+
+The model is optional: left empty, a role runs the agent's default. Otherwise it is the agent's own name for a model, such as `opus` for Claude Code. Settings are kept in `~/.epik/settings.json`, and builds that start after **Save** use them. Before a build starts, the app opens a session with each role's agent, without a prompt, to check that it runs unattended and offers the model; if it doesn't, the build is refused with an error listing the models it does offer, and nothing is recorded. A build records the roles it ran with, and **Rerun** uses them again, whatever Settings say now. A build on a host runs with the roles in the user's own Settings, not the host's.
+
+To use Codex, the user chooses it for a role in Settings, then **Check setup…**: the checklist downloads Codex and signs it in. To build without Claude Code at all, both coding and, if it is on, review must use Codex.
+
+## Review
+
+With review on, the review agent reviews the run's pull request once it exists and its checks pass: a single issue's pull request, or for an epic, the epic's pull request into the default branch. An epic's issues still merge into the epic branch as they finish; the epic never pauses for a review in the middle.
+
+The reviewer reads the issue (for an epic, the epic and its sub-issues) and the pull request, and posts one GitHub review on the pull request, as the user reads any review: an inline comment on each line it questions, each the start of a thread, and a summary for concerns with no line. Because every agent acts on GitHub as the user, and GitHub won't let anyone approve or request changes on their own pull request, the review only comments. Its verdict is the last line of its summary, a marker hidden in GitHub's rendering, naming the round it answers: `<!-- epik-review: approve round=1 -->` or `<!-- epik-review: changes round=1 -->`. The app reads the verdict from GitHub, not from what the agent says.
+
+- **Approve:** the build finishes, and the pull request waits for the user.
+- **Changes:** a coding agent works on the pull request's branch. For each open thread it fixes what the thread asks, replies saying what it did and resolves the thread; a thread it thinks is wrong it answers and leaves open. It pushes, and once the checks pass the reviewer reviews again, reading the threads before the diff. After two rounds of changes the build stops anyway: the pull request waits for the user with its reviews and any threads still open, and the run needs attention.
+- **No verdict:** a review that leaves no marker for its round is recorded as none, and the pull request waits for the user.
+
+The run's page shows its reviews under its header, each with its verdict, and how many threads were left open.
+
+## Cost
+
+Epik records what each agent reports it spent, and keeps no price table of its own. Claude Code reports cost; Codex doesn't, so a Codex session has its time recorded and its cost shown as "not reported by Codex", never as $0.00. A total that includes unreported costs says so: "$0.92 plus some not reported by Codex" for one issue, or "$2.06 plus 1 issue not reported" for a run. The comment Epik leaves on each issue lists its agent sessions, with each one's role, round, agent, model, time and cost.
 
 ## Building on another machine
 
@@ -47,8 +84,8 @@ Setting up a host is done by hand:
    ~/.epik/bin/epik-app --version
    ```
 
-3. **Install the tools.** `~/.epik/bin/epik-app setup` checks what a build needs and says what to run for each item not done. `epik-app setup install gh` and `epik-app setup install node` install private copies in `~/.epik/tools/`, checked against their published checksums. Builds run Claude Code, so if it's missing: `curl -fsSL https://claude.ai/install.sh | bash`. The host doesn't need the Epik plugin; builds bring their own.
-4. **Sign in.** `gh auth login -s project` (a one-time code to enter in the browser) and `gh auth setup-git`; where Epik installed its own `gh`, `epik-app setup` prints the full path to type. Then each agent the roles use, since a build on a host runs with the roles in the user's own Settings: `claude auth login` for Claude Code (a code to paste back). `epik-app setup` succeeds once everything a build needs is done.
+3. **Install the tools.** `~/.epik/bin/epik-app setup` checks what a build needs and says what to run for each item not done. `epik-app setup install gh` and `epik-app setup install node` install private copies in `~/.epik/tools/`, checked against their published checksums. If a role uses Claude Code and it's missing: `curl -fsSL https://claude.ai/install.sh | bash`. If a role uses Codex, `epik-app setup` prints the command that downloads it. The host doesn't need the Epik plugin; builds bring their own.
+4. **Sign in.** `gh auth login -s project` (a one-time code to enter in the browser) and `gh auth setup-git`; where Epik installed its own `gh`, `epik-app setup` prints the full path to type. Then each agent the roles use, since a build on a host runs with the roles in the user's own Settings: `claude auth login` for Claude Code (a code to paste back), and for Codex the sign-in command `epik-app setup` prints. Codex's sign-in opens a browser, which a host reached over `ssh` doesn't have; instead, sign Codex in on their own computer and copy `~/.codex/auth.json` to the same place on the host. `epik-app setup` succeeds once everything a build needs is done.
 5. **Run it as a `systemd --user` service.** Save this as `~/.config/systemd/user/epik.service`:
 
    ```ini
@@ -88,8 +125,10 @@ A **run** is the work of finishing one epic or issue, and each attempt at it is 
 A run's record is in `~/.epik/runs/<owner>/<name>/<number>/`, with a directory per build holding:
 
 - `events.jsonl`: what happened in the build;
-- each issue's agent log, `<issue>.jsonl` and `<issue>.err`;
-- `summary.json`: the build's cost and duration, once it ends.
+- each agent session's log and its standard error: `<issue>.jsonl` and `<issue>.err` for an issue's coding, and `<issue>-review-<round>.jsonl` or `<issue>-coding-<round>.jsonl` for a review and the coding that answers it;
+- `summary.json`: the build's sessions, roles, cost and duration, once it ends.
+
+Each **agent session** is recorded with its role, round, agent, model, time and cost, and the issue's and run's time and cost are their sums.
 
 A build's clone is temporary: the app removes it, and the worktrees its agents made, when the build ends, and removes any left over when it starts. The record stays. To say how a build is going, use `build_status`.
 
@@ -105,6 +144,14 @@ Desktop's Code tab loads user-scope plugins, so once the setup checklist has ins
 
 **Installing the plugin fails with `JSON Parse error`.** Claude Code's marketplace registry is corrupt, often from a stray trailing comma. Have the user check `jq . ~/.claude/plugins/known_marketplaces.json` and fix the syntax it points at. If it says the name `epik` is already in use, they run `claude plugin marketplace remove epik` and press the checklist's button again.
 
-**A build's agent stops at once: it "can't run in auto mode".** The Epik app runs its agents in Claude Code's auto mode, so they can work without anyone answering prompts. When auto mode isn't available, the app stops the agent rather than let it stall. Auto mode needs a recent model, chosen with `/model`. On a Team or Enterprise plan, an admin can turn auto mode off for the organization. Claude Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes) lists the models that support it.
+**A build is refused: Claude Code "can't run unattended".** The Epik app runs Claude Code in its auto mode, so it can work without anyone answering prompts. When auto mode isn't available, the app refuses the build rather than let the agent stall. Auto mode needs a recent model, chosen with `/model`. On a Team or Enterprise plan, an admin can turn auto mode off for the organization. Claude Code's [permission modes documentation](https://code.claude.com/docs/en/permission-modes) lists the models that support it.
+
+**A build is refused: an agent "doesn't offer the model".** The model in Settings is one the role's agent doesn't offer, or doesn't offer to this account. The error lists the models it does offer, such as "Claude Code doesn't offer the model `gpt-5`; its models are: sonnet, opus": a model belongs to its agent, so a Codex model needs Codex chosen for the role. Have the user choose one from the list in **Settings…**, or clear the model to use the agent's default, and build again. For a build on a host, the check runs on the host, with the agent signed in there.
+
+**A build is refused because Codex or its sign-in is missing.** A role uses Codex and its setup isn't done on the machine building. Settings says "Its setup isn't done" beside Codex; **Check setup…** downloads Codex and signs it in. On a host, run `~/.epik/bin/epik-app setup` there.
+
+**The review keeps asking for changes.** After two rounds of changes the build stops, and the run needs attention: "the review still asks for changes after 2 rounds". Nothing is lost: the pull request waits with its reviews, and the threads still open are where the reviewer and the coding agent disagree, or what the coding agent couldn't fix. Have the user read those threads on GitHub and decide, as with any review: fix what is right, answer and resolve what isn't, and merge when they are satisfied. The reviewer can be wrong. If it is often wrong, a different review model, or review turned off, may serve them better.
+
+**A cost says "not reported".** Codex doesn't report what it spends, so its sessions have a time but no cost, and totals say how much is missing rather than count it as zero. Its usage is in the user's OpenAI account.
 
 **On Windows, Epik's tools don't appear in Claude Code.** The plugin runs Epik's tools as `${HOME}/.epik/bin/epik-app mcp`. Claude Code expands `${HOME}` on macOS; that it does on Windows is not yet checked. If it doesn't, this is a known limitation, to be fixed in a later release.

@@ -205,7 +205,8 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 - Each session has its `role`, `coding` or `review`, and its `round`, from 1 for each role; the `agent` and `model`
   it ran (`model` is `null` for the agent's default); its `log`, a file name in its build's directory, `build_id`;
   when it started; and its `duration_ms` and `cost_usd`. `duration_ms` is `null` while it runs, and `cost_usd` when
-  its agent reported no cost, as Codex never does: an unreported cost is never zero.
+  its agent reported no cost, as Codex never does: an unreported cost is never zero. A finished review session has
+  `verdict`, what it concluded, as `review` gives it: `approve`, `changes` or `none`. Other sessions have none.
 - `sessions`: the run's own sessions, such as reviews of its pull request and the coding sessions that address them,
   over every build. A single issue's run
   has these in its issue's `sessions`.
