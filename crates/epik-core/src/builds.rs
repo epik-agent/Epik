@@ -1052,7 +1052,7 @@ mod tests {
 
         assert_eq!(
             error,
-            "\"aider\" is not an agent Epik knows: the agents are claude"
+            "\"aider\" is not an agent Epik knows: the agents are claude, codex"
         );
         assert!(asked.lock().unwrap().made.is_empty());
         assert!(run::list(root.path()).unwrap().is_empty());

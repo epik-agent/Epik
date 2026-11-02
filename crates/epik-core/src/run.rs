@@ -148,6 +148,9 @@ pub struct BuildSummary {
     pub ended_at: Option<DateTime<Utc>>,
     pub elapsed_ms: u64,
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported, which `cost_usd` lacks.
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 /// A run, as its builds leave it.
@@ -194,6 +197,10 @@ pub struct RunState {
     pub elapsed_ms: u64,
     /// Summed over the builds.
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported in any build, which
+    /// `cost_usd` lacks. See [`IssueState::cost_not_reported_by`].
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 impl RunState {
@@ -276,6 +283,14 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
             (Disposition::NeedsAttention, latest.reason.clone())
         }
     };
+    let issues: Vec<IssueState> = order
+        .into_iter()
+        .filter_map(|number| issues.remove(&number))
+        .collect();
+    let sessions: Vec<Session> = builds
+        .iter()
+        .flat_map(|build| build.sessions.iter().cloned())
+        .collect();
     Some(RunState {
         run: latest.run(),
         repo: latest.repo.clone(),
@@ -288,14 +303,9 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
         pull_request: latest.pull_request,
         review: latest.review,
         open_threads: latest.open_threads,
-        issues: order
-            .into_iter()
-            .filter_map(|number| issues.remove(&number))
-            .collect(),
-        sessions: builds
-            .iter()
-            .flat_map(|build| build.sessions.iter().cloned())
-            .collect(),
+        cost_unreported: record::cost_unreported(&issues, &sessions),
+        issues,
+        sessions,
         builds: builds
             .iter()
             .map(|build| BuildSummary {
@@ -307,6 +317,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
                 ended_at: build.ended_at,
                 elapsed_ms: build.elapsed_ms,
                 cost_usd: build.cost_usd,
+                cost_unreported: build.cost_unreported,
             })
             .collect(),
         running_build: (latest.status == BuildStatus::Running).then(|| latest.build_id.clone()),
@@ -814,6 +825,33 @@ mod tests {
         let reviews: Vec<&str> = run.sessions.iter().map(|s| s.log.as_str()).collect();
         assert_eq!(reviews, ["13-review-1.jsonl"]);
         assert_eq!(run.cost_usd, dollars("0.90") + dollars("0.75"));
+    }
+
+    #[test]
+    fn an_issue_whose_cost_was_not_reported_in_two_builds_counts_once() {
+        let unreported = |events: &mut Vec<Event>| {
+            for event in events.iter_mut() {
+                if let Event::SessionFinished { cost_usd, .. } = event {
+                    *cost_usd = None;
+                }
+            }
+        };
+        let mut first = with_sessions();
+        unreported(&mut first);
+        let mut second = with_sessions();
+        unreported(&mut second);
+        let Event::BuildStarted { build_id, .. } = &mut second[0] else {
+            unreachable!()
+        };
+        *build_id = "20261028T171640Z-cccc".to_owned();
+        let builds = [build(&first), build(&second)];
+        assert_eq!(builds[0].cost_unreported, 1);
+
+        let run = fold(&builds).unwrap();
+
+        assert_eq!(run.cost_unreported, 1);
+        assert_eq!(run.issue(15).unwrap().cost_usd, None);
+        assert_eq!(run.cost_usd, Decimal::ZERO);
     }
 
     #[test]

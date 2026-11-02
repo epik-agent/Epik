@@ -15,7 +15,7 @@ use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
 use epik_core::setup::{Check, Item};
 use epik_core::uninstall::Outcome;
-use epik_core::words::{dollars, duration};
+use epik_core::words::{cost_of, dollars, duration, total_cost};
 use epik_view::{
     Home, HostRow, HostStatus, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
     RepositoryRow, RunCard, RunPage, Settings, SetupFix, Sidebar, SidebarRun, Span, TrayRun,
@@ -474,7 +474,7 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
         count: count_words(run),
         disposition: disposition(run.disposition),
         elapsed: duration(u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0)),
-        cost: dollars(run.cost_usd),
+        cost: total_cost(run.cost_usd, run.cost_unreported),
         graph: mini_graph(run),
         progress: progress(run),
         now: running.iter().map(|i| now_line(run, i, now)).collect(),
@@ -710,8 +710,8 @@ fn starts_when(run: &RunState, issue: &IssueState) -> Words {
 }
 
 fn figures(issue: &IssueState) -> Option<String> {
-    match (issue.duration_ms, issue.cost_usd) {
-        (Some(ms), Some(cost)) => Some(format!("{} · {}", duration(ms), dollars(cost))),
+    match (issue.duration_ms, cost_of(issue)) {
+        (Some(ms), Some(cost)) => Some(format!("{} · {cost}", duration(ms))),
         (Some(ms), None) => Some(duration(ms)),
         _ => None,
     }
@@ -875,7 +875,7 @@ fn build_sentence(n: usize, build: &BuildSummary, merged: &[u64], zone: &FixedOf
     let figures = format!(
         "{} · {}",
         duration(build.elapsed_ms),
-        dollars(build.cost_usd)
+        total_cost(build.cost_usd, build.cost_unreported)
     );
     match build.status {
         BuildStatus::Running => match merged {
@@ -988,7 +988,7 @@ pub fn run_page(
         sentence,
         disposition: disposition(run.disposition),
         elapsed: duration(u64::try_from(run.elapsed(now).num_milliseconds()).unwrap_or(0)),
-        cost: dollars(run.cost_usd),
+        cost: total_cost(run.cost_usd, run.cost_unreported),
         also_building: shown
             .runs
             .iter()

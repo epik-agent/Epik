@@ -13,8 +13,8 @@ use serde::Serialize;
 
 use crate::record::{IssueState, Session, SessionRole};
 use crate::run::RunState;
-use crate::settings::{self, Role};
-use crate::words::{dollars, duration};
+use crate::settings;
+use crate::words::{cost_of, dollars, duration, total_cost};
 
 /// The version of the hidden block's JSON.
 const VERSION: u32 = 1;
@@ -24,7 +24,8 @@ const VERSION: u32 = 1;
 struct IssueCost<'a> {
     number: u64,
     duration_ms: u64,
-    cost_usd: Decimal,
+    /// `None` if any of it wasn't reported.
+    cost_usd: Option<Decimal>,
     pull_request: Option<u64>,
     merge_commit: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -69,18 +70,14 @@ fn sessions(sessions: &[Session]) -> String {
                 1 => String::new(),
                 n => format!(", round {n}"),
             };
-            let agent = settings::profile(&Role {
-                agent: session.agent.clone(),
-                model: session.model.clone(),
-            })
-            .map_or_else(|_| session.agent.clone(), |profile| profile.name);
+            let agent = settings::name(&session.agent);
             let model = session.model.as_deref().unwrap_or("its default model");
             let time = session
                 .duration_ms
                 .map_or("still running".to_owned(), duration);
             let cost = session
                 .cost_usd
-                .map_or("cost not reported".to_owned(), dollars);
+                .map_or_else(|| format!("not reported by {agent}"), dollars);
             format!("- {role}{round}: {agent} with {model}, {time}, {cost}\n")
         })
         .collect()
@@ -91,7 +88,9 @@ impl<'a> IssueCost<'a> {
         Self {
             number: issue.issue.number,
             duration_ms: issue.duration_ms.unwrap_or(0),
-            cost_usd: issue.cost_usd.unwrap_or(Decimal::ZERO),
+            cost_usd: issue
+                .cost_usd
+                .filter(|_| issue.cost_not_reported_by().is_empty()),
             pull_request: issue.pull_request,
             merge_commit: issue.merge_commit.as_deref(),
             sessions: issue.sessions.iter().map(SessionCost::of).collect(),
@@ -131,7 +130,7 @@ pub fn issue_merged(branch: &str, issue: &IssueState) -> String {
     format!(
         "**Epik: {}, {}.** Merged into `{branch}`{by}.\n\n{lines}{}",
         duration(cost.duration_ms),
-        dollars(cost.cost_usd),
+        cost_of(issue).unwrap_or_else(|| "cost not reported".to_owned()),
         hidden(&Block {
             version: VERSION,
             issue: cost,
@@ -167,7 +166,7 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
     let mut text = format!(
         "**Epik: built in {builds}, {}, {}**\n\n",
         duration(run.elapsed_ms),
-        dollars(run.cost_usd)
+        total_cost(run.cost_usd, run.cost_unreported)
     );
     if !single && let Some(merge) = merge {
         let sha = merge
@@ -196,7 +195,7 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
             issue.issue.number,
             issue.issue.title.replace('|', "\\|"),
             issue.duration_ms.map(duration).unwrap_or_else(dash),
-            issue.cost_usd.map(dollars).unwrap_or_else(dash),
+            cost_of(issue).unwrap_or_else(dash),
             issue
                 .pull_request
                 .map(|pr| format!("#{pr}"))
@@ -214,7 +213,9 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
         run: String,
         builds: usize,
         duration_ms: u64,
+        /// What was reported, which lacks `cost_unreported` issues' costs.
         cost_usd: Decimal,
+        cost_unreported: usize,
         pull_request: Option<u64>,
         merge_commit: Option<&'a str>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -228,6 +229,7 @@ pub fn closing(run: &RunState, merge: Option<&Merge>) -> String {
         builds: run.builds.len(),
         duration_ms: run.elapsed_ms,
         cost_usd: run.cost_usd,
+        cost_unreported: run.cost_unreported,
         pull_request: merge.map(|merge| merge.pull_request),
         merge_commit: merge.and_then(|merge| merge.merge_commit.as_deref()),
         sessions: run.sessions.iter().map(SessionCost::of).collect(),
@@ -293,6 +295,7 @@ mod tests {
             ended_at: None,
             elapsed_ms: 0,
             cost_usd: Decimal::ZERO,
+            cost_unreported: 0,
         }
     }
 
@@ -311,6 +314,7 @@ mod tests {
             review: None,
             open_threads: None,
             cost_usd: issues.iter().filter_map(|i| i.cost_usd).sum(),
+            cost_unreported: crate::record::cost_unreported(&issues, &[]),
             issues,
             sessions: Vec::new(),
             builds: (0..builds).map(|n| summary(&n.to_string())).collect(),
@@ -349,10 +353,11 @@ mod tests {
         let (readable, block) = text.split_once("<!-- epik:cost ").unwrap();
         assert_eq!(
             readable,
-            "**Epik: 3m 05s, $0.92.** Merged into `epic/13` by #20 (1a2b3c4).\n\n\
+            "**Epik: 3m 05s, $0.92 plus some not reported by Claude Code.** Merged into \
+             `epic/13` by #20 (1a2b3c4).\n\n\
              - Coding: Claude Code with opus, 2m 05s, $0.92\n\
-             - Review: Claude Code with its default model, 40s, cost not reported\n\
-             - Coding, round 2: Claude Code with opus, 20s, cost not reported\n\n"
+             - Review: Claude Code with its default model, 40s, not reported by Claude Code\n\
+             - Coding, round 2: Claude Code with opus, 20s, not reported by Claude Code\n\n"
         );
         let json: serde_json::Value =
             serde_json::from_str(block.strip_suffix(" -->").unwrap()).unwrap();
@@ -450,6 +455,83 @@ mod tests {
             text.contains("| #7 One thing | 1m 00s | $0.50 | #8 | abcdef0 |"),
             "{text}"
         );
+    }
+
+    /// A Codex session, which reports no cost.
+    fn codex(role: SessionRole, round: u32, ms: u64) -> Session {
+        Session {
+            agent: "codex".to_owned(),
+            ..session(role, round, None, ms, None)
+        }
+    }
+
+    #[test]
+    fn a_sub_issue_codex_coded_has_its_cost_not_reported_and_null_in_the_block() {
+        let mut parse = issue(14, "Parse ^", 185_000, "0", 20, "1a2b3c4d5e6f");
+        parse.cost_usd = None;
+        parse.sessions = vec![codex(SessionRole::Coding, 1, 185_000)];
+
+        let text = issue_merged("epic/13", &parse);
+
+        let (readable, block) = text.split_once("<!-- epik:cost ").unwrap();
+        assert_eq!(
+            readable,
+            "**Epik: 3m 05s, not reported by Codex.** Merged into `epic/13` by #20 (1a2b3c4).\n\n\
+             - Coding: Codex with its default model, 3m 05s, not reported by Codex\n\n"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(block.strip_suffix(" -->").unwrap()).unwrap();
+        assert_eq!(json["cost_usd"], serde_json::Value::Null);
+        assert_eq!(json["sessions"][0]["cost_usd"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_cost_partly_reported_is_null_in_the_block_and_says_so() {
+        let mut parse = issue(14, "Parse ^", 185_000, "0.92", 20, "1a2b3c4d5e6f");
+        parse.sessions = vec![
+            session(SessionRole::Coding, 1, None, 145_000, Some("0.92")),
+            codex(SessionRole::Review, 1, 40_000),
+        ];
+
+        let text = issue_merged("epic/13", &parse);
+
+        assert!(
+            text.starts_with("**Epik: 3m 05s, $0.92 plus some not reported by Codex.**"),
+            "{text}"
+        );
+        let (_, block) = text.split_once("<!-- epik:cost ").unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(block.strip_suffix(" -->").unwrap()).unwrap();
+        assert_eq!(json["cost_usd"], serde_json::Value::Null);
+        assert_eq!(json["sessions"][0]["cost_usd"], 0.92);
+    }
+
+    #[test]
+    fn the_closing_comment_counts_the_issues_whose_cost_was_not_reported() {
+        let parse = issue(14, "Parse ^", 185_000, "0.92", 20, "1a2b3c4aaaa");
+        let mut right = issue(15, "Right", 252_000, "0", 21, "5d6e7f8bbbb");
+        right.cost_usd = None;
+        right.sessions = vec![codex(SessionRole::Coding, 1, 252_000)];
+
+        let text = closing(&run(13, vec![parse, right], 1), None);
+
+        let (readable, block) = text.split_once("<!-- epik:cost ").unwrap();
+        assert!(
+            readable.starts_with(
+                "**Epik: built in 1 build, 21m 52s, $0.92 plus 1 issue not reported**"
+            ),
+            "{readable}"
+        );
+        assert!(
+            readable.contains("| #15 Right | 4m 12s | not reported by Codex | #21 | 5d6e7f8 |"),
+            "{readable}"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(block.strip_suffix(" -->").unwrap()).unwrap();
+        assert_eq!(json["cost_usd"], 0.92);
+        assert_eq!(json["cost_unreported"], 1);
+        assert_eq!(json["issues"][0]["cost_usd"], 0.92);
+        assert_eq!(json["issues"][1]["cost_usd"], serde_json::Value::Null);
     }
 
     #[test]

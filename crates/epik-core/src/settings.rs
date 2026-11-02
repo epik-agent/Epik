@@ -24,7 +24,7 @@ use crate::agent::AgentProfile;
 pub const FILE: &str = "settings.json";
 
 /// The ids of the agents Epik can run.
-pub const AGENTS: &[&str] = &["claude"];
+pub const AGENTS: &[&str] = &["claude", "codex"];
 
 fn path(root: &Path) -> PathBuf {
     root.join(FILE)
@@ -35,11 +35,22 @@ fn path(root: &Path) -> PathBuf {
 pub fn profile(role: &Role) -> Result<AgentProfile, String> {
     match role.agent.as_str() {
         "claude" => Ok(AgentProfile::claude()),
+        "codex" => Ok(AgentProfile::codex()),
         agent => Err(format!(
             "{agent:?} is not an agent Epik knows: the agents are {}",
             AGENTS.join(", ")
         )),
     }
+}
+
+/// What people call the agent whose id is `agent`, such as `Codex`, or
+/// its id if Epik doesn't know it.
+pub fn name(agent: &str) -> String {
+    profile(&Role {
+        agent: agent.to_owned(),
+        model: None,
+    })
+    .map_or_else(|_| agent.to_owned(), |profile| profile.name)
 }
 
 /// Why `settings` can't be used, if an agent in them is one Epik doesn't
@@ -124,6 +135,19 @@ mod tests {
     }
 
     #[test]
+    fn either_role_can_be_codex() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            coding: role("codex", Some("gpt-6.1-sol")),
+            review: Some(role("codex", None)),
+        };
+        write(root.path(), &settings).unwrap();
+
+        assert_eq!(read(root.path()).unwrap(), settings);
+        assert_eq!(profile(&settings.coding).unwrap(), AgentProfile::codex());
+    }
+
+    #[test]
     fn the_file_has_the_documented_shape() {
         let root = tempfile::tempdir().unwrap();
         fs::write(
@@ -160,7 +184,10 @@ mod tests {
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{json}");
             let message = error.to_string();
             assert!(message.contains("\"aider\""), "{message}");
-            assert!(message.ends_with("the agents are claude"), "{message}");
+            assert!(
+                message.ends_with("the agents are claude, codex"),
+                "{message}"
+            );
         }
     }
 
@@ -180,7 +207,7 @@ mod tests {
         let error = write(root.path(), &refused).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("the agents are claude"));
+        assert!(error.to_string().contains("the agents are claude, codex"));
         assert_eq!(read(root.path()).unwrap(), before);
         assert_eq!(files(root.path()), [FILE]);
     }

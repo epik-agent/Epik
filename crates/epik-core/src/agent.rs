@@ -3,8 +3,9 @@
 //! An [`Agent`] runs one prompt, unattended, in one directory, keeps its raw
 //! output, and reports how it ended and what it cost as an [`AgentOutcome`].
 //! [`AcpClient`] runs every agent; what differs between agents is data, in
-//! its [`AgentProfile`]. [`AgentProfile::claude`], Claude Code through
-//! `claude-agent-acp`, is the only profile.
+//! its [`AgentProfile`]: [`AgentProfile::claude`], Claude Code through
+//! `claude-agent-acp`, or [`AgentProfile::codex`], Codex through
+//! `codex-acp`.
 
 use std::fs::File;
 use std::io::Write;
@@ -62,7 +63,8 @@ pub struct AgentOutcome {
     /// `no_auto_mode` when the session couldn't run in the agent's
     /// unattended mode, `no_model` when it doesn't offer the model asked
     /// for, and `agent_failed` when the agent couldn't start, exited, or
-    /// broke the protocol.
+    /// broke the protocol. A prompt Codex failed is stopped by its
+    /// `codexErrorInfo`, such as `usageLimitExceeded`.
     pub stop_reason: String,
     pub duration_ms: u64,
     /// The session's cumulative cost, from the last `usage_update` in US
@@ -129,6 +131,31 @@ impl AgentProfile {
             env: Vec::new(),
             reports_cost: true,
             quiet_period: Duration::from_secs(300),
+        }
+    }
+
+    /// Codex: `codex-acp` 2.5.0 through `npx`, running the Codex it depends
+    /// on, in `agent` mode, not reporting cost, with a quiet period of 5
+    /// seconds.
+    ///
+    /// In `agent` mode Codex works in a sandbox with no network, and its own
+    /// automatic reviewer answers its approvals, such as for `git push` and
+    /// `gh`. Its prompt returns only when its work is done: it has no
+    /// background subagents to wait for.
+    pub fn codex() -> Self {
+        let npx = if cfg!(windows) { "npx.cmd" } else { "npx" };
+        Self {
+            id: "codex".into(),
+            name: "Codex".into(),
+            command: vec![
+                npx.into(),
+                "-y".into(),
+                "@agentclientprotocol/codex-acp@2.5.0".into(),
+            ],
+            unattended_mode: "agent".into(),
+            env: Vec::new(),
+            reports_cost: false,
+            quiet_period: Duration::from_secs(5),
         }
     }
 }
@@ -253,7 +280,7 @@ impl AcpClient {
             .ok()
             .and_then(|value| value.as_str().map(String::from))
             .unwrap_or_default();
-        Ok(Ended::Stopped(stop_reason))
+        Ok(Ended::Stopped(stop_reason, None))
     }
 }
 
@@ -280,7 +307,13 @@ impl Agent for AcpClient {
                 let ended = futures::executor::block_on(async {
                     match select(pin!(session), pin!(cancelled)).await {
                         Either::Left((Ok(ended), _)) => ended,
-                        Either::Left((Err(error), _)) => Ended::Failed(error.to_string()),
+                        Either::Left((Err(error), _)) => match codex_error(&error) {
+                            Some((info, message)) => Ended::Stopped(
+                                info,
+                                Some(format!("{} stopped: {message}", self.profile.name)),
+                            ),
+                            None => Ended::Failed(error.to_string()),
+                        },
                         Either::Right(_) => Ended::Cancelled,
                     }
                 });
@@ -288,7 +321,7 @@ impl Agent for AcpClient {
             }
         };
         let (stop_reason, error) = match ended {
-            Ended::Stopped(reason) => (reason, None),
+            Ended::Stopped(reason, error) => (reason, error),
             Ended::Refused(refusal @ Refusal::NoUnattendedMode(_)) => {
                 ("no_auto_mode".into(), Some(refusal.to_string()))
             }
@@ -432,14 +465,33 @@ fn setup(
     })
 }
 
-/// How a run ended. Only `Stopped` is clean.
+/// How a run ended. Only `Stopped` with no error is clean.
 enum Ended {
     /// The prompt returned with this ACP stop reason and the agent went
-    /// quiet.
-    Stopped(String),
+    /// quiet, or failed for this reason of the agent's own, and why.
+    Stopped(String, Option<String>),
     Refused(Refusal),
     Failed(String),
     Cancelled,
+}
+
+/// The reason Codex gives for failing a prompt, its `codexErrorInfo`, and
+/// its message, if `error` is such a failure. Codex sends it as an
+/// "Internal error" whose data has both. The reason is a name, such as
+/// `usageLimitExceeded`, or an object keyed by one.
+fn codex_error(error: &agent_client_protocol::Error) -> Option<(String, String)> {
+    let data = error.data.as_ref()?;
+    let info = match data.get("codexErrorInfo")? {
+        Value::String(name) => name.clone(),
+        Value::Object(object) => object.keys().next()?.clone(),
+        _ => return None,
+    };
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or(&error.message)
+        .to_owned();
+    Some((info, message))
 }
 
 /// Rejects a permission request, once if the agent offers that.

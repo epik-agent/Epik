@@ -456,6 +456,13 @@ pub struct IssueState {
 }
 
 impl IssueState {
+    /// The agents of its finished sessions that reported no cost, each
+    /// once, oldest first. Its cost is only theirs to report, so while
+    /// there are any, its `cost_usd` is less than it spent.
+    pub fn cost_not_reported_by(&self) -> Vec<&str> {
+        not_reported_by(&self.sessions)
+    }
+
     /// The file name of its agent's log in build `build_id`: its latest
     /// session's, if that session ran in the build, or else `<issue>.jsonl`,
     /// as a record from before sessions has it.
@@ -529,6 +536,31 @@ pub(crate) fn sessions_cost(sessions: &[Session]) -> Option<Decimal> {
         .reduce(|a, b| a + b)
 }
 
+/// The agents of `sessions` that finished without reporting a cost, each
+/// once, oldest first.
+pub(crate) fn not_reported_by(sessions: &[Session]) -> Vec<&str> {
+    let mut agents: Vec<&str> = Vec::new();
+    for session in sessions {
+        if session.duration_ms.is_some()
+            && session.cost_usd.is_none()
+            && !agents.contains(&session.agent.as_str())
+        {
+            agents.push(&session.agent);
+        }
+    }
+    agents
+}
+
+/// How many of `issues` have a session that reported no cost, counting the
+/// run's own `sessions` as one more issue, the epic's.
+pub(crate) fn cost_unreported(issues: &[IssueState], sessions: &[Session]) -> usize {
+    issues
+        .iter()
+        .filter(|issue| !issue.cost_not_reported_by().is_empty())
+        .count()
+        + usize::from(!not_reported_by(sessions).is_empty())
+}
+
 /// A build, as its events leave it. `summary.json` is this, serialized.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildState {
@@ -572,6 +604,10 @@ pub struct BuildState {
     pub elapsed_ms: u64,
     /// The sum of the issues' and the run's own sessions' costs so far.
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported, which `cost_usd` lacks.
+    /// See [`IssueState::cost_not_reported_by`].
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 impl BuildState {
@@ -665,6 +701,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         latest_at: *at,
         elapsed_ms: 0,
         cost_usd: Decimal::ZERO,
+        cost_unreported: 0,
     };
     for event in rest {
         state.latest_at = state.latest_at.max(event.at());
@@ -757,6 +794,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         .filter_map(|m| m.cost_usd)
         .sum::<Decimal>()
         + sessions_cost(&state.sessions).unwrap_or_default();
+    state.cost_unreported = cost_unreported(&state.issues, &state.sessions);
     Some(state)
 }
 
@@ -1422,6 +1460,67 @@ mod tests {
         let issue = fold(&events).unwrap().issue(13).unwrap().clone();
         assert_eq!(issue.duration_ms, Some(13_000));
         assert_eq!(issue.cost_usd, Some(dollars("0.25")));
+    }
+
+    /// A Codex session of `number`, `role` and `round`, finished with no
+    /// cost.
+    fn codex_session(at: u32, number: u64, role: SessionRole, round: u32) -> [Event; 2] {
+        [
+            Event::SessionStarted {
+                at: time(at),
+                number,
+                role,
+                round,
+                agent: "codex".to_owned(),
+                model: None,
+                log: format!("{number}-codex-{round}.jsonl"),
+            },
+            Event::SessionFinished {
+                at: time(at + 4),
+                number,
+                role,
+                round,
+                duration_ms: 4_000,
+                cost_usd: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn an_issue_with_a_session_that_reported_no_cost_is_counted_as_not_reported() {
+        let mut events = one_session();
+        events.extend(codex_session(11, 13, SessionRole::Review, 1));
+        events.extend(codex_session(16, 13, SessionRole::Review, 2));
+
+        let state = fold(&events).unwrap();
+
+        let issue = state.issue(13).unwrap();
+        assert_eq!(issue.cost_usd, Some(dollars("0.25")));
+        assert_eq!(issue.cost_not_reported_by(), ["codex"]);
+        assert_eq!(state.cost_usd, dollars("0.25"));
+        assert_eq!(state.cost_unreported, 1);
+    }
+
+    #[test]
+    fn a_session_still_running_is_not_counted_as_not_reported() {
+        let mut events = one_session();
+        events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
+
+        let state = fold(&events).unwrap();
+
+        assert!(state.issue(13).unwrap().cost_not_reported_by().is_empty());
+        assert_eq!(state.cost_unreported, 0);
+    }
+
+    #[test]
+    fn the_runs_own_session_that_reported_no_cost_counts_its_epic_issue() {
+        let mut events = one_session();
+        events.extend(codex_session(11, 12, SessionRole::Review, 1));
+
+        let state = fold(&events).unwrap();
+
+        assert_eq!(state.cost_unreported, 1);
+        assert_eq!(state.cost_usd, dollars("0.25"));
     }
 
     #[test]

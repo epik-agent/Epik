@@ -14,6 +14,9 @@
 //! - `--echo-env <name>`: write the environment variable `name` to stderr
 //!   when started.
 //! - `--cost <amount>`: the cost the prompt reports (default `0.25`).
+//! - `--no-cost`: report usage with no cost, as Codex does.
+//! - `--codex-error <info>`: fail the prompt as Codex does, with a JSON-RPC
+//!   "Internal error" whose data has `codexErrorInfo` set to `info`.
 //! - `--after-prompt <n>`: after the prompt returns, send `n` more updates,
 //!   100 ms apart; the last reports a cost one dollar higher.
 //! - `--ask-permission`: during the prompt, ask the client for permission and
@@ -37,6 +40,8 @@ struct Options {
     models: Vec<String>,
     echo_env: Option<String>,
     cost: f64,
+    no_cost: bool,
+    codex_error: Option<String>,
     after_prompt: u32,
     ask_permission: bool,
     exit_early: bool,
@@ -50,6 +55,8 @@ fn options() -> Options {
         models: Vec::new(),
         echo_env: None,
         cost: 0.25,
+        no_cost: false,
+        codex_error: None,
         after_prompt: 0,
         ask_permission: false,
         exit_early: false,
@@ -64,6 +71,8 @@ fn options() -> Options {
             "--models" => options.models = value().split(',').map(String::from).collect(),
             "--echo-env" => options.echo_env = Some(value()),
             "--cost" => options.cost = value().parse().expect("cost is a number"),
+            "--no-cost" => options.no_cost = true,
+            "--codex-error" => options.codex_error = Some(value()),
             "--after-prompt" => options.after_prompt = value().parse().expect("a count"),
             "--ask-permission" => options.ask_permission = true,
             "--exit-early" => options.exit_early = true,
@@ -95,16 +104,13 @@ fn text(session_id: &str, text: &str) {
     );
 }
 
-fn usage(session_id: &str, cost: f64) {
-    update(
-        session_id,
-        json!({
-            "sessionUpdate": "usage_update",
-            "used": 1000,
-            "size": 200000,
-            "cost": {"amount": cost, "currency": "USD"},
-        }),
-    );
+/// A `usage_update`, with `cost` if there is one.
+fn usage(session_id: &str, cost: Option<f64>) {
+    let mut usage = json!({"sessionUpdate": "usage_update", "used": 1000, "size": 200000});
+    if let Some(cost) = cost {
+        usage["cost"] = json!({"amount": cost, "currency": "USD"});
+    }
+    update(session_id, usage);
 }
 
 /// The session's config options: a `model` option, if there are models.
@@ -202,12 +208,27 @@ fn main() {
                         &format!("Permission answer: {}", answer["result"]),
                     );
                 }
-                usage(session_id, options.cost);
+                if let Some(info) = &options.codex_error {
+                    let message = "Quota exceeded. Check your plan and billing details.";
+                    text(session_id, message);
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error",
+                            "data": {"message": message, "codexErrorInfo": info},
+                        },
+                    }));
+                    continue;
+                }
+                let cost = |amount: f64| (!options.no_cost).then_some(amount);
+                usage(session_id, cost(options.cost));
                 reply(json!({"stopReason": "end_turn"}));
                 for n in 1..=options.after_prompt {
                     sleep(Duration::from_millis(100));
                     if n == options.after_prompt {
-                        usage(session_id, options.cost + 1.0);
+                        usage(session_id, cost(options.cost + 1.0));
                     } else {
                         text(session_id, "A background subagent is still working.");
                     }
