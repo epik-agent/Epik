@@ -241,10 +241,60 @@ pub struct RepositoryRow {
     pub missing: bool,
 }
 
-/// Settings: the monitored repositories.
+/// Settings: the monitored repositories, and the hosts builds can run on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     pub repositories: Vec<RepositoryRow>,
+    /// This computer first, then each remote host in the order added.
+    pub hosts: Vec<HostRow>,
+}
+
+/// A host builds can run on, as Settings lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRow {
+    /// Its SSH destination, or `None` for this computer.
+    pub destination: Option<String>,
+    /// "This computer", or the destination.
+    pub name: String,
+    pub status: HostStatus,
+    /// "Epik 0.4.0 · setup complete · 2 runs".
+    pub about: String,
+    /// Why it can't build: what `ssh` said, or which Epik to install there.
+    pub why: Option<String>,
+    /// Each setup item a build needs that it lacks, with what to run there.
+    pub missing: Vec<SetupFix>,
+    /// Whether builds go to it unless told otherwise.
+    pub default: bool,
+    /// The runs that leave the window if it is removed: each one's key and
+    /// title.
+    pub runs: Vec<(String, String)>,
+}
+
+/// Whether a host can build, as its row's mark shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostStatus {
+    /// It answered, and nothing it is known to need is missing.
+    Ready,
+    /// Not heard from since it was added.
+    Unchecked,
+    /// It answered, and lacks something a build needs.
+    Incomplete,
+    /// It couldn't be reached.
+    Unreachable,
+    /// Its app is another minor version than this one's.
+    Mismatch,
+}
+
+/// A setup item a host lacks, and the commands to run there for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupFix {
+    /// "GitHub sign-in".
+    pub title: String,
+    /// "not signed in".
+    pub detail: String,
+    /// Each command to run on the host, in order.
+    pub commands: Vec<String>,
 }
 
 /// The agent and model each role runs with, as `~/.epik/settings.json`

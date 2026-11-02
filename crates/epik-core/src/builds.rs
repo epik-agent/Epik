@@ -367,18 +367,30 @@ impl Builds {
     /// Sends `request` to the remote `host`'s app, which must be listed,
     /// and returns its answer, or why it couldn't be asked.
     pub fn ask(&self, host: &str, request: &ipc::Request) -> Result<ipc::Response, String> {
+        self.reaching_host(host)?
+            .request(host, request)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Checks the remote `host`, which must be listed: records its version,
+    /// or why it couldn't be reached, and its setup items.
+    pub fn check_host(&self, host: &str) -> Result<(), String> {
+        self.reaching_host(host)?
+            .check(host)
+            .map_err(|error| error.to_string())
+    }
+
+    /// The mirrors that reach the remote `host`, once it is known to be
+    /// listed.
+    fn reaching_host(&self, host: &str) -> Result<&Mirrors, String> {
         let listed =
             hosts::list(&self.root).map_err(|error| format!("couldn't read the hosts: {error}"))?;
         if !listed.iter().any(|listed| listed.destination == host) {
             return Err(format!("{host:?} is not a host: add it in Settings"));
         }
-        let mirrors = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| "this Epik app doesn't reach other hosts".to_owned())?;
-        mirrors
-            .request(host, request)
-            .map_err(|error| error.to_string())
+        self.hosts
+            .as_deref()
+            .ok_or_else(|| "this Epik app doesn't reach other hosts".to_owned())
     }
 
     /// Syncs `host`'s mirror at once, since something changed there.
@@ -1143,6 +1155,7 @@ mod tests {
                 Request::Ping => Response::Pong {
                     version: crate::version().to_owned(),
                 },
+                Request::Setup => Response::Setup { items: Vec::new() },
                 Request::Runs => {
                     self.syncs.fetch_add(1, Ordering::SeqCst);
                     crate::ipc::records(self.root.path(), request.clone())
@@ -1185,6 +1198,24 @@ mod tests {
             roles: Some(roles),
             host: None,
         }
+    }
+
+    #[test]
+    fn a_listed_host_is_checked_through_its_mirrors_client() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = Remote::new(None);
+        let (builds, _mirrors) = on_hosts(root.path(), &remote);
+
+        builds.check_host("devbox").unwrap();
+        let refused = builds.check_host("elsewhere").unwrap_err();
+
+        let host = &hosts::list(root.path()).unwrap()[0];
+        assert!(
+            matches!(host.state, Some(hosts::State::Reachable { .. })),
+            "{host:?}"
+        );
+        assert_eq!(host.setup, Some(Vec::new()));
+        assert_eq!(refused, "\"elsewhere\" is not a host: add it in Settings");
     }
 
     #[test]

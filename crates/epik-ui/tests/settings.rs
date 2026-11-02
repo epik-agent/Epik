@@ -1,5 +1,7 @@
-use epik_ui::settings::{ConfirmBody, MonitorForm, Repositories, SettingsPage};
-use epik_view::Settings;
+use epik_ui::settings::{
+    ConfirmBody, ConfirmHostBody, HostForm, Hosts, MonitorForm, Repositories, SettingsPage,
+};
+use epik_view::{HostRow, HostStatus, Settings, SetupFix};
 use leptos::prelude::*;
 
 mod fixtures;
@@ -9,6 +11,7 @@ use fixtures::{render, repository};
 fn settings_lists_each_monitored_repository() {
     let settings = Settings {
         repositories: vec![repository("acme/widgets", vec![], false)],
+        hosts: vec![],
     };
     let html = render(|| view! { <Repositories settings=Ok(settings)/> });
     assert_eq!(
@@ -21,6 +24,7 @@ fn settings_lists_each_monitored_repository() {
 fn a_repository_no_longer_on_github_can_be_removed() {
     let settings = Settings {
         repositories: vec![repository("acme/gone", vec![], true)],
+        hosts: vec![],
     };
     let html = render(|| view! { <Repositories settings=Ok(settings)/> });
     assert_eq!(
@@ -33,6 +37,7 @@ fn a_repository_no_longer_on_github_can_be_removed() {
 fn settings_without_repositories_says_so() {
     let settings = Settings {
         repositories: vec![],
+        hosts: vec![],
     };
     let html = render(|| view! { <Repositories settings=Ok(settings)/> });
     assert_eq!(html, r#"<li class="muted none">No repositories yet.</li>"#);
@@ -104,9 +109,11 @@ fn the_monitor_form_shows_its_error_under_the_input() {
 fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
     let settings = Signal::stored(Ok(Settings {
         repositories: vec![repository("acme/widgets", vec![], false)],
+        hosts: vec![this_computer(true)],
     }));
     let error = RwSignal::new(String::new());
-    let html = render(|| view! { <SettingsPage settings error/> });
+    let host_error = RwSignal::new(String::new());
+    let html = render(|| view! { <SettingsPage settings error host_error/> });
     assert!(
         html.starts_with(concat!(
             r#"<h1 class="page-title">Settings</h1><div class="card settings">"#,
@@ -118,6 +125,15 @@ fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
     );
     assert!(
         html.contains(r#"<button>Stop monitoring</button></li></ul><form id="add">"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(concat!(
+            r#"</form></section><section class="hosts"><h3>Hosts</h3>"#,
+            r#"<p class="muted">Builds run on one of these machines: this one, or another you reach with ssh that runs Epik. "#,
+            r#"<a href="https://github.com/epik-agent/Epik#build-on-another-machine">How to set up a host</a></p>"#,
+            r#"<ul id="hosts"><li class="host">"#,
+        )),
         "{html}"
     );
     assert!(
@@ -133,9 +149,175 @@ fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
 fn the_settings_page_says_why_it_could_not_read_the_repositories() {
     let settings = Signal::stored(Err("no ~/.epik".to_string()));
     let error = RwSignal::new(String::new());
-    let html = render(|| view! { <SettingsPage settings error/> });
+    let host_error = RwSignal::new(String::new());
+    let html = render(|| view! { <SettingsPage settings error host_error/> });
     assert!(
         html.contains(r#"<ul id="repositories"><li class="error">no ~/.epik</li></ul>"#),
         "{html}"
+    );
+}
+
+/// This computer, the default for builds or not.
+fn this_computer(default: bool) -> HostRow {
+    HostRow {
+        destination: None,
+        name: "This computer".into(),
+        status: HostStatus::Ready,
+        about: "Epik 0.4.0".into(),
+        why: None,
+        missing: vec![],
+        default,
+        runs: vec![],
+    }
+}
+
+/// The host `devbox`, in `status`, saying `about`.
+fn devbox(status: HostStatus, about: &str) -> HostRow {
+    HostRow {
+        destination: Some("devbox".into()),
+        name: "devbox".into(),
+        status,
+        about: about.into(),
+        why: None,
+        missing: vec![],
+        default: false,
+        runs: vec![],
+    }
+}
+
+#[test]
+fn this_computer_can_be_made_the_default_but_not_removed() {
+    let html = render(|| view! { <Hosts hosts=vec![this_computer(false)]/> });
+    assert_eq!(
+        html,
+        concat!(
+            r#"<li class="host"><span class="status-dot"></span>"#,
+            r#"<div class="host-text"><div class="host-name">This computer</div><div class="muted">Epik 0.4.0</div></div>"#,
+            r#"<div class="host-buttons"><button>Make default</button></div></li>"#,
+        )
+    );
+}
+
+#[test]
+fn the_default_host_is_marked_instead_of_offered() {
+    let row = HostRow {
+        default: true,
+        ..devbox(HostStatus::Ready, "Epik 0.4.0 · setup complete · No runs")
+    };
+    let html = render(|| view! { <Hosts hosts=vec![this_computer(false), row]/> });
+    assert!(
+        html.contains(concat!(
+            r#"<li class="host"><span class="status-dot"></span>"#,
+            r#"<div class="host-text"><div class="host-name">devbox</div><div class="muted">Epik 0.4.0 · setup complete · No runs</div></div>"#,
+            r#"<div class="host-buttons"><span class="default">Default for builds</span>"#,
+            r#"<button>Check again</button><button>Remove</button></div></li>"#,
+        )),
+        "{html}"
+    );
+    assert!(html.contains(r#"<button>Make default</button>"#), "{html}");
+}
+
+#[test]
+fn an_unreachable_host_says_what_ssh_said() {
+    let row = HostRow {
+        why: Some("ssh: Could not resolve hostname devbox".into()),
+        ..devbox(HostStatus::Unreachable, "Unreachable · No runs")
+    };
+    let html = render(|| view! { <Hosts hosts=vec![row]/> });
+    assert!(
+        html.starts_with(concat!(
+            r#"<li class="host unreachable"><span class="status-x">✕</span>"#,
+            r#"<div class="host-text"><div class="host-name">devbox</div><div class="muted">Unreachable · No runs</div>"#,
+            r#"<div class="why">ssh: Could not resolve hostname devbox</div></div>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_host_of_another_version_says_which_to_install() {
+    let row = HostRow {
+        why: Some("devbox runs Epik 0.3.2; install 0.4.x there".into()),
+        ..devbox(HostStatus::Mismatch, "Epik 0.3.2 · No runs")
+    };
+    let html = render(|| view! { <Hosts hosts=vec![row]/> });
+    assert!(
+        html.starts_with(concat!(
+            r#"<li class="host unreachable"><span class="status-x">✕</span>"#,
+            r#"<div class="host-text"><div class="host-name">devbox</div><div class="muted">Epik 0.3.2 · No runs</div>"#,
+            r#"<div class="why">devbox runs Epik 0.3.2; install 0.4.x there</div></div>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_host_not_checked_yet_has_no_mark() {
+    let html = render(
+        || view! { <Hosts hosts=vec![devbox(HostStatus::Unchecked, "Not checked yet · No runs")]/> },
+    );
+    assert!(
+        html.starts_with(r#"<li class="host unchecked"><span class="status-none"></span>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_hosts_missing_setup_items_show_what_to_run_there() {
+    let row = HostRow {
+        missing: vec![SetupFix {
+            title: "GitHub sign-in".into(),
+            detail: "not signed in".into(),
+            commands: vec![
+                "gh auth login -s project".into(),
+                "gh auth setup-git".into(),
+            ],
+        }],
+        ..devbox(
+            HostStatus::Incomplete,
+            "Epik 0.4.0 · setup incomplete · No runs",
+        )
+    };
+    let html = render(|| view! { <Hosts hosts=vec![row]/> });
+    assert!(
+        html.starts_with(concat!(
+            r#"<li class="host incomplete"><span class="status-warn">!</span>"#,
+            r#"<div class="host-text"><div class="host-name">devbox</div><div class="muted">Epik 0.4.0 · setup incomplete · No runs</div>"#,
+            r#"<ul class="fixes"><li>GitHub sign-in: not signed in. On devbox, run:"#,
+            r#"<pre><code>gh auth login -s project</code><code>gh auth setup-git</code></pre></li></ul></div>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn the_host_form_shows_its_error_under_the_input() {
+    let error = RwSignal::new("\"dev box\" is not an SSH destination".to_string());
+    let html = render(|| view! { <HostForm error/> });
+    assert_eq!(
+        html,
+        concat!(
+            r#"<form id="add-host"><label for="host">Add a host</label>"#,
+            r#"<div class="row"><input id="host" placeholder="devbox or me@build.example.com" autocomplete="off" spellcheck="false">"#,
+            r#"<button class="primary">Add</button></div>"#,
+            r#"<p id="add-host-error" class="error">"dev box" is not an SSH destination</p></form>"#,
+        )
+    );
+}
+
+#[test]
+fn the_confirmation_to_remove_a_host_lists_the_runs_that_will_disappear() {
+    let row = HostRow {
+        runs: vec![("acme/widgets#13".into(), "Exponentiation".into())],
+        ..devbox(HostStatus::Ready, "Epik 0.4.0 · 1 run")
+    };
+    let html = render(|| view! { <ConfirmHostBody host=row/> });
+    assert_eq!(
+        html,
+        concat!(
+            r#"<h2 id="confirm-title">Remove devbox?</h2>"#,
+            r#"<p id="confirm-text">Epik will stop checking it, and this run will disappear from the window. The run stays on devbox.</p>"#,
+            r#"<ul id="confirm-runs"><li>Exponentiation (acme/widgets#13)</li></ul>"#,
+        )
     );
 }
