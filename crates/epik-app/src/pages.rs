@@ -8,15 +8,18 @@
 use chrono::{DateTime, FixedOffset, Utc};
 use epik_core::graph::Graph;
 use epik_core::hosted::{HostedRun, Shown};
-use epik_core::hosts::State;
+use epik_core::hosts::{Host, State};
 use epik_core::record::{BuildStatus, IssueState, IssueStatus, Kind};
+use epik_core::remote::Mismatch;
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
+use epik_core::setup::{Check, Item};
 use epik_core::uninstall::Outcome;
 use epik_core::words::{dollars, duration};
 use epik_view::{
-    Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress, RepositoryRow,
-    RunCard, RunPage, Settings, Sidebar, SidebarRun, Span, TrayRun, UninstallStep, Words,
+    Home, HostRow, HostStatus, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
+    RepositoryRow, RunCard, RunPage, Settings, SetupFix, Sidebar, SidebarRun, Span, TrayRun,
+    UninstallStep, Words,
 };
 
 /// How long an agent may log nothing and still be "active".
@@ -154,7 +157,8 @@ fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 /// Where `run` builds, when there are remote hosts: "Building on devbox"
 /// or "Built on this Mac", and for a host that couldn't be reached when
-/// last asked, when it was last heard from.
+/// last asked, or whose app is another version, when it was last heard
+/// from.
 fn place(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> Option<String> {
     let building = run.state.disposition.is_building();
     let verb = if building { "Building" } else { "Built" };
@@ -162,7 +166,7 @@ fn place(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> Option<String> {
         return (!shown.hosts.is_empty()).then(|| format!("{verb} on {}", this_machine()));
     };
     let mut place = format!("{verb} on {}", host.destination);
-    if let Some(State::Unreachable { .. }) = host.state {
+    if let Some(State::Unreachable { .. } | State::Mismatch { .. }) = host.state {
         match host.heard_at {
             Some(at) => place.push_str(&format!(", last heard from {} ago.", since(at, now))),
             None => place.push_str(", which hasn't answered yet."),
@@ -999,9 +1003,24 @@ pub fn run_page(
     }
 }
 
-/// Settings for the monitored `repositories` and all `runs`.
-pub fn settings(repositories: &[Repository], runs: &[RunState], zone: &FixedOffset) -> Settings {
+/// Settings for the monitored `repositories` and all `runs` here, and
+/// the remote `hosts`, each with the runs in its mirror, of which
+/// `default` is where builds go, or this computer for none.
+pub fn settings(
+    repositories: &[Repository],
+    runs: &[RunState],
+    hosts: &[(Host, Vec<RunState>)],
+    default: Option<&str>,
+    zone: &FixedOffset,
+) -> Settings {
     Settings {
+        hosts: std::iter::once(this_host(default.is_none()))
+            .chain(
+                hosts
+                    .iter()
+                    .map(|(host, runs)| host_row(host, runs, default)),
+            )
+            .collect(),
         repositories: repositories
             .iter()
             .map(|repository| {
@@ -1030,6 +1049,112 @@ pub fn settings(repositories: &[Repository], runs: &[RunState], zone: &FixedOffs
             })
             .collect(),
     }
+}
+
+/// This computer, as Settings lists it.
+fn this_host(default: bool) -> HostRow {
+    HostRow {
+        destination: None,
+        name: "This computer".to_owned(),
+        status: HostStatus::Ready,
+        about: format!("Epik {}", epik_core::version()),
+        why: None,
+        missing: Vec::new(),
+        default,
+        runs: Vec::new(),
+    }
+}
+
+/// The remote `host`, with the `runs` in its mirror, as Settings lists it.
+fn host_row(host: &Host, runs: &[RunState], default: Option<&str>) -> HostRow {
+    let missing: Vec<SetupFix> = host
+        .setup
+        .iter()
+        .flatten()
+        .filter(|check| check.item.needed_to_build() && !check.usable)
+        .map(|check| SetupFix {
+            title: check.title.clone(),
+            detail: check.detail.clone(),
+            commands: host_commands(check),
+        })
+        .collect();
+    let (status, heard, why) = match &host.state {
+        None => (HostStatus::Unchecked, "Not checked yet".to_owned(), None),
+        Some(State::Reachable { version, .. }) => {
+            let setup = match &host.setup {
+                None => "setup not checked",
+                Some(_) if missing.is_empty() => "setup complete",
+                Some(_) => "setup incomplete",
+            };
+            let status = if missing.is_empty() {
+                HostStatus::Ready
+            } else {
+                HostStatus::Incomplete
+            };
+            (status, format!("Epik {version} · {setup}"), None)
+        }
+        Some(State::Unreachable { error, .. }) => (
+            HostStatus::Unreachable,
+            "Unreachable".to_owned(),
+            Some(error.clone()),
+        ),
+        Some(State::Mismatch { version, .. }) => {
+            let mismatch = Mismatch {
+                destination: host.destination.clone(),
+                version: version.clone(),
+            };
+            (
+                HostStatus::Mismatch,
+                format!("Epik {version}"),
+                Some(mismatch.to_string()),
+            )
+        }
+    };
+    let count = match runs.len() {
+        0 => "No runs".to_owned(),
+        n => plural(n, "run", "runs"),
+    };
+    HostRow {
+        destination: Some(host.destination.clone()),
+        name: host.destination.clone(),
+        status,
+        about: format!("{heard} · {count}"),
+        why,
+        // An unreachable host's setup may have changed since it was said.
+        missing: if status == HostStatus::Incomplete {
+            missing
+        } else {
+            Vec::new()
+        },
+        default: default == Some(host.destination.as_str()),
+        runs: runs
+            .iter()
+            .map(|run| (run.run.to_string(), run.title.clone()))
+            .collect(),
+    }
+}
+
+/// What to run on a host, which has no window, for the item `check` says
+/// is missing there: the tools' own sign-ins, and `epik-app setup` for the
+/// tools Epik installs.
+fn host_commands(check: &Check) -> Vec<String> {
+    let commands: &[&str] = match check.item {
+        Item::Gh | Item::Node => {
+            return vec![format!(
+                "~/.epik/bin/epik-app setup install {}",
+                check.item.id()
+            )];
+        }
+        Item::GhAuth if check.detail == "git isn't set to use gh to push" => &["gh auth setup-git"],
+        Item::GhAuth => &["gh auth login -s project", "gh auth setup-git"],
+        Item::Claude => &["curl -fsSL https://claude.ai/install.sh | bash"],
+        Item::ClaudeAuth => &["claude auth login"],
+        Item::Plugin => &[],
+    };
+    commands
+        .iter()
+        .map(|command| (*command).to_owned())
+        .collect()
 }
 
 /// How each step of uninstalling went, as its dialog lists them.

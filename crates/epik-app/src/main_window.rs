@@ -3,8 +3,8 @@
 //!
 //! The window, drawn by `epik-ui` at `index.html#/`, asks these commands
 //! for what to show every second, and draws it. The window notifies; its only controls are Rerun
-//! and Delete on a run that needs attention, and Settings, which can also
-//! uninstall Epik. Every command
+//! and Delete on a run that needs attention, and Settings, which also adds,
+//! checks and removes hosts, and can uninstall Epik. Every command
 //! goes through `epik-core`; nothing here touches `~/.epik` itself.
 
 use std::path::{Path, PathBuf};
@@ -165,7 +165,68 @@ fn delete_named(builds: &Builds, run: &str) -> Result<(), String> {
 pub fn settings(window: State<'_, Window>) -> Result<Settings, String> {
     let monitored = repositories::list(&window.root).map_err(failed)?;
     let runs = run::list(&window.root).map_err(failed)?;
-    Ok(pages::settings(&monitored, &runs, Local::now().offset()))
+    let hosts = hosts::list(&window.root)
+        .map_err(failed)?
+        .into_iter()
+        .map(|host| {
+            let mirrored = run::list(&hosts::dir(&window.root, &host.destination))?;
+            Ok((host, mirrored))
+        })
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(failed)?;
+    let default = hosts::default(&window.root).map_err(failed)?;
+    Ok(pages::settings(
+        &monitored,
+        &runs,
+        &hosts,
+        default.as_deref(),
+        Local::now().offset(),
+    ))
+}
+
+/// Adds the host `destination`, an SSH destination, and checks it at once.
+/// A host that couldn't be checked is still added: Settings says why.
+#[tauri::command]
+pub async fn add_host(destination: String, window: State<'_, Window>) -> Result<(), String> {
+    let destination = destination.trim().to_owned();
+    hosts::add(&window.root, &destination, Utc::now()).map_err(failed)?;
+    off_main(window, move |builds| {
+        if let Err(error) = builds.check_host(&destination) {
+            eprintln!("epik-app: couldn't check {destination}: {error}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Checks the host `destination` again: whether it answers, and its setup.
+#[tauri::command]
+pub async fn check_host(destination: String, window: State<'_, Window>) -> Result<(), String> {
+    off_main(window, move |builds| {
+        if let Err(error) = builds.check_host(&destination) {
+            eprintln!("epik-app: couldn't check {destination}: {error}");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Removes the host `destination`, and its mirror.
+#[tauri::command]
+pub fn remove_host(destination: String, window: State<'_, Window>) -> Result<(), String> {
+    let removed = hosts::remove(&window.root, &destination);
+    window.runs.forget();
+    removed.map_err(failed)
+}
+
+/// Makes the host `destination` the default for builds, or this computer
+/// for none.
+#[tauri::command]
+pub fn set_default_host(
+    destination: Option<String>,
+    window: State<'_, Window>,
+) -> Result<(), String> {
+    hosts::set_default(&window.root, destination.as_deref()).map_err(failed)
 }
 
 #[tauri::command]

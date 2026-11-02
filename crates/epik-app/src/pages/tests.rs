@@ -4,6 +4,8 @@ use epik_core::activity::Activity;
 use epik_core::hosts::{Host, State};
 use epik_core::record::{Issue, Session, SessionRole};
 use epik_core::run::RunKey;
+use epik_core::setup;
+use epik_view::{HostRow, HostStatus};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -183,6 +185,7 @@ fn devbox(state: Option<State>) -> Host {
             _ => Some(time(-600)),
         },
         state,
+        setup: None,
     }
 }
 
@@ -693,7 +696,13 @@ fn settings_lists_each_repository_with_its_runs_and_when_it_was_added() {
         repository("wpm/calc-old", false, true),
     ];
 
-    let settings = settings(&repositories, &[exponentiation(), waiting_run()], &zone);
+    let settings = settings(
+        &repositories,
+        &[exponentiation(), waiting_run()],
+        &[],
+        None,
+        &zone,
+    );
 
     let rows: Vec<(&str, &str, usize, bool)> = settings
         .repositories
@@ -739,6 +748,8 @@ fn stopping_monitoring_a_repository_lists_only_its_runs() {
     let settings = settings(
         &[repository("wpm/epik-test"), repository("wpm/calc")],
         &[exponentiation(), elsewhere, waiting_run()],
+        &[],
+        None,
         &zone,
     );
 
@@ -753,6 +764,218 @@ fn stopping_monitoring_a_repository_lists_only_its_runs() {
         settings.repositories[1].runs,
         [("wpm/calc#7".to_owned(), "Division by zero".to_owned())]
     );
+}
+
+/// `item`, as a host's app reports it: done, or missing with `detail`.
+fn item(item: setup::Item, detail: Option<&str>) -> setup::Check {
+    setup::Check {
+        item,
+        title: item.title().to_owned(),
+        state: if detail.is_some() {
+            setup::State::Missing
+        } else {
+            setup::State::Done
+        },
+        detail: detail.unwrap_or("fine").to_owned(),
+        usable: detail.is_none(),
+    }
+}
+
+/// The hosts Settings lists, without the window's runs and repositories.
+fn host_rows(hosts: &[(Host, Vec<RunState>)], default: Option<&str>) -> Vec<HostRow> {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    settings(&[], &[], hosts, default, &zone).hosts
+}
+
+#[test]
+fn settings_list_this_computer_first_then_each_host_with_its_state() {
+    let named = |destination: &str, host: Host| Host {
+        destination: destination.to_owned(),
+        ..host
+    };
+    let mismatched = devbox(Some(State::Mismatch {
+        version: "0.3.2".to_owned(),
+        at: time(100),
+    }));
+    let hosts = [
+        (named("devbox", reachable()), vec![exponentiation()]),
+        (named("gone", unreachable()), vec![]),
+        (named("old", mismatched), vec![]),
+        (named("new", devbox(None)), vec![]),
+    ];
+
+    let rows = host_rows(&hosts, None);
+
+    type Shown<'a> = (
+        Option<&'a str>,
+        &'a str,
+        HostStatus,
+        &'a str,
+        Option<&'a str>,
+    );
+    let shown: Vec<Shown> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.destination.as_deref(),
+                row.name.as_str(),
+                row.status,
+                row.about.as_str(),
+                row.why.as_deref(),
+            )
+        })
+        .collect();
+    let here = format!("Epik {}", epik_core::version());
+    let minor = epik_core::version().rsplit_once('.').unwrap().0;
+    let install = format!("old runs Epik 0.3.2; install {minor}.x there");
+    assert_eq!(
+        shown,
+        [
+            (
+                None,
+                "This computer",
+                HostStatus::Ready,
+                here.as_str(),
+                None
+            ),
+            (
+                Some("devbox"),
+                "devbox",
+                HostStatus::Ready,
+                "Epik 0.4.0 · setup not checked · 1 run",
+                None
+            ),
+            (
+                Some("gone"),
+                "gone",
+                HostStatus::Unreachable,
+                "Unreachable · No runs",
+                Some("ssh: connect to host devbox port 22: Connection refused")
+            ),
+            (
+                Some("old"),
+                "old",
+                HostStatus::Mismatch,
+                "Epik 0.3.2 · No runs",
+                Some(install.as_str())
+            ),
+            (
+                Some("new"),
+                "new",
+                HostStatus::Unchecked,
+                "Not checked yet · No runs",
+                None
+            ),
+        ]
+    );
+    assert_eq!(
+        rows[1].runs,
+        [("wpm/epik-test#13".to_owned(), "Exponentiation".to_owned())]
+    );
+}
+
+#[test]
+fn a_host_whose_setup_is_complete_says_so() {
+    use setup::Item;
+    let host = Host {
+        setup: Some(vec![
+            item(Item::Gh, None),
+            item(Item::GhAuth, None),
+            item(Item::Plugin, Some("not installed")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].status, HostStatus::Ready);
+    assert_eq!(rows[1].about, "Epik 0.4.0 · setup complete · No runs");
+    assert_eq!(rows[1].missing, []);
+}
+
+#[test]
+fn a_hosts_missing_setup_items_say_what_to_run_there() {
+    use setup::Item;
+    let host = Host {
+        setup: Some(vec![
+            item(Item::Gh, Some("not installed")),
+            item(Item::GhAuth, Some("not signed in")),
+            item(Item::Claude, Some("not installed")),
+            item(Item::ClaudeAuth, Some("not signed in")),
+            item(Item::Node, Some("not installed")),
+            item(Item::Plugin, Some("not installed")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].status, HostStatus::Incomplete);
+    assert_eq!(rows[1].about, "Epik 0.4.0 · setup incomplete · No runs");
+    let missing: Vec<(&str, &str, Vec<&str>)> = rows[1]
+        .missing
+        .iter()
+        .map(|fix| {
+            (
+                fix.title.as_str(),
+                fix.detail.as_str(),
+                fix.commands.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (
+                "GitHub CLI",
+                "not installed",
+                vec!["~/.epik/bin/epik-app setup install gh"]
+            ),
+            (
+                "GitHub sign-in",
+                "not signed in",
+                vec!["gh auth login -s project", "gh auth setup-git"]
+            ),
+            (
+                "Claude Code",
+                "not installed",
+                vec!["curl -fsSL https://claude.ai/install.sh | bash"]
+            ),
+            ("Claude sign-in", "not signed in", vec!["claude auth login"]),
+            (
+                "Node",
+                "not installed",
+                vec!["~/.epik/bin/epik-app setup install node"]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_host_that_only_lacks_gits_use_of_gh_is_told_just_that() {
+    let host = Host {
+        setup: Some(vec![item(
+            setup::Item::GhAuth,
+            Some("git isn't set to use gh to push"),
+        )]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].missing[0].commands, ["gh auth setup-git"]);
+}
+
+#[test]
+fn this_computer_is_the_default_until_a_host_is() {
+    let hosts = [(reachable(), vec![])];
+
+    let here = host_rows(&hosts, None);
+    let there = host_rows(&hosts, Some("devbox"));
+
+    let defaults = |rows: &[HostRow]| rows.iter().map(|row| row.default).collect::<Vec<_>>();
+    assert_eq!(defaults(&here), [true, false]);
+    assert_eq!(defaults(&there), [false, true]);
 }
 
 #[test]
@@ -847,6 +1070,22 @@ fn an_unreachable_hosts_run_says_when_it_was_last_heard_from() {
              The build may still be going on there."
         )
     );
+    assert_eq!(
+        home.waiting[0].place.as_deref(),
+        Some("Built on devbox, last heard from 12m 00s ago.")
+    );
+}
+
+#[test]
+fn a_run_on_a_host_of_another_version_says_when_it_was_last_heard_from() {
+    let host = devbox(Some(State::Mismatch {
+        version: "0.3.2".to_owned(),
+        at: time(118),
+    }));
+    let shown = with(&host, vec![on(&host, waiting_run())]);
+
+    let home = home(&shown, now());
+
     assert_eq!(
         home.waiting[0].place.as_deref(),
         Some("Built on devbox, last heard from 12m 00s ago.")
