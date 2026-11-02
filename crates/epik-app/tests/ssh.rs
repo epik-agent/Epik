@@ -6,8 +6,9 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,9 @@ use std::time::{Duration, Instant};
 use epik_core::builds::Builds;
 use epik_core::ipc::{Address, Request, Response, Server};
 use epik_core::remote::Ssh;
+
+/// Set for a fake `ssh` that should exit at once, recording nothing.
+const PROBE_VAR: &str = "EPIK_TEST_SSH_PROBE";
 
 /// A temporary home with an app serving its socket, and a fake `ssh`
 /// beside it.
@@ -38,11 +42,12 @@ impl Host {
 
     /// A host whose `ssh` runs `body`, a shell script, after recording its
     /// arguments in `args`, its process ID in `pid`, and a line in
-    /// `starts`, each in `$DIR`.
+    /// `starts`, each in `$DIR`. It can be executed once this returns.
     fn with_ssh(body: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let script = format!(
             "#!/bin/sh\n\
+             [ -z \"${PROBE_VAR}\" ] || exit 0\n\
              DIR='{dir}'\n\
              echo \"$@\" > \"$DIR/args\"\n\
              echo $$ > \"$DIR/pid\"\n\
@@ -53,6 +58,7 @@ impl Host {
         let ssh = dir.path().join("ssh");
         fs::write(&ssh, script).unwrap();
         fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(&ssh);
 
         let root = dir.path().join("home").join(".epik");
         let server = Server::bind(&Address::in_root(&root)).unwrap();
@@ -100,6 +106,32 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         self.stop_app();
+    }
+}
+
+/// Returns once `ssh`, just written, can be executed. A fork on another
+/// test's thread while the file was open for writing leaves a copy of that
+/// descriptor in the child until it reaches `exec`, and until then Linux
+/// refuses to execute the file. One successful run is enough: nothing reopens
+/// the file for writing, and no later fork can inherit a closed descriptor.
+fn wait_until_executable(ssh: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Command::new(ssh).env(PROBE_VAR, "1").status() {
+            Ok(status) => {
+                assert!(status.success(), "probing {}: {status}", ssh.display());
+                return;
+            }
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy => {
+                assert!(
+                    Instant::now() < deadline,
+                    "{} stayed busy: {error}",
+                    ssh.display()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("probing {}: {error}", ssh.display()),
+        }
     }
 }
 
@@ -260,7 +292,7 @@ fn a_hung_host_times_out() {
     let error = ssh.request(&Request::Ping).unwrap_err();
 
     assert!(started.elapsed() < Duration::from_secs(10), "{started:?}");
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert_eq!(error.kind(), ErrorKind::TimedOut, "{error}");
     assert_eq!(error.to_string(), "devbox didn't answer within 0.5 seconds");
     let pid = fs::read_to_string(host.path("pid")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
