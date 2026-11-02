@@ -282,6 +282,7 @@ mod tests {
             started_at: Utc.with_ymd_and_hms(2026, 10, 28, 0, 0, 0).unwrap(),
             duration_ms: Some(ms),
             cost_usd: cost.map(|cost| Decimal::from_str(cost).unwrap()),
+            verdict: None,
         }
     }
 

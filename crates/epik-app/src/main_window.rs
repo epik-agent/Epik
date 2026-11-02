@@ -105,15 +105,12 @@ pub fn run_page(run: String, window: State<'_, Window>) -> Result<RunPage, Strin
                 .collect()
         })
         .collect();
-    let log_dir = state
-        .running_build
-        .as_deref()
-        .map(|build| record::build_dir(&root, &key, build));
+    let run_dir = run::run_dir(&root, &key);
     Ok(pages::run_page(
         &HostedRun { host, state },
         &shown,
         &merged_by_build,
-        log_dir.as_deref(),
+        Some(&run_dir),
         Utc::now(),
         Local::now().offset(),
     ))

@@ -2,7 +2,7 @@ use super::*;
 use chrono::TimeZone;
 use epik_core::activity::Activity;
 use epik_core::hosts::{Host, State};
-use epik_core::record::{Issue, Session, SessionRole};
+use epik_core::record::{Issue, ReviewVerdict, Session, SessionRole};
 use epik_core::run::RunKey;
 use epik_core::setup;
 use epik_view::{HostRow, HostStatus};
@@ -568,7 +568,7 @@ fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
 fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     let zone = FixedOffset::east_opt(0).unwrap();
     let merged_by_build = [vec![14], vec![15]];
-    let dir = std::path::Path::new("/runs/wpm/epik-test/13/b0");
+    let dir = std::path::Path::new("/runs/wpm/epik-test/13");
 
     let page = run_page(
         &local(exponentiation()),
@@ -620,7 +620,7 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(plain(&detail.unblocks), "#18 and #19");
     assert_eq!(plain(&detail.pull_request), "Opens when the tests pass");
     assert_eq!(detail.recent, ["Reading src/eval.rs", "Running cargo test"]);
-    let log = dir.join("16.jsonl").display().to_string();
+    let log = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
@@ -641,6 +641,7 @@ fn a_cost_codex_did_not_report_is_said_to_be_missing() {
         started_at: time(-3600),
         duration_ms: Some(185_000),
         cost_usd: None,
+        verdict: None,
     }];
     run.builds[0].cost_unreported = 1;
     run.cost_unreported = 1;
@@ -686,13 +687,14 @@ fn a_running_issues_log_is_its_latest_sessions() {
         started_at: time(0),
         duration_ms: None,
         cost_usd: None,
+        verdict: None,
     };
     run.issues[3].sessions = vec![
         session("b-3600", "17.jsonl"),
         session("b0", "17.jsonl"),
         session("b0", "17-coding-2.jsonl"),
     ];
-    let dir = std::path::Path::new("/home/me/.epik/runs/wpm/epik-test/13/b0");
+    let dir = std::path::Path::new("/home/me/.epik/runs/wpm/epik-test/13");
 
     let page = run_page(
         &local(run),
@@ -704,9 +706,13 @@ fn a_running_issues_log_is_its_latest_sessions() {
     );
 
     let card = |n: u64| page.issues.iter().find(|c| c.number == n).unwrap();
-    let log = dir.join("17-coding-2.jsonl").display().to_string();
+    let log = dir
+        .join("b0")
+        .join("17-coding-2.jsonl")
+        .display()
+        .to_string();
     assert_eq!(card(17).log.as_deref(), Some(log.as_str()));
-    let old = dir.join("16.jsonl").display().to_string();
+    let old = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(card(16).log.as_deref(), Some(old.as_str()), "no sessions");
 }
 
@@ -1365,5 +1371,242 @@ fn a_run_here_doesnt_count_a_hosts_run_of_the_same_epic_as_itself() {
             "devbox:wpm/epik-test#13".to_owned(),
             "Exponentiation".to_owned()
         )]
+    );
+}
+
+/// A Claude Code session of `role` and `round` in build `b0`, from 20:00,
+/// that took a minute and $0.30.
+fn session(role: SessionRole, round: u32, log: &str) -> Session {
+    Session {
+        build_id: "b0".to_owned(),
+        role,
+        round,
+        agent: "claude".to_owned(),
+        model: None,
+        log: log.to_owned(),
+        started_at: time(0),
+        duration_ms: Some(60_000),
+        cost_usd: Some(dollars_of("0.30")),
+        verdict: None,
+    }
+}
+
+/// A review of `round` that concluded `verdict`.
+fn review(round: u32, verdict: ReviewVerdict) -> Session {
+    Session {
+        verdict: Some(verdict),
+        ..session(
+            SessionRole::Review,
+            round,
+            &format!("9-review-{round}.jsonl"),
+        )
+    }
+}
+
+/// Each session's role, round and verdict.
+fn rounds(sessions: &[epik_view::SessionRow]) -> Vec<(&str, u32, Option<&str>)> {
+    sessions
+        .iter()
+        .map(|s| (s.role.as_str(), s.round, s.verdict.as_deref()))
+        .collect()
+}
+
+/// The run's directory in [`page_of`].
+const RUN_DIR: &str = "/runs/wpm/epik-test/9";
+
+/// The path of `log`, of build `b0`, in [`RUN_DIR`].
+fn logged(log: &str) -> String {
+    Path::new(RUN_DIR)
+        .join("b0")
+        .join(log)
+        .display()
+        .to_string()
+}
+
+fn page_of(run: RunState) -> RunPage {
+    run_page(
+        &local(run),
+        &here([]),
+        &[],
+        Some(Path::new(RUN_DIR)),
+        now(),
+        &FixedOffset::east_opt(0).unwrap(),
+    )
+}
+
+#[test]
+fn a_reviewed_run_lists_its_reviews_and_fix_in_order_under_its_header() {
+    let mut run = waiting_run();
+    run.review = Some(ReviewVerdict::Approve);
+    run.open_threads = Some(2);
+    run.sessions = vec![
+        review(1, ReviewVerdict::Changes),
+        session(SessionRole::Coding, 2, "9-coding-2.jsonl"),
+        review(2, ReviewVerdict::Approve),
+    ];
+
+    let page = page_of(run);
+
+    assert_eq!(
+        rounds(&page.sessions),
+        [
+            ("Review", 1, Some("changes requested")),
+            ("Coding", 2, None),
+            ("Review", 2, Some("approved")),
+        ]
+    );
+    let last = page.sessions.last().unwrap();
+    assert_eq!(
+        (
+            last.agent.as_str(),
+            last.model.as_str(),
+            last.time.as_str(),
+            last.cost.as_deref()
+        ),
+        ("Claude Code", "default model", "1m 00s", Some("$0.30"))
+    );
+    assert_eq!(
+        last.threads,
+        Some(link(
+            "2 threads open",
+            "https://github.com/wpm/epik-test/pull/12/files"
+        ))
+    );
+    assert!(page.sessions[..2].iter().all(|s| s.threads.is_none()));
+    assert_eq!(
+        last.log.as_deref(),
+        Some(logged("9-review-2.jsonl").as_str())
+    );
+    assert!(!last.running);
+}
+
+#[test]
+fn one_open_thread_is_singular_and_none_is_said_plainly() {
+    let mut run = waiting_run();
+    run.sessions = vec![review(1, ReviewVerdict::Approve)];
+    run.open_threads = Some(1);
+    let page = page_of(run.clone());
+    let threads = page.sessions[0].threads.clone().unwrap();
+    assert_eq!(threads.text, "1 thread open");
+    run.open_threads = Some(0);
+    let page = page_of(run);
+    assert_eq!(page.sessions[0].threads, Some(text("no threads open")));
+}
+
+#[test]
+fn a_single_issue_runs_review_is_in_its_issues_panel_and_under_the_runs_header() {
+    let mut run = failed_run();
+    run.issues[0].sessions = vec![
+        session(SessionRole::Coding, 1, "7.jsonl"),
+        Session {
+            log: "7-review-1.jsonl".to_owned(),
+            ..review(1, ReviewVerdict::NoVerdict)
+        },
+    ];
+
+    let page = page_of(run);
+
+    let card = &page.issues[0];
+    assert_eq!(
+        rounds(&card.sessions),
+        [("Coding", 1, None), ("Review", 1, Some("no verdict"))]
+    );
+    assert_eq!(rounds(&page.sessions), [("Review", 1, Some("no verdict"))]);
+    assert_eq!(
+        card.log.as_deref(),
+        Some(logged("7-review-1.jsonl").as_str()),
+        "the latest session's, though the issue isn't running"
+    );
+    assert_eq!(
+        card.sessions[0].log.as_deref(),
+        Some(logged("7.jsonl").as_str())
+    );
+}
+
+#[test]
+fn a_codex_session_that_reported_no_cost_says_so() {
+    let mut run = exponentiation();
+    run.issues[1].sessions = vec![Session {
+        agent: "codex".to_owned(),
+        model: Some("gpt-5.5".to_owned()),
+        cost_usd: None,
+        ..session(SessionRole::Coding, 1, "15.jsonl")
+    }];
+
+    let page = page_of(run);
+
+    let row = &page.issues[1].sessions[0];
+    assert_eq!(
+        (row.agent.as_str(), row.model.as_str(), row.cost.as_deref()),
+        ("Codex", "gpt-5.5", Some("not reported"))
+    );
+}
+
+/// The calculator REPL, all merged, in its first build, reviewing its
+/// pull request since 20:00.
+fn reviewing_run() -> RunState {
+    let mut run = waiting_run();
+    run.disposition = Disposition::Reviewing;
+    run.pull_request = None;
+    run.builds = vec![summary(BuildStatus::Running, 0, 0, "3.67")];
+    run.running_build = Some("b0".to_owned());
+    run.sessions = vec![Session {
+        duration_ms: None,
+        cost_usd: None,
+        ..session(SessionRole::Review, 1, "9-review-1.jsonl")
+    }];
+    run
+}
+
+#[test]
+fn a_reviewing_run_says_so_in_its_header_and_its_now_line() {
+    let run = reviewing_run();
+
+    let card = run_card(&run, now());
+    let page = page_of(run);
+
+    let lines: Vec<String> = card.now.iter().map(|line| plain(&line.words)).collect();
+    assert_eq!(lines, ["#9 Calculator REPL — reviewing its pull request."]);
+    assert_eq!(
+        plain(&card.summary.unwrap()),
+        "4 of 4 issues merged. Reviewing its pull request."
+    );
+    assert_eq!(
+        page.sentence,
+        "First build running, reviewing its pull request."
+    );
+    let row = &page.sessions[0];
+    assert!(row.running);
+    assert_eq!(
+        (
+            row.time.as_str(),
+            row.cost.as_deref(),
+            row.verdict.as_deref()
+        ),
+        ("2m 00s so far", None, None)
+    );
+    assert_eq!(row.threads, None);
+}
+
+#[test]
+fn a_run_addressing_its_review_says_so_in_its_now_line() {
+    let mut run = reviewing_run();
+    run.disposition = Disposition::Building;
+    run.sessions = vec![
+        review(1, ReviewVerdict::Changes),
+        Session {
+            duration_ms: None,
+            cost_usd: None,
+            ..session(SessionRole::Coding, 2, "9-coding-2.jsonl")
+        },
+    ];
+
+    let card = run_card(&run, now());
+
+    let lines: Vec<String> = card.now.iter().map(|line| plain(&line.words)).collect();
+    assert_eq!(lines, ["#9 Calculator REPL — addressing the review."]);
+    assert_eq!(
+        plain(&card.summary.unwrap()),
+        "4 of 4 issues merged. Addressing the review."
     );
 }

@@ -195,7 +195,36 @@ pub struct IssueCard {
     pub pull_request: Words,
     /// What its agent has done, in words, oldest first.
     pub recent: Vec<String>,
-    /// Its latest agent session's full log, while it runs.
+    /// Its latest agent session's log, the one its stream shows unless
+    /// another session is chosen.
+    pub log: Option<String>,
+    /// Its agent sessions, oldest first.
+    pub sessions: Vec<SessionRow>,
+}
+
+/// An agent session, as an issue's panel and a run's header list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRow {
+    /// "Coding" or "Review".
+    pub role: String,
+    /// Which session of its role this is, from 1.
+    pub round: u32,
+    /// "Claude Code".
+    pub agent: String,
+    /// "opus", or "default model".
+    pub model: String,
+    /// "3m 05s", or "2m 00s so far" while it runs.
+    pub time: String,
+    /// "$0.92" or "not reported", once it has finished.
+    pub cost: Option<String>,
+    /// A review's verdict: "approved", "changes requested" or "no verdict".
+    pub verdict: Option<String>,
+    /// Beside the run's last review, the threads still open: "2 threads
+    /// open", linked to the pull request's Files view.
+    pub threads: Option<Span>,
+    /// Whether it is running.
+    pub running: bool,
+    /// Its log's path, for its stream.
     pub log: Option<String>,
 }
 
@@ -225,6 +254,9 @@ pub struct RunPage {
     pub rows: usize,
     pub issues: Vec<IssueCard>,
     pub edges: Vec<(u64, u64)>,
+    /// The run's own sessions, its reviews and the fixes they asked for,
+    /// oldest first.
+    pub sessions: Vec<SessionRow>,
 }
 
 /// A monitored repository, as Settings lists it.
