@@ -243,24 +243,17 @@ mod tests {
         assert_eq!(read(root.path()).unwrap(), Settings::default());
     }
 
-    /// The text of the section of `markdown` headed `heading`, up to the
-    /// next heading of its level or higher.
-    fn section<'a>(markdown: &'a str, heading: &str) -> &'a str {
-        let level = heading.len() - heading.trim_start_matches('#').len();
-        let start = markdown
-            .find(&format!("\n{heading}\n"))
-            .unwrap_or_else(|| panic!("no section {heading:?}"))
-            + heading.len()
-            + 2;
-        let rest = &markdown[start..];
-        let end = rest
-            .match_indices("\n#")
-            .find(|(at, _)| {
-                let hashes = rest[at + 1..].len() - rest[at + 1..].trim_start_matches('#').len();
-                hashes <= level
-            })
-            .map_or(rest.len(), |(at, _)| at);
-        &rest[..end]
+    /// The lines of the section of `markdown` headed `heading`, up to the
+    /// next heading of its level or higher. Read by line, since a Windows
+    /// checkout ends its lines with `\r\n`.
+    fn section(markdown: &str, heading: &str) -> String {
+        let level = |line: &str| line.len() - line.trim_start_matches('#').len();
+        let mut lines = markdown.lines().skip_while(|line| *line != heading);
+        assert!(lines.next().is_some(), "no section {heading:?}");
+        lines
+            .take_while(|line| !(line.starts_with('#') && level(line) <= level(heading)))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
