@@ -2,14 +2,15 @@
 //! (`#/run/<owner/name%23n>`, or `#/run/<host>:<owner/name%23n>` for a
 //! run on a remote host), or Settings (`#/settings`). It asks the app
 //! what to show every second and draws it. Its only controls are Rerun and
-//! Delete on a run that needs attention, and Settings, which also adds,
-//! checks and removes hosts, and can uninstall Epik.
+//! Delete on a run that needs attention, and Settings, which also chooses
+//! each role's agent and model, adds, checks and removes hosts, and can
+//! uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use epik_view::{
-    Disposition, Home, HostRow, NodeState, RepositoryRow, RunPage, Settings,
+    AgentSettings, Disposition, Home, HostRow, NodeState, RepositoryRow, RunPage, Settings,
     Sidebar as SidebarView, SidebarRun, Stream, Uninstall, UninstallStep,
 };
 use leptos::ev::MouseEvent;
@@ -524,6 +525,25 @@ pub fn MainWindow() -> impl IntoView {
     };
     let on_monitored = Callback::new(move |()| refresh());
 
+    // The roles, read each time Settings opens so the form starts from
+    // what is saved, and the agents whose setup isn't done.
+    let agents = RwSignal::new(None::<Result<AgentSettings, String>>);
+    let unready = RwSignal::new(Vec::<String>::new());
+    Effect::new(move |_| {
+        if page.get() != Page::Settings {
+            return;
+        }
+        agents.set(None);
+        spawn_local(async move {
+            agents.set(Some(
+                tauri::invoke::<_, AgentSettings>("agent_settings", &()).await,
+            ));
+            if let Ok(fetched) = tauri::invoke::<_, Vec<String>>("unready_agents", &()).await {
+                unready.set(fetched);
+            }
+        });
+    });
+
     // The dialog that uninstalls Epik. While it asks, it follows whether a
     // build is running.
     let uninstall_dialog = NodeRef::<Dialog>::new();
@@ -658,6 +678,8 @@ pub fn MainWindow() -> impl IntoView {
                 {settings.map(|settings| view! {
                     <SettingsPage
                         settings
+                        agents
+                        unready
                         error=monitor_error
                         host_error
                         on_stop=Some(on_stop)

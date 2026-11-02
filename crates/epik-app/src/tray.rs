@@ -104,6 +104,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
             main_window::set_default_host,
             main_window::agent_settings,
             main_window::set_agent_settings,
+            main_window::unready_agents,
             main_window::uninstall_plan,
             main_window::uninstall,
             main_window::quit_to_remove,

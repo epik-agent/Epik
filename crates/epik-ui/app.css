@@ -321,6 +321,14 @@ dialog {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.15); }
+#agents .role { display: grid; grid-template-columns: 70px 140px 1fr; gap: 8px; align-items: center; margin-top: 10px; }
+#agents label { color: var(--secondary); }
+#agents select { font: inherit; padding: 6px 8px; border: 1px solid var(--strong); border-radius: 6px; }
+#agents input { font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
+#agents .row { display: flex; gap: 10px; align-items: center; }
+.agent-list { margin: 8px 0 12px; padding-left: 18px; }
+.agent-list .why { color: var(--error); }
+button.link { padding: 0; border: none; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; }
 #repositories { list-style: none; margin: 12px 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; }
 .repository { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: center; padding: 10px 14px; }
 .repository + .repository { border-top: 1px solid var(--border); }

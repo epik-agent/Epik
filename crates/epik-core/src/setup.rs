@@ -156,15 +156,19 @@ impl Item {
     /// Whether the user needs it, building with `roles`: an agent and its
     /// sign-in only when a role uses that agent, everything else always.
     pub fn needed(self, roles: &Settings) -> bool {
-        let uses = |agent: &str| {
+        self.agent().is_none_or(|agent| {
             std::iter::once(&roles.coding)
                 .chain(roles.review.as_ref())
                 .any(|role| role.agent == agent)
-        };
+        })
+    }
+
+    /// The id of the agent it is part of, for an agent or its sign-in.
+    pub fn agent(self) -> Option<&'static str> {
         match self {
-            Item::Claude | Item::ClaudeAuth => uses("claude"),
-            Item::Codex | Item::CodexAuth => uses("codex"),
-            _ => true,
+            Item::Claude | Item::ClaudeAuth => Some("claude"),
+            Item::Codex | Item::CodexAuth => Some("codex"),
+            _ => None,
         }
     }
 
@@ -214,6 +218,18 @@ impl Check {
     pub fn blocks_build(&self) -> bool {
         self.needed && self.item != Item::Plugin && !self.usable
     }
+}
+
+/// The ids of the agents with an item in `checks` that Epik can't use, in
+/// the checklist's order.
+pub fn unready_agents(checks: &[Check]) -> Vec<&'static str> {
+    let mut unready: Vec<&'static str> = checks
+        .iter()
+        .filter(|check| !check.usable)
+        .filter_map(|check| check.item.agent())
+        .collect();
+    unready.dedup();
+    unready
 }
 
 /// `checks`, each marked whether `roles` need it.
@@ -1167,6 +1183,20 @@ pub(crate) mod tests {
             refusal(&checks, &roles("claude", Some("codex"))).unwrap(),
             "Epik's setup is incomplete: Codex sign-in. Choose Check setup in the Epik menu."
         );
+    }
+
+    #[test]
+    fn an_agent_is_unready_while_any_of_its_items_is_unusable() {
+        let root = tempfile::tempdir().unwrap();
+        let complete = check_all(root.path(), &Recorded::complete(), &Unknown);
+        assert!(unready_agents(&complete).is_empty());
+
+        let no_claude_sign_in = Recorded::complete().answer("claude auth status", false, "");
+        let checks = check_all(root.path(), &no_claude_sign_in, &Unknown);
+        assert_eq!(unready_agents(&checks), ["claude"]);
+
+        let checks = check_all(root.path(), &Recorded::default(), &Unknown);
+        assert_eq!(unready_agents(&checks), ["claude", "codex"]);
     }
 
     #[test]

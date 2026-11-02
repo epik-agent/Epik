@@ -1,7 +1,8 @@
 use epik_ui::settings::{
-    ConfirmBody, ConfirmHostBody, HostForm, Hosts, MonitorForm, Repositories, SettingsPage,
+    Agents, Choice, ConfirmBody, ConfirmHostBody, HostForm, Hosts, MonitorForm, Repositories,
+    SetAgentSettings, SettingsPage,
 };
-use epik_view::{HostRow, HostStatus, Settings, SetupFix};
+use epik_view::{AgentSettings, HostRow, HostStatus, Role, Settings, SetupFix};
 use leptos::prelude::*;
 
 mod fixtures;
@@ -113,11 +114,18 @@ fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
     }));
     let error = RwSignal::new(String::new());
     let host_error = RwSignal::new(String::new());
-    let html = render(|| view! { <SettingsPage settings error host_error/> });
+    let agents = Signal::stored(Some(Ok(AgentSettings::default())));
+    let html = render(|| view! { <SettingsPage settings agents error host_error/> });
     assert!(
         html.starts_with(concat!(
             r#"<h1 class="page-title">Settings</h1><div class="card settings">"#,
-            r#"<section><h3>Monitored repositories</h3>"#,
+            r#"<section class="agents"><h3>Agents</h3>"#,
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(concat!(
+            r#"</section><section><h3>Monitored repositories</h3>"#,
             r#"<p class="muted">Epik monitors these repositories. When Epik creates an epic or starts a build in a repository that isn't listed, it adds that repository here.</p>"#,
             r#"<ul id="repositories"><li class="repository">"#,
         )),
@@ -330,5 +338,127 @@ fn the_confirmation_to_remove_a_host_lists_the_runs_that_will_disappear() {
             r#"<p id="confirm-text">Epik will stop checking it, and this run will disappear from the window. The run stays on devbox.</p>"#,
             r#"<ul id="confirm-runs"><li>Exponentiation (acme/widgets#13)</li></ul>"#,
         )
+    );
+}
+
+/// Claude Code codes with `model`, and `review` reviews, if anything does.
+fn roles(model: Option<&str>, review: Option<(&str, Option<&str>)>) -> AgentSettings {
+    AgentSettings {
+        coding: Role {
+            agent: "claude".into(),
+            model: model.map(Into::into),
+        },
+        review: review.map(|(agent, model)| Role {
+            agent: agent.into(),
+            model: model.map(Into::into),
+        }),
+    }
+}
+
+#[test]
+fn the_agents_section_shows_the_current_roles() {
+    let agents = roles(Some("opus"), Some(("codex", Some("gpt-5.5"))));
+    let html = render(|| view! { <Agents agents/> });
+    assert!(
+        html.contains(concat!(
+            r#"<div class="role"><label for="coding-agent">Coding</label>"#,
+            r#"<select id="coding-agent"><option value="claude" selected>Claude Code</option><option value="codex">Codex</option></select>"#,
+            r#"<input id="coding-model" placeholder="The agent's default" autocomplete="off" spellcheck="false" value="opus"></div>"#,
+            r#"<div class="role"><label for="review-agent">Review</label>"#,
+            r#"<select id="review-agent"><option value="off">Off</option><option value="claude">Claude Code</option><option value="codex" selected>Codex</option></select>"#,
+            r#"<input id="review-model" placeholder="The agent's default" autocomplete="off" spellcheck="false" value="gpt-5.5"></div>"#,
+            r#"<p class="muted">Reviews the build's pull request when the build is done, and fixes what it finds, up to twice, before the pull request reaches you.</p>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn each_agent_says_how_it_runs_unattended() {
+    let html = render(|| view! { <Agents agents=AgentSettings::default()/> });
+    assert!(
+        html.contains(concat!(
+            r#"<ul class="agent-list">"#,
+            r#"<li><b>Claude Code</b> runs unattended with a model approving each risky action, and no sandbox.</li>"#,
+            r#"<li><b>Codex</b> runs unattended in a sandbox, with its own reviewer approving what leaves it.</li>"#,
+            r#"</ul>"#,
+        )),
+        "{html}"
+    );
+}
+
+#[test]
+fn review_off_hides_its_model_field() {
+    let html = render(|| view! { <Agents agents=roles(None, None)/> });
+    assert!(
+        html.contains(concat!(
+            r#"<select id="review-agent"><option value="off" selected>Off</option>"#,
+            r#"<option value="claude">Claude Code</option><option value="codex">Codex</option></select></div>"#,
+        )),
+        "{html}"
+    );
+    assert!(!html.contains("review-model"), "{html}");
+}
+
+#[test]
+fn an_agent_whose_setup_isnt_done_links_to_check_setup() {
+    let agents = roles(None, Some(("codex", None)));
+    let unready = Signal::stored(vec!["codex".to_string()]);
+    let html = render(|| view! { <Agents agents unready/> });
+    assert!(
+        html.contains(concat!(
+            r#"<li><b>Codex</b> runs unattended in a sandbox, with its own reviewer approving what leaves it. "#,
+            r#"<span class="why">Its setup isn't done. </span><button type="button" class="link">Check setup</button></li>"#,
+        )),
+        "{html}"
+    );
+    assert!(
+        html.contains(
+            r#"<li><b>Claude Code</b> runs unattended with a model approving each risky action, and no sandbox.</li>"#
+        ),
+        "{html}"
+    );
+}
+
+#[test]
+fn an_agent_no_role_uses_doesnt_ask_for_its_setup() {
+    let unready = Signal::stored(vec!["codex".to_string()]);
+    let html = render(|| view! { <Agents agents=roles(None, None) unready/> });
+    assert!(!html.contains("Check setup"), "{html}");
+}
+
+#[test]
+fn saving_sends_the_roles_as_changed() {
+    let mut choice = Choice::from(&roles(Some("opus"), None));
+    assert_eq!(choice.settings(), roles(Some("opus"), None));
+
+    choice.coding_model = "  ".into();
+    choice.review = "codex".into();
+    choice.review_model = " gpt-5.5 ".into();
+    assert_eq!(
+        choice.request(),
+        SetAgentSettings {
+            settings: roles(None, Some(("codex", Some("gpt-5.5")))),
+        }
+    );
+    assert_eq!(SetAgentSettings::COMMAND, "set_agent_settings");
+
+    choice.review = "off".into();
+    assert_eq!(choice.settings(), roles(None, None));
+}
+
+#[test]
+fn the_agents_section_says_why_it_could_not_read_the_roles() {
+    let settings = Signal::stored(Ok(Settings {
+        repositories: vec![],
+        hosts: vec![],
+    }));
+    let agents = Signal::stored(Some(Err("unknown agent \"gemini\"".to_string())));
+    let error = RwSignal::new(String::new());
+    let host_error = RwSignal::new(String::new());
+    let html = render(|| view! { <SettingsPage settings agents error host_error/> });
+    assert!(
+        html.contains(r#"<section class="agents"><h3>Agents</h3><p class="error">unknown agent "gemini"</p></section>"#),
+        "{html}"
     );
 }

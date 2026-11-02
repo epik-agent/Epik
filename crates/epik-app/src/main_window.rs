@@ -258,6 +258,23 @@ pub fn set_agent_settings(
     settings::write(&window.root, &settings).map_err(failed)
 }
 
+/// The ids of the agents whose setup isn't done. Checking runs commands,
+/// so not on the main thread.
+#[tauri::command]
+pub async fn unready_agents(window: State<'_, Window>) -> Result<Vec<String>, String> {
+    let builds = window.builds.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Every item is checked whatever the roles, so any roles will do.
+        let checks = builds.setup(Some(&AgentSettings::default()))?;
+        Ok(setup::unready_agents(&checks)
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    })
+    .await
+    .map_err(failed)?
+}
+
 /// Why Epik can't be uninstalled while a build runs.
 const BUILDING: &str = "Wait for the running build to finish, or stop it first.";
 
