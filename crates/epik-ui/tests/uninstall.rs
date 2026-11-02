@@ -185,6 +185,14 @@ fn step(title: &str, error: Option<&str>) -> UninstallStep {
     UninstallStep {
         title: title.into(),
         error: error.map(Into::into),
+        skipped: None,
+    }
+}
+
+fn skipped(title: &str, reason: &str) -> UninstallStep {
+    UninstallStep {
+        skipped: Some(reason.into()),
+        ..step(title, None)
     }
 }
 
@@ -262,6 +270,29 @@ fn a_failed_step_is_shown_with_its_error() {
             r#"<li class="failed">✕ The Epik plugin<div class="why">disk full</div></li>"#,
             r#"<li class="removed">✓ Run history</li></ul>"#,
             r#"<p>Epik couldn't remove everything. Remove what failed yourself, then quit Epik and run <code>sudo apt remove epik</code>.</p>"#,
+            r#"<div class="buttons"><button class="primary">Quit</button></div>"#,
+        )
+    );
+}
+
+#[test]
+fn a_skipped_step_is_shown_with_why_and_uninstalling_still_succeeds() {
+    let steps = vec![
+        skipped("The Epik plugin", "Claude Code isn't installed"),
+        step("Run history", None),
+    ];
+    let plan = Uninstall {
+        removal: Removal::Deb,
+        ..Uninstall::default()
+    };
+    let html = render(|| view! { <UninstallBody plan stage=Uninstalling::Done(steps)/> });
+    assert_eq!(
+        html,
+        concat!(
+            r#"<h2>Epik's files are removed</h2><ul class="uninstall-steps">"#,
+            r#"<li class="skipped">– The Epik plugin<div class="note">Skipped: Claude Code isn't installed</div></li>"#,
+            r#"<li class="removed">✓ Run history</li></ul>"#,
+            r#"<p>One step left: quit Epik, then run <code>sudo apt remove epik</code>.</p>"#,
             r#"<div class="buttons"><button class="primary">Quit</button></div>"#,
         )
     );

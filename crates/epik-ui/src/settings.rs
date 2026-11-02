@@ -528,11 +528,18 @@ pub fn UninstallBody(
             };
             let steps = steps
                 .into_iter()
-                .map(|step| match step.error {
-                    None => {
+                .map(|step| match (step.error, step.skipped) {
+                    (None, None) => {
                         view! { <li class="removed">{format!("✓ {}", step.title)}</li> }.into_any()
                     }
-                    Some(error) => view! {
+                    (None, Some(reason)) => view! {
+                        <li class="skipped">
+                            {format!("– {}", step.title)}
+                            <div class="note">{format!("Skipped: {reason}")}</div>
+                        </li>
+                    }
+                    .into_any(),
+                    (Some(error), _) => view! {
                         <li class="failed">
                             {format!("✕ {}", step.title)}
                             <div class="why">{error}</div>

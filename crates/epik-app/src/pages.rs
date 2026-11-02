@@ -15,7 +15,7 @@ use epik_core::remote::Mismatch;
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
 use epik_core::setup::{Check, Item};
-use epik_core::uninstall::Outcome;
+use epik_core::uninstall::{Done, Outcome};
 use epik_core::words::{cost_of, dollars, duration, total_cost};
 use epik_view::{
     Home, HostRow, HostStatus, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
@@ -1169,6 +1169,10 @@ pub fn uninstall_steps(outcomes: &[Outcome]) -> Vec<UninstallStep> {
         .map(|outcome| UninstallStep {
             title: outcome.step.title().to_owned(),
             error: outcome.result.clone().err(),
+            skipped: match &outcome.result {
+                Ok(Done::Skipped(reason)) => Some(reason.clone()),
+                _ => None,
+            },
         })
         .collect()
 }

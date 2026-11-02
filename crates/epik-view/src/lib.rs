@@ -426,6 +426,8 @@ pub struct UninstallStep {
     pub title: String,
     /// Why it couldn't, if it couldn't.
     pub error: Option<String>,
+    /// Why it was skipped, if it was: "Claude Code isn't installed".
+    pub skipped: Option<String>,
 }
 
 /// An agent's log as people read it: what it said and did, in order.

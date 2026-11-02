@@ -1073,16 +1073,20 @@ fn this_computer_is_the_default_until_a_host_is() {
 }
 
 #[test]
-fn uninstalling_reports_each_step_by_its_title_with_any_error() {
-    use epik_core::uninstall::{Outcome, Step};
+fn uninstalling_reports_each_step_by_its_title_with_any_error_or_reason_to_skip() {
+    use epik_core::uninstall::{Done, Outcome, Step};
     let outcomes = [
         Outcome {
             step: Step::Plugin,
             result: Err("disk full".to_owned()),
         },
         Outcome {
+            step: Step::Marketplace,
+            result: Ok(Done::Skipped("Claude Code isn't installed".to_owned())),
+        },
+        Outcome {
             step: Step::Runs,
-            result: Ok(()),
+            result: Ok(Done::Removed),
         },
     ];
 
@@ -1092,10 +1096,17 @@ fn uninstalling_reports_each_step_by_its_title_with_any_error() {
             UninstallStep {
                 title: "The Epik plugin".to_owned(),
                 error: Some("disk full".to_owned()),
+                skipped: None,
+            },
+            UninstallStep {
+                title: "The Epik plugin's marketplace".to_owned(),
+                error: None,
+                skipped: Some("Claude Code isn't installed".to_owned()),
             },
             UninstallStep {
                 title: "Run history".to_owned(),
                 error: None,
+                skipped: None,
             },
         ]
     );
