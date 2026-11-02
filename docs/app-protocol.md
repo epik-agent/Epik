@@ -213,9 +213,15 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 
 An unknown run is an error.
 
+`host` (optional) names the remote host the run is on, as `build` does. Without it, the run is this computer's. For a
+remote host, the app sends the request on to that host's app, without `host`, and its reply is the host's:
+`{"type": "status", "run": "owner/name#356", "host": "devbox"}`. A host that isn't listed or can't be reached is an
+error naming it: `couldn't read owner/name#356 on devbox: …`.
+
 ### `list`
 
-The runs, newest activity first.
+The runs, this computer's and every remote host's, newest activity first. A remote host's are read from this app's
+mirror of them.
 
 ```json
 {"type": "list", "limit": 5}
@@ -224,8 +230,10 @@ The runs, newest activity first.
 `limit` is optional and defaults to 20. The reply holds each run's state, as `status` gives it, without `type`:
 
 ```json
-{"type": "runs", "runs": [{"run": "owner/name#356", "disposition": "building", ...}]}
+{"type": "runs", "runs": [{"run": "owner/name#356", "disposition": "building", ...}, {"run": "owner/name#357", "host": "devbox", ...}]}
 ```
+
+A remote host's run has `host`, the host it is on. This computer's has none.
 
 ### `runs`
 
@@ -293,6 +301,12 @@ now say. The build skips the issues already closed.
 
 The reply is `started`, as for `build`. A run that is building or waiting for review is an error.
 
+`host` (optional) names the remote host the run is on: `{"type": "rerun", "run": "owner/name#356", "host": "devbox"}`.
+Without it, the run is this computer's. For a remote host, the app sends the request on to that host's app, without
+`host`, and the host reruns it with its last build's roles. The host's refusal is the error, naming the host:
+`couldn't rerun owner/name#356 on devbox: a build of owner/name#356 is running`. Once the host has started the build,
+the reply is its `started` with `host`, and this app syncs its mirror of the host's runs at once.
+
 ### `delete`
 
 Deletes a run that needs attention: every build's clone and record. GitHub keeps the outcome, so there is no
@@ -307,6 +321,10 @@ confirmation.
 ```
 
 A run that is building or waiting for review is an error.
+
+`host` (optional) names the remote host the run is on, as for `rerun`. The host deletes the run, and this app syncs its
+mirror at once, which removes the run here too. The host's refusal is the error, naming the host:
+`couldn't delete owner/name#356 on devbox: …`.
 
 ### `setup`
 
