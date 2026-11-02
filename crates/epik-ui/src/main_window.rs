@@ -89,7 +89,7 @@ const MARK: &str = r##"<svg viewBox="0 0 64 64" width="20" height="20" aria-hidd
 /// A run's status dot's class.
 pub(crate) fn disposition_class(disposition: Disposition) -> &'static str {
     match disposition {
-        Disposition::Building => "building",
+        Disposition::Building | Disposition::Reviewing => "building",
         Disposition::WaitingForReview => "waiting_for_review",
         Disposition::NeedsAttention => "needs_attention",
     }

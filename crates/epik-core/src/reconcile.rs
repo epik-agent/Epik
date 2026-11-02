@@ -84,7 +84,7 @@ pub fn reconcile(root: &Path, github: &dyn GitHub, building: &[RunKey]) -> Repor
             }
         }
         for state in runs.iter().filter(|r| r.repo.eq_ignore_ascii_case(&repo)) {
-            if building.contains(&state.run) || state.disposition == Disposition::Building {
+            if building.contains(&state.run) || state.disposition.is_building() {
                 continue;
             }
             if let Err(error) = check(root, github, state, &mut report) {
@@ -247,6 +247,8 @@ mod tests {
                     outcome: Outcome::Succeeded,
                     reason: None,
                     pull_request: Some(3),
+                    review: None,
+                    open_threads: None,
                 },
             ]);
         }

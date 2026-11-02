@@ -114,6 +114,8 @@ fn exponentiation() -> RunState {
         disposition: Disposition::Building,
         reason: None,
         pull_request: None,
+        review: None,
+        open_threads: None,
         issues,
         sessions: Vec::new(),
         builds: vec![

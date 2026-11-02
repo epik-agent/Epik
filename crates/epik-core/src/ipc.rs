@@ -23,6 +23,7 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
+use crate::hosts;
 use crate::record;
 use crate::run::{self, RunKey, RunState};
 use crate::settings::Settings;
@@ -62,8 +63,14 @@ pub enum Request {
         host: Option<String>,
     },
     /// A run's state.
-    Status { run: RunKey },
-    /// The runs, newest activity first.
+    Status {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+    /// The runs, this computer's and every remote host's, newest activity
+    /// first.
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
@@ -80,9 +87,19 @@ pub enum Request {
     },
     /// Start a new build of a run that needs attention, as its last build
     /// was started.
-    Rerun { run: RunKey },
+    Rerun {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
     /// Delete a run that needs attention: its builds' clones and records.
-    Delete { run: RunKey },
+    Delete {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
     /// Every setup item's state.
     Setup,
     /// Whether the app is there, and its version.
@@ -98,7 +115,7 @@ pub enum Response {
     /// A run's state, folded from its builds.
     Run(RunState),
     Runs {
-        runs: Vec<RunState>,
+        runs: Vec<ListedRun>,
     },
     /// Every run's key, and when it last changed.
     RunKeys {
@@ -125,6 +142,16 @@ pub enum Response {
     Error {
         message: String,
     },
+}
+
+/// A run in a list, and the remote host it is on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListedRun {
+    #[serde(flatten)]
+    pub state: RunState,
+    /// The remote host, or `None` for this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 /// A run, and when it last changed.
@@ -177,8 +204,21 @@ fn handle(builds: &Builds, request: Request) -> Response {
             Ok(started) => Response::Started(started),
             Err(message) => Response::error(message),
         },
-        Request::Status { run } => status(builds.root(), &run),
-        Request::List { limit } => match run::list(builds.root()) {
+        Request::Status { run, host: None } => status(builds.root(), &run),
+        Request::Status {
+            run,
+            host: Some(host),
+        } => {
+            let request = Request::Status {
+                run: run.clone(),
+                host: None,
+            };
+            match builds.ask(&host, &request) {
+                Ok(reply) => reply,
+                Err(why) => Response::error(format!("couldn't read {run} on {host}: {why}")),
+            }
+        }
+        Request::List { limit } => match listed(builds.root()) {
             Ok(mut runs) => {
                 runs.truncate(limit.unwrap_or(DEFAULT_LIMIT));
                 Response::Runs { runs }
@@ -188,13 +228,13 @@ fn handle(builds: &Builds, request: Request) -> Response {
         Request::Runs | Request::Files { .. } | Request::Read { .. } => {
             records(builds.root(), request)
         }
-        Request::Rerun { run } => match builds.rerun(&run) {
+        Request::Rerun { run, host } => match builds.rerun_on(host.as_deref(), &run) {
             Ok(started) => Response::Started(started),
-            Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
+            Err(why) => Response::error(format!("couldn't rerun {}: {why}", on(&run, &host))),
         },
-        Request::Delete { run } => match builds.delete(&run) {
+        Request::Delete { run, host } => match builds.delete_on(host.as_deref(), &run) {
             Ok(()) => Response::Deleted { run },
-            Err(why) => Response::error(format!("couldn't delete {run}: {why}")),
+            Err(why) => Response::error(format!("couldn't delete {}: {why}", on(&run, &host))),
         },
         Request::Setup => Response::Setup {
             items: builds.setup(),
@@ -213,7 +253,35 @@ fn respond(builds: &Builds, line: &str) -> Response {
     }
 }
 
-fn status(root: &Path, key: &RunKey) -> Response {
+/// `run`, and the remote host it is on if any, as a sentence names it.
+fn on(run: &RunKey, host: &Option<String>) -> String {
+    match host {
+        Some(host) => format!("{run} on {host}"),
+        None => run.to_string(),
+    }
+}
+
+/// Every run under `root` and in each remote host's mirror, newest
+/// activity first. A host whose mirror can't be read lists none.
+fn listed(root: &Path) -> io::Result<Vec<ListedRun>> {
+    let mut runs: Vec<ListedRun> = run::list(root)?
+        .into_iter()
+        .map(|state| ListedRun { state, host: None })
+        .collect();
+    for host in hosts::list(root)? {
+        let Ok(mirrored) = run::list(&hosts::dir(root, &host.destination)) else {
+            continue;
+        };
+        runs.extend(mirrored.into_iter().map(|state| ListedRun {
+            state,
+            host: Some(host.destination.clone()),
+        }));
+    }
+    runs.sort_by_key(|run| std::cmp::Reverse(run.state.latest_at));
+    Ok(runs)
+}
+
+pub(crate) fn status(root: &Path, key: &RunKey) -> Response {
     match run::read(root, key) {
         Ok(state) => Response::Run(state),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -848,6 +916,52 @@ mod tests {
 
         assert_eq!(reply["runs"].as_array().unwrap().len(), DEFAULT_LIMIT);
         assert_eq!(reply["runs"][0]["number"], DEFAULT_LIMIT as u64 + 1);
+    }
+
+    #[test]
+    fn list_includes_every_hosts_runs_each_with_its_host() {
+        let app = Running::new(fake_github());
+        let root = app.root.path();
+        hosts::add(root, "devbox", chrono::Utc::now()).unwrap();
+        write_build(root, 1, 1);
+        write_build(&hosts::dir(root, "devbox"), 2, 3);
+        write_build(&hosts::dir(root, "devbox"), 3, 2);
+
+        let reply = app.send(r#"{"type": "list"}"#);
+
+        let runs = reply["runs"].as_array().unwrap();
+        let listed: Vec<(u64, Option<&str>)> = runs
+            .iter()
+            .map(|run| (run["number"].as_u64().unwrap(), run["host"].as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [(2, Some("devbox")), (3, Some("devbox")), (1, None)]
+        );
+        assert!(runs[2].get("host").is_none(), "{}", runs[2]);
+        let Response::Runs { runs } = serde_json::from_value(reply).unwrap() else {
+            panic!("not runs");
+        };
+        assert_eq!(runs[0].host.as_deref(), Some("devbox"));
+        assert_eq!(runs[0].state.run, RunKey::new("owner/repo", 2));
+    }
+
+    #[test]
+    fn rerun_delete_and_status_take_the_host_the_run_is_on() {
+        let app = Running::new(fake_github());
+
+        let reply = |kind: &str| {
+            app.send(&json!({"type": kind, "run": "owner/repo#7", "host": "devbox"}).to_string())
+        };
+
+        let not_a_host = "\"devbox\" is not a host: add it in Settings";
+        for (kind, verb) in [("rerun", "rerun"), ("delete", "delete"), ("status", "read")] {
+            assert_eq!(
+                reply(kind),
+                json!({"type": "error", "message": format!("couldn't {verb} owner/repo#7 on devbox: {not_a_host}")}),
+                "{kind}"
+            );
+        }
     }
 
     /// Records a build of issue `number` started `seconds` into the day.

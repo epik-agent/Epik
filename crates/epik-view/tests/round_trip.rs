@@ -307,6 +307,7 @@ fn the_json_is_what_the_windows_read() {
     let json = serde_json::to_value((
         text("plain"),
         Disposition::WaitingForReview,
+        Disposition::Reviewing,
         ItemState::Outdated,
         NodeState::NotStarted,
     ))
@@ -316,6 +317,7 @@ fn the_json_is_what_the_windows_read() {
         serde_json::json!([
             {"text": "plain"},
             "waiting_for_review",
+            "reviewing",
             "outdated",
             "not_started"
         ])

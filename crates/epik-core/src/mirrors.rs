@@ -271,6 +271,8 @@ mod tests {
                     outcome: Outcome::Failed,
                     reason: Some("stopped".to_owned()),
                     pull_request: None,
+                    review: None,
+                    open_threads: None,
                 })
                 .unwrap();
         }

@@ -26,6 +26,7 @@ const ACTIVE_FOR: i64 = 60;
 fn disposition(disposition: Disposition) -> epik_view::Disposition {
     match disposition {
         Disposition::Building => epik_view::Disposition::Building,
+        Disposition::Reviewing => epik_view::Disposition::Reviewing,
         Disposition::WaitingForReview => epik_view::Disposition::WaitingForReview,
         Disposition::NeedsAttention => epik_view::Disposition::NeedsAttention,
     }
@@ -155,7 +156,7 @@ fn since(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
 /// or "Built on this Mac", and for a host that couldn't be reached when
 /// last asked, when it was last heard from.
 fn place(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> Option<String> {
-    let building = run.state.disposition == Disposition::Building;
+    let building = run.state.disposition.is_building();
     let verb = if building { "Building" } else { "Built" };
     let Some(host) = &run.host else {
         return (!shown.hosts.is_empty()).then(|| format!("{verb} on {}", this_machine()));
@@ -403,7 +404,7 @@ fn attention_words(run: &RunState) -> Words {
 
 /// The run's card at `now`, as if it were on this computer.
 pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
-    let building = run.disposition == Disposition::Building;
+    let building = run.disposition.is_building();
     let running: Vec<&IssueState> = run
         .issues
         .iter()
@@ -411,7 +412,7 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
         .collect();
     let epic = issue_url(&run.repo, run.number);
     let (sentence, note) = match run.disposition {
-        Disposition::Building => (None, None),
+        Disposition::Building | Disposition::Reviewing => (None, None),
         Disposition::WaitingForReview => {
             let mut words = Vec::new();
             if run.kind == Kind::Epic {
@@ -536,18 +537,18 @@ fn hosted_card(run: &HostedRun, shown: &Shown, now: DateTime<Utc>) -> RunCard {
 
 /// Home, for the runs `shown`, newest activity first, at `now`.
 pub fn home(shown: &Shown, now: DateTime<Utc>) -> Home {
-    let cards = |wanted: Disposition| -> Vec<RunCard> {
+    let cards = |wanted: &dyn Fn(Disposition) -> bool| -> Vec<RunCard> {
         shown
             .runs
             .iter()
-            .filter(|run| run.state.disposition == wanted)
+            .filter(|run| wanted(run.state.disposition))
             .map(|run| hosted_card(run, shown, now))
             .collect()
     };
     let building: Vec<&HostedRun> = shown
         .runs
         .iter()
-        .filter(|run| run.state.disposition == Disposition::Building)
+        .filter(|run| run.state.disposition.is_building())
         .collect();
     let here = building.iter().filter(|run| run.host.is_none()).count();
     let hosts: Vec<&str> = building
@@ -557,9 +558,9 @@ pub fn home(shown: &Shown, now: DateTime<Utc>) -> Home {
         .collect();
     Home {
         headline: headline(here, &hosts),
-        building: cards(Disposition::Building),
-        waiting: cards(Disposition::WaitingForReview),
-        attention: cards(Disposition::NeedsAttention),
+        building: cards(&Disposition::is_building),
+        waiting: cards(&|d| d == Disposition::WaitingForReview),
+        attention: cards(&|d| d == Disposition::NeedsAttention),
     }
 }
 
@@ -574,6 +575,7 @@ pub fn sidebar(
     let order = [
         Disposition::NeedsAttention,
         Disposition::Building,
+        Disposition::Reviewing,
         Disposition::WaitingForReview,
     ];
     let up = u64::try_from((now - started).num_milliseconds()).unwrap_or(0);
@@ -603,7 +605,7 @@ pub fn popover(shown: &Shown, started: DateTime<Utc>, now: DateTime<Utc>) -> Pop
     let building: Vec<&HostedRun> = shown
         .runs
         .iter()
-        .filter(|run| run.state.disposition == Disposition::Building)
+        .filter(|run| run.state.disposition.is_building())
         .collect();
     let agents = building
         .iter()
@@ -933,6 +935,10 @@ pub fn run_page(
                 format!("{build} build running, {agents}.")
             }
         }
+        Disposition::Reviewing => {
+            let build = capitalized(&ordinal(run.builds.len()));
+            format!("{build} build running, reviewing its pull request.")
+        }
         _ => capitalized(&plain(&run_card(run, now).sentence.unwrap_or_default())),
     };
     let mut about = vec![text(format!("{} · ", plural(total, "issue", "issues")))];
@@ -982,7 +988,7 @@ pub fn run_page(
         also_building: shown
             .runs
             .iter()
-            .filter(|o| o.state.disposition == Disposition::Building && o.key() != hosted.key())
+            .filter(|o| o.state.disposition.is_building() && o.key() != hosted.key())
             .map(|o| (o.key().to_string(), o.state.title.clone()))
             .collect(),
         builds,

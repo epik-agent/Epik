@@ -16,7 +16,7 @@ use epik_core::hosted::{HostedKey, HostedRun};
 use epik_core::hosts;
 use epik_core::record::{self, IssueStatus};
 use epik_core::repositories;
-use epik_core::run::{self, RunKey};
+use epik_core::run;
 use epik_core::{settings, setup, uninstall};
 use epik_view::{
     AgentSettings, Home, Popover, Removal, RunPage, Settings, Sidebar, Stream, Uninstall,
@@ -45,20 +45,6 @@ pub const LABEL: &str = "main";
 
 fn key(run: &str) -> Result<HostedKey, String> {
     run.parse()
-}
-
-/// The run named `run`, which must be on this computer: a remote host owns
-/// its runs, and rerunning or deleting one there isn't done from here yet.
-fn here(run: &str) -> Result<RunKey, String> {
-    match key(run)? {
-        HostedKey { host: None, run } => Ok(run),
-        HostedKey {
-            host: Some(host),
-            run,
-        } => Err(format!(
-            "{run} builds on {host}, and only {host} can change it"
-        )),
-    }
 }
 
 fn failed(error: impl std::fmt::Display) -> String {
@@ -147,20 +133,32 @@ async fn off_main(
 
 #[tauri::command]
 pub async fn rerun(run: String, window: State<'_, Window>) -> Result<(), String> {
-    let key = here(&run)?;
     let runs = window.runs.clone();
-    let rerun = off_main(window, move |builds| builds.rerun(&key).map(drop)).await;
+    let rerun = off_main(window, move |builds| rerun_named(builds, &run)).await;
     runs.forget();
     rerun
 }
 
 #[tauri::command]
 pub async fn delete_run(run: String, window: State<'_, Window>) -> Result<(), String> {
-    let key = here(&run)?;
     let runs = window.runs.clone();
-    let deleted = off_main(window, move |builds| builds.delete(&key)).await;
+    let deleted = off_main(window, move |builds| delete_named(builds, &run)).await;
     runs.forget();
     deleted
+}
+
+/// Reruns the run named `run` on the host it builds on: a remote host's
+/// run is rerun there.
+fn rerun_named(builds: &Builds, run: &str) -> Result<(), String> {
+    let HostedKey { host, run } = key(run)?;
+    builds.rerun_on(host.as_deref(), &run).map(drop)
+}
+
+/// Deletes the run named `run` on the host it builds on: a remote host's
+/// run is deleted there, and goes from its mirror here.
+fn delete_named(builds: &Builds, run: &str) -> Result<(), String> {
+    let HostedKey { host, run } = key(run)?;
+    builds.delete_on(host.as_deref(), &run)
 }
 
 #[tauri::command]
@@ -394,6 +392,13 @@ pub fn open(handle: &AppHandle, route: &str) -> tauri::Result<()> {
 mod tests {
     use std::fs;
 
+    use epik_core::builds::Started;
+    use epik_core::ipc::{Request, Response};
+    use epik_core::mirrors::Mirrors;
+    use epik_core::record::Kind;
+    use epik_core::remote::Client;
+    use epik_core::run::RunKey;
+
     use super::*;
 
     const LINE: &str = r#"{"at":"2026-10-30T18:11:41Z","from_agent":{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello."}}}}}"#;
@@ -455,11 +460,69 @@ mod tests {
         }
     }
 
+    /// A host's app that keeps what it is asked, starts every rerun and
+    /// deletes every run.
+    #[derive(Default)]
+    struct Remote {
+        asked: std::sync::Mutex<Vec<Request>>,
+    }
+
+    impl Client for Remote {
+        fn request(&self, request: &Request) -> std::io::Result<Response> {
+            self.asked.lock().unwrap().push(request.clone());
+            Ok(match request {
+                Request::Rerun { run, .. } => Response::Started(Started {
+                    run: run.clone(),
+                    build_id: "20261101T120000Z-abcd".to_owned(),
+                    kind: Kind::Issue,
+                    branch: "main".to_owned(),
+                    build_dir: "/home/me/.epik/runs/acme/widgets/13/b".into(),
+                    host: None,
+                }),
+                Request::Delete { run, .. } => Response::Deleted { run: run.clone() },
+                _ => Response::RunKeys { runs: Vec::new() },
+            })
+        }
+    }
+
     #[test]
-    fn a_hosts_run_cant_be_rerun_or_deleted_from_here_yet() {
-        assert_eq!(here("acme/widgets#13"), Ok(RunKey::new("acme/widgets", 13)));
-        let refused = here("devbox:acme/widgets#13").unwrap_err();
-        assert!(refused.contains("devbox"), "{refused}");
+    fn a_hosts_run_is_rerun_and_deleted_on_its_host() {
+        let root = tempfile::tempdir().unwrap();
+        hosts::add(root.path(), "devbox", Utc::now()).unwrap();
+        let remote = Arc::new(Remote::default());
+        let mirrors = Mirrors::new(root.path(), {
+            let remote = remote.clone();
+            move |_| remote.clone()
+        });
+        let builds = Builds::real(root.path()).reaching(Arc::new(mirrors));
+
+        rerun_named(&builds, "devbox:acme/widgets#13").unwrap();
+        delete_named(&builds, "devbox:acme/widgets#13").unwrap();
+
+        let run = RunKey::new("acme/widgets", 13);
+        assert_eq!(
+            *remote.asked.lock().unwrap(),
+            [
+                Request::Rerun {
+                    run: run.clone(),
+                    host: None
+                },
+                Request::Delete { run, host: None },
+            ]
+        );
+        assert!(builds.active().is_empty(), "nothing builds here");
+    }
+
+    #[test]
+    fn a_run_on_this_computer_is_rerun_and_deleted_here() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = Builds::real(root.path());
+
+        let rerun = rerun_named(&builds, "acme/widgets#13").unwrap_err();
+        let deleted = delete_named(&builds, "acme/widgets#13").unwrap_err();
+
+        assert_eq!(rerun, "no run acme/widgets#13");
+        assert_eq!(deleted, "no run acme/widgets#13");
     }
 
     #[test]

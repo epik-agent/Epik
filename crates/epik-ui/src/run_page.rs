@@ -34,7 +34,7 @@ fn state_class(state: NodeState) -> &'static str {
 
 fn disposition_class(disposition: Disposition) -> &'static str {
     match disposition {
-        Disposition::Building => "building",
+        Disposition::Building | Disposition::Reviewing => "building",
         Disposition::WaitingForReview => "waiting_for_review",
         Disposition::NeedsAttention => "needs_attention",
     }
