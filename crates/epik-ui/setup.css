@@ -19,6 +19,7 @@ main { padding: 12px 28px 28px; }
 .done .mark { color: var(--accent); }
 .missing .mark { color: var(--error); }
 .outdated .mark { color: var(--warning); }
+.unneeded .mark, .unneeded .title { color: var(--muted); }
 .title { font-weight: 500; }
 .detail { grid-column: 2; color: var(--secondary); }
 .item button { grid-row: 1 / span 2; grid-column: 3; align-self: center; }

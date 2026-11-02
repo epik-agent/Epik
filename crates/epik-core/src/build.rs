@@ -12,6 +12,13 @@
 //! closes the issue, which GitHub does only for merges into the default
 //! branch. For a single issue, the pull request targets the default branch
 //! and is left for the user to merge.
+//!
+//! With review on, the run's pull request into the default branch, the
+//! single issue's or the epic's, is reviewed once its checks pass, and the
+//! build finishes with the review's verdict. A review asking for changes
+//! has the coding agent address it on the pull request's branch, then the
+//! checks and the review run again, up to [`REVIEW_ROUNDS`] reviews. An
+//! epic's issues merge with no review between them.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -32,11 +39,20 @@ use crate::cleanup;
 use crate::comment;
 use crate::github::{self, Checks, GitHub, PullRequest, State};
 use crate::graph::Graph;
-use crate::record::{self, BuildState, BuildWriter, Event, Issue, Kind, Outcome};
+use crate::prompt::{self, Work};
+use crate::record::{
+    self, BuildState, BuildWriter, Event, Issue, Kind, Outcome, ReviewVerdict, SessionRole,
+};
+use crate::review::{self, Verdict};
 use crate::run::{self, RunKey};
+use crate::settings::{Role, Settings};
 
 /// How often a pull request's checks are read while they are pending.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many times the run's pull request is reviewed before a review that
+/// still asks for changes leaves it to the user.
+pub const REVIEW_ROUNDS: u32 = 2;
 
 /// How often a waiting build looks at the cancel signal.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -55,8 +71,10 @@ pub struct Request {
     /// Epik's root, normally `~/.epik`. Clones go under `builds`, records
     /// under `runs`.
     pub root: PathBuf,
-    /// Epik's Claude Code plugin, which each agent loads.
-    pub plugin_dir: PathBuf,
+    /// The agent and model each role runs with, recorded in
+    /// `build_started`. Each issue's agent runs the coding role's model,
+    /// and the review, when it is on, the review role's.
+    pub roles: Settings,
 }
 
 /// Why a build couldn't start.
@@ -211,6 +229,7 @@ pub fn start<'a>(
                 .collect::<github::Result<_>>()?
         }
     };
+    let numbers = issues.iter().map(|issue| issue.number).collect();
     let graph = Graph::new(
         issues
             .iter()
@@ -251,11 +270,12 @@ pub fn start<'a>(
         branch: branch.clone(),
         issues,
         closed: closed.iter().copied().collect(),
-        plugin_dir: Some(request.plugin_dir.clone()),
+        roles: request.roles.clone(),
     });
     Ok(Build {
         github,
         agent,
+        reviewer: agent,
         root: request.root.clone(),
         key,
         repo: repo.to_owned(),
@@ -267,10 +287,11 @@ pub fn start<'a>(
         build_id,
         clone,
         dir,
-        plugin_dir: request.plugin_dir.clone(),
+        issues: numbers,
         graph,
         closed,
         problems,
+        roles: request.roles.clone(),
         check_interval: CHECK_INTERVAL,
         log: Mutex::new(log),
     })
@@ -280,6 +301,8 @@ pub fn start<'a>(
 pub struct Build<'a> {
     github: &'a dyn GitHub,
     agent: &'a (dyn Agent + Sync),
+    /// The agent that reviews the run's pull request, when review is on.
+    reviewer: &'a (dyn Agent + Sync),
     /// Epik's root, holding the run's earlier builds.
     root: PathBuf,
     key: RunKey,
@@ -293,13 +316,15 @@ pub struct Build<'a> {
     clone: PathBuf,
     /// The run's record directory.
     dir: PathBuf,
-    plugin_dir: PathBuf,
+    /// The run's issues, closed or not.
+    issues: Vec<u64>,
     /// The run's issues and the issues blocking each.
     graph: Graph,
     /// The issues closed when the build started.
     closed: BTreeSet<u64>,
     /// What stops the run before any agent starts.
     problems: Vec<String>,
+    roles: Settings,
     check_interval: Duration,
     log: Mutex<Log>,
 }
@@ -313,7 +338,7 @@ enum Finished {
     Cancelled,
 }
 
-impl Build<'_> {
+impl<'a> Build<'a> {
     /// The run the build belongs to.
     pub fn run_key(&self) -> &RunKey {
         &self.key
@@ -344,6 +369,13 @@ impl Build<'_> {
         &self.clone
     }
 
+    /// The agent that reviews the run's pull request when review is on;
+    /// by default the agent that codes.
+    pub fn reviewer(mut self, reviewer: &'a (dyn Agent + Sync)) -> Self {
+        self.reviewer = reviewer;
+        self
+    }
+
     /// How often pending checks are read; [`CHECK_INTERVAL`] by default.
     pub fn check_interval(mut self, interval: Duration) -> Self {
         self.check_interval = interval;
@@ -354,12 +386,14 @@ impl Build<'_> {
     /// also written to `summary.json`.
     ///
     /// Every ready issue's agent starts at once, each on its own thread,
-    /// with the prompt `/epik:issue <number> <branch>`. As each finishes,
+    /// with a prompt saying what the work is, Epik's rules and the procedure
+    /// for implementing an issue. As each finishes,
     /// its issue is finished, and for an epic merged and closed, and the
     /// issues it unblocks start. When nothing is running or ready, an epic
     /// whose issues are all closed gets its pull request into the default
-    /// branch. Setting `cancel` stops every agent and ends the run with
-    /// `build_interrupted`.
+    /// branch. With review on, that pull request, or a single issue's, is
+    /// reviewed once its checks pass. Setting `cancel` stops every agent
+    /// and ends the run with `build_interrupted`.
     pub fn run(self, cancel: &AtomicBool) -> BuildState {
         if self.problems.is_empty() {
             self.orchestrate(cancel);
@@ -425,10 +459,7 @@ impl Build<'_> {
         });
 
         if cancel.load(Ordering::SeqCst) {
-            self.append(Event::BuildInterrupted {
-                at: Utc::now(),
-                reason: "cancelled".to_owned(),
-            });
+            self.interrupt();
             return;
         }
         let stuck = self.graph.stuck(&closed, &failed);
@@ -440,9 +471,9 @@ impl Build<'_> {
             self.finish(Err(reason));
             return;
         }
-        match self.kind {
+        let pull_request = match self.kind {
             // The single issue's own pull request.
-            Kind::Issue => self.finish(Ok(last_pull_request)),
+            Kind::Issue => last_pull_request,
             Kind::Epic => {
                 let body = format!("Closes #{}", self.number);
                 let opened = self.github.open_pull_request(
@@ -452,13 +483,214 @@ impl Build<'_> {
                     &self.title,
                     &body,
                 );
-                self.finish(
-                    opened
-                        .map(Some)
-                        .map_err(|error| format!("couldn't open the epic's pull request: {error}")),
+                match opened {
+                    Ok(pr) => Some(pr),
+                    Err(error) => {
+                        self.finish(Err(format!(
+                            "couldn't open the epic's pull request: {error}"
+                        )));
+                        return;
+                    }
+                }
+            }
+        };
+        match (pull_request, &self.roles.review) {
+            (Some(pr), Some(role)) => self.review(pr, role, cancel),
+            _ => self.finish(Ok(pull_request)),
+        }
+    }
+
+    /// Waits for the run's pull request `pr`'s checks, reviews it with
+    /// `role`'s agent, and finishes the build with the review's verdict and
+    /// the threads left open. When the review asks for changes, the coding
+    /// agent addresses it on the pull request's branch and the checks and
+    /// the review run again, up to [`REVIEW_ROUNDS`] reviews; changes asked
+    /// for after the last leave the run needing attention. Failing checks
+    /// fail the build.
+    fn review(&self, pr: u64, role: &Role, cancel: &AtomicBool) {
+        let number = self.number;
+        let sub_issues = match self.kind {
+            Kind::Epic => self.issues.clone(),
+            Kind::Issue => Vec::new(),
+        };
+        let base = match self.kind {
+            Kind::Epic => &self.default_branch,
+            Kind::Issue => &self.branch,
+        };
+        let open_threads = || self.github.open_review_threads(&self.repo, pr).ok();
+        // The verdict the pull request stands on, once a review has run.
+        let mut review = None;
+        let mut round = 1;
+        loop {
+            match self.await_checks(pr, cancel) {
+                Ok(()) => {}
+                Err(Stop::Cancelled) => return self.interrupt(),
+                Err(Stop::Failed(reason)) => {
+                    return self.end(Outcome::Failed, Some(reason), Some(pr), review, None);
+                }
+            }
+            let request = AgentRequest {
+                prompt: prompt::review_prompt(&self.repo, number, &sub_issues, pr, round),
+                issue: number,
+                branch: base.clone(),
+                cwd: self.clone.clone(),
+                jsonl_path: self.dir.join(format!("{number}-review-{round}.jsonl")),
+                err_path: self.dir.join(format!("{number}-review-{round}.err")),
+                model: role.model.clone(),
+            };
+            self.session_started(role, SessionRole::Review, round, &request);
+            let outcome = self.reviewer.run(&request, cancel);
+            if cancel.load(Ordering::SeqCst) {
+                self.session_finished(SessionRole::Review, round, &request, &outcome, None);
+                return self.interrupt();
+            }
+            // The verdict is GitHub's, whatever the agent said or however it
+            // stopped: a review that can't be read is no verdict.
+            let verdict = self
+                .github
+                .reviews(&self.repo, pr)
+                .ok()
+                .and_then(|reviews| review::verdict(&reviews, round));
+            review = Some(match verdict {
+                Some(Verdict::Approve) => ReviewVerdict::Approve,
+                Some(Verdict::Changes) => ReviewVerdict::Changes,
+                None => ReviewVerdict::NoVerdict,
+            });
+            self.session_finished(SessionRole::Review, round, &request, &outcome, review);
+            if review != Some(ReviewVerdict::Changes) {
+                return self.end(Outcome::Succeeded, None, Some(pr), review, open_threads());
+            }
+            if round == REVIEW_ROUNDS {
+                let reason = format!(
+                    "the review still asks for changes after {REVIEW_ROUNDS} rounds; see #{pr}"
+                );
+                return self.end(
+                    Outcome::Failed,
+                    Some(reason),
+                    Some(pr),
+                    review,
+                    open_threads(),
                 );
             }
+            round += 1;
+            if let Err(stop) = self.address(pr, round, base, cancel) {
+                return match stop {
+                    Stop::Cancelled => self.interrupt(),
+                    Stop::Failed(reason) => self.end(
+                        Outcome::Failed,
+                        Some(reason),
+                        Some(pr),
+                        review,
+                        open_threads(),
+                    ),
+                };
+            }
         }
+    }
+
+    /// Runs the coding agent on the run's pull request `pr` into `base` as
+    /// session `round`, to address the review on the pull request's branch.
+    fn address(&self, pr: u64, round: u32, base: &str, cancel: &AtomicBool) -> Result<(), Stop> {
+        let number = self.number;
+        let head = self
+            .github
+            .pull_request(&self.repo, pr)
+            .map_err(|error| Stop::Failed(format!("couldn't read #{pr}: {error}")))?
+            .head;
+        let work = Work::Address {
+            issue: number,
+            epic: self.kind == Kind::Epic,
+            pull_request: pr,
+            head: &head,
+        };
+        let request = AgentRequest {
+            prompt: prompt::prompt(&self.repo, work, base),
+            issue: number,
+            branch: base.to_owned(),
+            cwd: self.clone.clone(),
+            jsonl_path: self.dir.join(format!("{number}-coding-{round}.jsonl")),
+            err_path: self.dir.join(format!("{number}-coding-{round}.err")),
+            model: self.roles.coding.model.clone(),
+        };
+        let coding = &self.roles.coding;
+        let outcome = self.session(
+            self.agent,
+            coding,
+            SessionRole::Coding,
+            round,
+            &request,
+            cancel,
+        );
+        if cancel.load(Ordering::SeqCst) {
+            return Err(Stop::Cancelled);
+        }
+        if !outcome.exited_cleanly {
+            return Err(Stop::Failed(format!(
+                "the agent addressing the review stopped ({}): {}",
+                outcome.stop_reason,
+                outcome.error.as_deref().unwrap_or("no error given")
+            )));
+        }
+        Ok(())
+    }
+
+    /// Runs `agent` on `request` as session `round` of `role`, with the
+    /// agent and model of `with`, recording when it starts and finishes.
+    fn session(
+        &self,
+        agent: &(dyn Agent + Sync),
+        with: &Role,
+        role: SessionRole,
+        round: u32,
+        request: &AgentRequest,
+        cancel: &AtomicBool,
+    ) -> AgentOutcome {
+        self.session_started(with, role, round, request);
+        let outcome = agent.run(request, cancel);
+        self.session_finished(role, round, request, &outcome, None);
+        outcome
+    }
+
+    /// Records that session `round` of `role` has started on `request`,
+    /// with the agent and model of `with`.
+    fn session_started(&self, with: &Role, role: SessionRole, round: u32, request: &AgentRequest) {
+        let log = request
+            .jsonl_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.append(Event::SessionStarted {
+            at: Utc::now(),
+            number: request.issue,
+            role,
+            round,
+            agent: with.agent.clone(),
+            model: with.model.clone(),
+            log,
+        });
+    }
+
+    /// Records that session `round` of `role` on `request` has finished with
+    /// `outcome`, and for a review, its `verdict`.
+    fn session_finished(
+        &self,
+        role: SessionRole,
+        round: u32,
+        request: &AgentRequest,
+        outcome: &AgentOutcome,
+        verdict: Option<ReviewVerdict>,
+    ) {
+        self.append(Event::SessionFinished {
+            at: Utc::now(),
+            number: request.issue,
+            role,
+            round,
+            duration_ms: outcome.duration_ms,
+            cost_usd: outcome
+                .cost_usd
+                .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
+            verdict,
+        });
     }
 
     /// Runs issue `number`'s agent, then finds its pull request, and for an
@@ -466,17 +698,21 @@ impl Build<'_> {
     fn build_issue(&self, number: u64, cancel: &AtomicBool) -> Finished {
         let dir = &self.dir;
         let request = AgentRequest {
-            prompt: format!("/epik:issue {number} {}", self.branch),
+            prompt: prompt::prompt(&self.repo, Work::Issue(number), &self.branch),
+            issue: number,
+            branch: self.branch.clone(),
             cwd: self.clone.clone(),
-            plugin_dir: self.plugin_dir.clone(),
             jsonl_path: dir.join(format!("{number}.jsonl")),
             err_path: dir.join(format!("{number}.err")),
+            model: self.roles.coding.model.clone(),
         };
-        let outcome = self.agent.run(&request, cancel);
+        let coding = &self.roles.coding;
+        let outcome = self.session(self.agent, coding, SessionRole::Coding, 1, &request, cancel);
         if cancel.load(Ordering::SeqCst) {
-            // What the agent spent before it was stopped still counts.
+            // What the agent spent before it was stopped still counts: its
+            // session has it.
             let reason = Some("interrupted".to_owned());
-            self.issue_finished(number, &outcome, Outcome::Failed, reason, None);
+            self.issue_finished(number, Outcome::Failed, reason, None);
             return Finished::Cancelled;
         }
         let found = if outcome.exited_cleanly {
@@ -501,11 +737,11 @@ impl Build<'_> {
         let pr = match found {
             Ok(pr) => pr,
             Err(reason) => {
-                self.issue_finished(number, &outcome, Outcome::Failed, Some(reason), None);
+                self.issue_finished(number, Outcome::Failed, Some(reason), None);
                 return Finished::Failed;
             }
         };
-        self.issue_finished(number, &outcome, Outcome::Succeeded, None, Some(pr.number));
+        self.issue_finished(number, Outcome::Succeeded, None, Some(pr.number));
         if self.kind == Kind::Issue {
             return Finished::Done(pr.number);
         }
@@ -524,13 +760,7 @@ impl Build<'_> {
             Err(Stop::Failed(reason)) => {
                 // A second `issue_finished` records that the issue failed
                 // after its agent succeeded.
-                self.issue_finished(
-                    number,
-                    &outcome,
-                    Outcome::Failed,
-                    Some(reason),
-                    Some(pr.number),
-                );
+                self.issue_finished(number, Outcome::Failed, Some(reason), Some(pr.number));
                 Finished::Failed
             }
         }
@@ -595,7 +825,6 @@ impl Build<'_> {
     fn issue_finished(
         &self,
         number: u64,
-        agent: &AgentOutcome,
         outcome: Outcome,
         reason: Option<String>,
         pull_request: Option<u64>,
@@ -606,25 +835,43 @@ impl Build<'_> {
             outcome,
             reason,
             pull_request,
-            duration_ms: agent.duration_ms,
-            cost_usd: agent
-                .cost_usd
-                .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
+            duration_ms: None,
+            cost_usd: None,
         });
     }
 
-    /// Ends the run: with its pull request if it succeeded, else with the
-    /// reason it failed.
+    /// Ends the run unreviewed: with its pull request if it succeeded, else
+    /// with the reason it failed.
     fn finish(&self, result: Result<Option<u64>, String>) {
-        let (outcome, reason, pull_request) = match result {
-            Ok(pull_request) => (Outcome::Succeeded, None, pull_request),
-            Err(reason) => (Outcome::Failed, Some(reason), None),
-        };
+        match result {
+            Ok(pull_request) => self.end(Outcome::Succeeded, None, pull_request, None, None),
+            Err(reason) => self.end(Outcome::Failed, Some(reason), None, None, None),
+        }
+    }
+
+    fn end(
+        &self,
+        outcome: Outcome,
+        reason: Option<String>,
+        pull_request: Option<u64>,
+        review: Option<ReviewVerdict>,
+        open_threads: Option<usize>,
+    ) {
         self.append(Event::BuildFinished {
             at: Utc::now(),
             outcome,
             reason,
             pull_request,
+            review,
+            open_threads,
+        });
+    }
+
+    /// Ends the run as cancelled.
+    fn interrupt(&self) {
+        self.append(Event::BuildInterrupted {
+            at: Utc::now(),
+            reason: "cancelled".to_owned(),
         });
     }
 
@@ -682,7 +929,7 @@ fn numbered<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
 mod tests {
     use super::*;
     use crate::github::{FakeGitHub, MergeMethods, PullState};
-    use crate::record::{BuildStatus, IssueStatus};
+    use crate::record::{BuildStatus, IssueStatus, ReviewVerdict};
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
 
@@ -704,10 +951,15 @@ mod tests {
         Hang,
     }
 
-    /// An [`Agent`] that acts on a [`FakeGitHub`] as `/epik:issue` would.
+    /// An [`Agent`] that acts on a [`FakeGitHub`] as an agent following the
+    /// issue procedure would. Addressing a review, it pushes to the pull
+    /// request it was given, which the fake doesn't see, and opens none.
     struct FakeAgent<'a> {
         github: &'a FakeGitHub,
         acts: BTreeMap<u64, Act>,
+        /// Whether addressing a review fails, as an agent that couldn't
+        /// start does.
+        address_crashes: bool,
         requests: Mutex<Vec<AgentRequest>>,
         running: AtomicUsize,
         most_running: AtomicUsize,
@@ -718,24 +970,27 @@ mod tests {
             Self {
                 github,
                 acts: BTreeMap::from(acts),
+                address_crashes: false,
                 requests: Mutex::new(Vec::new()),
                 running: AtomicUsize::new(0),
                 most_running: AtomicUsize::new(0),
             }
         }
 
-        fn prompts(&self) -> Vec<String> {
+        /// Each agent's issue and target branch, in the order they ran.
+        fn issues(&self) -> Vec<(u64, String)> {
             let requests = self.requests.lock().unwrap();
-            requests.iter().map(|r| r.prompt.clone()).collect()
+            requests
+                .iter()
+                .map(|r| (r.issue, r.branch.clone()))
+                .collect()
         }
 
-        fn act(&self, prompt: &str, cancel: &AtomicBool) -> Option<String> {
-            let words: Vec<&str> = prompt.split(' ').collect();
-            let [command, number, branch] = words[..] else {
-                panic!("unexpected prompt {prompt}");
-            };
-            assert_eq!(command, "/epik:issue");
-            let number: u64 = number.parse().unwrap();
+        fn act(&self, request: &AgentRequest, cancel: &AtomicBool) -> Option<String> {
+            let (number, branch) = (request.issue, request.branch.as_str());
+            if addresses(request) {
+                return self.address_crashes.then(|| "agent_failed".into());
+            }
             match self
                 .acts
                 .get(&number)
@@ -770,6 +1025,13 @@ mod tests {
         }
     }
 
+    /// Whether `request` addresses a review: a coding session after the
+    /// first, whose log is `<n>-coding-<round>.jsonl`.
+    fn addresses(request: &AgentRequest) -> bool {
+        let log = request.jsonl_path.file_name().unwrap().to_string_lossy();
+        log.contains("-coding-")
+    }
+
     impl Agent for FakeAgent<'_> {
         fn run(&self, request: &AgentRequest, cancel: &AtomicBool) -> AgentOutcome {
             self.requests.lock().unwrap().push(request.clone());
@@ -777,7 +1039,7 @@ mod tests {
             self.most_running.fetch_max(now, Ordering::SeqCst);
             // Long enough for issues started together to overlap.
             thread::sleep(Duration::from_millis(50));
-            let stopped = self.act(&request.prompt, cancel);
+            let stopped = self.act(request, cancel);
             self.running.fetch_sub(1, Ordering::SeqCst);
             AgentOutcome {
                 exited_cleanly: stopped.is_none(),
@@ -787,6 +1049,125 @@ mod tests {
                 cost_usd: Some(0.25),
             }
         }
+
+        fn check(&self, _cwd: &std::path::Path, _model: Option<&str>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// An [`Agent`] that reviews a run's pull request into `main` as an
+    /// agent following the review procedure would: each round it posts one
+    /// review ending with that round's marker, or with no marker, and
+    /// leaves `open_threads` unresolved.
+    struct FakeReviewer<'a> {
+        github: &'a FakeGitHub,
+        root: PathBuf,
+        /// Each round's marker. Rounds past the last repeat it.
+        markers: Vec<Option<&'static str>>,
+        open_threads: usize,
+        requests: Mutex<Vec<AgentRequest>>,
+        /// The pull request's checks and the run's disposition, as each
+        /// review saw them.
+        seen: Mutex<Vec<(Checks, run::Disposition)>>,
+    }
+
+    impl<'a> FakeReviewer<'a> {
+        fn new(github: &'a FakeGitHub, root: &Path, marker: Option<&'static str>) -> Self {
+            Self {
+                github,
+                root: root.to_owned(),
+                markers: vec![marker],
+                open_threads: 0,
+                requests: Mutex::new(Vec::new()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Marks the next round's review with `marker`.
+        fn then(mut self, marker: Option<&'static str>) -> Self {
+            self.markers.push(marker);
+            self
+        }
+    }
+
+    impl Agent for FakeReviewer<'_> {
+        fn run(&self, request: &AgentRequest, _cancel: &AtomicBool) -> AgentOutcome {
+            let round = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request.clone());
+                requests.len()
+            };
+            let pulls = self.github.repo(REPO).pulls;
+            let (&pr, _) = pulls
+                .iter()
+                .find(|(_, pull)| pull.base == "main" && pull.state == PullState::Open)
+                .expect("the run's pull request is open");
+            let run = run::read(&self.root, &RunKey::new(REPO, request.issue)).unwrap();
+            let checks = self.github.checks(REPO, pr).unwrap();
+            self.seen.lock().unwrap().push((checks, run.disposition));
+            let marker = self.markers[round.min(self.markers.len()) - 1];
+            let body = match marker {
+                Some(verdict) => {
+                    format!("Read it.\n\n<!-- epik-review: {verdict} round={round} -->")
+                }
+                None => "Read it.".to_owned(),
+            };
+            self.github.add_review(REPO, pr, &body, Utc::now());
+            self.github
+                .set_open_review_threads(REPO, pr, self.open_threads);
+            AgentOutcome {
+                exited_cleanly: true,
+                error: None,
+                stop_reason: "end_turn".into(),
+                duration_ms: 2_000,
+                cost_usd: Some(0.5),
+            }
+        }
+
+        fn check(&self, _cwd: &std::path::Path, _model: Option<&str>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The review role, with a model.
+    fn reviewing() -> Option<Role> {
+        Some(Role {
+            agent: "claude".to_owned(),
+            model: Some("sonnet".to_owned()),
+        })
+    }
+
+    /// A repository on `main` holding open issue 7, "One thing".
+    fn single() -> FakeGitHub {
+        let github = FakeGitHub::new();
+        github.add_repo(REPO, "main");
+        github.add_issue(REPO, 7, "One thing");
+        github
+    }
+
+    /// Builds `number` to its end with `review` as the review role and
+    /// `reviewer` as its agent.
+    fn build_reviewed(
+        github: &FakeGitHub,
+        agent: &FakeAgent,
+        reviewer: &FakeReviewer,
+        root: &Path,
+        number: u64,
+        review: Option<Role>,
+    ) -> BuildState {
+        let mut request = request(root, number);
+        request.roles.review = review;
+        start(github, agent, &request)
+            .unwrap()
+            .reviewer(reviewer)
+            .check_interval(Duration::from_millis(1))
+            .run(&AtomicBool::new(false))
+    }
+
+    /// Every event on disk, each written briefly, without its time.
+    fn all_events(root: &Path, state: &BuildState) -> Vec<String> {
+        let events = record::read_events(root, &state.run(), &state.build_id).unwrap();
+        events.iter().map(brief).collect()
     }
 
     /// A repository on `main` holding epic 1, "The epic", whose sub-issues
@@ -811,7 +1192,7 @@ mod tests {
             number,
             branch: None,
             root: root.to_owned(),
-            plugin_dir: PathBuf::from("/plugin"),
+            roles: Settings::default(),
         }
     }
 
@@ -833,10 +1214,20 @@ mod tests {
         *found.expect("the issue has a pull request").0
     }
 
-    /// The run's events on disk, each written briefly, without its time.
+    /// The run's events on disk, each written briefly, without its time,
+    /// leaving out its sessions'.
     fn events(root: &Path, state: &BuildState) -> Vec<String> {
         let events = record::read_events(root, &state.run(), &state.build_id).unwrap();
-        events.iter().map(brief).collect()
+        events
+            .iter()
+            .filter(|event| {
+                !matches!(
+                    event,
+                    Event::SessionStarted { .. } | Event::SessionFinished { .. }
+                )
+            })
+            .map(brief)
+            .collect()
     }
 
     fn brief(event: &Event) -> String {
@@ -863,6 +1254,26 @@ mod tests {
                 format!("build_started {kind:?} {branch} {}", issues.join(" "))
             }
             Event::IssueStarted { number, .. } => format!("issue_started {number}"),
+            Event::SessionStarted {
+                number,
+                role,
+                round,
+                agent,
+                model,
+                log,
+                ..
+            } => format!("session_started {number} {role:?} {round} {agent} {model:?} {log}"),
+            Event::SessionFinished {
+                number,
+                role,
+                round,
+                duration_ms,
+                cost_usd,
+                ..
+            } => format!(
+                "session_finished {number} {role:?} {round} {duration_ms} {}",
+                cost_usd.map_or("-".to_owned(), |cost| cost.to_string())
+            ),
             Event::IssueFinished {
                 number,
                 outcome,
@@ -883,12 +1294,18 @@ mod tests {
                 outcome,
                 reason,
                 pull_request,
+                review,
+                open_threads,
                 ..
-            } => format!(
-                "build_finished {outcome:?}{}{}",
-                pr(pull_request),
-                why(reason)
-            ),
+            } => {
+                let review = review.map_or(String::new(), |review| format!(" {review:?}"));
+                let open = open_threads.map_or(String::new(), |open| format!(" {open} open"));
+                format!(
+                    "build_finished {outcome:?}{}{review}{open}{}",
+                    pr(pull_request),
+                    why(reason)
+                )
+            }
             Event::BuildInterrupted { reason, .. } => format!("build_interrupted ({reason})"),
             Event::PullRequestClosed { pull_request, .. } => {
                 format!("pull_request_closed #{pull_request}")
@@ -991,6 +1408,53 @@ mod tests {
     }
 
     #[test]
+    fn each_issues_agent_runs_as_a_coding_session_with_the_coding_role() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(root.path(), 1);
+        request.roles.coding.model = Some("opus".to_owned());
+        let state = start(&github, &agent, &request)
+            .unwrap()
+            .check_interval(Duration::from_millis(1))
+            .run(&AtomicBool::new(false));
+
+        let events = record::read_events(root.path(), &state.run(), &state.build_id).unwrap();
+        let briefly: Vec<String> = events.iter().map(brief).collect();
+        let pr = pr_of(&github, 2);
+        assert_eq!(
+            briefly[1..5],
+            [
+                "issue_started 2".to_owned(),
+                "session_started 2 Coding 1 claude Some(\"opus\") 2.jsonl".to_owned(),
+                "session_finished 2 Coding 1 1000 0.25".to_owned(),
+                format!("issue_finished 2 Succeeded #{pr}"),
+            ]
+        );
+        let finished = events
+            .iter()
+            .find(|event| matches!(event, Event::IssueFinished { .. }));
+        let Some(Event::IssueFinished {
+            duration_ms,
+            cost_usd,
+            ..
+        }) = finished
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (duration_ms, cost_usd),
+            (&None, &None),
+            "the session has them"
+        );
+
+        let issue = state.issue(2).unwrap();
+        assert_eq!(issue.sessions.len(), 1);
+        assert_eq!(issue.duration_ms, Some(1_000));
+        assert_eq!(issue.cost_usd, Some(Decimal::from_str("0.25").unwrap()));
+    }
+
+    #[test]
     fn a_build_clones_the_repository_and_keeps_each_agents_logs() {
         let github = epic([(2, &[])]);
         let agent = FakeAgent::new(&github, []);
@@ -1004,9 +1468,13 @@ mod tests {
             panic!("one agent ran");
         };
         let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
-        assert_eq!(request.prompt, format!("/epik:issue 2 {EPIC_BRANCH}"));
+        assert_eq!(request.issue, 2);
+        assert_eq!(request.branch, EPIC_BRANCH);
+        assert_eq!(
+            request.prompt,
+            prompt::prompt(REPO, Work::Issue(2), EPIC_BRANCH)
+        );
         assert_eq!(request.cwd, clone);
-        assert_eq!(request.plugin_dir, Path::new("/plugin"));
         assert_eq!(request.jsonl_path, dir.join("2.jsonl"));
         assert_eq!(request.err_path, dir.join("2.err"));
 
@@ -1025,8 +1493,49 @@ mod tests {
         request.branch = Some("daemon".to_owned());
         let state = run(&github, &agent, &request, &cancel).unwrap();
         assert_eq!(state.branch, "daemon");
-        assert_eq!(agent.prompts(), ["/epik:issue 2 daemon"]);
+        assert_eq!(agent.issues(), [(2, "daemon".to_owned())]);
         assert_eq!(github.repo(REPO).pulls[&pr_of(&github, 2)].base, "daemon");
+    }
+
+    #[test]
+    fn each_agent_runs_the_coding_model_and_the_build_records_its_roles() {
+        let github = epic([(2, &[]), (3, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let roles = Settings {
+            coding: Role {
+                agent: "claude".to_owned(),
+                model: Some("opus".to_owned()),
+            },
+            review: Some(Role {
+                agent: "claude".to_owned(),
+                model: None,
+            }),
+        };
+        let mut request = request(root.path(), 1);
+        request.roles = roles.clone();
+
+        let state = run(&github, &agent, &request, &cancel).unwrap();
+
+        let models: Vec<Option<String>> = agent
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.issue != 1)
+            .map(|request| request.model.clone())
+            .collect();
+        assert_eq!(models, [Some("opus".to_owned()), Some("opus".to_owned())]);
+        assert_eq!(state.roles, roles);
+        let events = record::read_events(root.path(), &state.run(), &state.build_id).unwrap();
+        let Event::BuildStarted {
+            roles: recorded, ..
+        } = &events[0]
+        else {
+            panic!("the build starts with build_started");
+        };
+        assert_eq!(*recorded, roles);
     }
 
     #[test]
@@ -1058,7 +1567,7 @@ mod tests {
             events[6..],
             ["build_finished Failed (failed: #2; stuck: #3, #4)"]
         );
-        assert_eq!(agent.prompts().len(), 2);
+        assert_eq!(agent.issues().len(), 2);
         let repo = github.repo(REPO);
         assert_eq!(repo.issues[&2].state, State::Open);
         assert_eq!(repo.issues[&5].state, State::Closed);
@@ -1155,7 +1664,7 @@ mod tests {
                 "build_finished Failed (a dependency cycle: #2, #3)".to_owned(),
             ]
         );
-        assert!(agent.prompts().is_empty());
+        assert!(agent.issues().is_empty());
     }
 
     #[test]
@@ -1171,7 +1680,7 @@ mod tests {
             events(root.path(), &state)[1..],
             ["build_finished Failed (sub-issues in another repository: other/repo#9)"]
         );
-        assert!(agent.prompts().is_empty());
+        assert!(agent.issues().is_empty());
     }
 
     #[test]
@@ -1188,7 +1697,7 @@ mod tests {
             format!("build_started Epic {EPIC_BRANCH} x2[] 3[2]")
         );
         assert_eq!(events[1], "issue_started 3");
-        assert_eq!(agent.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        assert_eq!(agent.issues(), [(3, EPIC_BRANCH.to_owned())]);
         assert_eq!(state.status, BuildStatus::Succeeded);
     }
 
@@ -1211,7 +1720,7 @@ mod tests {
                 format!("build_finished Succeeded #{pr}"),
             ]
         );
-        assert_eq!(agent.prompts(), ["/epik:issue 7 main"]);
+        assert_eq!(agent.issues(), [(7, "main".to_owned())]);
         let repo = github.repo(REPO);
         assert_eq!(repo.pulls[&pr].state, PullState::Open);
         assert_eq!(repo.pulls[&pr].base, "main");
@@ -1242,7 +1751,7 @@ mod tests {
             ]
         );
         assert_eq!(events[5..], ["build_interrupted (cancelled)"]);
-        assert_eq!(agent.prompts().len(), 2);
+        assert_eq!(agent.issues().len(), 2);
         assert_eq!(state.status, BuildStatus::Interrupted);
         assert_eq!(state.cost_usd, Decimal::from_str("0.50").unwrap());
         assert!(github.repo(REPO).pulls.is_empty());
@@ -1259,7 +1768,14 @@ mod tests {
             .check_interval(Duration::from_secs(3600));
         let state = thread::scope(|scope| {
             let running = scope.spawn(|| build.run(&cancel));
-            while github.repo(REPO).pulls.is_empty() {
+            // Its agent has finished, so the build is waiting on the checks.
+            let finished = || {
+                run::read(root.path(), &RunKey::new(REPO, 1))
+                    .ok()
+                    .and_then(|run| run.issue(2).map(|issue| issue.status))
+                    == Some(IssueStatus::Succeeded)
+            };
+            while !finished() {
                 thread::sleep(Duration::from_millis(5));
             }
             cancel.store(true, Ordering::SeqCst);
@@ -1324,7 +1840,7 @@ mod tests {
         let second = FakeAgent::new(&github, []);
         let finished = build(&github, &second, root.path(), 1);
 
-        assert_eq!(second.prompts(), [format!("/epik:issue 3 {EPIC_BRANCH}")]);
+        assert_eq!(second.issues(), [(3, EPIC_BRANCH.to_owned())]);
         let run = run::read(root.path(), &RunKey::new(REPO, 1)).unwrap();
         assert_eq!(run.builds.len(), 2);
         assert_eq!(run.disposition, run::Disposition::WaitingForReview);
@@ -1376,5 +1892,343 @@ mod tests {
         assert!(matches!(error, Some(Error::Closed)));
         assert!(github.clones().is_empty());
         assert!(run::list(root.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_review_off_no_review_runs() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, None);
+
+        assert!(reviewer.requests.lock().unwrap().is_empty());
+        let pr = pr_of(&github, 7);
+        assert_eq!(
+            all_events(root.path(), &state).last().unwrap(),
+            &format!("build_finished Succeeded #{pr}")
+        );
+        assert_eq!((state.review, state.open_threads), (None, None));
+    }
+
+    #[test]
+    fn an_approved_single_issue_finishes_with_its_pull_request_and_the_verdict() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(
+            all_events(root.path(), &state)[5..],
+            [
+                "session_started 7 Review 1 claude Some(\"sonnet\") 7-review-1.jsonl".to_owned(),
+                "session_finished 7 Review 1 2000 0.5".to_owned(),
+                format!("build_finished Succeeded #{pr} Approve 0 open"),
+            ]
+        );
+        let requests = reviewer.requests.lock().unwrap();
+        let [request] = &requests[..] else {
+            panic!("one review ran");
+        };
+        let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
+        assert_eq!(request.prompt, prompt::review_prompt(REPO, 7, &[], pr, 1));
+        assert_eq!(request.issue, 7);
+        assert_eq!(request.model, Some("sonnet".to_owned()));
+        assert_eq!(request.jsonl_path, dir.join("7-review-1.jsonl"));
+        assert_eq!(request.err_path, dir.join("7-review-1.err"));
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.pull_request, Some(pr));
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+        assert_eq!(state.open_threads, Some(0));
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn changes_are_addressed_on_the_pull_requests_branch_and_reviewed_again() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(
+            all_events(root.path(), &state)[5..],
+            [
+                "session_started 7 Review 1 claude Some(\"sonnet\") 7-review-1.jsonl".to_owned(),
+                "session_finished 7 Review 1 2000 0.5".to_owned(),
+                "session_started 7 Coding 2 claude None 7-coding-2.jsonl".to_owned(),
+                "session_finished 7 Coding 2 1000 0.25".to_owned(),
+                "session_started 7 Review 2 claude Some(\"sonnet\") 7-review-2.jsonl".to_owned(),
+                "session_finished 7 Review 2 2000 0.5".to_owned(),
+                format!("build_finished Succeeded #{pr} Approve 0 open"),
+            ]
+        );
+        let requests = agent.requests.lock().unwrap();
+        let [_, request] = &requests[..] else {
+            panic!("the issue's agent, then one addressing the review");
+        };
+        let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
+        let work = Work::Address {
+            issue: 7,
+            epic: false,
+            pull_request: pr,
+            head: "issue-7",
+        };
+        assert_eq!(request.prompt, prompt::prompt(REPO, work, "main"));
+        assert_eq!(request.issue, 7);
+        assert_eq!(request.branch, "main");
+        assert_eq!(request.model, None);
+        assert_eq!(request.jsonl_path, dir.join("7-coding-2.jsonl"));
+        assert_eq!(request.err_path, dir.join("7-coding-2.err"));
+        let reviews = reviewer.requests.lock().unwrap();
+        assert_eq!(
+            reviews[1].prompt,
+            prompt::review_prompt(REPO, 7, &[], pr, 2)
+        );
+        assert_eq!(github.repo(REPO).pulls.len(), 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.disposition, run::Disposition::WaitingForReview);
+    }
+
+    #[test]
+    fn changes_after_the_last_round_leave_the_pull_request_for_the_user_needing_attention() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let mut reviewer = FakeReviewer::new(&github, root.path(), Some("changes"));
+        reviewer.open_threads = 2;
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), 2);
+        assert_eq!(agent.requests.lock().unwrap().len(), 2);
+        let reason = format!("the review still asks for changes after 2 rounds; see #{pr}");
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(state.reason, Some(reason.clone()));
+        assert_eq!(state.pull_request, Some(pr));
+        assert_eq!(state.review, Some(ReviewVerdict::Changes));
+        assert_eq!(state.open_threads, Some(2));
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.disposition, run::Disposition::NeedsAttention);
+        assert_eq!(run.reason, Some(reason));
+        assert_eq!(run.pull_request, Some(pr));
+        assert_eq!(run.review, Some(ReviewVerdict::Changes));
+        assert_eq!(run.open_threads, Some(2));
+    }
+
+    #[test]
+    fn an_epics_review_is_addressed_on_the_epic_branch() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 1, reviewing());
+
+        let epic_pr = state.pull_request.expect("the epic's pull request");
+        let requests = agent.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        let work = Work::Address {
+            issue: 1,
+            epic: true,
+            pull_request: epic_pr,
+            head: EPIC_BRANCH,
+        };
+        assert_eq!(request.prompt, prompt::prompt(REPO, work, "main"));
+        assert_eq!(request.branch, "main");
+        let sessions: Vec<_> = state
+            .sessions
+            .iter()
+            .map(|s| (s.role, s.round, s.log.as_str()))
+            .collect();
+        assert_eq!(
+            sessions,
+            [
+                (SessionRole::Review, 1, "1-review-1.jsonl"),
+                (SessionRole::Coding, 2, "1-coding-2.jsonl"),
+                (SessionRole::Review, 2, "1-review-2.jsonl"),
+            ]
+        );
+        let verdicts: Vec<_> = state.sessions.iter().map(|s| s.verdict).collect();
+        assert_eq!(
+            verdicts,
+            [
+                Some(ReviewVerdict::Changes),
+                None,
+                Some(ReviewVerdict::Approve)
+            ]
+        );
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+    }
+
+    #[test]
+    fn an_agent_that_fails_to_address_the_review_fails_the_build() {
+        let github = single();
+        let mut agent = FakeAgent::new(&github, []);
+        agent.address_crashes = true;
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("changes"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), 1);
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(
+            state.reason.as_deref(),
+            Some("the agent addressing the review stopped (agent_failed): it broke")
+        );
+        assert_eq!(state.pull_request, Some(pr));
+        assert_eq!(state.review, Some(ReviewVerdict::Changes));
+    }
+
+    #[test]
+    fn a_review_with_no_marker_is_no_verdict() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), None);
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.review, Some(ReviewVerdict::NoVerdict));
+    }
+
+    #[test]
+    fn the_review_waits_for_the_pull_requests_checks() {
+        let github = single();
+        let agent = FakeAgent::new(&github, [(7, Act::Pull(Checks::Pending))]);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = thread::scope(|scope| {
+            let running = scope
+                .spawn(|| build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing()));
+            while github.repo(REPO).pulls.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            thread::sleep(Duration::from_millis(50));
+            assert!(reviewer.requests.lock().unwrap().is_empty());
+            github.set_checks(REPO, pr_of(&github, 7), Checks::Passing);
+            running.join().unwrap()
+        });
+
+        let seen = reviewer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, Checks::Passing);
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+    }
+
+    #[test]
+    fn failing_checks_fail_the_build_without_a_review() {
+        let github = single();
+        let agent = FakeAgent::new(&github, [(7, Act::Pull(Checks::Failing))]);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert!(reviewer.requests.lock().unwrap().is_empty());
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(state.reason, Some(format!("checks failed on #{pr}")));
+        assert_eq!(state.pull_request, Some(pr));
+        assert_eq!(state.review, None);
+    }
+
+    #[test]
+    fn an_epics_issues_merge_without_review_and_its_pull_request_is_reviewed_once() {
+        let github = epic([(2, &[]), (3, &[2])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 1, reviewing());
+
+        let epic_pr = state.pull_request.expect("the epic's pull request");
+        let events = events(root.path(), &state);
+        assert_eq!(
+            events[1..],
+            [
+                "issue_started 2".to_owned(),
+                format!("issue_finished 2 Succeeded #{}", pr_of(&github, 2)),
+                format!("issue_merged 2 #{}", pr_of(&github, 2)),
+                "issue_started 3".to_owned(),
+                format!("issue_finished 3 Succeeded #{}", pr_of(&github, 3)),
+                format!("issue_merged 3 #{}", pr_of(&github, 3)),
+                format!("build_finished Succeeded #{epic_pr} Approve 0 open"),
+            ]
+        );
+        let requests = reviewer.requests.lock().unwrap();
+        let [request] = &requests[..] else {
+            panic!("one review ran");
+        };
+        assert_eq!(
+            request.prompt,
+            prompt::review_prompt(REPO, 1, &[2, 3], epic_pr, 1)
+        );
+        let [session] = &state.sessions[..] else {
+            panic!("the run has one session of its own");
+        };
+        assert_eq!((session.role, session.round), (SessionRole::Review, 1));
+        assert_eq!(session.log, "1-review-1.jsonl");
+    }
+
+    #[test]
+    fn while_the_review_runs_the_run_is_reviewing() {
+        for number in [1, 7] {
+            let github = epic([(2, &[])]);
+            github.add_issue(REPO, 7, "One thing");
+            let agent = FakeAgent::new(&github, []);
+            let root = tempfile::tempdir().unwrap();
+            let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+            build_reviewed(&github, &agent, &reviewer, root.path(), number, reviewing());
+
+            let seen = reviewer.seen.lock().unwrap();
+            assert_eq!(seen[0].1, run::Disposition::Reviewing, "#{number}");
+        }
+    }
+
+    #[test]
+    fn the_builds_time_and_cost_include_the_review() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 1, reviewing());
+
+        assert_eq!(state.cost_usd, Decimal::from_str("0.75").unwrap());
+        assert_eq!(state.sessions[0].duration_ms, Some(2_000));
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.cost_usd, Decimal::from_str("0.75").unwrap());
+        assert_eq!(run.sessions.len(), 1);
+
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let issue = state.issue(7).unwrap();
+        assert_eq!(issue.sessions.len(), 2);
+        assert_eq!(issue.duration_ms, Some(3_000));
+        assert_eq!(state.cost_usd, Decimal::from_str("0.75").unwrap());
+
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let issue = state.issue(7).unwrap();
+        assert_eq!(issue.sessions.len(), 4);
+        assert_eq!(issue.duration_ms, Some(6_000));
+        assert_eq!(state.cost_usd, Decimal::from_str("1.5").unwrap());
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.cost_usd, Decimal::from_str("1.5").unwrap());
     }
 }

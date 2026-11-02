@@ -157,3 +157,24 @@ fn home_without_runs_says_so() {
     assert!(html.contains(r#"<div class="empty"><p>No runs right now.</p><p class="muted">Ask Epik to build an issue or an epic in Claude Code, and it shows up here while it builds.</p></div>"#), "{html}");
     assert!(!html.contains("<table"), "{html}");
 }
+
+#[test]
+fn a_hosts_run_says_where_it_builds_under_its_repository() {
+    let mut remote = building("devbox:acme/widgets#10");
+    remote.place = Some(
+        "Building on devbox, last heard from 12m 00s ago. The build may still be going on there."
+            .into(),
+    );
+    let html = render(|| view! { <HomePage home=home(vec![remote], vec![], vec![])/> });
+    assert_eq!(rows(&html), ["devbox:acme/widgets%2310"], "{html}");
+    assert!(
+        html.contains(r#"</div><div class="place">Building on devbox, last heard from 12m 00s ago. The build may still be going on there.</div></td>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn a_run_with_nowhere_to_say_says_nothing_of_it() {
+    let html = render(|| view! { <HomePage home=runs()/> });
+    assert!(!html.contains(r#"class="place""#), "{html}");
+}

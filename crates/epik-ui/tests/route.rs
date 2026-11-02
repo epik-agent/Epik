@@ -60,3 +60,19 @@ fn settings_is_a_page_of_the_main_window() {
     assert_eq!(Page::from_hash("#/settings"), Page::Settings);
     assert_eq!(href("settings"), "#/settings");
 }
+
+#[test]
+fn a_hosts_runs_page_is_at_its_host_and_key() {
+    assert_eq!(
+        href("run/devbox:acme/widgets#13"),
+        "#/run/devbox:acme/widgets%2313"
+    );
+    assert_eq!(
+        Page::from_hash("#/run/devbox:acme/widgets%2313"),
+        Page::Run("devbox:acme/widgets#13".into())
+    );
+    assert_eq!(
+        Page::from_hash("#/run/me@build.example.com:acme/widgets%2313"),
+        Page::Run("me@build.example.com:acme/widgets#13".into())
+    );
+}

@@ -1,0 +1,48 @@
+[
+  {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "reviewThreads": {
+            "nodes": [
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": false
+              },
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": false
+              },
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": false
+              },
+              {
+                "isResolved": true
+              },
+              {
+                "isResolved": true
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0xMC0zMFQyMzo1NDoxOFrOsi2m-A=="
+            }
+          }
+        }
+      }
+    }
+  }
+]

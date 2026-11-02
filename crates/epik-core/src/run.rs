@@ -22,6 +22,7 @@ use crate::activity;
 use crate::cleanup;
 use crate::record::{
     self, BuildState, BuildStatus, BuildWriter, Event, IssueState, IssueStatus, Kind,
+    ReviewVerdict, Session,
 };
 
 /// A run's identity: its epic issue, written `owner/name#number`.
@@ -119,12 +120,21 @@ pub fn clone_dir(root: &Path, run: &RunKey, build_id: &str) -> PathBuf {
 pub enum Disposition {
     /// A build is running.
     Building,
+    /// A build is running, and is reviewing the run's pull request.
+    Reviewing,
     /// Every issue merged, and its pull request into the default branch
     /// waits for the user.
     WaitingForReview,
     /// Its latest build failed or was interrupted, or its pull request was
     /// closed without merging.
     NeedsAttention,
+}
+
+impl Disposition {
+    /// Whether a build of the run is running, reviewing or not.
+    pub fn is_building(self) -> bool {
+        matches!(self, Disposition::Building | Disposition::Reviewing)
+    }
 }
 
 /// One build of a run, in brief.
@@ -138,6 +148,9 @@ pub struct BuildSummary {
     pub ended_at: Option<DateTime<Utc>>,
     pub elapsed_ms: u64,
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported, which `cost_usd` lacks.
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 /// A run, as its builds leave it.
@@ -155,9 +168,22 @@ pub struct RunState {
     pub reason: Option<String>,
     /// The latest build's pull request into the default branch.
     pub pull_request: Option<u64>,
+    /// What the latest build's review of that pull request concluded, if
+    /// it was reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewVerdict>,
+    /// How many of its review threads were unresolved when the latest
+    /// build finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_threads: Option<usize>,
     /// Every issue of the run, including ones merged in earlier builds.
-    /// Each one's duration and cost are summed over the builds.
+    /// Each one's duration and cost are summed over the builds, and its
+    /// sessions are every build's.
     pub issues: Vec<IssueState>,
+    /// The run's own agent sessions, such as reviews of its pull request,
+    /// over every build, oldest first.
+    #[serde(default)]
+    pub sessions: Vec<Session>,
     /// Oldest first.
     pub builds: Vec<BuildSummary>,
     /// The running build's id, if one is running.
@@ -171,6 +197,10 @@ pub struct RunState {
     pub elapsed_ms: u64,
     /// Summed over the builds.
     pub cost_usd: Decimal,
+    /// How many issues have a cost not reported in any build, which
+    /// `cost_usd` lacks. See [`IssueState::cost_not_reported_by`].
+    #[serde(default)]
+    pub cost_unreported: usize,
 }
 
 impl RunState {
@@ -209,6 +239,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
                 .or_insert_with(|| IssueState {
                     duration_ms: None,
                     cost_usd: None,
+                    sessions: Vec::new(),
                     ..now.clone()
                 });
             issue.issue = now.issue.clone();
@@ -224,6 +255,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
             }
             issue.duration_ms = add(issue.duration_ms, now.duration_ms);
             issue.cost_usd = add(issue.cost_usd, now.cost_usd);
+            issue.sessions.extend(now.sessions.iter().cloned());
         }
     }
     let mut order: Vec<u64> = latest.issues.iter().map(|m| m.issue.number).collect();
@@ -235,6 +267,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
         }
     }
     let (disposition, reason) = match latest.status {
+        BuildStatus::Running if latest.reviewing() => (Disposition::Reviewing, None),
         BuildStatus::Running => (Disposition::Building, None),
         BuildStatus::Succeeded if !latest.pull_request_closed => {
             (Disposition::WaitingForReview, None)
@@ -250,6 +283,14 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
             (Disposition::NeedsAttention, latest.reason.clone())
         }
     };
+    let issues: Vec<IssueState> = order
+        .into_iter()
+        .filter_map(|number| issues.remove(&number))
+        .collect();
+    let sessions: Vec<Session> = builds
+        .iter()
+        .flat_map(|build| build.sessions.iter().cloned())
+        .collect();
     Some(RunState {
         run: latest.run(),
         repo: latest.repo.clone(),
@@ -260,10 +301,11 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
         disposition,
         reason,
         pull_request: latest.pull_request,
-        issues: order
-            .into_iter()
-            .filter_map(|number| issues.remove(&number))
-            .collect(),
+        review: latest.review,
+        open_threads: latest.open_threads,
+        cost_unreported: record::cost_unreported(&issues, &sessions),
+        issues,
+        sessions,
         builds: builds
             .iter()
             .map(|build| BuildSummary {
@@ -275,6 +317,7 @@ pub fn fold(builds: &[BuildState]) -> Option<RunState> {
                 ended_at: build.ended_at,
                 elapsed_ms: build.elapsed_ms,
                 cost_usd: build.cost_usd,
+                cost_unreported: build.cost_unreported,
             })
             .collect(),
         running_build: (latest.status == BuildStatus::Running).then(|| latest.build_id.clone()),
@@ -301,8 +344,9 @@ pub fn read(root: &Path, run: &RunKey) -> io::Result<RunState> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no run {run}")))
 }
 
-/// `state` with each running issue's [`Activity`], read from its agent's
-/// log in the running build. A log that can't be read gives none.
+/// `state` with each running issue's [`Activity`], read from its latest
+/// session's log in the running build, or from `<issue>.jsonl` in a record
+/// from before sessions. A log that can't be read gives none.
 fn with_activity(root: &Path, mut state: RunState) -> RunState {
     let Some(build_id) = state.running_build.clone() else {
         return state;
@@ -310,8 +354,7 @@ fn with_activity(root: &Path, mut state: RunState) -> RunState {
     let dir = record::build_dir(root, &state.run, &build_id);
     for issue in &mut state.issues {
         if issue.status == IssueStatus::Running {
-            let log = dir.join(format!("{}.jsonl", issue.issue.number));
-            issue.activity = activity::read(&log).ok();
+            issue.activity = activity::read(&dir.join(issue.log(&build_id))).ok();
         }
     }
     state
@@ -419,19 +462,43 @@ pub fn interrupt_unfinished(root: &Path) -> io::Result<()> {
             if build.status == BuildStatus::Running {
                 let mut writer = BuildWriter::open(root, &key, &build.build_id)?;
                 let now = Utc::now();
-                // Their agents stopped with the app.
+                let ran =
+                    |at: DateTime<Utc>| u64::try_from((now - at).num_milliseconds()).unwrap_or(0);
+                // Their agents stopped with the app, and what they spent
+                // isn't known.
+                let sessions = build
+                    .issues
+                    .iter()
+                    .map(|issue| (issue.issue.number, &issue.sessions))
+                    .chain([(build.number, &build.sessions)]);
+                for (number, sessions) in sessions {
+                    for session in sessions.iter().filter(|s| s.duration_ms.is_none()) {
+                        writer.append(&Event::SessionFinished {
+                            at: now,
+                            number,
+                            role: session.role,
+                            round: session.round,
+                            duration_ms: ran(session.started_at),
+                            cost_usd: None,
+                            verdict: None,
+                        })?;
+                    }
+                }
                 for issue in &build.issues {
                     if issue.status == IssueStatus::Running {
-                        let ran = issue
-                            .started_at
-                            .map_or(0, |at| (now - at).num_milliseconds());
+                        // A record from before sessions keeps the agent's
+                        // time on the issue.
+                        let duration_ms = issue
+                            .sessions
+                            .is_empty()
+                            .then(|| issue.started_at.map_or(0, ran));
                         writer.append(&Event::IssueFinished {
                             at: now,
                             number: issue.issue.number,
                             outcome: crate::record::Outcome::Failed,
                             reason: Some("interrupted".to_owned()),
                             pull_request: None,
-                            duration_ms: u64::try_from(ran).unwrap_or(0),
+                            duration_ms,
                             cost_usd: None,
                         })?;
                     }
@@ -449,7 +516,7 @@ pub fn interrupt_unfinished(root: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{Issue, Outcome};
+    use crate::record::{Issue, Outcome, SessionRole};
     use chrono::TimeZone;
 
     fn time(seconds: i64) -> DateTime<Utc> {
@@ -488,7 +555,7 @@ mod tests {
                 },
             ],
             closed: closed.to_vec(),
-            plugin_dir: None,
+            roles: Default::default(),
         }
     }
 
@@ -506,9 +573,58 @@ mod tests {
             outcome,
             reason: None,
             pull_request: Some(number + 100),
-            duration_ms: 60_000,
+            duration_ms: Some(60_000),
             cost_usd: Some(dollars(cost)),
         }
+    }
+
+    fn session_started(at: i64, number: u64, role: SessionRole, round: u32, log: &str) -> Event {
+        Event::SessionStarted {
+            at: time(at),
+            number,
+            role,
+            round,
+            agent: "claude".to_owned(),
+            model: None,
+            log: log.to_owned(),
+        }
+    }
+
+    fn session_finished(at: i64, number: u64, role: SessionRole, round: u32, cost: &str) -> Event {
+        Event::SessionFinished {
+            at: time(at),
+            number,
+            role,
+            round,
+            duration_ms: 10_000,
+            cost_usd: Some(dollars(cost)),
+            verdict: None,
+        }
+    }
+
+    /// Build 2 of [`finished`], with 15 coded in two sessions and the
+    /// epic's pull request reviewed in one, still running.
+    fn with_sessions() -> Vec<Event> {
+        let finished = Event::IssueFinished {
+            at: time(1060),
+            number: 15,
+            outcome: Outcome::Succeeded,
+            reason: None,
+            pull_request: Some(115),
+            duration_ms: None,
+            cost_usd: None,
+        };
+        vec![
+            started("20261028T171640Z-bbbb", 1000, &[14]),
+            issue_started(1001, 15),
+            session_started(1001, 15, SessionRole::Coding, 1, "15.jsonl"),
+            session_finished(1030, 15, SessionRole::Coding, 1, "0.50"),
+            session_started(1031, 15, SessionRole::Coding, 2, "15-coding-2.jsonl"),
+            session_finished(1059, 15, SessionRole::Coding, 2, "0.25"),
+            finished,
+            merged(1061, 15),
+            session_started(1062, 13, SessionRole::Review, 1, "13-review-1.jsonl"),
+        ]
     }
 
     fn merged(at: i64, number: u64) -> Event {
@@ -548,6 +664,8 @@ mod tests {
                 outcome: Outcome::Succeeded,
                 reason: None,
                 pull_request: Some(200),
+                review: None,
+                open_threads: None,
             },
         ]
     }
@@ -672,6 +790,8 @@ mod tests {
             outcome: Outcome::Failed,
             reason: Some("failed: #15".to_owned()),
             pull_request: None,
+            review: None,
+            open_threads: None,
         });
         let builds = [build(&first), build(&finished())];
 
@@ -684,6 +804,59 @@ mod tests {
     }
 
     #[test]
+    fn an_issue_tried_in_two_builds_keeps_every_session_and_adds_them_up() {
+        let builds = [build(&interrupted()), build(&with_sessions())];
+
+        let run = fold(&builds).unwrap();
+
+        let issue = run.issue(15).unwrap();
+        let logs: Vec<(&str, &str)> = issue
+            .sessions
+            .iter()
+            .map(|s| (s.build_id.as_str(), s.log.as_str()))
+            .collect();
+        assert_eq!(
+            logs,
+            [
+                ("20261028T171640Z-bbbb", "15.jsonl"),
+                ("20261028T171640Z-bbbb", "15-coding-2.jsonl")
+            ]
+        );
+        assert_eq!(issue.duration_ms, Some(20_000));
+        assert_eq!(issue.cost_usd, Some(dollars("0.75")));
+        let reviews: Vec<&str> = run.sessions.iter().map(|s| s.log.as_str()).collect();
+        assert_eq!(reviews, ["13-review-1.jsonl"]);
+        assert_eq!(run.cost_usd, dollars("0.90") + dollars("0.75"));
+    }
+
+    #[test]
+    fn an_issue_whose_cost_was_not_reported_in_two_builds_counts_once() {
+        let unreported = |events: &mut Vec<Event>| {
+            for event in events.iter_mut() {
+                if let Event::SessionFinished { cost_usd, .. } = event {
+                    *cost_usd = None;
+                }
+            }
+        };
+        let mut first = with_sessions();
+        unreported(&mut first);
+        let mut second = with_sessions();
+        unreported(&mut second);
+        let Event::BuildStarted { build_id, .. } = &mut second[0] else {
+            unreachable!()
+        };
+        *build_id = "20261028T171640Z-cccc".to_owned();
+        let builds = [build(&first), build(&second)];
+        assert_eq!(builds[0].cost_unreported, 1);
+
+        let run = fold(&builds).unwrap();
+
+        assert_eq!(run.cost_unreported, 1);
+        assert_eq!(run.issue(15).unwrap().cost_usd, None);
+        assert_eq!(run.cost_usd, Decimal::ZERO);
+    }
+
+    #[test]
     fn an_issue_closed_by_hand_after_failing_is_closed() {
         let mut first = interrupted();
         first.truncate(5);
@@ -693,6 +866,8 @@ mod tests {
             outcome: Outcome::Failed,
             reason: Some("failed: #15".to_owned()),
             pull_request: None,
+            review: None,
+            open_threads: None,
         });
         let mut second = finished();
         second.truncate(1);
@@ -772,7 +947,7 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: vec![],
                 closed: vec![],
-                plugin_dir: None,
+                roles: Default::default(),
             })
             .unwrap();
         std::fs::create_dir_all(run_dir(root.path(), &RunKey::new("wpm/empty", 1))).unwrap();
@@ -807,6 +982,23 @@ mod tests {
     }
 
     #[test]
+    fn a_running_issue_reports_what_its_latest_session_is_doing() {
+        let root = tempfile::tempdir().unwrap();
+        let mut running = with_sessions();
+        running.truncate(5);
+        write(root.path(), &running);
+        let log = format!("{}/src/fixtures/agent.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let dir = record::build_dir(root.path(), &key(), "20261028T171640Z-bbbb");
+        fs::write(dir.join("15.jsonl"), "").unwrap();
+        fs::copy(log, dir.join("15-coding-2.jsonl")).unwrap();
+
+        let run = read(root.path(), &key()).unwrap();
+
+        let activity = run.issue(15).unwrap().activity.as_ref().unwrap();
+        assert_eq!(activity.last_action.as_deref(), Some("Running cargo build"));
+    }
+
+    #[test]
     fn deleting_a_run_leaves_nothing_of_it() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), &interrupted());
@@ -833,6 +1025,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrors_running_build_is_not_interrupted() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = crate::hosts::dir(root.path(), "devbox");
+        write(&mirror, &interrupted()[..5]);
+        let before = record::list_builds(&mirror, &key()).unwrap();
+
+        interrupt_unfinished(root.path()).unwrap();
+
+        assert_eq!(record::list_builds(&mirror, &key()).unwrap(), before);
+        assert_eq!(
+            read(&mirror, &key()).unwrap().disposition,
+            Disposition::Building
+        );
+    }
+
+    #[test]
     fn unfinished_builds_are_recorded_as_interrupted() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), &interrupted());
@@ -854,5 +1062,31 @@ mod tests {
         );
         assert_eq!(issue.reason.as_deref(), Some("interrupted"));
         assert_eq!(run.builds[0].reason.as_deref(), Some("the app quit"));
+    }
+
+    #[test]
+    fn an_interrupted_session_keeps_the_time_it_ran() {
+        let root = tempfile::tempdir().unwrap();
+        let mut running = with_sessions();
+        running.truncate(5);
+        write(root.path(), &running);
+
+        interrupt_unfinished(root.path()).unwrap();
+
+        let issue = read(root.path(), &key())
+            .unwrap()
+            .issue(15)
+            .unwrap()
+            .clone();
+        assert_eq!(issue.status, IssueStatus::Failed);
+        let [first, second] = &issue.sessions[..] else {
+            panic!("two sessions: {:?}", issue.sessions);
+        };
+        assert_eq!(first.duration_ms, Some(10_000));
+        let ran = second.duration_ms.expect("finished when interrupted");
+        assert!(ran > 0, "it ran from its start to the interruption");
+        assert_eq!(second.cost_usd, None);
+        assert_eq!(issue.duration_ms, Some(10_000 + ran));
+        assert_eq!(issue.cost_usd, Some(dollars("0.50")));
     }
 }

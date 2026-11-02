@@ -15,6 +15,7 @@ pub use gh::GhCli;
 use std::fmt;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 /// The `gh` program to run.
@@ -114,11 +115,13 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
-/// A pull request's state, and its merge commit once it has merged.
+/// A pull request's state, its merge commit once it has merged, and the
+/// branch it is on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullStatus {
     pub state: PullState,
     pub merge_commit: Option<String>,
+    pub head: String,
 }
 
 /// How a pull request is merged.
@@ -191,6 +194,14 @@ pub enum Checks {
     None,
 }
 
+/// A review submitted on a pull request: its summary, and when GitHub
+/// says it was submitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Review {
+    pub body: String,
+    pub submitted_at: DateTime<Utc>,
+}
+
 /// The GitHub operations a build needs. Synchronous: a build calls them
 /// from its own thread.
 pub trait GitHub: Send + Sync {
@@ -255,6 +266,13 @@ pub trait GitHub: Send + Sync {
         title: &str,
         body: &str,
     ) -> Result<u64>;
+
+    /// The reviews submitted on pull request `pr`, oldest first. A review
+    /// still pending, which only its author can see, is not among them.
+    fn reviews(&self, repo: &str, pr: u64) -> Result<Vec<Review>>;
+
+    /// How many of pull request `pr`'s review threads are unresolved.
+    fn open_review_threads(&self, repo: &str, pr: u64) -> Result<usize>;
 }
 
 /// The keywords by which a pull request's body closes an issue.

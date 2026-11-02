@@ -1,7 +1,9 @@
 //! A run's page: its issues laid out as their dependency graph, and the
 //! chosen issue's detail panel.
 
-use epik_view::{Disposition, IssueCard, NodeState, RunPage, Span, Stream, Words as Sentence};
+use epik_view::{
+    Disposition, IssueCard, NodeState, RunPage, SessionRow, Span, Stream, Words as Sentence,
+};
 use leptos::ev::MouseEvent;
 use leptos::html::Button;
 use leptos::prelude::*;
@@ -34,7 +36,7 @@ fn state_class(state: NodeState) -> &'static str {
 
 fn disposition_class(disposition: Disposition) -> &'static str {
     match disposition {
-        Disposition::Building => "building",
+        Disposition::Building | Disposition::Reviewing => "building",
         Disposition::WaitingForReview => "waiting_for_review",
         Disposition::NeedsAttention => "needs_attention",
     }
@@ -160,6 +162,87 @@ pub fn Edges(issues: Vec<IssueCard>, edges: Vec<(u64, u64)>) -> impl IntoView {
         .collect_view()
 }
 
+/// The log the stream shows on `page` with issue `chosen`'s panel open: the
+/// session `picked`, if it is the run's or that issue's, or else the run's
+/// own session while it runs, or else the issue's latest.
+pub fn shown_log(page: &RunPage, chosen: Option<u64>, picked: Option<&str>) -> Option<String> {
+    let issue = chosen.and_then(|number| page.issues.iter().find(|i| i.number == number));
+    let sessions = || {
+        page.sessions
+            .iter()
+            .chain(issue.into_iter().flat_map(|i| &i.sessions))
+    };
+    picked
+        .filter(|picked| sessions().any(|s| s.log.as_deref() == Some(*picked)))
+        .map(str::to_owned)
+        .or_else(|| {
+            page.sessions
+                .last()
+                .filter(|s| s.running)
+                .and_then(|s| s.log.clone())
+        })
+        .or_else(|| issue.and_then(|i| i.log.clone()))
+}
+
+/// Agent sessions, oldest first: each one's role and round, agent and
+/// model, time and cost, and a review's verdict, with the threads still
+/// open beside the last review. Choosing one shows its stream; the one
+/// whose log is `shown` is pressed.
+#[component]
+pub fn Sessions(
+    #[prop(into)] sessions: Signal<Vec<SessionRow>>,
+    #[prop(optional, into)] shown: Signal<Option<String>>,
+    #[prop(optional_no_strip)] on_pick: Option<Callback<String>>,
+) -> impl IntoView {
+    let numbered = Signal::derive(move || sessions.get().into_iter().enumerate().collect());
+    let row = move |session: Signal<(usize, SessionRow)>| {
+        let row = part(session, |(_, row)| row.clone());
+        move || {
+            let row = row.get();
+            let class = if row.running {
+                "session running"
+            } else {
+                "session"
+            };
+            let pressed = {
+                let log = row.log.clone();
+                move || {
+                    let pressed = log.is_some() && shown.with(|shown| *shown == log);
+                    if pressed { "true" } else { "false" }
+                }
+            };
+            let pick = {
+                let log = row.log.clone();
+                move |_: MouseEvent| {
+                    if let (Some(on_pick), Some(log)) = (on_pick, log.clone()) {
+                        on_pick.run(log);
+                    }
+                }
+            };
+            let figures = match &row.cost {
+                Some(cost) => format!("{} · {cost}", row.time),
+                None => row.time.clone(),
+            };
+            view! {
+                <li class=class>
+                    <button aria-pressed=pressed on:click=pick>
+                        <span class="what">{format!("{} · round {}", row.role, row.round)}</span>
+                        <span class="who">{format!("{} · {}", row.agent, row.model)}</span>
+                        <span class="figures">{figures}</span>
+                    </button>
+                    {row.verdict.map(|verdict| view! { <span class="verdict">{verdict}</span> })}
+                    {row.threads.map(|threads| view! { <Words spans=vec![threads] class="threads"/> })}
+                </li>
+            }
+        }
+    };
+    view! {
+        <ol class="sessions">
+            {keyed(numbered, |(i, _): &(usize, SessionRow)| *i, row)}
+        </ol>
+    }
+}
+
 /// The chosen issue's detail panel: its state and facts, and what its
 /// agent is doing, in Full, the stream of its log, or in Summary, its
 /// recent actions.
@@ -172,6 +255,10 @@ pub fn Detail(
     /// Whether it starts on Summary rather than Full.
     #[prop(optional)]
     summary: bool,
+    /// The log of the session whose stream shows.
+    #[prop(optional, into)]
+    shown: Signal<Option<String>>,
+    #[prop(optional_no_strip)] on_pick: Option<Callback<String>>,
 ) -> impl IntoView {
     let title = part(issue, |issue| format!(" {}", issue.title));
     let state = part(issue, |issue| issue.state);
@@ -222,6 +309,10 @@ pub fn Detail(
         }
     };
     let sentence = part(issue, |issue| issue.sentence.clone());
+    let sessions = part(issue, |issue| issue.sessions.clone());
+    let sessions = move || {
+        (!sessions.with(Vec::is_empty)).then(|| view! { <Sessions sessions shown on_pick/> })
+    };
     view! {
         <section class="detail">
             <div class="facts">
@@ -236,6 +327,7 @@ pub fn Detail(
                     {fact("Unblocks", part(issue, |issue| issue.unblocks.clone()))}
                     {fact("Pull request", part(issue, |issue| issue.pull_request.clone()))}
                 </dl>
+                {sessions}
             </div>
             <div class="doing">
                 <div class="switch" role="group" aria-label="What the agent has done">
@@ -264,6 +356,10 @@ pub fn RunView(
     /// The stream of an agent's log, and the log's path.
     #[prop(optional, into)]
     streamed: Signal<Option<(String, Stream)>>,
+    /// The log of the session picked to stream, if one was.
+    #[prop(optional, into)]
+    picked: Signal<Option<String>>,
+    #[prop(optional)] on_pick: Option<Callback<String>>,
 ) -> impl IntoView {
     let run = page.with_untracked(|page| page.run.clone());
     let also_building = part(page, |page| page.also_building.clone());
@@ -271,6 +367,7 @@ pub fn RunView(
     let about = part(page, |page| page.about.clone());
     let title = part(page, |page| page.title.clone());
     let sentence = part(page, |page| page.sentence.clone());
+    let place = part(page, |page| page.place.clone());
     let disposition = part(page, |page| page.disposition);
     let elapsed = part(page, |page| page.elapsed.clone());
     let cost = part(page, |page| page.cost.clone());
@@ -293,6 +390,21 @@ pub fn RunView(
     });
     let edges = part(page, |page| (page.issues.clone(), page.edges.clone()));
     let issues = part(page, |page| page.issues.clone());
+    let shown = Memo::new(move |_| {
+        let (chosen, picked) = (chosen.get(), picked.get());
+        page.with(|page| shown_log(page, chosen, picked.as_deref()))
+    });
+    let sessions = part(page, |page| page.sessions.clone());
+    let sessions = move || {
+        (!sessions.with(Vec::is_empty)).then(|| {
+            view! {
+                <div class="run-sessions">
+                    <span class="label">"Sessions"</span>
+                    <Sessions sessions shown on_pick/>
+                </div>
+            }
+        })
+    };
     let detail = move || {
         let number = chosen.get()?;
         let issue =
@@ -300,9 +412,9 @@ pub fn RunView(
         let issue = kept(issue, move || {
             issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())
         });
-        // Only the chosen issue's own stream.
+        // Only the shown session's stream.
         let stream = Memo::new(move |_| {
-            let log = issue.with(|issue| issue.log.clone());
+            let log = shown.get();
             streamed.with(|streamed| {
                 streamed
                     .as_ref()
@@ -310,7 +422,7 @@ pub fn RunView(
                     .map(|(_, stream)| stream.clone())
             })
         });
-        Some(view! { <Detail issue stream/> })
+        Some(view! { <Detail issue stream shown on_pick/> })
     };
     view! {
         <nav class="run-bar"><RunBar title also_building/></nav>
@@ -319,6 +431,7 @@ pub fn RunView(
                 <div class="about">{link(epic)}" · "{words(about, None)}</div>
                 <h1>{title}</h1>
                 <p class=move || format!("sentence {}", disposition_class(disposition.get()))>{sentence}</p>
+                {move || place.get().map(|place| view! { <p class="place">{place}</p> })}
             </div>
             <dl class="totals">
                 <dt>"Elapsed"</dt>
@@ -327,6 +440,7 @@ pub fn RunView(
                 <dd>{cost}</dd>
             </dl>
         </section>
+        {sessions}
         <div class="builds">
             <span class="label">"Builds"</span>
             {builds}

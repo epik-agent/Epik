@@ -177,6 +177,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_sweep_leaves_the_hosts_mirrors_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let mirror = crate::hosts::dir(root.path(), "devbox");
+        let mirrored = mirror.join("runs").join("owner").join("repo").join("3");
+        fs::create_dir_all(&mirrored).unwrap();
+        fs::write(mirrored.join("record.jsonl"), "{}\n").unwrap();
+        fs::create_dir_all(builds_dir(root.path()).join("crashed")).unwrap();
+
+        sweep_builds(root.path()).unwrap();
+
+        assert_eq!(fs::read(mirrored.join("record.jsonl")).unwrap(), b"{}\n");
+    }
+
+    #[test]
     fn the_sweep_of_a_root_without_builds_does_nothing() {
         let root = tempfile::tempdir().unwrap();
 

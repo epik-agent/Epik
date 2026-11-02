@@ -74,8 +74,6 @@ pub struct Context {
     pub start_app: Box<dyn Fn() -> std::io::Result<()> + Send + Sync>,
     /// How long a started app has to answer.
     pub start_timeout: Duration,
-    /// Epik's plugin, from `CLAUDE_PLUGIN_ROOT`, which builds load.
-    pub plugin_dir: Option<PathBuf>,
 }
 
 /// Epik's MCP server.
@@ -314,7 +312,6 @@ pub(crate) mod tests {
             root,
             start_app: Box::new(|| Err(std::io::Error::other("no app in tests"))),
             start_timeout: Duration::from_millis(100),
-            plugin_dir: Some(PathBuf::from("/plugin")),
         })
     }
 

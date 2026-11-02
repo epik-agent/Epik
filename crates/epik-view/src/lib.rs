@@ -6,6 +6,8 @@
 //! functions that build them are in `epik-app`, and in `epik-core` for
 //! [`Stream`].
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// A piece of a sentence: text, which may link somewhere, and may be code.
@@ -76,9 +78,13 @@ pub struct NowLine {
 /// A run, as Home shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCard {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     /// The epic issue, `owner/name#number`, linked.
     pub epic: Span,
     /// "6 issues, 2 merged" or "1 issue".
@@ -115,7 +121,7 @@ pub struct Home {
 /// A run, as the main window's sidebar lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarRun {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
     pub disposition: Disposition,
@@ -137,9 +143,13 @@ pub struct Sidebar {
 /// A building run, as the tray menu lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrayRun {
-    /// The run, `owner/name#number`.
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     /// How many of its issues are merged, of all of them: "3/7".
     pub count: String,
     /// Each issue's state, in the run's order: a segment each of its
@@ -185,15 +195,49 @@ pub struct IssueCard {
     pub pull_request: Words,
     /// What its agent has done, in words, oldest first.
     pub recent: Vec<String>,
-    /// Its agent's full log, if it has one.
+    /// Its latest agent session's log, the one its stream shows unless
+    /// another session is chosen.
+    pub log: Option<String>,
+    /// Its agent sessions, oldest first.
+    pub sessions: Vec<SessionRow>,
+}
+
+/// An agent session, as an issue's panel and a run's header list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRow {
+    /// "Coding" or "Review".
+    pub role: String,
+    /// Which session of its role this is, from 1.
+    pub round: u32,
+    /// "Claude Code".
+    pub agent: String,
+    /// "opus", or "default model".
+    pub model: String,
+    /// "3m 05s", or "2m 00s so far" while it runs.
+    pub time: String,
+    /// "$0.92" or "not reported", once it has finished.
+    pub cost: Option<String>,
+    /// A review's verdict: "approved", "changes requested" or "no verdict".
+    pub verdict: Option<String>,
+    /// Beside the run's last review, the threads still open: "2 threads
+    /// open", linked to the pull request's Files view.
+    pub threads: Option<Span>,
+    /// Whether it is running.
+    pub running: bool,
+    /// Its log's path, for its stream.
     pub log: Option<String>,
 }
 
 /// The run page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPage {
+    /// The run, `owner/name#number`, after `<host>:` on a remote host.
     pub run: String,
     pub title: String,
+    /// Where it builds, when there is more than one host: "Building on
+    /// devbox", or for a host that can't be reached, when it was last heard
+    /// from.
+    pub place: Option<String>,
     pub epic: Span,
     /// "6 issues · merging into epic/13-exponentiation".
     pub about: Words,
@@ -202,7 +246,7 @@ pub struct RunPage {
     pub disposition: Disposition,
     pub elapsed: String,
     pub cost: String,
-    /// Another run building, to link to: its key and title.
+    /// Another run building, to link to: its name and title.
     pub also_building: Vec<(String, String)>,
     /// Each build in a sentence, the current one first.
     pub builds: Vec<String>,
@@ -210,6 +254,9 @@ pub struct RunPage {
     pub rows: usize,
     pub issues: Vec<IssueCard>,
     pub edges: Vec<(u64, u64)>,
+    /// The run's own sessions, its reviews and the fixes they asked for,
+    /// oldest first.
+    pub sessions: Vec<SessionRow>,
 }
 
 /// A monitored repository, as Settings lists it.
@@ -226,10 +273,93 @@ pub struct RepositoryRow {
     pub missing: bool,
 }
 
-/// Settings: the monitored repositories.
+/// Settings: the monitored repositories, and the hosts builds can run on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     pub repositories: Vec<RepositoryRow>,
+    /// This computer first, then each remote host in the order added.
+    pub hosts: Vec<HostRow>,
+}
+
+/// A host builds can run on, as Settings lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRow {
+    /// Its SSH destination, or `None` for this computer.
+    pub destination: Option<String>,
+    /// "This computer", or the destination.
+    pub name: String,
+    pub status: HostStatus,
+    /// "Epik 0.4.0 · setup complete · 2 runs".
+    pub about: String,
+    /// Why it can't build: what `ssh` said, or which Epik to install there.
+    pub why: Option<String>,
+    /// Each setup item a build needs that it lacks, with what to run there.
+    pub missing: Vec<SetupFix>,
+    /// Whether builds go to it unless told otherwise.
+    pub default: bool,
+    /// The runs that leave the window if it is removed: each one's key and
+    /// title.
+    pub runs: Vec<(String, String)>,
+}
+
+/// Whether a host can build, as its row's mark shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostStatus {
+    /// It answered, and nothing it is known to need is missing.
+    Ready,
+    /// Not heard from since it was added.
+    Unchecked,
+    /// It answered, and lacks something a build needs.
+    Incomplete,
+    /// It couldn't be reached.
+    Unreachable,
+    /// Its app is another minor version than this one's.
+    Mismatch,
+}
+
+/// A setup item a host lacks, and the commands to run there for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupFix {
+    /// "GitHub sign-in".
+    pub title: String,
+    /// "not signed in".
+    pub detail: String,
+    /// Each command to run on the host, in order.
+    pub commands: Vec<String>,
+}
+
+/// The agent and model each role runs with, as `~/.epik/settings.json`
+/// keeps them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    /// Implementing one issue, up to a pull request with passing checks.
+    pub coding: Role,
+    /// Reading a build's pull requests before the user does, or `None`
+    /// when review is off.
+    pub review: Option<Role>,
+}
+
+impl Default for AgentSettings {
+    /// Claude Code codes with its default model, and nothing reviews.
+    fn default() -> Self {
+        Self {
+            coding: Role {
+                agent: "claude".to_owned(),
+                model: None,
+            },
+            review: None,
+        }
+    }
+}
+
+/// The agent a role runs, and the model it asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    /// The agent's id: `claude`.
+    pub agent: String,
+    /// The model, or `None` for the agent's default.
+    pub model: Option<String>,
 }
 
 /// One item as the checklist shows it.
@@ -241,6 +371,9 @@ pub struct Row {
     pub detail: String,
     /// The button's label, for an item that isn't done.
     pub button: Option<String>,
+    /// Whether the user's agents need it. One not needed doesn't hold the
+    /// checklist back from complete.
+    pub needed: bool,
 }
 
 /// The checklist.
@@ -265,12 +398,21 @@ pub struct Output {
 pub enum Disposition {
     /// A build is running.
     Building,
+    /// A build is running, and is reviewing the run's pull request.
+    Reviewing,
     /// Every issue merged, and its pull request into the default branch
     /// waits for the user.
     WaitingForReview,
     /// Its latest build failed or was interrupted, or its pull request was
     /// closed without merging.
     NeedsAttention,
+}
+
+impl Disposition {
+    /// Whether a build of the run is running, reviewing or not.
+    pub fn is_building(self) -> bool {
+        matches!(self, Disposition::Building | Disposition::Reviewing)
+    }
 }
 
 /// Where a setup item stands.
@@ -289,6 +431,24 @@ pub struct Uninstall {
     pub runs: usize,
     /// Whether a build is running, which keeps Epik from being uninstalled.
     pub building: bool,
+    /// How the user removes the app once Epik's files are gone.
+    pub removal: Removal,
+}
+
+/// How the user removes the app, the way their platform removes any app.
+/// The app doesn't remove itself: each platform's installer owns it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Removal {
+    /// The bundle at this path, e.g. /Applications/Epik.app.
+    MacApp(PathBuf),
+    /// Installed with the .msi.
+    WindowsApp,
+    /// The AppImage at this path, from $APPIMAGE.
+    AppImage(PathBuf),
+    /// Installed with the .deb.
+    #[default]
+    Deb,
 }
 
 /// How one step of uninstalling went.
@@ -298,6 +458,8 @@ pub struct UninstallStep {
     pub title: String,
     /// Why it couldn't, if it couldn't.
     pub error: Option<String>,
+    /// Why it was skipped, if it was: "Claude Code isn't installed".
+    pub skipped: Option<String>,
 }
 
 /// An agent's log as people read it: what it said and did, in order.

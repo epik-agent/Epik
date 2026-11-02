@@ -14,6 +14,7 @@ fn row(id: &str, state: ItemState, button: Option<&str>) -> Row {
         state,
         detail: "gh 2.80.0".into(),
         button: button.map(Into::into),
+        needed: true,
     }
 }
 
@@ -46,6 +47,44 @@ fn a_missing_row_has_its_button() {
     assert_eq!(
         html,
         r#"<li data-id="gh" class="item missing"><span class="mark">✕</span><span class="title">GitHub CLI</span><button class="primary">Install a private copy</button><span class="detail">gh 2.80.0</span></li>"#
+    );
+}
+
+#[test]
+fn a_row_not_needed_says_so_and_keeps_its_button() {
+    let codex = Row {
+        id: "codex-auth".into(),
+        title: "Codex sign-in".into(),
+        state: ItemState::Missing,
+        detail: "not signed in".into(),
+        button: Some("Sign in to Codex (opens the browser)".into()),
+        needed: false,
+    };
+
+    let html = render(move || view! { <Item row=codex busy=false/> });
+
+    assert_eq!(
+        html,
+        r#"<li data-id="codex-auth" class="item unneeded"><span class="mark">–</span><span class="title">Codex sign-in</span><button class="primary">Sign in to Codex (opens the browser)</button><span class="detail">Not needed by your agents</span></li>"#
+    );
+}
+
+#[test]
+fn a_done_row_not_needed_is_shown_done() {
+    let gh = Row {
+        needed: false,
+        ..row("gh", ItemState::Done, None)
+    };
+
+    let html = render(move || view! { <Item row=gh busy=false/> });
+
+    assert!(
+        html.starts_with(r#"<li data-id="gh" class="item done"><span class="mark">✓</span>"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="detail">gh 2.80.0</span>"#),
+        "{html}"
     );
 }
 

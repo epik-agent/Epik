@@ -4,17 +4,20 @@
 //! The tests parse responses recorded from `epik-agent/Epik` in
 //! `fixtures/`, trimmed to the fields that matter, and run the operations
 //! against a scripted `gh`. The `checks_*` fixtures other than
-//! `checks_passing.json` are the recorded shape with other states.
+//! `checks_passing.json` are the recorded shape with other states, as are
+//! the marker and pending review in `reviews.json` and the unresolved
+//! threads in `review_threads.json`.
 
 use std::path::Path;
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
 use super::{
     Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethods, PullRequest, PullState, PullStatus, Result, State, SubIssue,
+    MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
     closing_pull_request,
 };
 
@@ -212,6 +215,7 @@ impl GitHub for GhCli {
         Ok(PullStatus {
             state: pull.state(),
             merge_commit: pull.merge_commit_sha.filter(|_| pull.merged_at.is_some()),
+            head: pull.head.name,
         })
     }
 
@@ -274,6 +278,32 @@ impl GitHub for GhCli {
             &format!("body={body}"),
         ])?;
         Ok(created.number)
+    }
+
+    fn reviews(&self, repo: &str, pr: u64) -> Result<Vec<Review>> {
+        let raw: Vec<RawReview> = self.list(&format!("repos/{repo}/pulls/{pr}/reviews"))?;
+        Ok(raw.into_iter().filter_map(RawReview::submitted).collect())
+    }
+
+    fn open_review_threads(&self, repo: &str, pr: u64) -> Result<usize> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| Error::new(format!("{repo} is not owner/name")))?;
+        let pages: Vec<ThreadsPage> = self.json([
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            &format!("query={REVIEW_THREADS_QUERY}"),
+            "-F",
+            &format!("owner={owner}"),
+            "-F",
+            &format!("name={name}"),
+            "-F",
+            &format!("number={pr}"),
+        ])?;
+        Ok(unresolved(pages))
     }
 }
 
@@ -424,6 +454,14 @@ struct RawPull {
     #[serde(default)]
     merge_commit_sha: Option<String>,
     body: Option<String>,
+    head: RawBranch,
+}
+
+/// A pull request's branch, as the REST API returns it.
+#[derive(Deserialize)]
+struct RawBranch {
+    #[serde(rename = "ref")]
+    name: String,
 }
 
 impl RawPull {
@@ -434,6 +472,71 @@ impl RawPull {
             (State::Closed, None) => PullState::Closed,
         }
     }
+}
+
+/// A review as the REST API returns it. One still pending has no
+/// submission time.
+#[derive(Deserialize)]
+struct RawReview {
+    #[serde(default)]
+    body: String,
+    submitted_at: Option<DateTime<Utc>>,
+}
+
+impl RawReview {
+    fn submitted(self) -> Option<Review> {
+        Some(Review {
+            body: self.body,
+            submitted_at: self.submitted_at?,
+        })
+    }
+}
+
+/// A pull request's review threads, a page at a time: `gh api graphql
+/// --paginate` fills in `$endCursor` from each page's `pageInfo`.
+const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { nodes { isResolved } pageInfo { hasNextPage endCursor } } } } }";
+
+/// One page of [`REVIEW_THREADS_QUERY`]'s reply.
+#[derive(Deserialize)]
+struct ThreadsPage {
+    data: ThreadsData,
+}
+
+#[derive(Deserialize)]
+struct ThreadsData {
+    repository: ThreadsRepository,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsRepository {
+    pull_request: ThreadsPullRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsPullRequest {
+    review_threads: Threads,
+}
+
+#[derive(Deserialize)]
+struct Threads {
+    nodes: Vec<Thread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Thread {
+    is_resolved: bool,
+}
+
+/// How many threads across `pages` are unresolved.
+fn unresolved(pages: Vec<ThreadsPage>) -> usize {
+    pages
+        .iter()
+        .flat_map(|page| &page.data.repository.pull_request.review_threads.nodes)
+        .filter(|thread| !thread.is_resolved)
+        .count()
 }
 
 #[derive(Deserialize)]
@@ -653,7 +756,8 @@ mod tests {
     #[test]
     fn an_unmerged_closed_pull_request_is_closed() {
         let pull: RawPull =
-            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null}"#).unwrap();
+            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a"}}"#)
+                .unwrap();
         assert_eq!(pull.state(), PullState::Closed);
     }
 
@@ -859,6 +963,7 @@ mod tests {
             merged.merge_commit.as_deref(),
             Some("dd1288cc693368c025b69618edc4bc603c07d301")
         );
+        assert_eq!(merged.head, "issue-357-rust-workspace");
         let open = gh.pull_request(REPO, 367).unwrap();
         assert_eq!(open.state, PullState::Open);
         assert_eq!(open.merge_commit, None);
@@ -1071,5 +1176,77 @@ mod tests {
             ),
         ]);
         gh.close_issue(REPO, 359, "Merged in #370.").unwrap();
+    }
+
+    #[test]
+    fn reads_the_submitted_reviews_through_gh_api() {
+        let (gh, _) = scripted(vec![(
+            vec![
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/epik-agent/Epik/pulls/471/reviews?per_page=100",
+            ],
+            ok(&fixture("reviews.json")),
+        )]);
+        let reviews = gh.reviews(REPO, 471).unwrap();
+        assert_eq!(reviews.len(), 3);
+        assert_eq!(reviews[0].body, "");
+        assert_eq!(
+            reviews[0].submitted_at,
+            "2026-10-30T23:54:08Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            reviews[2].body,
+            "Two concerns, inline.\n\n<!-- epik-review: changes round=1 -->"
+        );
+    }
+
+    #[test]
+    fn counts_the_unresolved_review_threads_through_graphql() {
+        let query: &'static str =
+            Box::leak(format!("query={REVIEW_THREADS_QUERY}").into_boxed_str());
+        let (gh, _) = scripted(vec![(
+            vec![
+                "api",
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-f",
+                query,
+                "-F",
+                "owner=epik-agent",
+                "-F",
+                "name=Epik",
+                "-F",
+                "number=471",
+            ],
+            ok(&fixture("review_threads.json")),
+        )]);
+        assert_eq!(gh.open_review_threads(REPO, 471).unwrap(), 3);
+    }
+
+    #[test]
+    fn review_threads_are_counted_across_pages() {
+        let page = |resolved: &[bool]| {
+            let nodes: Vec<String> = resolved
+                .iter()
+                .map(|resolved| format!(r#"{{"isResolved": {resolved}}}"#))
+                .collect();
+            format!(
+                r#"{{"data": {{"repository": {{"pullRequest": {{"reviewThreads": {{"nodes": [{}]}}}}}}}}}}"#,
+                nodes.join(", ")
+            )
+        };
+        let json = format!("[{}, {}]", page(&[false, true]), page(&[false]));
+        let pages: Vec<ThreadsPage> = parse(&json).unwrap();
+        assert_eq!(unresolved(pages), 2);
+    }
+
+    #[test]
+    fn a_repository_name_without_an_owner_has_no_review_threads_to_count() {
+        let (gh, calls) = scripted(vec![]);
+        assert!(gh.open_review_threads("Epik", 471).is_err());
+        assert!(calls.lock().unwrap().is_empty());
     }
 }

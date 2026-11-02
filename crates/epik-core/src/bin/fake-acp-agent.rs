@@ -2,13 +2,21 @@
 //!
 //! It speaks just enough of the Agent Client Protocol, newline-delimited
 //! JSON-RPC on stdin and stdout, to stand in for `claude-agent-acp`: it
-//! answers `initialize`, `session/new`, `session/set_mode` and
-//! `session/prompt`, and sends `session/update` notifications including a
+//! answers `initialize`, `session/new`, `session/set_mode`,
+//! `session/set_config_option` and `session/prompt`, and sends `session/update` notifications including a
 //! `usage_update` with a cost. Flags choose how it misbehaves:
 //!
 //! - `--mode <id>`: the session's current mode (default `auto`).
 //! - `--modes <id,id,...>`: the modes the session offers (default `auto`).
+//! - `--models <id,id,...>`: offer these models in a `model` config option,
+//!   the first current (default: no such option). Setting it writes the model
+//!   to stderr; setting one not offered is an error.
+//! - `--echo-env <name>`: write the environment variable `name` to stderr
+//!   when started.
 //! - `--cost <amount>`: the cost the prompt reports (default `0.25`).
+//! - `--no-cost`: report usage with no cost, as Codex does.
+//! - `--codex-error <info>`: fail the prompt as Codex does, with a JSON-RPC
+//!   "Internal error" whose data has `codexErrorInfo` set to `info`.
 //! - `--after-prompt <n>`: after the prompt returns, send `n` more updates,
 //!   100 ms apart; the last reports a cost one dollar higher.
 //! - `--ask-permission`: during the prompt, ask the client for permission and
@@ -29,7 +37,11 @@ use serde_json::{Value, json};
 struct Options {
     mode: String,
     modes: Vec<String>,
+    models: Vec<String>,
+    echo_env: Option<String>,
     cost: f64,
+    no_cost: bool,
+    codex_error: Option<String>,
     after_prompt: u32,
     ask_permission: bool,
     exit_early: bool,
@@ -40,7 +52,11 @@ fn options() -> Options {
     let mut options = Options {
         mode: "auto".into(),
         modes: vec!["auto".into()],
+        models: Vec::new(),
+        echo_env: None,
         cost: 0.25,
+        no_cost: false,
+        codex_error: None,
         after_prompt: 0,
         ask_permission: false,
         exit_early: false,
@@ -52,7 +68,11 @@ fn options() -> Options {
         match arg.as_str() {
             "--mode" => options.mode = value(),
             "--modes" => options.modes = value().split(',').map(String::from).collect(),
+            "--models" => options.models = value().split(',').map(String::from).collect(),
+            "--echo-env" => options.echo_env = Some(value()),
             "--cost" => options.cost = value().parse().expect("cost is a number"),
+            "--no-cost" => options.no_cost = true,
+            "--codex-error" => options.codex_error = Some(value()),
             "--after-prompt" => options.after_prompt = value().parse().expect("a count"),
             "--ask-permission" => options.ask_permission = true,
             "--exit-early" => options.exit_early = true,
@@ -84,20 +104,40 @@ fn text(session_id: &str, text: &str) {
     );
 }
 
-fn usage(session_id: &str, cost: f64) {
-    update(
-        session_id,
-        json!({
-            "sessionUpdate": "usage_update",
-            "used": 1000,
-            "size": 200000,
-            "cost": {"amount": cost, "currency": "USD"},
-        }),
-    );
+/// A `usage_update`, with `cost` if there is one.
+fn usage(session_id: &str, cost: Option<f64>) {
+    let mut usage = json!({"sessionUpdate": "usage_update", "used": 1000, "size": 200000});
+    if let Some(cost) = cost {
+        usage["cost"] = json!({"amount": cost, "currency": "USD"});
+    }
+    update(session_id, usage);
+}
+
+/// The session's config options: a `model` option, if there are models.
+fn config_options(models: &[String], current: &str) -> Value {
+    if models.is_empty() {
+        return json!([]);
+    }
+    let values: Vec<Value> = models
+        .iter()
+        .map(|model| json!({"value": model, "name": model}))
+        .collect();
+    json!([{
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": current,
+        "options": values,
+    }])
 }
 
 fn main() {
     let options = options();
+    if let Some(name) = &options.echo_env {
+        eprintln!("{name}={}", std::env::var(name).unwrap_or_default());
+    }
+    let mut model = options.models.first().cloned().unwrap_or_default();
     let session_id = "fake-session";
     let mut lines = std::io::stdin().lock().lines();
     while let Some(Ok(line)) = lines.next() {
@@ -119,6 +159,7 @@ fn main() {
                 reply(json!({
                     "sessionId": session_id,
                     "modes": {"currentModeId": options.mode, "availableModes": modes},
+                    "configOptions": config_options(&options.models, &model),
                 }));
                 if options.exit_early {
                     eprintln!("fake-acp-agent: exiting early");
@@ -126,6 +167,21 @@ fn main() {
                 }
             }
             Some("session/set_mode") => reply(json!({})),
+            Some("session/set_config_option") => {
+                let params = &message["params"];
+                let value = params["value"].as_str().unwrap_or_default();
+                eprintln!("fake-acp-agent: set {} to {value}", params["configId"]);
+                if params["configId"] == "model" && options.models.iter().any(|m| m == value) {
+                    model = value.to_owned();
+                    reply(json!({"configOptions": config_options(&options.models, &model)}));
+                } else {
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32602, "message": "no such option or value"},
+                    }));
+                }
+            }
             Some("session/prompt") => {
                 if options.hang {
                     continue;
@@ -152,12 +208,27 @@ fn main() {
                         &format!("Permission answer: {}", answer["result"]),
                     );
                 }
-                usage(session_id, options.cost);
+                if let Some(info) = &options.codex_error {
+                    let message = "Quota exceeded. Check your plan and billing details.";
+                    text(session_id, message);
+                    send(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error",
+                            "data": {"message": message, "codexErrorInfo": info},
+                        },
+                    }));
+                    continue;
+                }
+                let cost = |amount: f64| (!options.no_cost).then_some(amount);
+                usage(session_id, cost(options.cost));
                 reply(json!({"stopReason": "end_turn"}));
                 for n in 1..=options.after_prompt {
                     sleep(Duration::from_millis(100));
                     if n == options.after_prompt {
-                        usage(session_id, options.cost + 1.0);
+                        usage(session_id, cost(options.cost + 1.0));
                     } else {
                         text(session_id, "A background subagent is still working.");
                     }

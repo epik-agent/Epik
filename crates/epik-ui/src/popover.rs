@@ -152,7 +152,8 @@ pub fn Segments(segments: Vec<NodeState>) -> impl IntoView {
     view! { <div class="segments">{segments}</div> }
 }
 
-/// An active run, which opens its page.
+/// An active run, and where it builds if there is more than one host,
+/// which opens its page.
 #[component]
 pub fn RunRow(run: TrayRun) -> impl IntoView {
     let command = Command::open_run(&run.run);
@@ -163,6 +164,7 @@ pub fn RunRow(run: TrayRun) -> impl IntoView {
                 <span class="count">{run.count}</span>
             </div>
             <Segments segments=run.segments/>
+            {run.place.map(|place| view! { <div class="place">{place}</div> })}
             <div class="line">{run.line}</div>
         </button>
     }

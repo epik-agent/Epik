@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, Listener, ListenerNonblockingMode, ListenerOptions, Name,
@@ -22,7 +23,10 @@ use interprocess::local_socket::{
 use serde::{Deserialize, Serialize};
 
 use crate::builds::{Builds, Started};
+use crate::hosts;
+use crate::record;
 use crate::run::{self, RunKey, RunState};
+use crate::settings::Settings;
 use crate::setup;
 
 /// How many runs `list` returns when it isn't given a limit.
@@ -30,6 +34,9 @@ pub const DEFAULT_LIMIT: usize = 20;
 
 /// The longest request read. A build request is a few hundred bytes.
 const MAX_REQUEST: u64 = 64 * 1024;
+
+/// The most `read` returns, unless the first line alone is longer.
+pub const MAX_CHUNK: usize = 1024 * 1024;
 
 /// How long a client has to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,22 +54,58 @@ pub enum Request {
         number: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
-        plugin_dir: PathBuf,
+        /// The agent and model each role runs with, or `None` for the
+        /// app's settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roles: Option<Settings>,
+        /// The remote host to build on, or `None` for the default host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
     },
     /// A run's state.
-    Status { run: RunKey },
-    /// The runs, newest activity first.
+    Status {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+    /// The runs, this computer's and every remote host's, newest activity
+    /// first.
     List {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
+    /// Every run's key, with no limit.
+    Runs,
+    /// Every regular file in a run's record directory.
+    Files { run: RunKey },
+    /// The whole lines of a run's record file from a byte offset.
+    Read {
+        run: RunKey,
+        path: String,
+        offset: u64,
+    },
     /// Start a new build of a run that needs attention, as its last build
     /// was started.
-    Rerun { run: RunKey },
+    Rerun {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
     /// Delete a run that needs attention: its builds' clones and records.
-    Delete { run: RunKey },
-    /// Every setup item's state.
-    Setup,
+    Delete {
+        run: RunKey,
+        /// The remote host the run is on, or `None` for this computer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+    /// Every setup item's state, each marked whether `roles` need it.
+    Setup {
+        /// The roles to mark them for, or `None` for the settings'.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roles: Option<Settings>,
+    },
     /// Whether the app is there, and its version.
     Ping,
 }
@@ -76,8 +119,19 @@ pub enum Response {
     /// A run's state, folded from its builds.
     Run(RunState),
     Runs {
-        runs: Vec<RunState>,
+        runs: Vec<ListedRun>,
     },
+    /// Every run's key, and when it last changed.
+    RunKeys {
+        runs: Vec<RunLatest>,
+    },
+    /// A run's record files.
+    Files {
+        run: RunKey,
+        files: Vec<RecordFile>,
+    },
+    /// Whole lines of a record file.
+    Chunk(Chunk),
     /// Every setup item's state.
     Setup {
         items: Vec<setup::Check>,
@@ -92,6 +146,45 @@ pub enum Response {
     Error {
         message: String,
     },
+}
+
+/// A run in a list, and the remote host it is on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListedRun {
+    #[serde(flatten)]
+    pub state: RunState,
+    /// The remote host, or `None` for this computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// A run, and when it last changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunLatest {
+    pub run: RunKey,
+    pub latest_at: DateTime<Utc>,
+}
+
+/// A regular file in a run's record directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordFile {
+    /// Relative to the run's directory, separated by `/`.
+    pub path: String,
+    /// In bytes.
+    pub size: u64,
+}
+
+/// The whole lines of a record file from `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chunk {
+    pub path: String,
+    pub offset: u64,
+    /// The lines, decoded lossily where they aren't UTF-8.
+    pub data: String,
+    /// The offset after the lines read, from which to read next.
+    pub end: u64,
+    /// The file's size.
+    pub size: u64,
 }
 
 impl Response {
@@ -109,29 +202,47 @@ fn handle(builds: &Builds, request: Request) -> Response {
             repo,
             number,
             branch,
-            plugin_dir,
-        } => match builds.start(&repo, number, branch, plugin_dir) {
+            roles,
+            host,
+        } => match builds.build(host.as_deref(), &repo, number, branch, roles) {
             Ok(started) => Response::Started(started),
-            Err(why) => Response::error(format!("couldn't build {repo}#{number}: {why}")),
+            Err(message) => Response::error(message),
         },
-        Request::Status { run } => status(builds.root(), &run),
-        Request::List { limit } => match run::list(builds.root()) {
+        Request::Status { run, host: None } => status(builds.root(), &run),
+        Request::Status {
+            run,
+            host: Some(host),
+        } => {
+            let request = Request::Status {
+                run: run.clone(),
+                host: None,
+            };
+            match builds.ask(&host, &request) {
+                Ok(reply) => reply,
+                Err(why) => Response::error(format!("couldn't read {run} on {host}: {why}")),
+            }
+        }
+        Request::List { limit } => match listed(builds.root()) {
             Ok(mut runs) => {
                 runs.truncate(limit.unwrap_or(DEFAULT_LIMIT));
                 Response::Runs { runs }
             }
             Err(error) => Response::error(format!("couldn't list the runs: {error}")),
         },
-        Request::Rerun { run } => match builds.rerun(&run) {
+        Request::Runs | Request::Files { .. } | Request::Read { .. } => {
+            records(builds.root(), request)
+        }
+        Request::Rerun { run, host } => match builds.rerun_on(host.as_deref(), &run) {
             Ok(started) => Response::Started(started),
-            Err(why) => Response::error(format!("couldn't rerun {run}: {why}")),
+            Err(why) => Response::error(format!("couldn't rerun {}: {why}", on(&run, &host))),
         },
-        Request::Delete { run } => match builds.delete(&run) {
+        Request::Delete { run, host } => match builds.delete_on(host.as_deref(), &run) {
             Ok(()) => Response::Deleted { run },
-            Err(why) => Response::error(format!("couldn't delete {run}: {why}")),
+            Err(why) => Response::error(format!("couldn't delete {}: {why}", on(&run, &host))),
         },
-        Request::Setup => Response::Setup {
-            items: builds.setup(),
+        Request::Setup { roles } => match builds.setup(roles.as_ref()) {
+            Ok(items) => Response::Setup { items },
+            Err(message) => Response::error(message),
         },
         Request::Ping => Response::Pong {
             version: crate::version().to_owned(),
@@ -147,7 +258,35 @@ fn respond(builds: &Builds, line: &str) -> Response {
     }
 }
 
-fn status(root: &Path, key: &RunKey) -> Response {
+/// `run`, and the remote host it is on if any, as a sentence names it.
+fn on(run: &RunKey, host: &Option<String>) -> String {
+    match host {
+        Some(host) => format!("{run} on {host}"),
+        None => run.to_string(),
+    }
+}
+
+/// Every run under `root` and in each remote host's mirror, newest
+/// activity first. A host whose mirror can't be read lists none.
+fn listed(root: &Path) -> io::Result<Vec<ListedRun>> {
+    let mut runs: Vec<ListedRun> = run::list(root)?
+        .into_iter()
+        .map(|state| ListedRun { state, host: None })
+        .collect();
+    for host in hosts::list(root)? {
+        let Ok(mirrored) = run::list(&hosts::dir(root, &host.destination)) else {
+            continue;
+        };
+        runs.extend(mirrored.into_iter().map(|state| ListedRun {
+            state,
+            host: Some(host.destination.clone()),
+        }));
+    }
+    runs.sort_by_key(|run| std::cmp::Reverse(run.state.latest_at));
+    Ok(runs)
+}
+
+pub(crate) fn status(root: &Path, key: &RunKey) -> Response {
     match run::read(root, key) {
         Ok(state) => Response::Run(state),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -155,6 +294,151 @@ fn status(root: &Path, key: &RunKey) -> Response {
         }
         Err(error) => Response::error(format!("couldn't read run {key}: {error}")),
     }
+}
+
+/// Answers `runs`, `files` and `read` from the records under `root`.
+/// Any other request is a `bad request`.
+pub(crate) fn records(root: &Path, request: Request) -> Response {
+    match request {
+        Request::Runs => run_keys(root),
+        Request::Files { run } => files(root, &run),
+        Request::Read { run, path, offset } => read(root, &run, path, offset),
+        other => Response::error(format!("bad request: {other:?} is not about records")),
+    }
+}
+
+fn run_keys(root: &Path) -> Response {
+    let latest = || -> io::Result<Vec<RunLatest>> {
+        let mut runs = Vec::new();
+        for key in run::keys(root)? {
+            if let Some(state) = run::fold(&record::list_builds(root, &key)?) {
+                runs.push(RunLatest {
+                    run: key,
+                    latest_at: state.latest_at,
+                });
+            }
+        }
+        runs.sort_by(|a, b| a.run.cmp(&b.run));
+        Ok(runs)
+    };
+    match latest() {
+        Ok(runs) => Response::RunKeys { runs },
+        Err(error) => Response::error(format!("couldn't list the runs: {error}")),
+    }
+}
+
+/// `run`'s record directory, or `None` if it has none.
+fn existing_run_dir(root: &Path, key: &RunKey) -> Option<PathBuf> {
+    let dir = run::run_dir(root, key);
+    dir.is_dir().then_some(dir)
+}
+
+fn files(root: &Path, key: &RunKey) -> Response {
+    let Some(dir) = existing_run_dir(root, key) else {
+        return Response::error(format!("no run {key}"));
+    };
+    let mut files = Vec::new();
+    match walk(&dir, "", &mut files) {
+        Ok(()) => {
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            Response::Files {
+                run: key.clone(),
+                files,
+            }
+        }
+        Err(error) => Response::error(format!("couldn't list run {key}'s files: {error}")),
+    }
+}
+
+/// Adds every regular file under `dir`, named `prefix` from the run's
+/// directory, to `files`. Symbolic links aren't followed.
+fn walk(dir: &Path, prefix: &str, files: &mut Vec<RecordFile>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{prefix}{name}");
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            walk(&entry.path(), &format!("{path}/"), files)?;
+        } else if kind.is_file() {
+            files.push(RecordFile {
+                path,
+                size: entry.metadata()?.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn read(root: &Path, key: &RunKey, path: String, offset: u64) -> Response {
+    let Some(dir) = existing_run_dir(root, key) else {
+        return Response::error(format!("no run {key}"));
+    };
+    let Some(relative) = within(&path) else {
+        return Response::error(format!(
+            "bad request: {path:?} is not a path in the run's directory"
+        ));
+    };
+    match read_lines(&dir.join(relative), offset) {
+        Ok((data, end, size)) => Response::Chunk(Chunk {
+            path,
+            offset,
+            data,
+            end,
+            size,
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Response::error(format!("run {key} has no file {path}"))
+        }
+        Err(error) => Response::error(format!("couldn't read {path} of run {key}: {error}")),
+    }
+}
+
+/// `path` as a relative path that stays below where it is joined: not
+/// empty, not absolute, and without `..`.
+fn within(path: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let path = Path::new(path);
+    let stays = path
+        .components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
+    (stays
+        && path
+            .components()
+            .any(|part| matches!(part, Component::Normal(_))))
+    .then(|| path.to_path_buf())
+}
+
+/// The whole lines of the file at `path` from `offset`, up to
+/// [`MAX_CHUNK`] bytes unless the first line alone is longer, with the
+/// offset after them and the file's size. A trailing line without its
+/// newline is still being written, and is left for the next read.
+fn read_lines(path: &Path, offset: u64) -> io::Result<(String, u64, u64)> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    if offset >= size {
+        return Ok((String::new(), offset, size));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut reader)
+        .take(MAX_CHUNK as u64)
+        .read_to_end(&mut bytes)?;
+    match bytes.iter().rposition(|&byte| byte == b'\n') {
+        Some(last) => bytes.truncate(last + 1),
+        None if bytes.len() == MAX_CHUNK => {
+            // The first line is longer than a chunk: finish it.
+            reader.read_until(b'\n', &mut bytes)?;
+            if bytes.last() != Some(&b'\n') {
+                bytes.clear();
+            }
+        }
+        None => bytes.clear(),
+    }
+    let end = offset + bytes.len() as u64;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), end, size))
 }
 
 /// Where the socket is.
@@ -327,16 +611,60 @@ fn write_line(stream: &mut Stream, value: &impl Serialize) -> io::Result<()> {
 
 /// Sends `request` to the app at `address` and returns its answer.
 pub fn request(address: &Address, request: &Request) -> io::Result<Response> {
-    let mut stream = Stream::connect(address.name()?)?;
-    write_line(&mut stream, request)?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
-    Ok(serde_json::from_str(&line)?)
+    let stream = Stream::connect(address.name()?)?;
+    let reply = exchange(stream, &serde_json::to_string(request)?)?;
+    Ok(serde_json::from_str(&reply)?)
+}
+
+/// Relays each line of `input` to the app at `address` as it is, and
+/// writes each answer to `output` as a line, flushed, until `input` ends.
+/// When the app can't be reached, the answer is an error saying why. This
+/// is how a client on another machine reaches the app: `epik-app stdio`,
+/// run over `ssh`.
+pub fn bridge(address: &Address, input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+    for line in input.lines() {
+        let line = line?;
+        let reply = match address.name().and_then(Stream::connect) {
+            Err(_) => serde_json::to_string(&Response::error(format!(
+                "no Epik app is running at {address} on this machine: start it with \
+                 `epik-app --headless`, or start its service"
+            )))?,
+            Ok(stream) => match exchange(stream, &line) {
+                Ok(reply) => reply,
+                Err(error) => serde_json::to_string(&Response::error(format!(
+                    "couldn't reach the Epik app at {address}: {error}"
+                )))?,
+            },
+        };
+        output.write_all(reply.as_bytes())?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+/// Writes `line`, a request as JSON, to `stream`, and returns the answer,
+/// a line of JSON without its `\n`.
+fn exchange(mut stream: Stream, line: &str) -> io::Result<String> {
+    stream.write_all(line.trim_end_matches(['\r', '\n']).as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply)?;
+    if !reply.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the app closed the connection without answering",
+        ));
+    }
+    reply.truncate(reply.trim_end_matches(['\r', '\n']).len());
+    Ok(reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentProfile;
     use crate::builds::{HangingAgent, fake_github};
     use crate::github::FakeGitHub;
     use crate::record::{self, Kind};
@@ -377,7 +705,7 @@ mod tests {
             let builds = Arc::new(Builds::new(
                 root.path(),
                 Arc::new(github),
-                Arc::new(HangingAgent),
+                |_: &AgentProfile| Arc::new(HangingAgent),
             ));
             let stop = Arc::new(AtomicBool::new(false));
             let thread = thread::spawn({
@@ -442,9 +770,7 @@ mod tests {
     fn build_answers_once_the_build_has_started() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        let reply = app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
 
         assert_eq!(reply["type"], "started", "{reply}");
         assert_eq!(reply["run"], "owner/repo#7");
@@ -465,20 +791,60 @@ mod tests {
     fn build_takes_a_branch() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "branch": "topic", "plugin_dir": "/plugin"}"#,
-        );
+        let reply =
+            app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7, "branch": "topic"}"#);
 
         assert_eq!(reply["branch"], "topic", "{reply}");
+    }
+
+    #[test]
+    fn build_takes_the_roles_to_run() {
+        let app = Running::new(fake_github());
+
+        let roles = r#""roles": {"coding": {"agent": "claude", "model": "opus"}, "review": null}"#;
+        let reply = app.send(&format!(
+            r#"{{"type": "build", "repo": "owner/repo", "number": 7, {roles}}}"#
+        ));
+
+        assert_eq!(reply["type"], "started", "{reply}");
+        let key = RunKey::new("owner/repo", 7);
+        let events =
+            record::read_events(app.root.path(), &key, reply["build_id"].as_str().unwrap())
+                .unwrap();
+        let roles = record::fold(&events).unwrap().roles;
+        assert_eq!(roles.coding.model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn build_takes_the_host_to_build_on() {
+        let app = Running::new(fake_github());
+
+        let reply =
+            app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7, "host": "devbox"}"#);
+
+        assert_eq!(
+            reply,
+            json!({"type": "error", "message": "couldn't build owner/repo#7: \"devbox\" is not a host: add it in Settings"})
+        );
+        assert!(app.builds.active().is_empty());
+    }
+
+    #[test]
+    fn a_build_request_from_a_client_that_still_sends_a_plugin_is_answered() {
+        let app = Running::new(fake_github());
+
+        let reply = app.send(
+            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
+        );
+
+        assert_eq!(reply["type"], "started", "{reply}");
     }
 
     #[test]
     fn a_build_that_cannot_start_is_an_error() {
         let app = Running::new(fake_github());
 
-        let reply = app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 8, "plugin_dir": "/plugin"}"#,
-        );
+        let reply = app.send(r#"{"type": "build", "repo": "owner/repo", "number": 8}"#);
 
         assert_eq!(reply["type"], "error", "{reply}");
         let message = reply["message"].as_str().unwrap();
@@ -492,9 +858,7 @@ mod tests {
     #[test]
     fn status_answers_with_the_runs_folded_state() {
         let app = Running::new(fake_github());
-        app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
 
         let reply = app.send(r#"{"type": "status", "run": "owner/repo#7"}"#);
 
@@ -559,6 +923,52 @@ mod tests {
         assert_eq!(reply["runs"][0]["number"], DEFAULT_LIMIT as u64 + 1);
     }
 
+    #[test]
+    fn list_includes_every_hosts_runs_each_with_its_host() {
+        let app = Running::new(fake_github());
+        let root = app.root.path();
+        hosts::add(root, "devbox", chrono::Utc::now()).unwrap();
+        write_build(root, 1, 1);
+        write_build(&hosts::dir(root, "devbox"), 2, 3);
+        write_build(&hosts::dir(root, "devbox"), 3, 2);
+
+        let reply = app.send(r#"{"type": "list"}"#);
+
+        let runs = reply["runs"].as_array().unwrap();
+        let listed: Vec<(u64, Option<&str>)> = runs
+            .iter()
+            .map(|run| (run["number"].as_u64().unwrap(), run["host"].as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [(2, Some("devbox")), (3, Some("devbox")), (1, None)]
+        );
+        assert!(runs[2].get("host").is_none(), "{}", runs[2]);
+        let Response::Runs { runs } = serde_json::from_value(reply).unwrap() else {
+            panic!("not runs");
+        };
+        assert_eq!(runs[0].host.as_deref(), Some("devbox"));
+        assert_eq!(runs[0].state.run, RunKey::new("owner/repo", 2));
+    }
+
+    #[test]
+    fn rerun_delete_and_status_take_the_host_the_run_is_on() {
+        let app = Running::new(fake_github());
+
+        let reply = |kind: &str| {
+            app.send(&json!({"type": kind, "run": "owner/repo#7", "host": "devbox"}).to_string())
+        };
+
+        let not_a_host = "\"devbox\" is not a host: add it in Settings";
+        for (kind, verb) in [("rerun", "rerun"), ("delete", "delete"), ("status", "read")] {
+            assert_eq!(
+                reply(kind),
+                json!({"type": "error", "message": format!("couldn't {verb} owner/repo#7 on devbox: {not_a_host}")}),
+                "{kind}"
+            );
+        }
+    }
+
     /// Records a build of issue `number` started `seconds` into the day.
     fn write_build(root: &Path, number: u64, seconds: u32) {
         use chrono::TimeZone;
@@ -577,17 +987,215 @@ mod tests {
                 branch: "main".to_owned(),
                 issues: Vec::new(),
                 closed: Vec::new(),
-                plugin_dir: None,
+                roles: Default::default(),
             })
             .unwrap();
     }
 
     #[test]
+    fn runs_answers_with_every_runs_key_past_the_list_limit() {
+        let app = Running::new(fake_github());
+        let count = DEFAULT_LIMIT as u64 + 5;
+        for n in 1..=count {
+            write_build(app.root.path(), n, n as u32);
+        }
+
+        let reply = app.send(r#"{"type": "runs"}"#);
+
+        assert_eq!(reply["type"], "run_keys", "{reply}");
+        let runs = reply["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), count as usize);
+        let key = RunKey::new("owner/repo", 3);
+        let three = runs
+            .iter()
+            .find(|run| run["run"] == "owner/repo#3")
+            .unwrap();
+        let state = run::read(app.root.path(), &key).unwrap();
+        assert_eq!(
+            three,
+            &json!({"run": "owner/repo#3", "latest_at": state.latest_at})
+        );
+    }
+
+    #[test]
+    fn files_answers_with_every_file_of_a_runs_builds() {
+        let app = Running::new(fake_github());
+        let root = app.root.path();
+        write_build(root, 7, 1);
+        write_build(root, 7, 2);
+        let key = RunKey::new("owner/repo", 7);
+        let builds = record::list_builds(root, &key).unwrap();
+        let first = &builds[0].build_id;
+        fs::write(
+            record::build_dir(root, &key, first).join("8.err"),
+            b"oops\n",
+        )
+        .unwrap();
+
+        let reply = app.send(r#"{"type": "files", "run": "owner/repo#7"}"#);
+
+        assert_eq!(reply["type"], "files", "{reply}");
+        assert_eq!(reply["run"], "owner/repo#7");
+        let mut expected = Vec::new();
+        for build in &builds {
+            let dir = record::build_dir(root, &key, &build.build_id);
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                expected.push(json!({
+                    "path": format!("{}/{}", build.build_id, entry.file_name().to_string_lossy()),
+                    "size": entry.metadata().unwrap().len(),
+                }));
+            }
+        }
+        expected.sort_by_key(|file| file["path"].as_str().unwrap().to_owned());
+        assert_eq!(reply["files"], json!(expected));
+        assert!(
+            expected
+                .iter()
+                .any(|file| file["path"] == format!("{first}/8.err") && file["size"] == 5)
+        );
+        assert_eq!(builds.len(), 2);
+    }
+
+    #[test]
+    fn files_and_read_of_an_unknown_run_are_errors() {
+        let app = Running::new(fake_github());
+
+        let files = app.send(r#"{"type": "files", "run": "owner/repo#9"}"#);
+        let read = app.send(
+            r#"{"type": "read", "run": "owner/repo#9", "path": "b/events.jsonl", "offset": 0}"#,
+        );
+
+        assert_eq!(
+            files,
+            json!({"type": "error", "message": "no run owner/repo#9"})
+        );
+        assert_eq!(
+            read,
+            json!({"type": "error", "message": "no run owner/repo#9"})
+        );
+    }
+
+    /// A server with run `owner/repo#7` whose file `b/log` holds `contents`.
+    fn with_log(contents: &[u8]) -> Running {
+        let app = Running::new(fake_github());
+        let dir = run::run_dir(app.root.path(), &RunKey::new("owner/repo", 7)).join("b");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("log"), contents).unwrap();
+        app
+    }
+
+    fn read_log(app: &Running, offset: u64) -> Value {
+        app.send(
+            &json!({"type": "read", "run": "owner/repo#7", "path": "b/log", "offset": offset})
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn read_answers_with_the_whole_lines_from_an_offset() {
+        let app = with_log(b"one\ntwo\nthree\n");
+
+        assert_eq!(
+            read_log(&app, 0),
+            json!({"type": "chunk", "path": "b/log", "offset": 0, "data": "one\ntwo\nthree\n", "end": 14, "size": 14})
+        );
+        assert_eq!(read_log(&app, 4)["data"], "two\nthree\n");
+        assert_eq!(read_log(&app, 4)["end"], 14);
+        assert_eq!(read_log(&app, 14)["data"], "");
+        assert_eq!(read_log(&app, 14)["end"], 14);
+    }
+
+    #[test]
+    fn read_holds_back_a_trailing_partial_line() {
+        let app = with_log(b"one\ntw");
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"], "one\n");
+        assert_eq!(reply["end"], 4);
+        assert_eq!(reply["size"], 6);
+        assert_eq!(read_log(&app, 4)["data"], "");
+        assert_eq!(read_log(&app, 4)["end"], 4);
+    }
+
+    #[test]
+    fn read_cuts_at_the_last_whole_line_under_the_chunk_size() {
+        let line = format!("{}\n", "x".repeat(999));
+        let lines = MAX_CHUNK / line.len() + 2;
+        let app = with_log(line.repeat(lines).as_bytes());
+
+        let first = read_log(&app, 0);
+        let fitting = MAX_CHUNK / line.len() * line.len();
+        assert_eq!(first["data"].as_str().unwrap().len(), fitting);
+        assert_eq!(first["end"], fitting);
+        let rest = read_log(&app, fitting as u64);
+        assert_eq!(
+            rest["data"].as_str().unwrap().len(),
+            (lines * line.len()) - fitting
+        );
+    }
+
+    #[test]
+    fn read_returns_a_line_over_the_chunk_size_whole() {
+        let long = format!("{}\n", "y".repeat(MAX_CHUNK + 10));
+        let app = with_log(format!("{long}short\n").as_bytes());
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"].as_str().unwrap(), long);
+        assert_eq!(reply["end"], long.len());
+    }
+
+    #[test]
+    fn read_decodes_bytes_that_are_not_utf8_lossily() {
+        let app = with_log(b"ok\xff\n");
+
+        let reply = read_log(&app, 0);
+
+        assert_eq!(reply["data"], "ok\u{fffd}\n");
+        assert_eq!(reply["end"], 4, "the offset counts bytes, not characters");
+    }
+
+    #[test]
+    fn read_past_the_end_returns_nothing() {
+        let app = with_log(b"one\n");
+
+        let reply = read_log(&app, 100);
+
+        assert_eq!(
+            reply,
+            json!({"type": "chunk", "path": "b/log", "offset": 100, "data": "", "end": 100, "size": 4})
+        );
+    }
+
+    #[test]
+    fn read_refuses_a_path_that_leaves_the_runs_directory() {
+        let app = with_log(b"one\n");
+        let outside = app.root.path().join("secret");
+        fs::write(&outside, b"secret\n").unwrap();
+
+        for path in [
+            "../../../../secret",
+            "b/../../8/b/log",
+            outside.to_str().unwrap(),
+            "",
+        ] {
+            let reply = app.send(
+                &json!({"type": "read", "run": "owner/repo#7", "path": path, "offset": 0})
+                    .to_string(),
+            );
+
+            assert_eq!(reply["type"], "error", "{path}: {reply}");
+            let message = reply["message"].as_str().unwrap();
+            assert!(message.starts_with("bad request: "), "{path}: {message}");
+        }
+    }
+
+    #[test]
     fn a_run_that_needs_attention_is_rerun_and_deleted() {
         let app = Running::new(fake_github());
-        app.send(
-            r#"{"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"}"#,
-        );
+        app.send(r#"{"type": "build", "repo": "owner/repo", "number": 7}"#);
         let refused = app.send(r#"{"type": "rerun", "run": "owner/repo#7"}"#);
         assert_eq!(
             refused,
@@ -621,6 +1229,50 @@ mod tests {
             reply,
             json!({"type": "setup", "items": []}),
             "no check in tests"
+        );
+    }
+
+    #[test]
+    fn setup_marks_each_item_needed_by_the_roles_or_the_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let builds = Builds::new(root.path(), Arc::new(fake_github()), |_: &AgentProfile| {
+            Arc::new(HangingAgent)
+        })
+        .check_setup(|_| {
+            [setup::Item::Claude, setup::Item::Codex]
+                .map(|item| setup::Check {
+                    item,
+                    title: item.title().to_owned(),
+                    state: setup::State::Missing,
+                    detail: "not installed".to_owned(),
+                    usable: false,
+                    needed: true,
+                })
+                .to_vec()
+        });
+        let needed = |request: &str| -> Vec<(String, bool)> {
+            let reply = respond(&builds, request);
+            let Response::Setup { items } = reply else {
+                panic!("{reply:?}");
+            };
+            items
+                .iter()
+                .map(|check| (check.item.id().to_owned(), check.needed))
+                .collect()
+        };
+
+        let by_settings = needed(r#"{"type": "setup"}"#);
+        let by_roles = needed(
+            r#"{"type": "setup", "roles": {"coding": {"agent": "codex", "model": null}, "review": null}}"#,
+        );
+
+        assert_eq!(
+            by_settings,
+            [("claude".to_owned(), true), ("codex".to_owned(), false)]
+        );
+        assert_eq!(
+            by_roles,
+            [("claude".to_owned(), false), ("codex".to_owned(), true)]
         );
     }
 
@@ -760,11 +1412,12 @@ mod tests {
             repo: "owner/repo".to_owned(),
             number: 7,
             branch: None,
-            plugin_dir: "/plugin".into(),
+            roles: None,
+            host: None,
         };
         assert_eq!(
             serde_json::to_value(&build).unwrap(),
-            json!({"type": "build", "repo": "owner/repo", "number": 7, "plugin_dir": "/plugin"})
+            json!({"type": "build", "repo": "owner/repo", "number": 7})
         );
         assert_eq!(
             serde_json::to_value(Request::List { limit: None }).unwrap(),
@@ -776,6 +1429,7 @@ mod tests {
             kind: Kind::Epic,
             branch: "epic/1".to_owned(),
             build_dir: "/runs/o/r/1/b".into(),
+            host: None,
         });
         assert_eq!(
             serde_json::to_value(&started).unwrap(),

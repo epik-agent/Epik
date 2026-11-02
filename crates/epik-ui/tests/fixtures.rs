@@ -6,7 +6,7 @@ use leptos::prelude::{Owner, RenderHtml};
 
 use epik_view::{
     Disposition, Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
-    RepositoryRow, RunCard, RunPage, Sidebar, SidebarRun, Span, TrayRun,
+    RepositoryRow, RunCard, RunPage, SessionRow, Sidebar, SidebarRun, Span, TrayRun,
 };
 
 pub fn text(text: &str) -> Span {
@@ -59,6 +59,7 @@ pub fn card(now: Vec<NowLine>) -> RunCard {
     RunCard {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         epic: link(
             "acme/widgets#13",
             "https://github.com/acme/widgets/issues/13",
@@ -92,6 +93,7 @@ pub fn tray_run() -> TrayRun {
     TrayRun {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         count: "1/3".into(),
         segments: vec![NodeState::Merged, NodeState::Running, NodeState::NotStarted],
         line: "building #2 · 2m 00s · acme/widgets#13".into(),
@@ -168,6 +170,24 @@ pub fn issue(number: u64, state: NodeState, column: usize, row: usize) -> IssueC
         pull_request: vec![text("none yet")],
         recent: vec![],
         log: None,
+        sessions: vec![],
+    }
+}
+
+/// A finished Claude Code session of `role` and `round`, with its log at
+/// `log`.
+pub fn session(role: &str, round: u32, verdict: Option<&str>, log: &str) -> SessionRow {
+    SessionRow {
+        role: role.into(),
+        round,
+        agent: "Claude Code".into(),
+        model: "default model".into(),
+        time: "1m 00s".into(),
+        cost: Some("$0.30".into()),
+        verdict: verdict.map(Into::into),
+        threads: None,
+        running: false,
+        log: Some(log.into()),
     }
 }
 
@@ -176,6 +196,7 @@ pub fn run_page() -> RunPage {
     RunPage {
         run: "acme/widgets#13".into(),
         title: "Exponentiation".into(),
+        place: None,
         epic: link(
             "acme/widgets#13",
             "https://github.com/acme/widgets/issues/13",
@@ -198,6 +219,7 @@ pub fn run_page() -> RunPage {
             issue(3, NodeState::NotStarted, 1, 1),
         ],
         edges: vec![(1, 2), (1, 3)],
+        sessions: vec![],
     }
 }
 

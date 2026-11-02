@@ -50,12 +50,8 @@ enum Item {
 #[derive(Default)]
 struct Tracked {
     call: Call,
-    /// Its latest `rawOutput`, which, as each update's fields replace
-    /// those before, is all of its output so far.
-    output: String,
     /// What Claude Code says the tool did, from its latest update.
     response: Option<Value>,
-    finished: bool,
 }
 
 /// An agent log's stream, read a line at a time.
@@ -135,31 +131,12 @@ impl Reader {
                     *last_call = Some(id.to_owned());
                     Tracked::default()
                 });
-                if let Some(tool) = update.pointer("/_meta/claudeCode/toolName") {
-                    tracked.call.tool = tool.as_str().map(str::to_owned);
-                }
-                if let Some(title) = update.get("title").and_then(Value::as_str) {
-                    tracked.call.title = Some(title.to_owned());
-                }
-                if let Some(input) = update.get("rawInput")
-                    && input.as_object().is_some_and(|input| !input.is_empty())
-                {
-                    if let Some(command) = input.get("command").and_then(Value::as_str) {
-                        self.dirs.extend(activity::cd_targets(command));
-                    }
-                    tracked.call.input = Some(input.clone());
+                tracked.call.apply(update);
+                if activity::has_input(update) {
+                    self.dirs.extend(tracked.call.dirs());
                 }
                 if let Some(response) = update.pointer("/_meta/claudeCode/toolResponse") {
                     tracked.response = Some(response.clone());
-                }
-                if let Some(output) = update.get("rawOutput") {
-                    tracked.output = text_of(output);
-                }
-                if matches!(
-                    update.get("status").and_then(Value::as_str),
-                    Some("completed" | "failed")
-                ) {
-                    tracked.finished = true;
                 }
             }
             _ => {}
@@ -191,27 +168,17 @@ impl Reader {
             working: self
                 .last_call
                 .as_ref()
-                .is_some_and(|id| !self.calls[id].finished),
+                .is_some_and(|id| !self.calls[id].call.finished),
         }
-    }
-}
-
-/// A `rawOutput` as text: a string, or the text of its content blocks.
-fn text_of(output: &Value) -> String {
-    match output {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
     }
 }
 
 /// A tool call as an entry, or in words if it isn't one the stream shows
 /// in full or its input isn't known yet.
 fn entry(tracked: &Tracked, dirs: &[String]) -> Entry {
+    if tracked.call.tool.is_none() {
+        return acp_entry(&tracked.call, dirs);
+    }
     let input = tracked.call.input.as_ref();
     let response = tracked.response.as_ref();
     let field = |name: &str| input.and_then(|input| input.get(name));
@@ -219,9 +186,9 @@ fn entry(tracked: &Tracked, dirs: &[String]) -> Entry {
     let number = |name: &str| field(name).and_then(Value::as_u64);
     let path = text("file_path").map(|path| activity::relative(path, dirs));
     let entry = match (tracked.call.tool.as_deref(), path) {
-        (Some("Bash"), _) => text("command").map(|command| Entry::Command {
+        (Some("Bash"), _) => tracked.call.command().map(|command| Entry::Command {
             command: command.to_owned(),
-            output: cut(lines(&tracked.output)),
+            output: cut(lines(&tracked.call.output)),
         }),
         (Some("Read"), Some(path)) => Some(Entry::Read {
             path,
@@ -242,7 +209,7 @@ fn entry(tracked: &Tracked, dirs: &[String]) -> Entry {
             } else {
                 text("output_mode")
             };
-            let (matches, hits) = hits(&tracked.output, mode, dirs);
+            let (matches, hits) = hits(&tracked.call.output, mode, dirs);
             Entry::Search {
                 pattern: pattern.to_owned(),
                 within: text("path")
@@ -268,6 +235,45 @@ fn entry(tracked: &Tracked, dirs: &[String]) -> Entry {
     };
     entry.unwrap_or_else(|| Entry::Other {
         text: activity::describe(&tracked.call, dirs),
+    })
+}
+
+/// A call from an agent other than Claude Code as an entry, from ACP's
+/// fields: a command and its output, a file's changes or its first lines,
+/// a file read; else in words.
+fn acp_entry(call: &Call, dirs: &[String]) -> Entry {
+    let entry = match call.kind.as_deref() {
+        Some("execute") => call.command().map(|command| Entry::Command {
+            command: command.to_owned(),
+            output: cut(lines(&call.output)),
+        }),
+        Some("edit") => call.diffs.first().map(|first| {
+            let path = activity::relative(&first.path, dirs);
+            let diffs = call.diffs.iter().filter(|diff| diff.path == first.path);
+            if call.diffs.iter().all(|diff| diff.old.is_none()) {
+                Entry::NewFile {
+                    path,
+                    content: cut(lines(&first.new)),
+                }
+            } else {
+                Entry::Edit {
+                    path,
+                    changes: cut(diffs
+                        .flat_map(|diff| {
+                            difference(diff.old.as_deref().unwrap_or_default(), &diff.new)
+                        })
+                        .collect()),
+                }
+            }
+        }),
+        Some("read") => call.locations.first().map(|path| Entry::Read {
+            path: activity::relative(path, dirs),
+            lines: None,
+        }),
+        _ => None,
+    };
+    entry.unwrap_or_else(|| Entry::Other {
+        text: activity::describe(call, dirs),
     })
 }
 

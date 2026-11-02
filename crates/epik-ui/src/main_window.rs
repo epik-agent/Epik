@@ -1,15 +1,17 @@
 //! The main window: a sidebar beside Home (`#/`), a run's page
-//! (`#/run/<owner/name%23n>`), or Settings (`#/settings`). It asks the app
+//! (`#/run/<owner/name%23n>`, or `#/run/<host>:<owner/name%23n>` for a
+//! run on a remote host), or Settings (`#/settings`). It asks the app
 //! what to show every second and draws it. Its only controls are Rerun and
-//! Delete on a run that needs attention, and Settings, which can also
+//! Delete on a run that needs attention, and Settings, which also chooses
+//! each role's agent and model, adds, checks and removes hosts, and can
 //! uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use epik_view::{
-    Disposition, Home, NodeState, RepositoryRow, RunPage, Settings, Sidebar as SidebarView,
-    SidebarRun, Stream, Uninstall, UninstallStep,
+    AgentSettings, Disposition, Home, HostRow, NodeState, RepositoryRow, RunPage, Settings,
+    Sidebar as SidebarView, SidebarRun, Stream, Uninstall, UninstallStep,
 };
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
@@ -20,8 +22,10 @@ use serde::Serialize;
 use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::{kept, keyed, part};
-use crate::run_page::RunView;
-use crate::settings::{ConfirmBody, SettingsPage, UninstallBody, Uninstalling};
+use crate::run_page::{RunView, shown_log};
+use crate::settings::{
+    ConfirmBody, ConfirmHostBody, HostActions, SettingsPage, UninstallBody, Uninstalling,
+};
 use crate::tauri;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -31,7 +35,8 @@ const REFRESH: Duration = Duration::from_secs(1);
 pub enum Page {
     /// `#/`, and any hash that isn't another page's.
     Home,
-    /// `#/run/<owner/name%23n>`: the run's page.
+    /// `#/run/<owner/name%23n>`, after `<host>:` for a run on a remote
+    /// host: the run's page.
     Run(String),
     /// `#/settings`.
     Settings,
@@ -74,7 +79,7 @@ fn decode(text: &str) -> String {
 }
 
 /// The hash for `path`: `""` for Home, `run/<owner/name#n>` for a run's
-/// page, `settings` for Settings. A run's `#` would end the URL's
+/// page (after `<host>:` on a remote host), `settings` for Settings. A run's `#` would end the URL's
 /// fragment, so it is escaped.
 pub fn href(path: &str) -> String {
     format!("#/{}", path.replace('#', "%23"))
@@ -87,7 +92,7 @@ const MARK: &str = r##"<svg viewBox="0 0 64 64" width="20" height="20" aria-hidd
 /// A run's status dot's class.
 pub(crate) fn disposition_class(disposition: Disposition) -> &'static str {
     match disposition {
-        Disposition::Building => "building",
+        Disposition::Building | Disposition::Reviewing => "building",
         Disposition::WaitingForReview => "waiting_for_review",
         Disposition::NeedsAttention => "needs_attention",
     }
@@ -269,6 +274,20 @@ struct Repo {
 }
 
 #[derive(Serialize)]
+struct Destination {
+    destination: Option<String>,
+}
+
+/// What the confirmation dialog on the Settings page asks about.
+#[derive(Debug, Clone)]
+enum Confirming {
+    /// No longer monitoring a repository.
+    Repository(RepositoryRow),
+    /// Removing a host.
+    Host(HostRow),
+}
+
+#[derive(Serialize)]
 struct Log {
     path: String,
 }
@@ -285,10 +304,10 @@ fn chosen_issue(page: &RunPage, picked: Option<u64>) -> Option<u64> {
     })
 }
 
-/// What reading the chosen issue's agent log on a run's page found.
+/// What reading the shown session's agent log on a run's page found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetched {
-    /// The issue has no log: it isn't running.
+    /// There is no session to show.
     NoLog,
     /// The stream in the log at the path.
     Read(String, Stream),
@@ -296,12 +315,10 @@ pub enum Fetched {
     Unread(String),
 }
 
-/// The stream of the chosen issue's agent log on a run's page.
-async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Fetched {
-    let path = chosen_issue(page, picked)
-        .and_then(|number| page.issues.iter().find(|issue| issue.number == number))
-        .and_then(|issue| issue.log.clone());
-    let Some(path) = path else {
+/// The stream of the shown session's agent log on a run's page, with
+/// issue `picked` and the session whose log is `session` picked.
+async fn fetch_stream(page: &RunPage, picked: Option<u64>, session: Option<&str>) -> Fetched {
+    let Some(path) = shown_log(page, chosen_issue(page, picked), session) else {
         return Fetched::NoLog;
     };
     match tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() }).await {
@@ -349,6 +366,8 @@ pub fn MainWindow() -> impl IntoView {
     let error = RwSignal::new(String::new());
     // The issue chosen on each run's page.
     let selected = RwSignal::new(HashMap::<String, u64>::new());
+    // The log of the session picked on each run's page.
+    let picked_logs = RwSignal::new(HashMap::<String, String>::new());
     // The stream of the chosen issue's agent log, and the log's path.
     let streamed = RwSignal::new(None::<(String, Stream)>);
     let flashing = Flashing(RwSignal::new(HashMap::new()));
@@ -383,7 +402,9 @@ pub fn MainWindow() -> impl IntoView {
                         Shown::Run(page) => {
                             let picked = selected
                                 .with_untracked(|selected| selected.get(&page.run).copied());
-                            fetch_stream(page, picked).await
+                            let session =
+                                picked_logs.with_untracked(|picked| picked.get(&page.run).cloned());
+                            fetch_stream(page, picked, session.as_deref()).await
                         }
                         _ => Fetched::NoLog,
                     };
@@ -429,11 +450,33 @@ pub fn MainWindow() -> impl IntoView {
     });
 
     // The dialog on the Settings page that confirms no longer monitoring a
-    // repository.
+    // repository, or removing a host.
     let monitor_error = RwSignal::new(String::new());
+    let host_error = RwSignal::new(String::new());
     let confirm_dialog = NodeRef::<Dialog>::new();
     let cancel = NodeRef::<Button>::new();
-    let confirming = RwSignal::new(None::<RepositoryRow>);
+    let confirming = RwSignal::new(None::<Confirming>);
+    let ask = move |question: Confirming| {
+        confirming.set(Some(question));
+        if let Some(dialog) = confirm_dialog.get_untracked() {
+            dialog.set_return_value("");
+            let _ = dialog.show_modal();
+        }
+        if let Some(cancel) = cancel.get_untracked() {
+            let _ = cancel.focus();
+        }
+    };
+    // Asks the app to `command` with `arguments`, showing why it couldn't.
+    let act = move |command: &'static str, arguments: Destination| {
+        spawn_local(async move {
+            if let Err(reason) = tauri::invoke::<_, ()>(command, &arguments).await {
+                error.set(reason);
+            }
+            refresh();
+        });
+    };
+    let remove_host =
+        move |destination: Option<String>| act("remove_host", Destination { destination });
     let stop_monitoring = move |repo: String| {
         spawn_local(async move {
             if let Err(reason) = tauri::invoke::<_, ()>("stop_monitoring", &Repo { repo }).await {
@@ -447,24 +490,59 @@ pub fn MainWindow() -> impl IntoView {
             stop_monitoring(repository.repo);
             return;
         }
-        confirming.set(Some(repository));
-        if let Some(dialog) = confirm_dialog.get_untracked() {
-            dialog.set_return_value("");
-            let _ = dialog.show_modal();
-        }
-        if let Some(cancel) = cancel.get_untracked() {
-            let _ = cancel.focus();
-        }
+        ask(Confirming::Repository(repository));
     });
+    let host_actions = HostActions {
+        // A host with runs asks first, as a repository does.
+        remove: Callback::new(move |host: HostRow| {
+            if host.runs.is_empty() {
+                remove_host(host.destination);
+            } else {
+                ask(Confirming::Host(host));
+            }
+        }),
+        make_default: Callback::new(move |destination| {
+            act("set_default_host", Destination { destination });
+        }),
+        check: Callback::new(move |destination| {
+            act(
+                "check_host",
+                Destination {
+                    destination: Some(destination),
+                },
+            );
+        }),
+    };
     let confirmed = move |_| {
         let ok = confirm_dialog
             .get_untracked()
             .is_some_and(|dialog| dialog.return_value() == "ok");
-        if let (true, Some(repository)) = (ok, confirming.get_untracked()) {
-            stop_monitoring(repository.repo);
+        match (ok, confirming.get_untracked()) {
+            (true, Some(Confirming::Repository(repository))) => stop_monitoring(repository.repo),
+            (true, Some(Confirming::Host(host))) => remove_host(host.destination),
+            _ => {}
         }
     };
     let on_monitored = Callback::new(move |()| refresh());
+
+    // The roles, read each time Settings opens so the form starts from
+    // what is saved, and the agents whose setup isn't done.
+    let agents = RwSignal::new(None::<Result<AgentSettings, String>>);
+    let unready = RwSignal::new(Vec::<String>::new());
+    Effect::new(move |_| {
+        if page.get() != Page::Settings {
+            return;
+        }
+        agents.set(None);
+        spawn_local(async move {
+            agents.set(Some(
+                tauri::invoke::<_, AgentSettings>("agent_settings", &()).await,
+            ));
+            if let Ok(fetched) = tauri::invoke::<_, Vec<String>>("unready_agents", &()).await {
+                unready.set(fetched);
+            }
+        });
+    });
 
     // The dialog that uninstalls Epik. While it asks, it follows whether a
     // build is running.
@@ -511,7 +589,7 @@ pub fn MainWindow() -> impl IntoView {
             dialog.close();
         }
     });
-    let on_quit = Callback::new(move |()| tauri::run("quit", ()));
+    let on_quit = Callback::new(move |()| tauri::run("quit_to_remove", ()));
     // Escape only closes the dialog while it asks.
     let escape = move |event: leptos::ev::Event| {
         if !matches!(stage.get_untracked(), Uninstalling::Asking(_)) {
@@ -564,15 +642,32 @@ pub fn MainWindow() -> impl IntoView {
                     page?.with(|page| chosen_issue(page, picked))
                 }
             });
-            let on_choose = Callback::new(move |number: u64| {
-                selected.update(|selected| {
-                    selected.insert(run.clone(), number);
+            let picked = Signal::derive({
+                let run = run.clone();
+                move || picked_logs.with(|picked| picked.get(&run).cloned())
+            });
+            let on_choose = Callback::new({
+                let run = run.clone();
+                move |number: u64| {
+                    selected.update(|selected| {
+                        selected.insert(run.clone(), number);
+                    });
+                    // A new issue shows its own latest session.
+                    picked_logs.update(|picked| {
+                        picked.remove(&run);
+                    });
+                    refresh();
+                }
+            });
+            let on_pick = Callback::new(move |log: String| {
+                picked_logs.update(|picked| {
+                    picked.insert(run.clone(), log);
                 });
                 refresh();
             });
             view! {
                 {error_line}
-                {page.map(|page| view! { <RunView page chosen on_choose streamed/> })}
+                {page.map(|page| view! { <RunView page chosen on_choose streamed picked on_pick/> })}
             }
             .into_any()
         }
@@ -583,9 +678,14 @@ pub fn MainWindow() -> impl IntoView {
                 {settings.map(|settings| view! {
                     <SettingsPage
                         settings
+                        agents
+                        unready
                         error=monitor_error
+                        host_error
                         on_stop=Some(on_stop)
                         on_monitored=Some(on_monitored)
+                        host_actions=Some(host_actions)
+                        on_host_added=Some(on_monitored)
                         on_open_uninstall=Some(on_open_uninstall)
                     />
                 })}
@@ -598,10 +698,18 @@ pub fn MainWindow() -> impl IntoView {
         <nav id="sidebar"><Sidebar sidebar page/></nav>
         <main id="page">{body}</main>
         <dialog id="confirm" node_ref=confirm_dialog on:close=confirmed>
-            {move || confirming.get().map(|repository| view! { <ConfirmBody repository/> })}
+            {move || confirming.get().map(|question| match question {
+                Confirming::Repository(repository) => view! { <ConfirmBody repository/> }.into_any(),
+                Confirming::Host(host) => view! { <ConfirmHostBody host/> }.into_any(),
+            })}
             <form method="dialog" class="buttons">
                 <button value="cancel" id="confirm-cancel" autofocus node_ref=cancel>"Cancel"</button>
-                <button value="ok" class="danger">"Stop monitoring"</button>
+                <button value="ok" class="danger">
+                    {move || match confirming.get() {
+                        Some(Confirming::Host(_)) => "Remove",
+                        _ => "Stop monitoring",
+                    }}
+                </button>
             </form>
         </dialog>
         <dialog id="uninstall" node_ref=uninstall_dialog on:cancel=escape>

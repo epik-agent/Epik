@@ -1,8 +1,11 @@
 use super::*;
 use chrono::TimeZone;
 use epik_core::activity::Activity;
-use epik_core::record::Issue;
+use epik_core::hosts::{Host, State};
+use epik_core::record::{Issue, ReviewVerdict, Session, SessionRole};
 use epik_core::run::RunKey;
+use epik_core::setup;
+use epik_view::{HostRow, HostStatus};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -28,6 +31,7 @@ fn issue(number: u64, title: &str, blocked_by: &[u64], status: IssueStatus) -> I
         merge_commit: None,
         duration_ms: None,
         cost_usd: None,
+        sessions: Vec::new(),
         activity: None,
     }
 }
@@ -73,6 +77,7 @@ fn summary(status: BuildStatus, start: i64, elapsed_ms: u64, cost: &str) -> Buil
             .then(|| time(start) + chrono::Duration::milliseconds(elapsed_ms as i64)),
         elapsed_ms,
         cost_usd: dollars_of(cost),
+        cost_unreported: 0,
     }
 }
 
@@ -111,7 +116,10 @@ fn exponentiation() -> RunState {
         disposition: Disposition::Building,
         reason: None,
         pull_request: None,
+        review: None,
+        open_threads: None,
         issues,
+        sessions: Vec::new(),
         builds: vec![
             summary(BuildStatus::Interrupted, -3600, 720_000, "1.01"),
             summary(BuildStatus::Running, 0, 0, "2.06"),
@@ -121,6 +129,7 @@ fn exponentiation() -> RunState {
         latest_at: time(118),
         elapsed_ms: 720_000,
         cost_usd: dollars_of("3.07"),
+        cost_unreported: 0,
     }
 }
 
@@ -152,6 +161,73 @@ fn failed_run() -> RunState {
     run.issues = vec![issue(7, "Division by zero", &[], IssueStatus::Failed)];
     run.builds = vec![summary(BuildStatus::Failed, 0, 363_000, "1.76")];
     run.running_build = None;
+    run
+}
+
+/// `run` on this computer.
+fn local(state: RunState) -> HostedRun {
+    HostedRun { host: None, state }
+}
+
+/// The runs, all on this computer, with no remote hosts.
+fn here(runs: impl IntoIterator<Item = RunState>) -> Shown {
+    Shown {
+        hosts: vec![],
+        runs: runs.into_iter().map(local).collect(),
+    }
+}
+
+/// The host `devbox`, last heard from as `state`.
+fn devbox(state: Option<State>) -> Host {
+    Host {
+        destination: "devbox".to_owned(),
+        added_at: time(-7200),
+        heard_at: match &state {
+            Some(State::Reachable { at, .. }) => Some(*at),
+            _ => Some(time(-600)),
+        },
+        state,
+        setup: None,
+    }
+}
+
+/// `devbox`, which answered a second ago.
+fn reachable() -> Host {
+    devbox(Some(State::Reachable {
+        version: "0.4.0".to_owned(),
+        at: time(119),
+    }))
+}
+
+/// `devbox`, which last answered ten minutes ago, and not since.
+fn unreachable() -> Host {
+    devbox(Some(State::Unreachable {
+        error: "ssh: connect to host devbox port 22: Connection refused".to_owned(),
+        at: time(118),
+    }))
+}
+
+/// `state` on `host`.
+fn on(host: &Host, state: RunState) -> HostedRun {
+    HostedRun {
+        host: Some(host.clone()),
+        state,
+    }
+}
+
+/// `devbox` as `host`, and the runs.
+fn with(host: &Host, runs: Vec<HostedRun>) -> Shown {
+    Shown {
+        hosts: vec![host.clone()],
+        runs,
+    }
+}
+
+/// Exponentiation, numbered `number`.
+fn numbered(number: u64) -> RunState {
+    let mut run = exponentiation();
+    run.run = RunKey::new("wpm/epik-test", number);
+    run.number = number;
     run
 }
 
@@ -266,7 +342,7 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
     second.run = RunKey::new("wpm/tic-tac-toe", 4);
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
 
-    let home = home(&runs, now());
+    let home = home(&here(runs), now());
 
     let keys = |cards: &[RunCard]| cards.iter().map(|c| c.run.clone()).collect::<Vec<_>>();
     assert_eq!(
@@ -282,7 +358,10 @@ fn home_sorts_runs_by_disposition_and_says_what_is_building() {
         home.headline
     );
     assert!(home.headline.ends_with(" awake until they finish."));
-    assert_eq!(super::home(&[], now()).headline, "Nothing is building.");
+    assert_eq!(
+        super::home(&here([]), now()).headline,
+        "Nothing is building."
+    );
 }
 
 #[test]
@@ -292,7 +371,7 @@ fn the_sidebar_lists_runs_needing_attention_then_building_then_waiting() {
     second.title = "Tic-tac-toe".to_owned();
     let runs = [exponentiation(), waiting_run(), failed_run(), second];
 
-    let sidebar = sidebar(&runs, &[], time(0), now());
+    let sidebar = sidebar(&here(runs), &[], time(0), now());
 
     let listed: Vec<(&str, &str, epik_view::Disposition)> = sidebar
         .runs
@@ -336,12 +415,12 @@ fn the_sidebar_marks_settings_while_a_repository_is_missing() {
         missing: true,
     };
 
-    assert!(sidebar(&[], &[missing], time(0), now()).missing_repository);
+    assert!(sidebar(&here([]), &[missing], time(0), now()).missing_repository);
 }
 
 #[test]
 fn the_status_line_says_how_long_epik_has_been_running() {
-    let up = |seconds: i64| sidebar(&[], &[], time(0), time(seconds)).status;
+    let up = |seconds: i64| sidebar(&here([]), &[], time(0), time(seconds)).status;
     assert_eq!(up(0), "Epik running · up 0s");
     assert_eq!(up(4 * 3600 + 12 * 60 + 30), "Epik running · up 4h 12m");
 }
@@ -381,7 +460,7 @@ fn an_agent_is_active_for_a_minute_then_quiet() {
 fn the_tray_menu_counts_the_runs_and_agents_and_says_how_long_epik_has_been_up() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&runs, time(0), time(4 * 3600 + 12 * 60 + 30));
+    let menu = popover(&here(runs), time(0), time(4 * 3600 + 12 * 60 + 30));
 
     assert_eq!(menu.about, "3 runs · 2 agents · up 4h 12m");
 }
@@ -406,10 +485,13 @@ fn restarting_warns_of_the_builds_it_interrupts() {
 fn the_tray_menu_asks_before_interrupting_its_building_runs() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
     assert_eq!(
-        popover(&runs, time(0), time(5)).restart,
+        popover(&here(runs), time(0), time(5)).restart,
         "Interrupt one build?"
     );
-    assert_eq!(popover(&[], time(0), time(5)).restart, "Restart Epik?");
+    assert_eq!(
+        popover(&here([]), time(0), time(5)).restart,
+        "Restart Epik?"
+    );
 }
 
 #[test]
@@ -417,11 +499,11 @@ fn the_tray_menus_counts_read_as_english() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.issue.number != 17);
     assert_eq!(
-        popover(&[run], time(0), time(5)).about,
+        popover(&here([run]), time(0), time(5)).about,
         "1 run · 1 agent · up 5s"
     );
     assert_eq!(
-        popover(&[], time(0), time(0)).about,
+        popover(&here([]), time(0), time(0)).about,
         "0 runs · 0 agents · up 0s"
     );
 }
@@ -430,7 +512,7 @@ fn the_tray_menus_counts_read_as_english() {
 fn the_tray_menu_lists_each_building_run_with_its_progress() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&runs, time(0), now());
+    let menu = popover(&here(runs), time(0), now());
 
     assert_eq!(menu.runs.len(), 1);
     let run = &menu.runs[0];
@@ -457,7 +539,7 @@ fn a_tray_menu_row_times_its_longest_running_issue() {
     run.issues[2].started_at = Some(time(60));
     run.issues[3].started_at = Some(time(30));
 
-    let menu = popover(&[run], time(0), now());
+    let menu = popover(&here([run]), time(0), now());
 
     assert_eq!(
         menu.runs[0].line,
@@ -470,14 +552,14 @@ fn a_tray_menu_row_with_nothing_running_is_starting() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.status != IssueStatus::Running);
 
-    let menu = popover(&[run], time(0), now());
+    let menu = popover(&here([run]), time(0), now());
 
     assert_eq!(menu.runs[0].line, "starting · wpm/epik-test#13");
 }
 
 #[test]
 fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
-    let menu = popover(&[waiting_run(), failed_run()], time(0), now());
+    let menu = popover(&here([waiting_run(), failed_run()]), time(0), now());
 
     assert!(menu.runs.is_empty());
 }
@@ -486,11 +568,11 @@ fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
 fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     let zone = FixedOffset::east_opt(0).unwrap();
     let merged_by_build = [vec![14], vec![15]];
-    let dir = std::path::Path::new("/runs/wpm/epik-test/13/b0");
+    let dir = std::path::Path::new("/runs/wpm/epik-test/13");
 
     let page = run_page(
-        &exponentiation(),
-        &[waiting_run()],
+        &local(exponentiation()),
+        &here([waiting_run()]),
         &merged_by_build,
         Some(dir),
         now(),
@@ -538,10 +620,100 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(plain(&detail.unblocks), "#18 and #19");
     assert_eq!(plain(&detail.pull_request), "Opens when the tests pass");
     assert_eq!(detail.recent, ["Reading src/eval.rs", "Running cargo test"]);
-    let log = dir.join("16.jsonl").display().to_string();
+    let log = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_cost_codex_did_not_report_is_said_to_be_missing() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let mut run = exponentiation();
+    run.issues[1].cost_usd = None;
+    run.issues[1].sessions = vec![Session {
+        build_id: "b-3600".to_owned(),
+        role: SessionRole::Coding,
+        round: 1,
+        agent: "codex".to_owned(),
+        model: None,
+        log: "15.jsonl".to_owned(),
+        started_at: time(-3600),
+        duration_ms: Some(185_000),
+        cost_usd: None,
+        verdict: None,
+    }];
+    run.builds[0].cost_unreported = 1;
+    run.cost_unreported = 1;
+
+    let card = run_card(&run, now());
+    let page = run_page(
+        &local(run),
+        &here([waiting_run()]),
+        &[vec![14], vec![15]],
+        None,
+        now(),
+        &zone,
+    );
+
+    assert_eq!(card.cost, "$3.07 plus 1 issue not reported");
+    assert_eq!(page.cost, "$3.07 plus 1 issue not reported");
+    assert_eq!(
+        page.builds[1],
+        "Build 1, Oct 28, merged #14, then was interrupted · 12m 00s · $1.01 plus 1 issue \
+         not reported"
+    );
+    let figures = |n: u64| {
+        let card = page.issues.iter().find(|c| c.number == n).unwrap();
+        card.figures.clone()
+    };
+    assert_eq!(
+        figures(15).as_deref(),
+        Some("3m 05s · not reported by Codex")
+    );
+    assert_eq!(figures(14).as_deref(), Some("3m 05s · $0.92"));
+}
+
+#[test]
+fn a_running_issues_log_is_its_latest_sessions() {
+    let mut run = exponentiation();
+    let session = |build_id: &str, log: &str| Session {
+        build_id: build_id.to_owned(),
+        role: SessionRole::Coding,
+        round: 1,
+        agent: "claude".to_owned(),
+        model: None,
+        log: log.to_owned(),
+        started_at: time(0),
+        duration_ms: None,
+        cost_usd: None,
+        verdict: None,
+    };
+    run.issues[3].sessions = vec![
+        session("b-3600", "17.jsonl"),
+        session("b0", "17.jsonl"),
+        session("b0", "17-coding-2.jsonl"),
+    ];
+    let dir = std::path::Path::new("/home/me/.epik/runs/wpm/epik-test/13");
+
+    let page = run_page(
+        &local(run),
+        &here([]),
+        &[],
+        Some(dir),
+        now(),
+        &FixedOffset::east_opt(0).unwrap(),
+    );
+
+    let card = |n: u64| page.issues.iter().find(|c| c.number == n).unwrap();
+    let log = dir
+        .join("b0")
+        .join("17-coding-2.jsonl")
+        .display()
+        .to_string();
+    assert_eq!(card(17).log.as_deref(), Some(log.as_str()));
+    let old = dir.join("b0").join("16.jsonl").display().to_string();
+    assert_eq!(card(16).log.as_deref(), Some(old.as_str()), "no sessions");
 }
 
 #[test]
@@ -579,7 +751,13 @@ fn settings_lists_each_repository_with_its_runs_and_when_it_was_added() {
         repository("wpm/calc-old", false, true),
     ];
 
-    let settings = settings(&repositories, &[exponentiation(), waiting_run()], &zone);
+    let settings = settings(
+        &repositories,
+        &[exponentiation(), waiting_run()],
+        &[],
+        None,
+        &zone,
+    );
 
     let rows: Vec<(&str, &str, usize, bool)> = settings
         .repositories
@@ -625,6 +803,8 @@ fn stopping_monitoring_a_repository_lists_only_its_runs() {
     let settings = settings(
         &[repository("wpm/epik-test"), repository("wpm/calc")],
         &[exponentiation(), elsewhere, waiting_run()],
+        &[],
+        None,
         &zone,
     );
 
@@ -641,17 +821,278 @@ fn stopping_monitoring_a_repository_lists_only_its_runs() {
     );
 }
 
+/// `item`, as a host's app reports it: done, or missing with `detail`.
+fn item(item: setup::Item, detail: Option<&str>) -> setup::Check {
+    setup::Check {
+        item,
+        title: item.title().to_owned(),
+        state: if detail.is_some() {
+            setup::State::Missing
+        } else {
+            setup::State::Done
+        },
+        detail: detail.unwrap_or("fine").to_owned(),
+        usable: detail.is_none(),
+        needed: true,
+    }
+}
+
+/// The hosts Settings lists, without the window's runs and repositories.
+fn host_rows(hosts: &[(Host, Vec<RunState>)], default: Option<&str>) -> Vec<HostRow> {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    settings(&[], &[], hosts, default, &zone).hosts
+}
+
 #[test]
-fn uninstalling_reports_each_step_by_its_title_with_any_error() {
-    use epik_core::uninstall::{Outcome, Step};
+fn settings_list_this_computer_first_then_each_host_with_its_state() {
+    let named = |destination: &str, host: Host| Host {
+        destination: destination.to_owned(),
+        ..host
+    };
+    let mismatched = devbox(Some(State::Mismatch {
+        version: "0.3.2".to_owned(),
+        at: time(100),
+    }));
+    let hosts = [
+        (named("devbox", reachable()), vec![exponentiation()]),
+        (named("gone", unreachable()), vec![]),
+        (named("old", mismatched), vec![]),
+        (named("new", devbox(None)), vec![]),
+    ];
+
+    let rows = host_rows(&hosts, None);
+
+    type Shown<'a> = (
+        Option<&'a str>,
+        &'a str,
+        HostStatus,
+        &'a str,
+        Option<&'a str>,
+    );
+    let shown: Vec<Shown> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.destination.as_deref(),
+                row.name.as_str(),
+                row.status,
+                row.about.as_str(),
+                row.why.as_deref(),
+            )
+        })
+        .collect();
+    let here = format!("Epik {}", epik_core::version());
+    let minor = epik_core::version().rsplit_once('.').unwrap().0;
+    let install = format!("old runs Epik 0.3.2; install {minor}.x there");
+    assert_eq!(
+        shown,
+        [
+            (
+                None,
+                "This computer",
+                HostStatus::Ready,
+                here.as_str(),
+                None
+            ),
+            (
+                Some("devbox"),
+                "devbox",
+                HostStatus::Ready,
+                "Epik 0.4.0 · setup not checked · 1 run",
+                None
+            ),
+            (
+                Some("gone"),
+                "gone",
+                HostStatus::Unreachable,
+                "Unreachable · No runs",
+                Some("ssh: connect to host devbox port 22: Connection refused")
+            ),
+            (
+                Some("old"),
+                "old",
+                HostStatus::Mismatch,
+                "Epik 0.3.2 · No runs",
+                Some(install.as_str())
+            ),
+            (
+                Some("new"),
+                "new",
+                HostStatus::Unchecked,
+                "Not checked yet · No runs",
+                None
+            ),
+        ]
+    );
+    assert_eq!(
+        rows[1].runs,
+        [("wpm/epik-test#13".to_owned(), "Exponentiation".to_owned())]
+    );
+}
+
+#[test]
+fn a_host_whose_setup_is_complete_says_so() {
+    use setup::Item;
+    let host = Host {
+        setup: Some(vec![
+            item(Item::Gh, None),
+            item(Item::GhAuth, None),
+            item(Item::Plugin, Some("not installed")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].status, HostStatus::Ready);
+    assert_eq!(rows[1].about, "Epik 0.4.0 · setup complete · No runs");
+    assert_eq!(rows[1].missing, []);
+}
+
+#[test]
+fn a_hosts_missing_setup_items_say_what_to_run_there() {
+    use setup::Item;
+    let host = Host {
+        setup: Some(vec![
+            item(Item::Gh, Some("not installed")),
+            item(Item::GhAuth, Some("not signed in")),
+            item(Item::Claude, Some("not installed")),
+            item(Item::ClaudeAuth, Some("not signed in")),
+            item(Item::Node, Some("not installed")),
+            item(Item::Plugin, Some("not installed")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].status, HostStatus::Incomplete);
+    assert_eq!(rows[1].about, "Epik 0.4.0 · setup incomplete · No runs");
+    let missing: Vec<(&str, &str, Vec<&str>)> = rows[1]
+        .missing
+        .iter()
+        .map(|fix| {
+            (
+                fix.title.as_str(),
+                fix.detail.as_str(),
+                fix.commands.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (
+                "GitHub CLI",
+                "not installed",
+                vec!["~/.epik/bin/epik-app setup install gh"]
+            ),
+            (
+                "GitHub sign-in",
+                "not signed in",
+                vec!["gh auth login -s project", "gh auth setup-git"]
+            ),
+            (
+                "Claude Code",
+                "not installed",
+                vec!["curl -fsSL https://claude.ai/install.sh | bash"]
+            ),
+            ("Claude sign-in", "not signed in", vec!["claude auth login"]),
+            (
+                "Node",
+                "not installed",
+                vec!["~/.epik/bin/epik-app setup install node"]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_host_is_told_to_run_codex_through_its_adapter_and_not_what_isnt_needed() {
+    use setup::Item;
+    let unneeded = |check: setup::Check| setup::Check {
+        needed: false,
+        ..check
+    };
+    let host = Host {
+        setup: Some(vec![
+            unneeded(item(Item::Claude, Some("not installed"))),
+            unneeded(item(Item::ClaudeAuth, Some("not signed in"))),
+            item(Item::Codex, Some("npm error 404")),
+            item(Item::CodexAuth, Some("not signed in")),
+        ]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    let missing: Vec<(&str, Vec<&str>)> = rows[1]
+        .missing
+        .iter()
+        .map(|fix| {
+            (
+                fix.title.as_str(),
+                fix.commands.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (
+                "Codex",
+                vec!["npx -y -p @agentclientprotocol/codex-acp@2.5.0 codex --version"]
+            ),
+            (
+                "Codex sign-in",
+                vec!["npx -y -p @agentclientprotocol/codex-acp@2.5.0 codex login --device-auth"]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_host_that_only_lacks_gits_use_of_gh_is_told_just_that() {
+    let host = Host {
+        setup: Some(vec![item(
+            setup::Item::GhAuth,
+            Some("git isn't set to use gh to push"),
+        )]),
+        ..reachable()
+    };
+
+    let rows = host_rows(&[(host, vec![])], None);
+
+    assert_eq!(rows[1].missing[0].commands, ["gh auth setup-git"]);
+}
+
+#[test]
+fn this_computer_is_the_default_until_a_host_is() {
+    let hosts = [(reachable(), vec![])];
+
+    let here = host_rows(&hosts, None);
+    let there = host_rows(&hosts, Some("devbox"));
+
+    let defaults = |rows: &[HostRow]| rows.iter().map(|row| row.default).collect::<Vec<_>>();
+    assert_eq!(defaults(&here), [true, false]);
+    assert_eq!(defaults(&there), [false, true]);
+}
+
+#[test]
+fn uninstalling_reports_each_step_by_its_title_with_any_error_or_reason_to_skip() {
+    use epik_core::uninstall::{Done, Outcome, Step};
     let outcomes = [
         Outcome {
             step: Step::Plugin,
             result: Err("disk full".to_owned()),
         },
         Outcome {
+            step: Step::Marketplace,
+            result: Ok(Done::Skipped("Claude Code isn't installed".to_owned())),
+        },
+        Outcome {
             step: Step::Runs,
-            result: Ok(()),
+            result: Ok(Done::Removed),
         },
     ];
 
@@ -661,11 +1102,522 @@ fn uninstalling_reports_each_step_by_its_title_with_any_error() {
             UninstallStep {
                 title: "The Epik plugin".to_owned(),
                 error: Some("disk full".to_owned()),
+                skipped: None,
+            },
+            UninstallStep {
+                title: "The Epik plugin's marketplace".to_owned(),
+                error: None,
+                skipped: Some("Claude Code isn't installed".to_owned()),
             },
             UninstallStep {
                 title: "Run history".to_owned(),
                 error: None,
+                skipped: None,
             },
         ]
+    );
+}
+
+#[test]
+fn with_no_hosts_where_a_run_builds_goes_without_saying() {
+    let home = home(&here([exponentiation()]), now());
+
+    assert_eq!(home.building[0].place, None);
+}
+
+#[test]
+fn a_hosts_run_says_it_builds_there() {
+    let shown = with(&reachable(), vec![on(&reachable(), exponentiation())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(home.building[0].run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some("Building on devbox")
+    );
+}
+
+#[test]
+fn with_a_host_this_computers_runs_say_so() {
+    let shown = with(
+        &reachable(),
+        vec![local(exponentiation()), local(waiting_run())],
+    );
+
+    let home = home(&shown, now());
+
+    let building = home.building[0].place.as_deref().unwrap();
+    assert!(building.starts_with("Building on this "), "{building}");
+    let waiting = home.waiting[0].place.as_deref().unwrap();
+    assert!(waiting.starts_with("Built on this "), "{waiting}");
+}
+
+#[test]
+fn a_finished_run_on_a_host_was_built_there() {
+    let shown = with(&reachable(), vec![on(&reachable(), failed_run())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(home.attention[0].place.as_deref(), Some("Built on devbox"));
+}
+
+#[test]
+fn an_unreachable_hosts_run_says_when_it_was_last_heard_from() {
+    let shown = with(
+        &unreachable(),
+        vec![
+            on(&unreachable(), exponentiation()),
+            on(&unreachable(), waiting_run()),
+        ],
+    );
+
+    let home = home(&shown, now());
+
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    assert_eq!(
+        home.waiting[0].place.as_deref(),
+        Some("Built on devbox, last heard from 12m 00s ago.")
+    );
+}
+
+#[test]
+fn a_run_on_a_host_of_another_version_says_when_it_was_last_heard_from() {
+    let host = devbox(Some(State::Mismatch {
+        version: "0.3.2".to_owned(),
+        at: time(118),
+    }));
+    let shown = with(&host, vec![on(&host, waiting_run())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(
+        home.waiting[0].place.as_deref(),
+        Some("Built on devbox, last heard from 12m 00s ago.")
+    );
+}
+
+#[test]
+fn a_host_never_heard_from_says_so() {
+    let mut host = unreachable();
+    host.heard_at = None;
+    let shown = with(&host, vec![on(&host, exponentiation())]);
+
+    let home = home(&shown, now());
+
+    assert_eq!(
+        home.building[0].place.as_deref(),
+        Some(
+            "Building on devbox, which hasn't answered yet. \
+             The build may still be going on there."
+        )
+    );
+}
+
+#[test]
+fn the_headline_keeps_awake_only_for_builds_here() {
+    let host = reachable();
+    let remote = |n| on(&host, numbered(n));
+
+    let only_remote = home(&with(&host, vec![remote(1), remote(2)]), now());
+    assert!(
+        only_remote
+            .headline
+            .starts_with("Two runs building on devbox. This "),
+        "{}",
+        only_remote.headline
+    );
+    assert!(only_remote.headline.ends_with(" can sleep."));
+
+    let one_remote = home(&with(&host, vec![remote(1)]), now());
+    assert!(
+        one_remote
+            .headline
+            .starts_with("One run building on devbox. This "),
+        "{}",
+        one_remote.headline
+    );
+
+    let elsewhere = Host {
+        destination: "me@build.example.com".to_owned(),
+        ..reachable()
+    };
+    let two_hosts = Shown {
+        hosts: vec![host.clone(), elsewhere.clone()],
+        runs: vec![remote(1), on(&elsewhere, numbered(2))],
+    };
+    assert!(
+        home(&two_hosts, now())
+            .headline
+            .starts_with("Two runs building on other hosts. This "),
+    );
+
+    let both = home(
+        &with(&host, vec![remote(1), remote(2), local(numbered(3))]),
+        now(),
+    );
+    assert!(
+        both.headline
+            .starts_with("Three runs building. Keeping this "),
+        "{}",
+        both.headline
+    );
+    assert!(
+        both.headline
+            .ends_with(" awake until the one here finishes."),
+        "{}",
+        both.headline
+    );
+
+    let two_here = home(
+        &with(
+            &host,
+            vec![remote(1), local(numbered(2)), local(numbered(3))],
+        ),
+        now(),
+    );
+    assert!(
+        two_here
+            .headline
+            .ends_with(" awake until the two here finish."),
+        "{}",
+        two_here.headline
+    );
+}
+
+#[test]
+fn a_run_on_a_host_and_one_here_are_listed_apart() {
+    let shown = with(
+        &reachable(),
+        vec![on(&reachable(), exponentiation()), local(exponentiation())],
+    );
+
+    let sidebar = sidebar(&shown, &[], time(0), now());
+
+    let listed: Vec<&str> = sidebar.runs.iter().map(|r| r.run.as_str()).collect();
+    assert_eq!(listed, ["devbox:wpm/epik-test#13", "wpm/epik-test#13"]);
+}
+
+#[test]
+fn the_tray_menu_says_where_each_run_builds() {
+    let shown = with(
+        &unreachable(),
+        vec![on(&unreachable(), exponentiation()), local(numbered(4))],
+    );
+
+    let menu = popover(&shown, time(0), now());
+
+    assert_eq!(menu.runs[0].run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        menu.runs[0].place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    let here = menu.runs[1].place.as_deref().unwrap();
+    assert!(here.starts_with("Building on this "), "{here}");
+}
+
+#[test]
+fn restarting_interrupts_only_the_builds_here() {
+    let host = reachable();
+    let shown = with(&host, vec![on(&host, numbered(1)), local(numbered(2))]);
+    assert_eq!(
+        popover(&shown, time(0), now()).restart,
+        "Interrupt one build?"
+    );
+
+    let only_remote = with(&host, vec![on(&host, numbered(1))]);
+    assert_eq!(
+        popover(&only_remote, time(0), now()).restart,
+        "Restart Epik?"
+    );
+}
+
+#[test]
+fn a_hosts_run_page_says_where_it_builds_and_links_to_the_others_by_host() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let host = unreachable();
+    let run = on(&host, exponentiation());
+    let shown = with(&host, vec![run.clone(), on(&host, numbered(4))]);
+
+    let page = run_page(&run, &shown, &[], None, now(), &zone);
+
+    assert_eq!(page.run, "devbox:wpm/epik-test#13");
+    assert_eq!(
+        page.place.as_deref(),
+        Some(
+            "Building on devbox, last heard from 12m 00s ago. \
+             The build may still be going on there."
+        )
+    );
+    assert_eq!(
+        page.also_building,
+        [(
+            "devbox:wpm/epik-test#4".to_owned(),
+            "Exponentiation".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_run_here_doesnt_count_a_hosts_run_of_the_same_epic_as_itself() {
+    let zone = FixedOffset::east_opt(0).unwrap();
+    let host = reachable();
+    let here = local(exponentiation());
+    let shown = with(&host, vec![here.clone(), on(&host, exponentiation())]);
+
+    let page = run_page(&here, &shown, &[], None, now(), &zone);
+
+    assert_eq!(
+        page.also_building,
+        [(
+            "devbox:wpm/epik-test#13".to_owned(),
+            "Exponentiation".to_owned()
+        )]
+    );
+}
+
+/// A Claude Code session of `role` and `round` in build `b0`, from 20:00,
+/// that took a minute and $0.30.
+fn session(role: SessionRole, round: u32, log: &str) -> Session {
+    Session {
+        build_id: "b0".to_owned(),
+        role,
+        round,
+        agent: "claude".to_owned(),
+        model: None,
+        log: log.to_owned(),
+        started_at: time(0),
+        duration_ms: Some(60_000),
+        cost_usd: Some(dollars_of("0.30")),
+        verdict: None,
+    }
+}
+
+/// A review of `round` that concluded `verdict`.
+fn review(round: u32, verdict: ReviewVerdict) -> Session {
+    Session {
+        verdict: Some(verdict),
+        ..session(
+            SessionRole::Review,
+            round,
+            &format!("9-review-{round}.jsonl"),
+        )
+    }
+}
+
+/// Each session's role, round and verdict.
+fn rounds(sessions: &[epik_view::SessionRow]) -> Vec<(&str, u32, Option<&str>)> {
+    sessions
+        .iter()
+        .map(|s| (s.role.as_str(), s.round, s.verdict.as_deref()))
+        .collect()
+}
+
+/// The run's directory in [`page_of`].
+const RUN_DIR: &str = "/runs/wpm/epik-test/9";
+
+/// The path of `log`, of build `b0`, in [`RUN_DIR`].
+fn logged(log: &str) -> String {
+    Path::new(RUN_DIR)
+        .join("b0")
+        .join(log)
+        .display()
+        .to_string()
+}
+
+fn page_of(run: RunState) -> RunPage {
+    run_page(
+        &local(run),
+        &here([]),
+        &[],
+        Some(Path::new(RUN_DIR)),
+        now(),
+        &FixedOffset::east_opt(0).unwrap(),
+    )
+}
+
+#[test]
+fn a_reviewed_run_lists_its_reviews_and_fix_in_order_under_its_header() {
+    let mut run = waiting_run();
+    run.review = Some(ReviewVerdict::Approve);
+    run.open_threads = Some(2);
+    run.sessions = vec![
+        review(1, ReviewVerdict::Changes),
+        session(SessionRole::Coding, 2, "9-coding-2.jsonl"),
+        review(2, ReviewVerdict::Approve),
+    ];
+
+    let page = page_of(run);
+
+    assert_eq!(
+        rounds(&page.sessions),
+        [
+            ("Review", 1, Some("changes requested")),
+            ("Coding", 2, None),
+            ("Review", 2, Some("approved")),
+        ]
+    );
+    let last = page.sessions.last().unwrap();
+    assert_eq!(
+        (
+            last.agent.as_str(),
+            last.model.as_str(),
+            last.time.as_str(),
+            last.cost.as_deref()
+        ),
+        ("Claude Code", "default model", "1m 00s", Some("$0.30"))
+    );
+    assert_eq!(
+        last.threads,
+        Some(link(
+            "2 threads open",
+            "https://github.com/wpm/epik-test/pull/12/files"
+        ))
+    );
+    assert!(page.sessions[..2].iter().all(|s| s.threads.is_none()));
+    assert_eq!(
+        last.log.as_deref(),
+        Some(logged("9-review-2.jsonl").as_str())
+    );
+    assert!(!last.running);
+}
+
+#[test]
+fn one_open_thread_is_singular_and_none_is_said_plainly() {
+    let mut run = waiting_run();
+    run.sessions = vec![review(1, ReviewVerdict::Approve)];
+    run.open_threads = Some(1);
+    let page = page_of(run.clone());
+    let threads = page.sessions[0].threads.clone().unwrap();
+    assert_eq!(threads.text, "1 thread open");
+    run.open_threads = Some(0);
+    let page = page_of(run);
+    assert_eq!(page.sessions[0].threads, Some(text("no threads open")));
+}
+
+#[test]
+fn a_single_issue_runs_review_is_in_its_issues_panel_and_under_the_runs_header() {
+    let mut run = failed_run();
+    run.issues[0].sessions = vec![
+        session(SessionRole::Coding, 1, "7.jsonl"),
+        Session {
+            log: "7-review-1.jsonl".to_owned(),
+            ..review(1, ReviewVerdict::NoVerdict)
+        },
+    ];
+
+    let page = page_of(run);
+
+    let card = &page.issues[0];
+    assert_eq!(
+        rounds(&card.sessions),
+        [("Coding", 1, None), ("Review", 1, Some("no verdict"))]
+    );
+    assert_eq!(rounds(&page.sessions), [("Review", 1, Some("no verdict"))]);
+    assert_eq!(
+        card.log.as_deref(),
+        Some(logged("7-review-1.jsonl").as_str()),
+        "the latest session's, though the issue isn't running"
+    );
+    assert_eq!(
+        card.sessions[0].log.as_deref(),
+        Some(logged("7.jsonl").as_str())
+    );
+}
+
+#[test]
+fn a_codex_session_that_reported_no_cost_says_so() {
+    let mut run = exponentiation();
+    run.issues[1].sessions = vec![Session {
+        agent: "codex".to_owned(),
+        model: Some("gpt-5.5".to_owned()),
+        cost_usd: None,
+        ..session(SessionRole::Coding, 1, "15.jsonl")
+    }];
+
+    let page = page_of(run);
+
+    let row = &page.issues[1].sessions[0];
+    assert_eq!(
+        (row.agent.as_str(), row.model.as_str(), row.cost.as_deref()),
+        ("Codex", "gpt-5.5", Some("not reported"))
+    );
+}
+
+/// The calculator REPL, all merged, in its first build, reviewing its
+/// pull request since 20:00.
+fn reviewing_run() -> RunState {
+    let mut run = waiting_run();
+    run.disposition = Disposition::Reviewing;
+    run.pull_request = None;
+    run.builds = vec![summary(BuildStatus::Running, 0, 0, "3.67")];
+    run.running_build = Some("b0".to_owned());
+    run.sessions = vec![Session {
+        duration_ms: None,
+        cost_usd: None,
+        ..session(SessionRole::Review, 1, "9-review-1.jsonl")
+    }];
+    run
+}
+
+#[test]
+fn a_reviewing_run_says_so_in_its_header_and_its_now_line() {
+    let run = reviewing_run();
+
+    let card = run_card(&run, now());
+    let page = page_of(run);
+
+    let lines: Vec<String> = card.now.iter().map(|line| plain(&line.words)).collect();
+    assert_eq!(lines, ["#9 Calculator REPL — reviewing its pull request."]);
+    assert_eq!(
+        plain(&card.summary.unwrap()),
+        "4 of 4 issues merged. Reviewing its pull request."
+    );
+    assert_eq!(
+        page.sentence,
+        "First build running, reviewing its pull request."
+    );
+    let row = &page.sessions[0];
+    assert!(row.running);
+    assert_eq!(
+        (
+            row.time.as_str(),
+            row.cost.as_deref(),
+            row.verdict.as_deref()
+        ),
+        ("2m 00s so far", None, None)
+    );
+    assert_eq!(row.threads, None);
+}
+
+#[test]
+fn a_run_addressing_its_review_says_so_in_its_now_line() {
+    let mut run = reviewing_run();
+    run.disposition = Disposition::Building;
+    run.sessions = vec![
+        review(1, ReviewVerdict::Changes),
+        Session {
+            duration_ms: None,
+            cost_usd: None,
+            ..session(SessionRole::Coding, 2, "9-coding-2.jsonl")
+        },
+    ];
+
+    let card = run_card(&run, now());
+
+    let lines: Vec<String> = card.now.iter().map(|line| plain(&line.words)).collect();
+    assert_eq!(lines, ["#9 Calculator REPL — addressing the review."]);
+    assert_eq!(
+        plain(&card.summary.unwrap()),
+        "4 of 4 issues merged. Addressing the review."
     );
 }

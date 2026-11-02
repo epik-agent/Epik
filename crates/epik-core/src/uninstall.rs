@@ -1,11 +1,16 @@
 //! Removing what Epik put on the machine.
 //!
 //! Uninstalling takes out the Epik plugin and its marketplace from Claude
-//! Code, then all of `~/.epik`: the private tools, the app's link to
+//! Code, skipping them where Claude Code isn't installed, then all of
+//! `~/.epik`: the private tools, the app's link to
 //! itself, the build clones and the run history. It leaves alone what the
 //! user may also use without Epik: Claude Code and its sign-in, `gh` on
 //! the `PATH`, the `gh` sign-in, and git's use of `gh` as its credential
-//! helper. The app doesn't delete itself; the user does that last.
+//! helper.
+//!
+//! This is the first of uninstalling's two steps. In the second, the user
+//! quits the app and removes it the way their platform removes any app:
+//! each platform's installer owns it, so the app doesn't remove itself.
 
 use std::fs;
 use std::io;
@@ -59,17 +64,25 @@ impl Step {
     }
 }
 
-/// How one step went: removed, or why not.
+/// What a step that didn't fail did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Done {
+    Removed,
+    /// Skipped, for this reason: "Claude Code isn't installed".
+    Skipped(String),
+}
+
+/// How one step went: removed, skipped, or why it failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub step: Step,
-    pub result: Result<(), String>,
+    pub result: Result<Done, String>,
 }
 
 /// Removes everything Epik put under `root`, normally `~/.epik`, and its
 /// plugin and marketplace from Claude Code, through `runner`. Every step
 /// runs even when one before it fails, and what is already gone counts as
-/// removed.
+/// removed. Without Claude Code, its plugin steps are skipped.
 pub fn uninstall(root: &Path, runner: &dyn Runner) -> Vec<Outcome> {
     Step::ALL
         .into_iter()
@@ -80,7 +93,7 @@ pub fn uninstall(root: &Path, runner: &dyn Runner) -> Vec<Outcome> {
         .collect()
 }
 
-fn remove(root: &Path, runner: &dyn Runner, step: Step) -> Result<(), String> {
+fn remove(root: &Path, runner: &dyn Runner, step: Step) -> Result<Done, String> {
     match step {
         Step::Plugin => claude_plugin(root, runner, &["plugin", "uninstall", "epik@epik"]),
         Step::Marketplace => {
@@ -95,16 +108,20 @@ fn remove(root: &Path, runner: &dyn Runner, step: Step) -> Result<(), String> {
 }
 
 /// Runs `claude` with `args`. Claude Code saying the plugin or marketplace
-/// isn't there means it is already gone.
-fn claude_plugin(root: &Path, runner: &dyn Runner, args: &[&str]) -> Result<(), String> {
+/// isn't there means it is already gone; no Claude Code to run skips it.
+fn claude_plugin(root: &Path, runner: &dyn Runner, args: &[&str]) -> Result<Done, String> {
     let claude = setup::claude(root);
-    let out = runner
-        .run(&claude, args)
-        .map_err(|error| format!("couldn't run claude {}: {error}", args.join(" ")))?;
+    let out = match runner.run(&claude, args) {
+        Ok(out) => out,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Done::Skipped("Claude Code isn't installed".to_owned()));
+        }
+        Err(error) => return Err(format!("couldn't run claude {}: {error}", args.join(" "))),
+    };
     let said = format!("{}\n{}", out.stdout, out.stderr);
     let lower = said.to_lowercase();
     if out.success || lower.contains("not found") || lower.contains("not installed") {
-        return Ok(());
+        return Ok(Done::Removed);
     }
     let said = said.trim();
     Err(if said.is_empty() {
@@ -116,10 +133,10 @@ fn claude_plugin(root: &Path, runner: &dyn Runner, args: &[&str]) -> Result<(), 
 
 /// Removes the directory at `path` and everything in it. One that is
 /// already gone counts as removed.
-fn remove_dir(path: &Path) -> Result<(), String> {
+fn remove_dir(path: &Path) -> Result<Done, String> {
     match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(Done::Removed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Done::Removed),
         Err(error) => Err(format!("couldn't remove {}: {error}", path.display())),
     }
 }
@@ -212,15 +229,18 @@ mod tests {
         root
     }
 
-    fn results(outcomes: &[Outcome]) -> Vec<(Step, Result<(), String>)> {
+    fn results(outcomes: &[Outcome]) -> Vec<(Step, Result<Done, String>)> {
         outcomes
             .iter()
             .map(|outcome| (outcome.step, outcome.result.clone()))
             .collect()
     }
 
-    fn all_removed() -> Vec<(Step, Result<(), String>)> {
-        Step::ALL.into_iter().map(|step| (step, Ok(()))).collect()
+    fn all_removed() -> Vec<(Step, Result<Done, String>)> {
+        Step::ALL
+            .into_iter()
+            .map(|step| (step, Ok(Done::Removed)))
+            .collect()
     }
 
     #[test]
@@ -309,22 +329,17 @@ mod tests {
     }
 
     #[test]
-    fn without_claude_the_plugin_steps_fail_and_the_directory_is_still_removed() {
+    fn without_claude_the_plugin_steps_are_skipped_saying_so_and_the_rest_succeeds() {
         let home = tempfile::tempdir().unwrap();
         let root = set_up(home.path());
 
         let outcomes = uninstall(&root, &Recording::new(|_| None));
 
-        assert_eq!(outcomes[0].step, Step::Plugin);
-        assert!(
-            outcomes[0]
-                .result
-                .as_ref()
-                .is_err_and(|error| error.starts_with("couldn't run claude plugin uninstall")),
-            "{outcomes:?}"
-        );
-        assert!(outcomes[1].result.is_err());
-        assert!(outcomes[2..].iter().all(|outcome| outcome.result.is_ok()));
+        let skipped = Ok(Done::Skipped("Claude Code isn't installed".to_owned()));
+        let mut expected = all_removed();
+        expected[0].1 = skipped.clone();
+        expected[1].1 = skipped;
+        assert_eq!(results(&outcomes), expected);
         assert!(!root.exists());
     }
 

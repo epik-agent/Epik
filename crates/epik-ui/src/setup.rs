@@ -83,7 +83,8 @@ fn state_class(state: ItemState) -> &'static str {
 }
 
 /// An item: its state's mark, title, button and detail, then its latest
-/// step's output and failure. Its button is disabled while `busy`.
+/// step's output and failure. Its button is disabled while `busy`. One
+/// not done that isn't needed says so in place of its detail.
 #[component]
 pub fn Item(
     row: Row,
@@ -92,6 +93,12 @@ pub fn Item(
     #[prop(optional_no_strip)] on_press: Option<Callback<String>>,
 ) -> impl IntoView {
     let id = row.id.clone();
+    let unneeded = !row.needed && row.state != ItemState::Done;
+    let (class, mark, detail) = if unneeded {
+        ("item unneeded", "–", "Not needed by your agents".to_owned())
+    } else {
+        (state_class(row.state), mark(row.state), row.detail)
+    };
     let button = row.button.map(|label| {
         let press = move |_| {
             if let Some(on_press) = on_press {
@@ -117,11 +124,11 @@ pub fn Item(
         }
     });
     view! {
-        <li class=state_class(row.state) data-id=row.id>
-            <span class="mark">{mark(row.state)}</span>
+        <li class=class data-id=row.id>
+            <span class="mark">{mark}</span>
             <span class="title">{row.title}</span>
             {button}
-            <span class="detail">{row.detail}</span>
+            <span class="detail">{detail}</span>
             {output}
         </li>
     }
