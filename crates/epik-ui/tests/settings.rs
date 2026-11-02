@@ -146,6 +146,17 @@ fn the_settings_page_has_the_repositories_the_form_and_uninstall() {
 }
 
 #[test]
+fn the_readme_has_the_section_the_hosts_link_goes_to() {
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme
+            .lines()
+            .any(|line| line == "## Build on another machine"),
+        "README.md has no section #build-on-another-machine"
+    );
+}
+
+#[test]
 fn the_settings_page_says_why_it_could_not_read_the_repositories() {
     let settings = Signal::stored(Err("no ~/.epik".to_string()));
     let error = RwSignal::new(String::new());
