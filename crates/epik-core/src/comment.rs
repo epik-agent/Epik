@@ -308,6 +308,8 @@ mod tests {
             disposition: Disposition::WaitingForReview,
             reason: None,
             pull_request: Some(30),
+            review: None,
+            open_threads: None,
             cost_usd: issues.iter().filter_map(|i| i.cost_usd).sum(),
             issues,
             sessions: Vec::new(),

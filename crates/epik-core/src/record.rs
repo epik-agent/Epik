@@ -92,6 +92,17 @@ pub enum SessionRole {
     Review,
 }
 
+/// What the review of a run's pull request concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Approve,
+    Changes,
+    /// The reviewer left no verdict for its round.
+    #[serde(rename = "none")]
+    NoVerdict,
+}
+
 /// An issue of a run: an epic sub-issue, or the epic issue of an epic
 /// with none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +202,14 @@ pub enum Event {
         /// single issue's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull_request: Option<u64>,
+        /// What the review of that pull request concluded, when review
+        /// was on and the review ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<ReviewVerdict>,
+        /// How many of its review threads were unresolved at the finish,
+        /// when it was reviewed and they could be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_threads: Option<usize>,
     },
     BuildInterrupted {
         at: DateTime<Utc>,
@@ -527,6 +546,14 @@ pub struct BuildState {
     /// Whether that pull request was closed without merging.
     #[serde(default)]
     pub pull_request_closed: bool,
+    /// What the review of that pull request concluded, if it was
+    /// reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewVerdict>,
+    /// How many of its review threads were unresolved when the build
+    /// finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_threads: Option<usize>,
     pub issues: Vec<IssueState>,
     /// The run's own agent sessions, such as reviews of its pull request,
     /// when the run's number is not one of its issues', oldest first.
@@ -560,6 +587,17 @@ impl BuildState {
     /// The run the build belongs to.
     pub fn run(&self) -> RunKey {
         RunKey::new(&self.repo, self.number)
+    }
+
+    /// Whether a review of the run's pull request is running.
+    pub fn reviewing(&self) -> bool {
+        self.status == BuildStatus::Running
+            && self
+                .issues
+                .iter()
+                .flat_map(|issue| &issue.sessions)
+                .chain(&self.sessions)
+                .any(|s| s.role == SessionRole::Review && s.duration_ms.is_none())
     }
 
     /// How long the build has taken: to its end, or to `now` while it runs.
@@ -599,6 +637,8 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
         reason: None,
         pull_request: None,
         pull_request_closed: false,
+        review: None,
+        open_threads: None,
         issues: issues
             .iter()
             .map(|issue| IssueState {
@@ -681,10 +721,14 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
                 outcome,
                 reason,
                 pull_request,
+                review,
+                open_threads,
             } => {
                 state.status = (*outcome).into();
                 state.reason = reason.clone();
                 state.pull_request = *pull_request;
+                state.review = *review;
+                state.open_threads = *open_threads;
                 state.ended_at = Some(*at);
             }
             Event::BuildInterrupted { at, reason } => {
@@ -836,6 +880,8 @@ mod tests {
                 outcome: Outcome::Succeeded,
                 reason: None,
                 pull_request: Some(200),
+                review: None,
+                open_threads: None,
             },
         ]
     }
@@ -1091,6 +1137,8 @@ mod tests {
                 outcome: Outcome::Failed,
                 reason: Some("#13 failed".to_owned()),
                 pull_request: None,
+                review: None,
+                open_threads: None,
             },
         ];
         let state = fold(&events).unwrap();
@@ -1480,5 +1528,34 @@ mod tests {
 
             assert_eq!(error.kind(), io::ErrorKind::NotFound, "{build_id}");
         }
+    }
+
+    #[test]
+    fn build_finished_records_the_review_and_an_old_one_has_none() {
+        let line = r#"{"type":"build_finished","at":"2026-11-01T12:00:00Z","outcome":"succeeded","pull_request":9}"#;
+        let Event::BuildFinished {
+            review,
+            open_threads,
+            ..
+        } = serde_json::from_str(line).unwrap()
+        else {
+            panic!("a build_finished");
+        };
+        assert_eq!((review, open_threads), (None, None));
+
+        let reviewed = Event::BuildFinished {
+            at: time(0),
+            outcome: Outcome::Succeeded,
+            reason: None,
+            pull_request: Some(9),
+            review: Some(ReviewVerdict::NoVerdict),
+            open_threads: Some(3),
+        };
+        let json = serde_json::to_value(&reviewed).unwrap();
+        assert_eq!(json["review"], "none");
+        assert_eq!(json["open_threads"], 3);
+        let state = fold(&[epic_started("b1", time(0)), reviewed]).unwrap();
+        assert_eq!(state.review, Some(ReviewVerdict::NoVerdict));
+        assert_eq!(state.open_threads, Some(3));
     }
 }

@@ -185,10 +185,14 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 }
 ```
 
-- `disposition`: `building` while a build runs; `waiting_for_review` when every issue merged and the pull request into
-  the default branch waits for the user; `needs_attention` when the latest build failed or was interrupted, or its
-  pull request was closed without merging. `reason` says why a run needs attention.
+- `disposition`: `building` while a build runs; `reviewing` while a running build reviews the run's pull request;
+  `waiting_for_review` when every issue merged and the pull request into the default branch waits for the user;
+  `needs_attention` when the latest build failed or was interrupted, or its pull request was closed without merging.
+  `reason` says why a run needs attention.
 - `pull_request`: the latest build's pull request into the default branch: the epic's, or a single issue's.
+- `review` and `open_threads`, when review was on and the latest build reviewed its pull request: what the review
+  concluded, `approve`, `changes`, or `none` when the reviewer left no verdict; and how many of the pull request's
+  review threads were unresolved when the build finished. Absent otherwise.
 - `issues`: every issue of the run, including ones merged in earlier builds. Each one's `status` is `waiting`,
   `running`, `succeeded` (its agent opened a pull request), `merged`, `failed`, or `closed` (closed before a build
   started). Its `sessions` are the agent sessions it took over every build, oldest first, and its `duration_ms` and
