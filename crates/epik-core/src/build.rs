@@ -1753,7 +1753,14 @@ mod tests {
             .check_interval(Duration::from_secs(3600));
         let state = thread::scope(|scope| {
             let running = scope.spawn(|| build.run(&cancel));
-            while github.repo(REPO).pulls.is_empty() {
+            // Its agent has finished, so the build is waiting on the checks.
+            let finished = || {
+                run::read(root.path(), &RunKey::new(REPO, 1))
+                    .ok()
+                    .and_then(|run| run.issue(2).map(|issue| issue.status))
+                    == Some(IssueStatus::Succeeded)
+            };
+            while !finished() {
                 thread::sleep(Duration::from_millis(5));
             }
             cancel.store(true, Ordering::SeqCst);
