@@ -242,4 +242,32 @@ mod tests {
 
         assert_eq!(read(root.path()).unwrap(), Settings::default());
     }
+
+    /// The lines of the section of `markdown` headed `heading`, up to the
+    /// next heading of its level or higher. Read by line, since a Windows
+    /// checkout ends its lines with `\r\n`.
+    fn section(markdown: &str, heading: &str) -> String {
+        let level = |line: &str| line.len() - line.trim_start_matches('#').len();
+        let mut lines = markdown.lines().skip_while(|line| *line != heading);
+        assert!(lines.next().is_some(), "no section {heading:?}");
+        lines
+            .take_while(|line| !(line.starts_with('#') && level(line) <= level(heading)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_user_docs_describe_every_agent_a_role_can_run() {
+        let readme = include_str!("../../../README.md");
+        let how_it_works = include_str!("../../../plugin/skills/assistant/how-it-works.md");
+        for (doc, text) in [
+            ("README.md's Settings", section(readme, "## Settings")),
+            ("how-it-works.md's Roles", section(how_it_works, "## Roles")),
+        ] {
+            for agent in AGENTS {
+                let name = name(agent);
+                assert!(text.contains(&name), "{doc} doesn't mention {name}");
+            }
+        }
+    }
 }
