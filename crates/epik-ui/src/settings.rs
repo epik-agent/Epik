@@ -1,10 +1,13 @@
-//! Settings, a page of the main window: the monitored repositories, a form
-//! to monitor another, the hosts builds can run on, a form to add another,
+//! Settings, a page of the main window: the agent and model each role runs
+//! with, the monitored repositories, a form to monitor another, the hosts builds can run on, a form to add another,
 //! and a button to uninstall Epik.
 
 use std::path::Path;
 
-use epik_view::{HostRow, HostStatus, Removal, RepositoryRow, Settings, Uninstall, UninstallStep};
+use epik_view::{
+    AgentSettings, HostRow, HostStatus, Removal, RepositoryRow, Role, Settings, Uninstall,
+    UninstallStep,
+};
 use leptos::ev::SubmitEvent;
 use leptos::html::Input;
 use leptos::prelude::*;
@@ -27,7 +30,8 @@ pub struct HostActions {
     pub check: Callback<String>,
 }
 
-/// The Settings page: the monitored repositories, each with its button,
+/// The Settings page: the form choosing each role's agent and model, once
+/// they are read, the monitored repositories, each with its button,
 /// the form to monitor another, the hosts, each with its buttons, the form
 /// to add another, and the button that opens the confirmation to uninstall
 /// Epik. The lists are redrawn only when `settings` changes, so the forms
@@ -35,6 +39,12 @@ pub struct HostActions {
 #[component]
 pub fn SettingsPage(
     #[prop(into)] settings: Signal<Result<Settings, String>>,
+    /// The roles, or why they couldn't be read, or `None` until they are.
+    #[prop(into, optional)]
+    agents: Signal<Option<Result<AgentSettings, String>>>,
+    /// The ids of the agents whose setup isn't done.
+    #[prop(into, optional)]
+    unready: Signal<Vec<String>>,
     error: RwSignal<String>,
     host_error: RwSignal<String>,
     #[prop(optional_no_strip)] on_stop: Option<Callback<RepositoryRow>>,
@@ -44,6 +54,13 @@ pub fn SettingsPage(
     #[prop(optional_no_strip)] on_open_uninstall: Option<Callback<()>>,
 ) -> impl IntoView {
     let settings = Memo::new(move |_| settings.get());
+    let agents = Memo::new(move |_| agents.get());
+    let roles = move || {
+        agents.get().map(|agents| match agents {
+            Ok(agents) => view! { <Agents agents unready/> }.into_any(),
+            Err(reason) => view! { <p class="error">{reason}</p> }.into_any(),
+        })
+    };
     let hosts = Memo::new(move |_| {
         settings.with(|settings| {
             settings
@@ -55,6 +72,10 @@ pub fn SettingsPage(
     view! {
         <h1 class="page-title">"Settings"</h1>
         <div class="card settings">
+            <section class="agents">
+                <h3>"Agents"</h3>
+                {roles}
+            </section>
             <section>
                 <h3>"Monitored repositories"</h3>
                 <p class="muted">
@@ -78,6 +99,221 @@ pub fn SettingsPage(
             </section>
             <UninstallButton on_open=on_open_uninstall/>
         </div>
+    }
+}
+
+/// The agents a role can run: each one's id, name, and how it runs
+/// unattended.
+const AGENTS: [(&str, &str, &str); 2] = [
+    (
+        "claude",
+        "Claude Code",
+        "runs unattended with a model approving each risky action, and no sandbox.",
+    ),
+    (
+        "codex",
+        "Codex",
+        "runs unattended in a sandbox, with its own reviewer approving what leaves it.",
+    ),
+];
+
+/// What review's agent field says when nothing reviews.
+const OFF: &str = "off";
+
+/// What the form choosing the roles holds: each role's agent id, or
+/// [`OFF`] for no review, and the model as typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub coding: String,
+    pub coding_model: String,
+    pub review: String,
+    pub review_model: String,
+}
+
+impl From<&AgentSettings> for Choice {
+    fn from(settings: &AgentSettings) -> Self {
+        let model =
+            |role: Option<&Role>| role.and_then(|role| role.model.clone()).unwrap_or_default();
+        Self {
+            coding: settings.coding.agent.clone(),
+            coding_model: model(Some(&settings.coding)),
+            review: settings
+                .review
+                .as_ref()
+                .map_or(OFF.to_owned(), |role| role.agent.clone()),
+            review_model: model(settings.review.as_ref()),
+        }
+    }
+}
+
+impl Choice {
+    /// The roles as chosen. A blank model is the agent's default.
+    pub fn settings(&self) -> AgentSettings {
+        let role = |agent: &str, model: &str| Role {
+            agent: agent.to_owned(),
+            model: Some(model.trim())
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned),
+        };
+        AgentSettings {
+            coding: role(&self.coding, &self.coding_model),
+            review: (self.review != OFF).then(|| role(&self.review, &self.review_model)),
+        }
+    }
+
+    /// What saving the roles as chosen asks of the app.
+    pub fn request(&self) -> SetAgentSettings {
+        SetAgentSettings {
+            settings: self.settings(),
+        }
+    }
+
+    /// Whether a role runs the agent `id`.
+    fn uses(&self, id: &str) -> bool {
+        self.coding == id || self.review == id
+    }
+}
+
+/// The app's command that keeps the roles, with its argument.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SetAgentSettings {
+    pub settings: AgentSettings,
+}
+
+impl SetAgentSettings {
+    pub const COMMAND: &str = "set_agent_settings";
+}
+
+/// The form choosing each role's agent and model, for the builds that
+/// start after it is saved, and each agent in a line saying how it runs
+/// unattended. An agent a role uses whose setup isn't done says so, and
+/// opens the setup checklist.
+#[component]
+pub fn Agents(
+    agents: AgentSettings,
+    /// The ids of the agents whose setup isn't done.
+    #[prop(into, optional)]
+    unready: Signal<Vec<String>>,
+) -> impl IntoView {
+    let choice = RwSignal::new(Choice::from(&agents));
+    let error = RwSignal::new(String::new());
+    let saved = RwSignal::new(false);
+    let saving = RwSignal::new(false);
+    let change = move |set: fn(&mut Choice, String)| {
+        move |event: leptos::ev::Event| {
+            let value = event_target_value(&event);
+            choice.update(|choice| set(choice, value));
+            saved.set(false);
+        }
+    };
+    let options = move |field: fn(&Choice) -> &str, off: bool| {
+        let off = off.then(|| {
+            view! {
+                <option value=OFF selected=move || choice.with(|choice| field(choice) == OFF)>
+                    "Off"
+                </option>
+            }
+        });
+        let agents = AGENTS
+            .into_iter()
+            .map(|(id, name, _)| {
+                view! {
+                    <option value=id selected=move || choice.with(|choice| field(choice) == id)>
+                        {name}
+                    </option>
+                }
+            })
+            .collect_view();
+        view! { {off}{agents} }
+    };
+    let model =
+        move |id: &'static str, field: fn(&Choice) -> &str, set: fn(&mut Choice, String)| {
+            view! {
+                <input
+                    id=id
+                    placeholder="The agent's default"
+                    autocomplete="off"
+                    spellcheck="false"
+                    value=choice.with_untracked(|choice| field(choice).to_owned())
+                    on:input=change(set)
+                />
+            }
+        };
+    let review_model = move || {
+        choice.with(|choice| choice.review != OFF).then(|| {
+            model(
+                "review-model",
+                |choice| &choice.review_model,
+                |choice, value| choice.review_model = value,
+            )
+        })
+    };
+    let lines = AGENTS
+        .into_iter()
+        .map(|(id, name, unattended)| {
+            let setup = move || {
+                let unready = choice.with(|choice| choice.uses(id))
+                    && unready.with(|unready| unready.iter().any(|agent| agent == id));
+                unready.then(|| {
+                    view! {
+                        " "
+                        <span class="why">"Its setup isn't done. "</span>
+                        <button type="button" class="link" on:click=|_| tauri::run("check_setup", ())>
+                            "Check setup"
+                        </button>
+                    }
+                })
+            };
+            view! { <li><b>{name}</b>{format!(" {unattended}")}{setup}</li> }
+        })
+        .collect_view();
+    let submit = move |event: SubmitEvent| {
+        event.prevent_default();
+        saving.set(true);
+        let request = choice.get_untracked().request();
+        leptos::task::spawn_local(async move {
+            match tauri::invoke::<_, ()>(SetAgentSettings::COMMAND, &request).await {
+                Ok(()) => {
+                    error.set(String::new());
+                    saved.set(true);
+                }
+                Err(reason) => error.set(reason),
+            }
+            saving.set(false);
+        });
+    };
+    view! {
+        <form id="agents" on:submit=submit>
+            <div class="role">
+                <label for="coding-agent">"Coding"</label>
+                <select id="coding-agent" on:change=change(|choice, value| choice.coding = value)>
+                    {options(|choice| &choice.coding, false)}
+                </select>
+                {model(
+                    "coding-model",
+                    |choice| &choice.coding_model,
+                    |choice, value| choice.coding_model = value,
+                )}
+            </div>
+            <div class="role">
+                <label for="review-agent">"Review"</label>
+                <select id="review-agent" on:change=change(|choice, value| choice.review = value)>
+                    {options(|choice| &choice.review, true)}
+                </select>
+                {review_model}
+            </div>
+            <p class="muted">
+                "Reviews the build's pull request when the build is done, and fixes what it finds, up to twice, before the pull request reaches you."
+            </p>
+            <ul class="agent-list">{lines}</ul>
+            <div class="row">
+                <button class="primary" disabled=move || saving.get()>"Save"</button>
+                <span class="muted">
+                    {move || saved.get().then_some("Saved. Builds that start from now on use these.")}
+                </span>
+            </div>
+            <p id="agents-error" class="error">{error}</p>
+        </form>
     }
 }
 
