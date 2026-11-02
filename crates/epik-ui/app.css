@@ -162,6 +162,32 @@ table.run-table {
 .totals dt { grid-row: 1; font: 500 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .totals dd { grid-row: 2; margin: 0; font: 600 17px var(--mono); }
 
+/* Agent sessions: a run's own under its header, and an issue's in its panel. */
+.run-sessions { display: flex; gap: 12px; align-items: baseline; margin: 16px 0 0; }
+.run-sessions .label { width: auto; color: var(--muted); }
+.sessions { margin: 0; padding: 0; list-style: none; }
+.detail .sessions { margin-top: 14px; }
+.session { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 2px 0; }
+.session button {
+  display: flex;
+  gap: 10px;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--secondary);
+  font: inherit;
+  text-align: left;
+}
+.session button:hover { background: var(--raised); }
+.session button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+.session .what { color: var(--text); font-weight: 500; }
+.session .figures { font: 12px var(--mono); color: var(--muted); }
+.session.running .what::before { content: "●"; color: var(--accent); margin-right: 6px; }
+.session .verdict { color: var(--secondary); }
+.session .threads a { color: var(--warning); }
+
 .builds {
   display: flex;
   flex-wrap: wrap;

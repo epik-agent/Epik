@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::{kept, keyed, part};
-use crate::run_page::RunView;
+use crate::run_page::{RunView, shown_log};
 use crate::settings::{
     ConfirmBody, ConfirmHostBody, HostActions, SettingsPage, UninstallBody, Uninstalling,
 };
@@ -303,10 +303,10 @@ fn chosen_issue(page: &RunPage, picked: Option<u64>) -> Option<u64> {
     })
 }
 
-/// What reading the chosen issue's agent log on a run's page found.
+/// What reading the shown session's agent log on a run's page found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fetched {
-    /// The issue has no log: it isn't running.
+    /// There is no session to show.
     NoLog,
     /// The stream in the log at the path.
     Read(String, Stream),
@@ -314,12 +314,10 @@ pub enum Fetched {
     Unread(String),
 }
 
-/// The stream of the chosen issue's agent log on a run's page.
-async fn fetch_stream(page: &RunPage, picked: Option<u64>) -> Fetched {
-    let path = chosen_issue(page, picked)
-        .and_then(|number| page.issues.iter().find(|issue| issue.number == number))
-        .and_then(|issue| issue.log.clone());
-    let Some(path) = path else {
+/// The stream of the shown session's agent log on a run's page, with
+/// issue `picked` and the session whose log is `session` picked.
+async fn fetch_stream(page: &RunPage, picked: Option<u64>, session: Option<&str>) -> Fetched {
+    let Some(path) = shown_log(page, chosen_issue(page, picked), session) else {
         return Fetched::NoLog;
     };
     match tauri::invoke::<_, Stream>("agent_stream", &Log { path: path.clone() }).await {
@@ -367,6 +365,8 @@ pub fn MainWindow() -> impl IntoView {
     let error = RwSignal::new(String::new());
     // The issue chosen on each run's page.
     let selected = RwSignal::new(HashMap::<String, u64>::new());
+    // The log of the session picked on each run's page.
+    let picked_logs = RwSignal::new(HashMap::<String, String>::new());
     // The stream of the chosen issue's agent log, and the log's path.
     let streamed = RwSignal::new(None::<(String, Stream)>);
     let flashing = Flashing(RwSignal::new(HashMap::new()));
@@ -401,7 +401,9 @@ pub fn MainWindow() -> impl IntoView {
                         Shown::Run(page) => {
                             let picked = selected
                                 .with_untracked(|selected| selected.get(&page.run).copied());
-                            fetch_stream(page, picked).await
+                            let session =
+                                picked_logs.with_untracked(|picked| picked.get(&page.run).cloned());
+                            fetch_stream(page, picked, session.as_deref()).await
                         }
                         _ => Fetched::NoLog,
                     };
@@ -620,15 +622,32 @@ pub fn MainWindow() -> impl IntoView {
                     page?.with(|page| chosen_issue(page, picked))
                 }
             });
-            let on_choose = Callback::new(move |number: u64| {
-                selected.update(|selected| {
-                    selected.insert(run.clone(), number);
+            let picked = Signal::derive({
+                let run = run.clone();
+                move || picked_logs.with(|picked| picked.get(&run).cloned())
+            });
+            let on_choose = Callback::new({
+                let run = run.clone();
+                move |number: u64| {
+                    selected.update(|selected| {
+                        selected.insert(run.clone(), number);
+                    });
+                    // A new issue shows its own latest session.
+                    picked_logs.update(|picked| {
+                        picked.remove(&run);
+                    });
+                    refresh();
+                }
+            });
+            let on_pick = Callback::new(move |log: String| {
+                picked_logs.update(|picked| {
+                    picked.insert(run.clone(), log);
                 });
                 refresh();
             });
             view! {
                 {error_line}
-                {page.map(|page| view! { <RunView page chosen on_choose streamed/> })}
+                {page.map(|page| view! { <RunView page chosen on_choose streamed picked on_pick/> })}
             }
             .into_any()
         }

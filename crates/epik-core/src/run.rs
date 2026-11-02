@@ -480,6 +480,7 @@ pub fn interrupt_unfinished(root: &Path) -> io::Result<()> {
                             round: session.round,
                             duration_ms: ran(session.started_at),
                             cost_usd: None,
+                            verdict: None,
                         })?;
                     }
                 }
@@ -597,6 +598,7 @@ mod tests {
             round,
             duration_ms: 10_000,
             cost_usd: Some(dollars(cost)),
+            verdict: None,
         }
     }
 

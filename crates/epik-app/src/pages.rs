@@ -5,21 +5,26 @@
 //! without a desktop: the window describes, in sentences, what is
 //! happening, and every issue or pull request it mentions links to GitHub.
 
+use std::path::Path;
+
 use chrono::{DateTime, FixedOffset, Utc};
 use epik_core::graph::Graph;
 use epik_core::hosted::{HostedRun, Shown};
 use epik_core::hosts::{Host, State};
-use epik_core::record::{BuildStatus, IssueState, IssueStatus, Kind};
+use epik_core::record::{
+    BuildStatus, IssueState, IssueStatus, Kind, ReviewVerdict, Session, SessionRole,
+};
 use epik_core::remote::Mismatch;
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
+use epik_core::settings;
 use epik_core::setup::{Check, Item};
 use epik_core::uninstall::Outcome;
 use epik_core::words::{cost_of, dollars, duration, total_cost};
 use epik_view::{
     Home, HostRow, HostStatus, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
-    RepositoryRow, RunCard, RunPage, Settings, SetupFix, Sidebar, SidebarRun, Span, TrayRun,
-    UninstallStep, Words,
+    RepositoryRow, RunCard, RunPage, SessionRow, Settings, SetupFix, Sidebar, SidebarRun, Span,
+    TrayRun, UninstallStep, Words,
 };
 
 /// How long an agent may log nothing and still be "active".
@@ -302,6 +307,46 @@ fn now_line(run: &RunState, issue: &IssueState, now: DateTime<Utc>) -> NowLine {
     }
 }
 
+/// The run's own sessions, oldest first: its reviews and the fixes they
+/// asked for. A single issue's run has them among its issue's sessions.
+fn own_sessions(run: &RunState) -> Vec<&Session> {
+    run.sessions
+        .iter()
+        .chain(run.issue(run.number).into_iter().flat_map(|i| &i.sessions))
+        .filter(|s| s.role == SessionRole::Review || s.round > 1)
+        .collect()
+}
+
+/// What the run's own session is doing while it runs: "reviewing its pull
+/// request" or "addressing the review".
+fn own_doing(run: &RunState) -> Option<&'static str> {
+    if !run.disposition.is_building() {
+        return None;
+    }
+    let session = own_sessions(run)
+        .pop()
+        .filter(|s| s.duration_ms.is_none())?;
+    Some(match session.role {
+        SessionRole::Review => "reviewing its pull request",
+        SessionRole::Coding => "addressing the review",
+    })
+}
+
+/// The run's line while its own session runs: "#13 Exponentiation —
+/// reviewing its pull request."
+fn own_now_line(run: &RunState) -> Option<NowLine> {
+    let doing = own_doing(run)?;
+    Some(NowLine {
+        number: run.number,
+        words: vec![
+            issue_link(&run.repo, run.number),
+            text(format!(" {} — {doing}.", run.title)),
+        ],
+        life: None,
+        last_event: None,
+    })
+}
+
 fn count_words(run: &RunState) -> String {
     let issues = plural(run.issues.len(), "issue", "issues");
     let merged = run.issues.iter().filter(|i| is_merged(i)).count();
@@ -451,7 +496,10 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
             )));
         }
         match running.len() {
-            0 => words.push(text("Starting.")),
+            0 => match own_doing(run) {
+                Some(doing) => words.push(text(format!("{}.", capitalized(doing)))),
+                None => words.push(text("Starting.")),
+            },
             1 if run.issues.len() == 1 => {
                 words.push(text(capitalized(&plain(&doing(running[0])))));
             }
@@ -477,7 +525,11 @@ pub fn run_card(run: &RunState, now: DateTime<Utc>) -> RunCard {
         cost: total_cost(run.cost_usd, run.cost_unreported),
         graph: mini_graph(run),
         progress: progress(run),
-        now: running.iter().map(|i| now_line(run, i, now)).collect(),
+        now: running
+            .iter()
+            .map(|i| now_line(run, i, now))
+            .chain(own_now_line(run))
+            .collect(),
         next: if building { next_words(run) } else { None },
         done: if building { done_words(run) } else { None },
         sentence,
@@ -717,13 +769,96 @@ fn figures(issue: &IssueState) -> Option<String> {
     }
 }
 
+/// A review's verdict in words.
+fn verdict_words(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Approve => "approved",
+        ReviewVerdict::Changes => "changes requested",
+        ReviewVerdict::NoVerdict => "no verdict",
+    }
+}
+
+/// `session` as a row, with its log in the run's directory `run_dir`, at
+/// `now`.
+fn session_row(session: &Session, run_dir: Option<&Path>, now: DateTime<Utc>) -> SessionRow {
+    let running = session.duration_ms.is_none();
+    let time = match session.duration_ms {
+        Some(ms) => duration(ms),
+        None => format!("{} so far", since(session.started_at, now)),
+    };
+    SessionRow {
+        role: match session.role {
+            SessionRole::Coding => "Coding",
+            SessionRole::Review => "Review",
+        }
+        .to_owned(),
+        round: session.round,
+        agent: settings::name(&session.agent),
+        model: session
+            .model
+            .clone()
+            .unwrap_or_else(|| "default model".to_owned()),
+        time,
+        cost: (!running).then(|| {
+            session
+                .cost_usd
+                .map_or_else(|| "not reported".to_owned(), dollars)
+        }),
+        verdict: session.verdict.map(|v| verdict_words(v).to_owned()),
+        threads: None,
+        running,
+        log: run_dir.map(|dir| session_log(dir, session)),
+    }
+}
+
+/// The path of `session`'s log in the run's directory `run_dir`.
+fn session_log(run_dir: &Path, session: &Session) -> String {
+    run_dir
+        .join(&session.build_id)
+        .join(&session.log)
+        .display()
+        .to_string()
+}
+
+/// The run's own sessions as rows, the last review with the threads its
+/// pull request still has open, linked to its Files view.
+fn own_rows(run: &RunState, run_dir: Option<&Path>, now: DateTime<Utc>) -> Vec<SessionRow> {
+    let mut rows: Vec<SessionRow> = own_sessions(run)
+        .into_iter()
+        .map(|session| session_row(session, run_dir, now))
+        .collect();
+    let threads = run.open_threads.filter(|_| !run.disposition.is_building());
+    let last_review = rows.iter_mut().rev().find(|row| row.role == "Review");
+    if let (Some(row), Some(open)) = (last_review, threads) {
+        row.threads = Some(match (open, run.pull_request) {
+            (0, _) => text("no threads open"),
+            (open, Some(pr)) => link(
+                format!("{} open", plural(open, "thread", "threads")),
+                format!("{}/files", pull_url(&run.repo, pr)),
+            ),
+            (open, None) => text(format!("{} open", plural(open, "thread", "threads"))),
+        });
+    }
+    rows
+}
+
 fn issue_card(
     run: &RunState,
     issue: &IssueState,
     place: (usize, usize),
     now: DateTime<Utc>,
-    log: Option<String>,
+    run_dir: Option<&Path>,
 ) -> IssueCard {
+    // The latest session's log, or in a record from before sessions, the
+    // running build's log of the issue while it runs.
+    let log = run_dir.and_then(|dir| match issue.sessions.last() {
+        Some(session) => Some(session_log(dir, session)),
+        None => run
+            .running_build
+            .as_deref()
+            .filter(|_| issue.status == IssueStatus::Running)
+            .map(|build| dir.join(build).join(issue.log(build)).display().to_string()),
+    });
     let state = node_state(issue);
     let number = issue.issue.number;
     let activity = issue.activity.as_ref();
@@ -854,6 +989,11 @@ fn issue_card(
         pull_request,
         recent: activity.map(|a| a.recent.clone()).unwrap_or_default(),
         log,
+        sessions: issue
+            .sessions
+            .iter()
+            .map(|session| session_row(session, run_dir, now))
+            .collect(),
     }
 }
 
@@ -909,12 +1049,12 @@ fn build_sentence(n: usize, build: &BuildSummary, merged: &[u64], zone: &FixedOf
 }
 
 /// The run page for `hosted` among the runs `shown` at `now`, with the
-/// directory of its running build's record, where agents' logs are.
+/// directory of its record, where its builds' agents' logs are.
 pub fn run_page(
     hosted: &HostedRun,
     shown: &Shown,
     merged_by_build: &[Vec<u64>],
-    log_dir: Option<&std::path::Path>,
+    run_dir: Option<&Path>,
     now: DateTime<Utc>,
     zone: &FixedOffset,
 ) -> RunPage {
@@ -956,15 +1096,7 @@ pub fn run_page(
         .issues
         .iter()
         .zip(&layout.places)
-        .map(|(issue, (_, column, row))| {
-            let log = log_dir
-                .filter(|_| issue.status == IssueStatus::Running)
-                .map(|dir| {
-                    let build_id = run.running_build.as_deref().unwrap_or_default();
-                    dir.join(issue.log(build_id)).display().to_string()
-                });
-            issue_card(run, issue, (*column, *row), now, log)
-        })
+        .map(|(issue, (_, column, row))| issue_card(run, issue, (*column, *row), now, run_dir))
         .collect();
     let builds = run
         .builds
@@ -1000,6 +1132,7 @@ pub fn run_page(
         rows: layout.rows,
         issues,
         edges: layout.edges,
+        sessions: own_rows(run, run_dir, now),
     }
 }
 

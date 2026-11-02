@@ -167,6 +167,10 @@ pub enum Event {
         /// US dollars, as the agent reported them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<Decimal>,
+        /// What a review concluded, read from its pull request when it
+        /// finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<ReviewVerdict>,
     },
     IssueFinished {
         at: DateTime<Utc>,
@@ -424,6 +428,9 @@ pub struct Session {
     /// `None` while it runs.
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<Decimal>,
+    /// What a review concluded, once it has finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ReviewVerdict>,
 }
 
 /// An issue, as a build's events leave it, or as a run's builds do.
@@ -499,12 +506,14 @@ fn record_session(sessions: &mut Vec<Session>, build_id: &str, event: &Event) {
             started_at: *at,
             duration_ms: None,
             cost_usd: None,
+            verdict: None,
         }),
         Event::SessionFinished {
             role,
             round,
             duration_ms,
             cost_usd,
+            verdict,
             ..
         } => {
             if let Some(session) = sessions
@@ -514,6 +523,7 @@ fn record_session(sessions: &mut Vec<Session>, build_id: &str, event: &Event) {
             {
                 session.duration_ms = Some(*duration_ms);
                 session.cost_usd = *cost_usd;
+                session.verdict = *verdict;
             }
         }
         _ => {}
@@ -1325,6 +1335,7 @@ mod tests {
             round,
             duration_ms: ms,
             cost_usd: Some(dollars("0.25")),
+            verdict: None,
         }
     }
 
@@ -1402,6 +1413,7 @@ mod tests {
                 started_at: time(1),
                 duration_ms: Some(9_000),
                 cost_usd: Some(dollars("0.25")),
+                verdict: None,
             }]
         );
     }
@@ -1446,6 +1458,32 @@ mod tests {
     }
 
     #[test]
+    fn a_reviews_verdict_is_its_sessions() {
+        let mut events = one_session();
+        events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
+        let finished = Event::SessionFinished {
+            at: time(15),
+            number: 13,
+            role: SessionRole::Review,
+            round: 1,
+            duration_ms: 4_000,
+            cost_usd: None,
+            verdict: Some(ReviewVerdict::Changes),
+        };
+        assert_eq!(
+            serde_json::to_value(&finished).unwrap()["verdict"],
+            "changes"
+        );
+        events.push(finished);
+
+        let issue = fold(&events).unwrap().issue(13).unwrap().clone();
+
+        let verdicts: Vec<Option<ReviewVerdict>> =
+            issue.sessions.iter().map(|s| s.verdict).collect();
+        assert_eq!(verdicts, [None, Some(ReviewVerdict::Changes)]);
+    }
+
+    #[test]
     fn a_session_that_reports_no_cost_adds_only_its_time() {
         let mut events = one_session();
         events.push(session_started(11, 13, SessionRole::Review, 1, "r.jsonl"));
@@ -1456,6 +1494,7 @@ mod tests {
             round: 1,
             duration_ms: 4_000,
             cost_usd: None,
+            verdict: None,
         });
         let issue = fold(&events).unwrap().issue(13).unwrap().clone();
         assert_eq!(issue.duration_ms, Some(13_000));
@@ -1482,6 +1521,7 @@ mod tests {
                 round,
                 duration_ms: 4_000,
                 cost_usd: None,
+                verdict: None,
             },
         ]
     }

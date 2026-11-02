@@ -153,6 +153,18 @@ fn run_page() {
                 pull_request: vec![link("PR #20", "https://github.com/o/r/pull/20")],
                 recent: vec!["Ran cargo test".to_owned()],
                 log: Some("the log".to_owned()),
+                sessions: vec![SessionRow {
+                    role: "Coding".to_owned(),
+                    round: 1,
+                    agent: "Codex".to_owned(),
+                    model: "default model".to_owned(),
+                    time: "3m 05s".to_owned(),
+                    cost: Some("not reported".to_owned()),
+                    verdict: None,
+                    threads: None,
+                    running: false,
+                    log: Some("the log".to_owned()),
+                }],
             },
             IssueCard {
                 number: 15,
@@ -172,9 +184,25 @@ fn run_page() {
                 pull_request: vec![],
                 recent: vec![],
                 log: None,
+                sessions: vec![],
             },
         ],
         edges: vec![(14, 15)],
+        sessions: vec![SessionRow {
+            role: "Review".to_owned(),
+            round: 2,
+            agent: "Claude Code".to_owned(),
+            model: "opus".to_owned(),
+            time: "1m 00s so far".to_owned(),
+            cost: None,
+            verdict: Some("approved".to_owned()),
+            threads: Some(link(
+                "2 threads open",
+                "https://github.com/o/r/pull/30/files",
+            )),
+            running: true,
+            log: None,
+        }],
     });
 }
 

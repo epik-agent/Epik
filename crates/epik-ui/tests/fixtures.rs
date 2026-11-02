@@ -6,7 +6,7 @@ use leptos::prelude::{Owner, RenderHtml};
 
 use epik_view::{
     Disposition, Home, IssueCard, Layout, MiniGraph, NodeState, NowLine, Popover, Progress,
-    RepositoryRow, RunCard, RunPage, Sidebar, SidebarRun, Span, TrayRun,
+    RepositoryRow, RunCard, RunPage, SessionRow, Sidebar, SidebarRun, Span, TrayRun,
 };
 
 pub fn text(text: &str) -> Span {
@@ -170,6 +170,24 @@ pub fn issue(number: u64, state: NodeState, column: usize, row: usize) -> IssueC
         pull_request: vec![text("none yet")],
         recent: vec![],
         log: None,
+        sessions: vec![],
+    }
+}
+
+/// A finished Claude Code session of `role` and `round`, with its log at
+/// `log`.
+pub fn session(role: &str, round: u32, verdict: Option<&str>, log: &str) -> SessionRow {
+    SessionRow {
+        role: role.into(),
+        round,
+        agent: "Claude Code".into(),
+        model: "default model".into(),
+        time: "1m 00s".into(),
+        cost: Some("$0.30".into()),
+        verdict: verdict.map(Into::into),
+        threads: None,
+        running: false,
+        log: Some(log.into()),
     }
 }
 
@@ -201,6 +219,7 @@ pub fn run_page() -> RunPage {
             issue(3, NodeState::NotStarted, 1, 1),
         ],
         edges: vec![(1, 2), (1, 3)],
+        sessions: vec![],
     }
 }
 

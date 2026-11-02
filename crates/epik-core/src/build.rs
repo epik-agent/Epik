@@ -538,15 +538,10 @@ impl<'a> Build<'a> {
                 err_path: self.dir.join(format!("{number}-review-{round}.err")),
                 model: role.model.clone(),
             };
-            self.session(
-                self.reviewer,
-                role,
-                SessionRole::Review,
-                round,
-                &request,
-                cancel,
-            );
+            self.session_started(role, SessionRole::Review, round, &request);
+            let outcome = self.reviewer.run(&request, cancel);
             if cancel.load(Ordering::SeqCst) {
+                self.session_finished(SessionRole::Review, round, &request, &outcome, None);
                 return self.interrupt();
             }
             // The verdict is GitHub's, whatever the agent said or however it
@@ -561,6 +556,7 @@ impl<'a> Build<'a> {
                 Some(Verdict::Changes) => ReviewVerdict::Changes,
                 None => ReviewVerdict::NoVerdict,
             });
+            self.session_finished(SessionRole::Review, round, &request, &outcome, review);
             if review != Some(ReviewVerdict::Changes) {
                 return self.end(Outcome::Succeeded, None, Some(pr), review, open_threads());
             }
@@ -649,7 +645,15 @@ impl<'a> Build<'a> {
         request: &AgentRequest,
         cancel: &AtomicBool,
     ) -> AgentOutcome {
-        let number = request.issue;
+        self.session_started(with, role, round, request);
+        let outcome = agent.run(request, cancel);
+        self.session_finished(role, round, request, &outcome, None);
+        outcome
+    }
+
+    /// Records that session `round` of `role` has started on `request`,
+    /// with the agent and model of `with`.
+    fn session_started(&self, with: &Role, role: SessionRole, round: u32, request: &AgentRequest) {
         let log = request
             .jsonl_path
             .file_name()
@@ -657,25 +661,36 @@ impl<'a> Build<'a> {
             .unwrap_or_default();
         self.append(Event::SessionStarted {
             at: Utc::now(),
-            number,
+            number: request.issue,
             role,
             round,
             agent: with.agent.clone(),
             model: with.model.clone(),
             log,
         });
-        let outcome = agent.run(request, cancel);
+    }
+
+    /// Records that session `round` of `role` on `request` has finished with
+    /// `outcome`, and for a review, its `verdict`.
+    fn session_finished(
+        &self,
+        role: SessionRole,
+        round: u32,
+        request: &AgentRequest,
+        outcome: &AgentOutcome,
+        verdict: Option<ReviewVerdict>,
+    ) {
         self.append(Event::SessionFinished {
             at: Utc::now(),
-            number,
+            number: request.issue,
             role,
             round,
             duration_ms: outcome.duration_ms,
             cost_usd: outcome
                 .cost_usd
                 .and_then(|cost| Decimal::from_str(&cost.to_string()).ok()),
+            verdict,
         });
-        outcome
     }
 
     /// Runs issue `number`'s agent, then finds its pull request, and for an
@@ -2039,6 +2054,15 @@ mod tests {
                 (SessionRole::Review, 1, "1-review-1.jsonl"),
                 (SessionRole::Coding, 2, "1-coding-2.jsonl"),
                 (SessionRole::Review, 2, "1-review-2.jsonl"),
+            ]
+        );
+        let verdicts: Vec<_> = state.sessions.iter().map(|s| s.verdict).collect();
+        assert_eq!(
+            verdicts,
+            [
+                Some(ReviewVerdict::Changes),
+                None,
+                Some(ReviewVerdict::Approve)
             ]
         );
         assert_eq!(state.review, Some(ReviewVerdict::Approve));
