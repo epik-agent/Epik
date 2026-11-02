@@ -427,6 +427,7 @@ impl GitHub for FakeGitHub {
         Ok(PullStatus {
             state: pull.state,
             merge_commit: pull.merge_commit.clone(),
+            head: pull.head.clone(),
         })
     }
 

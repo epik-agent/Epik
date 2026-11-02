@@ -115,11 +115,13 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
-/// A pull request's state, and its merge commit once it has merged.
+/// A pull request's state, its merge commit once it has merged, and the
+/// branch it is on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullStatus {
     pub state: PullState,
     pub merge_commit: Option<String>,
+    pub head: String,
 }
 
 /// How a pull request is merged.

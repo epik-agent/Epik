@@ -215,6 +215,7 @@ impl GitHub for GhCli {
         Ok(PullStatus {
             state: pull.state(),
             merge_commit: pull.merge_commit_sha.filter(|_| pull.merged_at.is_some()),
+            head: pull.head.name,
         })
     }
 
@@ -453,6 +454,14 @@ struct RawPull {
     #[serde(default)]
     merge_commit_sha: Option<String>,
     body: Option<String>,
+    head: RawBranch,
+}
+
+/// A pull request's branch, as the REST API returns it.
+#[derive(Deserialize)]
+struct RawBranch {
+    #[serde(rename = "ref")]
+    name: String,
 }
 
 impl RawPull {
@@ -747,7 +756,8 @@ mod tests {
     #[test]
     fn an_unmerged_closed_pull_request_is_closed() {
         let pull: RawPull =
-            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null}"#).unwrap();
+            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a"}}"#)
+                .unwrap();
         assert_eq!(pull.state(), PullState::Closed);
     }
 
@@ -953,6 +963,7 @@ mod tests {
             merged.merge_commit.as_deref(),
             Some("dd1288cc693368c025b69618edc4bc603c07d301")
         );
+        assert_eq!(merged.head, "issue-357-rust-workspace");
         let open = gh.pull_request(REPO, 367).unwrap();
         assert_eq!(open.state, PullState::Open);
         assert_eq!(open.merge_commit, None);

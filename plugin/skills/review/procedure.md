@@ -65,8 +65,29 @@ The review is complete when its one review is posted on the pull request, its bo
 
 Fix what the review asks on the pull request's branch, and answer each of its threads.
 
-1. List the pull request's open review threads: the query above, keeping the threads whose `isResolved` is `false`. Read
-   the latest review's body too (`gh pr view <n> --repo <o>/<r> --json reviews`): a concern with no line has no thread.
+1. List the pull request's open review threads, the ones whose `isResolved` is `false`:
+
+   ```
+   gh api graphql -F owner=<o> -F name=<r> -F number=<n> -f query='
+     query($owner: String!, $name: String!, $number: Int!) {
+       repository(owner: $owner, name: $name) {
+         pullRequest(number: $number) {
+           reviewThreads(first: 100) {
+             nodes {
+               id
+               isResolved
+               path
+               line
+               comments(first: 100) { nodes { databaseId author { login } body } }
+             }
+           }
+         }
+       }
+     }'
+   ```
+
+   Read the latest review's body too (`gh pr view <n> --repo <o>/<r> --json reviews`): a concern with no line has no
+   thread.
 2. For each open thread:
    - Fix what it asks, test first.
    - Reply in the thread saying what you did, to the thread's first comment, whose `databaseId` is `<id>`:

@@ -15,8 +15,10 @@
 //!
 //! With review on, the run's pull request into the default branch, the
 //! single issue's or the epic's, is reviewed once its checks pass, and the
-//! build finishes with the review's verdict. An epic's issues merge with no
-//! review between them.
+//! build finishes with the review's verdict. A review asking for changes
+//! has the coding agent address it on the pull request's branch, then the
+//! checks and the review run again, up to [`REVIEW_ROUNDS`] reviews. An
+//! epic's issues merge with no review between them.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -47,6 +49,10 @@ use crate::settings::{Role, Settings};
 
 /// How often a pull request's checks are read while they are pending.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many times the run's pull request is reviewed before a review that
+/// still asks for changes leaves it to the user.
+pub const REVIEW_ROUNDS: u32 = 2;
 
 /// How often a waiting build looks at the cancel signal.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -496,16 +502,13 @@ impl<'a> Build<'a> {
 
     /// Waits for the run's pull request `pr`'s checks, reviews it with
     /// `role`'s agent, and finishes the build with the review's verdict and
-    /// the threads left open. Failing checks fail the build unreviewed.
+    /// the threads left open. When the review asks for changes, the coding
+    /// agent addresses it on the pull request's branch and the checks and
+    /// the review run again, up to [`REVIEW_ROUNDS`] reviews; changes asked
+    /// for after the last leave the run needing attention. Failing checks
+    /// fail the build.
     fn review(&self, pr: u64, role: &Role, cancel: &AtomicBool) {
-        match self.await_checks(pr, cancel) {
-            Ok(()) => {}
-            Err(Stop::Cancelled) => return self.interrupt(),
-            Err(Stop::Failed(reason)) => {
-                return self.end(Outcome::Failed, Some(reason), Some(pr), None, None);
-            }
-        }
-        let (number, round) = (self.number, 1);
+        let number = self.number;
         let sub_issues = match self.kind {
             Kind::Epic => self.issues.clone(),
             Kind::Issue => Vec::new(),
@@ -514,46 +517,125 @@ impl<'a> Build<'a> {
             Kind::Epic => &self.default_branch,
             Kind::Issue => &self.branch,
         };
-        let request = AgentRequest {
-            prompt: prompt::review_prompt(&self.repo, number, &sub_issues, pr, round),
+        let open_threads = || self.github.open_review_threads(&self.repo, pr).ok();
+        // The verdict the pull request stands on, once a review has run.
+        let mut review = None;
+        let mut round = 1;
+        loop {
+            match self.await_checks(pr, cancel) {
+                Ok(()) => {}
+                Err(Stop::Cancelled) => return self.interrupt(),
+                Err(Stop::Failed(reason)) => {
+                    return self.end(Outcome::Failed, Some(reason), Some(pr), review, None);
+                }
+            }
+            let request = AgentRequest {
+                prompt: prompt::review_prompt(&self.repo, number, &sub_issues, pr, round),
+                issue: number,
+                branch: base.clone(),
+                cwd: self.clone.clone(),
+                jsonl_path: self.dir.join(format!("{number}-review-{round}.jsonl")),
+                err_path: self.dir.join(format!("{number}-review-{round}.err")),
+                model: role.model.clone(),
+            };
+            self.session(
+                self.reviewer,
+                role,
+                SessionRole::Review,
+                round,
+                &request,
+                cancel,
+            );
+            if cancel.load(Ordering::SeqCst) {
+                return self.interrupt();
+            }
+            // The verdict is GitHub's, whatever the agent said or however it
+            // stopped: a review that can't be read is no verdict.
+            let verdict = self
+                .github
+                .reviews(&self.repo, pr)
+                .ok()
+                .and_then(|reviews| review::verdict(&reviews, round));
+            review = Some(match verdict {
+                Some(Verdict::Approve) => ReviewVerdict::Approve,
+                Some(Verdict::Changes) => ReviewVerdict::Changes,
+                None => ReviewVerdict::NoVerdict,
+            });
+            if review != Some(ReviewVerdict::Changes) {
+                return self.end(Outcome::Succeeded, None, Some(pr), review, open_threads());
+            }
+            if round == REVIEW_ROUNDS {
+                let reason = format!(
+                    "the review still asks for changes after {REVIEW_ROUNDS} rounds; see #{pr}"
+                );
+                return self.end(
+                    Outcome::Failed,
+                    Some(reason),
+                    Some(pr),
+                    review,
+                    open_threads(),
+                );
+            }
+            round += 1;
+            if let Err(stop) = self.address(pr, round, base, cancel) {
+                return match stop {
+                    Stop::Cancelled => self.interrupt(),
+                    Stop::Failed(reason) => self.end(
+                        Outcome::Failed,
+                        Some(reason),
+                        Some(pr),
+                        review,
+                        open_threads(),
+                    ),
+                };
+            }
+        }
+    }
+
+    /// Runs the coding agent on the run's pull request `pr` into `base` as
+    /// session `round`, to address the review on the pull request's branch.
+    fn address(&self, pr: u64, round: u32, base: &str, cancel: &AtomicBool) -> Result<(), Stop> {
+        let number = self.number;
+        let head = self
+            .github
+            .pull_request(&self.repo, pr)
+            .map_err(|error| Stop::Failed(format!("couldn't read #{pr}: {error}")))?
+            .head;
+        let work = Work::Address {
             issue: number,
-            branch: base.clone(),
-            cwd: self.clone.clone(),
-            jsonl_path: self.dir.join(format!("{number}-review-{round}.jsonl")),
-            err_path: self.dir.join(format!("{number}-review-{round}.err")),
-            model: role.model.clone(),
+            epic: self.kind == Kind::Epic,
+            pull_request: pr,
+            head: &head,
         };
-        self.session(
-            self.reviewer,
-            role,
-            SessionRole::Review,
+        let request = AgentRequest {
+            prompt: prompt::prompt(&self.repo, work, base),
+            issue: number,
+            branch: base.to_owned(),
+            cwd: self.clone.clone(),
+            jsonl_path: self.dir.join(format!("{number}-coding-{round}.jsonl")),
+            err_path: self.dir.join(format!("{number}-coding-{round}.err")),
+            model: self.roles.coding.model.clone(),
+        };
+        let coding = &self.roles.coding;
+        let outcome = self.session(
+            self.agent,
+            coding,
+            SessionRole::Coding,
             round,
             &request,
             cancel,
         );
         if cancel.load(Ordering::SeqCst) {
-            return self.interrupt();
+            return Err(Stop::Cancelled);
         }
-        // The verdict is GitHub's, whatever the agent said or however it
-        // stopped: a review that can't be read is no verdict.
-        let verdict = self
-            .github
-            .reviews(&self.repo, pr)
-            .ok()
-            .and_then(|reviews| review::verdict(&reviews, round));
-        let review = match verdict {
-            Some(Verdict::Approve) => ReviewVerdict::Approve,
-            Some(Verdict::Changes) => ReviewVerdict::Changes,
-            None => ReviewVerdict::NoVerdict,
-        };
-        let open_threads = self.github.open_review_threads(&self.repo, pr).ok();
-        self.end(
-            Outcome::Succeeded,
-            None,
-            Some(pr),
-            Some(review),
-            open_threads,
-        );
+        if !outcome.exited_cleanly {
+            return Err(Stop::Failed(format!(
+                "the agent addressing the review stopped ({}): {}",
+                outcome.stop_reason,
+                outcome.error.as_deref().unwrap_or("no error given")
+            )));
+        }
+        Ok(())
     }
 
     /// Runs `agent` on `request` as session `round` of `role`, with the
@@ -855,10 +937,14 @@ mod tests {
     }
 
     /// An [`Agent`] that acts on a [`FakeGitHub`] as an agent following the
-    /// issue procedure would.
+    /// issue procedure would. Addressing a review, it pushes to the pull
+    /// request it was given, which the fake doesn't see, and opens none.
     struct FakeAgent<'a> {
         github: &'a FakeGitHub,
         acts: BTreeMap<u64, Act>,
+        /// Whether addressing a review fails, as an agent that couldn't
+        /// start does.
+        address_crashes: bool,
         requests: Mutex<Vec<AgentRequest>>,
         running: AtomicUsize,
         most_running: AtomicUsize,
@@ -869,6 +955,7 @@ mod tests {
             Self {
                 github,
                 acts: BTreeMap::from(acts),
+                address_crashes: false,
                 requests: Mutex::new(Vec::new()),
                 running: AtomicUsize::new(0),
                 most_running: AtomicUsize::new(0),
@@ -886,6 +973,9 @@ mod tests {
 
         fn act(&self, request: &AgentRequest, cancel: &AtomicBool) -> Option<String> {
             let (number, branch) = (request.issue, request.branch.as_str());
+            if addresses(request) {
+                return self.address_crashes.then(|| "agent_failed".into());
+            }
             match self
                 .acts
                 .get(&number)
@@ -920,6 +1010,13 @@ mod tests {
         }
     }
 
+    /// Whether `request` addresses a review: a coding session after the
+    /// first, whose log is `<n>-coding-<round>.jsonl`.
+    fn addresses(request: &AgentRequest) -> bool {
+        let log = request.jsonl_path.file_name().unwrap().to_string_lossy();
+        log.contains("-coding-")
+    }
+
     impl Agent for FakeAgent<'_> {
         fn run(&self, request: &AgentRequest, cancel: &AtomicBool) -> AgentOutcome {
             self.requests.lock().unwrap().push(request.clone());
@@ -944,13 +1041,14 @@ mod tests {
     }
 
     /// An [`Agent`] that reviews a run's pull request into `main` as an
-    /// agent following the review procedure would: it posts one review
-    /// ending with `marker`, or with no marker, and leaves `open_threads`
-    /// unresolved.
+    /// agent following the review procedure would: each round it posts one
+    /// review ending with that round's marker, or with no marker, and
+    /// leaves `open_threads` unresolved.
     struct FakeReviewer<'a> {
         github: &'a FakeGitHub,
         root: PathBuf,
-        marker: Option<&'static str>,
+        /// Each round's marker. Rounds past the last repeat it.
+        markers: Vec<Option<&'static str>>,
         open_threads: usize,
         requests: Mutex<Vec<AgentRequest>>,
         /// The pull request's checks and the run's disposition, as each
@@ -963,17 +1061,27 @@ mod tests {
             Self {
                 github,
                 root: root.to_owned(),
-                marker,
+                markers: vec![marker],
                 open_threads: 0,
                 requests: Mutex::new(Vec::new()),
                 seen: Mutex::new(Vec::new()),
             }
         }
+
+        /// Marks the next round's review with `marker`.
+        fn then(mut self, marker: Option<&'static str>) -> Self {
+            self.markers.push(marker);
+            self
+        }
     }
 
     impl Agent for FakeReviewer<'_> {
         fn run(&self, request: &AgentRequest, _cancel: &AtomicBool) -> AgentOutcome {
-            self.requests.lock().unwrap().push(request.clone());
+            let round = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request.clone());
+                requests.len()
+            };
             let pulls = self.github.repo(REPO).pulls;
             let (&pr, _) = pulls
                 .iter()
@@ -982,8 +1090,11 @@ mod tests {
             let run = run::read(&self.root, &RunKey::new(REPO, request.issue)).unwrap();
             let checks = self.github.checks(REPO, pr).unwrap();
             self.seen.lock().unwrap().push((checks, run.disposition));
-            let body = match self.marker {
-                Some(verdict) => format!("Read it.\n\n<!-- epik-review: {verdict} round=1 -->"),
+            let marker = self.markers[round.min(self.markers.len()) - 1];
+            let body = match marker {
+                Some(verdict) => {
+                    format!("Read it.\n\n<!-- epik-review: {verdict} round={round} -->")
+                }
                 None => "Read it.".to_owned(),
             };
             self.github.add_review(REPO, pr, &body, Utc::now());
@@ -1813,7 +1924,58 @@ mod tests {
     }
 
     #[test]
-    fn changes_finish_the_build_with_the_pull_request_open() {
+    fn changes_are_addressed_on_the_pull_requests_branch_and_reviewed_again() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(
+            all_events(root.path(), &state)[5..],
+            [
+                "session_started 7 Review 1 claude Some(\"sonnet\") 7-review-1.jsonl".to_owned(),
+                "session_finished 7 Review 1 2000 0.5".to_owned(),
+                "session_started 7 Coding 2 claude None 7-coding-2.jsonl".to_owned(),
+                "session_finished 7 Coding 2 1000 0.25".to_owned(),
+                "session_started 7 Review 2 claude Some(\"sonnet\") 7-review-2.jsonl".to_owned(),
+                "session_finished 7 Review 2 2000 0.5".to_owned(),
+                format!("build_finished Succeeded #{pr} Approve 0 open"),
+            ]
+        );
+        let requests = agent.requests.lock().unwrap();
+        let [_, request] = &requests[..] else {
+            panic!("the issue's agent, then one addressing the review");
+        };
+        let dir = record::build_dir(root.path(), &state.run(), &state.build_id);
+        let work = Work::Address {
+            issue: 7,
+            epic: false,
+            pull_request: pr,
+            head: "issue-7",
+        };
+        assert_eq!(request.prompt, prompt::prompt(REPO, work, "main"));
+        assert_eq!(request.issue, 7);
+        assert_eq!(request.branch, "main");
+        assert_eq!(request.model, None);
+        assert_eq!(request.jsonl_path, dir.join("7-coding-2.jsonl"));
+        assert_eq!(request.err_path, dir.join("7-coding-2.err"));
+        let reviews = reviewer.requests.lock().unwrap();
+        assert_eq!(
+            reviews[1].prompt,
+            prompt::review_prompt(REPO, 7, &[], pr, 2)
+        );
+        assert_eq!(github.repo(REPO).pulls.len(), 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.disposition, run::Disposition::WaitingForReview);
+    }
+
+    #[test]
+    fn changes_after_the_last_round_leave_the_pull_request_for_the_user_needing_attention() {
         let github = single();
         let agent = FakeAgent::new(&github, []);
         let root = tempfile::tempdir().unwrap();
@@ -1822,15 +1984,77 @@ mod tests {
         let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
 
         let pr = pr_of(&github, 7);
-        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), 2);
+        assert_eq!(agent.requests.lock().unwrap().len(), 2);
+        let reason = format!("the review still asks for changes after 2 rounds; see #{pr}");
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(state.reason, Some(reason.clone()));
         assert_eq!(state.pull_request, Some(pr));
         assert_eq!(state.review, Some(ReviewVerdict::Changes));
         assert_eq!(state.open_threads, Some(2));
         assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
         let run = run::read(root.path(), &state.run()).unwrap();
-        assert_eq!(run.disposition, run::Disposition::WaitingForReview);
+        assert_eq!(run.disposition, run::Disposition::NeedsAttention);
+        assert_eq!(run.reason, Some(reason));
+        assert_eq!(run.pull_request, Some(pr));
         assert_eq!(run.review, Some(ReviewVerdict::Changes));
         assert_eq!(run.open_threads, Some(2));
+    }
+
+    #[test]
+    fn an_epics_review_is_addressed_on_the_epic_branch() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 1, reviewing());
+
+        let epic_pr = state.pull_request.expect("the epic's pull request");
+        let requests = agent.requests.lock().unwrap();
+        let request = requests.last().unwrap();
+        let work = Work::Address {
+            issue: 1,
+            epic: true,
+            pull_request: epic_pr,
+            head: EPIC_BRANCH,
+        };
+        assert_eq!(request.prompt, prompt::prompt(REPO, work, "main"));
+        assert_eq!(request.branch, "main");
+        let sessions: Vec<_> = state
+            .sessions
+            .iter()
+            .map(|s| (s.role, s.round, s.log.as_str()))
+            .collect();
+        assert_eq!(
+            sessions,
+            [
+                (SessionRole::Review, 1, "1-review-1.jsonl"),
+                (SessionRole::Coding, 2, "1-coding-2.jsonl"),
+                (SessionRole::Review, 2, "1-review-2.jsonl"),
+            ]
+        );
+        assert_eq!(state.review, Some(ReviewVerdict::Approve));
+    }
+
+    #[test]
+    fn an_agent_that_fails_to_address_the_review_fails_the_build() {
+        let github = single();
+        let mut agent = FakeAgent::new(&github, []);
+        agent.address_crashes = true;
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("changes"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let pr = pr_of(&github, 7);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), 1);
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(
+            state.reason.as_deref(),
+            Some("the agent addressing the review stopped (agent_failed): it broke")
+        );
+        assert_eq!(state.pull_request, Some(pr));
+        assert_eq!(state.review, Some(ReviewVerdict::Changes));
     }
 
     #[test]
@@ -1961,5 +2185,19 @@ mod tests {
         assert_eq!(issue.sessions.len(), 2);
         assert_eq!(issue.duration_ms, Some(3_000));
         assert_eq!(state.cost_usd, Decimal::from_str("0.75").unwrap());
+
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let issue = state.issue(7).unwrap();
+        assert_eq!(issue.sessions.len(), 4);
+        assert_eq!(issue.duration_ms, Some(6_000));
+        assert_eq!(state.cost_usd, Decimal::from_str("1.5").unwrap());
+        let run = run::read(root.path(), &state.run()).unwrap();
+        assert_eq!(run.cost_usd, Decimal::from_str("1.5").unwrap());
     }
 }
