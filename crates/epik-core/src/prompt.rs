@@ -19,22 +19,67 @@ const ADDRESSING_A_REVIEW: &str = "# Addressing a review";
 
 /// What an agent is asked to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Work {
+pub enum Work<'a> {
     /// Implement issue #n.
     Issue(u64),
+    /// Address the review of `pull_request`, open on branch `head`, which
+    /// implements `issue`, an epic when `epic` is set. An epic's `head` is
+    /// its epic branch.
+    Address {
+        issue: u64,
+        epic: bool,
+        pull_request: u64,
+        head: &'a str,
+    },
 }
 
 /// The prompt for `work` in `repo`, whose pull request goes into `branch`.
 pub fn prompt(repo: &str, work: Work, branch: &str) -> String {
-    let (task, procedure) = match work {
+    let (task, instead, procedure) = match work {
         Work::Issue(number) => (
             format!("Implement issue #{number} of the GitHub repository {repo}."),
-            ISSUE_PROCEDURE,
+            String::new(),
+            ISSUE_PROCEDURE.to_owned(),
         ),
+        Work::Address {
+            issue,
+            epic,
+            pull_request,
+            head,
+        } => {
+            let (implements, on) = if epic {
+                (
+                    format!("epic #{issue}"),
+                    format!(
+                        "the epic branch, `{head}`. Push to it directly, as Epik's own \
+                         merges into it are"
+                    ),
+                )
+            } else {
+                (format!("issue #{issue}"), format!("branch `{head}`"))
+            };
+            let (_, addressing) = review_procedure();
+            (
+                format!(
+                    "Address the review of pull request #{pull_request} of the GitHub \
+                     repository {repo}, which implements {implements}."
+                ),
+                format!(
+                    "Pull request #{pull_request} is already open, on {on}. This \
+                     replaces the procedure's first steps: make the worktree from \
+                     `{head}`, not a new branch; there, address each open review thread \
+                     as \"Addressing a review\" says; push to `{head}`; and open no new \
+                     pull request. Then wait for its checks as the procedure says.\n\
+                     \n"
+                ),
+                format!("{ISSUE_PROCEDURE}\n{addressing}"),
+            )
+        }
     };
     format!(
         "{task} The target branch is `{branch}`.\n\
          \n\
+         {instead}\
          You work unattended: no one will answer questions. Decide for \
          yourself, and keep going.\n\
          \n\
@@ -144,10 +189,58 @@ mod tests {
     }
 
     #[test]
+    fn an_address_prompt_names_the_pull_request_and_its_branch_then_the_procedures() {
+        let work = Work::Address {
+            issue: 7,
+            epic: false,
+            pull_request: 12,
+            head: "issue-7-thing",
+        };
+        let prompt = prompt("owner/repo", work, "main");
+
+        let (header, rest) = prompt.split_once("# Epik's rules").unwrap();
+        assert!(header.contains("review of pull request #12"), "{header}");
+        assert!(header.contains("issue #7"), "{header}");
+        assert!(header.contains("owner/repo"), "{header}");
+        assert!(header.contains("`main`"), "{header}");
+        assert!(header.contains("`issue-7-thing`"), "{header}");
+        assert!(header.contains("open no new pull request"), "{header}");
+        assert!(header.contains("no one will answer questions"), "{header}");
+        assert!(!header.contains("epic"), "{header}");
+        let (rules, procedure) = rest.split_once("# The procedure").unwrap();
+        assert!(rules.contains(RULES), "{rules}");
+        let (_, addressing) = review_procedure();
+        assert!(procedure.contains(ISSUE_PROCEDURE), "{procedure}");
+        assert!(procedure.ends_with(addressing), "{procedure}");
+        assert!(!procedure.contains("# Reviewing"), "{procedure}");
+    }
+
+    #[test]
+    fn an_epics_address_prompt_names_the_epic_branch() {
+        let work = Work::Address {
+            issue: 1,
+            epic: true,
+            pull_request: 9,
+            head: "epic/1-thing",
+        };
+        let prompt = prompt("owner/repo", work, "main");
+
+        let (header, _) = prompt.split_once("# Epik's rules").unwrap();
+        assert!(header.contains("epic #1"), "{header}");
+        assert!(
+            header.contains("the epic branch, `epic/1-thing`"),
+            "{header}"
+        );
+        assert!(header.contains("Push to it directly"), "{header}");
+    }
+
+    #[test]
     fn the_review_procedure_has_a_part_for_the_reviewer_and_one_for_the_fixer() {
         let (reviewing, addressing) = review_procedure();
         assert!(reviewing.contains("<!-- epik-review: changes round=<r> -->"));
         assert!(addressing.starts_with("# Addressing a review"));
         assert!(addressing.contains("resolveReviewThread"));
+        // The fixer is given only its part, so it lists the threads itself.
+        assert!(addressing.contains("reviewThreads"));
     }
 }

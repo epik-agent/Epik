@@ -308,6 +308,22 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.15); }
 #add label { display: block; margin-bottom: 4px; color: var(--secondary); }
 #add .row { display: flex; gap: 8px; }
 #add input { flex: 1; font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
+#hosts { list-style: none; margin: 12px 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; }
+.host { display: grid; grid-template-columns: 16px 1fr auto; gap: 12px; align-items: start; padding: 10px 14px; }
+.host + .host { border-top: 1px solid var(--border); }
+.host > .status-dot, .host > .status-none { margin-top: 5px; }
+.host-name { font-family: var(--mono); }
+.host .why { color: var(--error); font: 12px var(--mono); }
+.host-buttons { display: flex; gap: 6px; align-items: center; }
+.host .default { color: var(--secondary); font-size: 12px; }
+.status-none { width: 8px; height: 8px; border-radius: 50%; border: 1px solid var(--strong); box-sizing: border-box; }
+.status-warn { width: 16px; height: 16px; border-radius: 50%; background: #f59e0b; color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
+.fixes { margin: 6px 0 0; padding-left: 18px; }
+.fixes pre { margin: 4px 0 6px; padding: 6px 8px; border-radius: 6px; background: var(--error-muted); white-space: pre-wrap; }
+.fixes code { display: block; font: 12px var(--mono); user-select: all; }
+#add-host label { display: block; margin-bottom: 4px; color: var(--secondary); }
+#add-host .row { display: flex; gap: 8px; }
+#add-host input { flex: 1; font: 13px var(--mono); padding: 7px 10px; border: 1px solid var(--strong); border-radius: 6px; }
 #confirm, #uninstall { padding: 20px 22px; width: min(460px, 92vw); }
 #confirm h2, #uninstall h2 { margin: 0 0 8px; font-size: 16px; }
 #confirm .buttons, #uninstall .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }

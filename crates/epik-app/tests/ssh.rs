@@ -213,6 +213,7 @@ fn a_host_whose_app_is_another_minor_version_is_refused() {
         error.to_string(),
         format!("devbox runs Epik 0.2.9; install {minor}.x there")
     );
+    assert_eq!(epik_core::remote::mismatched(&error), Some("0.2.9"));
 }
 
 #[test]

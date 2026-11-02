@@ -188,6 +188,20 @@ fn settings() {
             runs: vec![("o/r#13".to_owned(), "Exponentiation".to_owned())],
             missing: false,
         }],
+        hosts: vec![HostRow {
+            destination: Some("devbox".to_owned()),
+            name: "devbox".to_owned(),
+            status: HostStatus::Incomplete,
+            about: "Epik 0.4.0 · setup incomplete · No runs".to_owned(),
+            why: None,
+            missing: vec![SetupFix {
+                title: "Claude sign-in".to_owned(),
+                detail: "not signed in".to_owned(),
+                commands: vec!["claude auth login".to_owned()],
+            }],
+            default: true,
+            runs: vec![],
+        }],
     });
 }
 

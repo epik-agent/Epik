@@ -2,15 +2,15 @@
 //! (`#/run/<owner/name%23n>`, or `#/run/<host>:<owner/name%23n>` for a
 //! run on a remote host), or Settings (`#/settings`). It asks the app
 //! what to show every second and draws it. Its only controls are Rerun and
-//! Delete on a run that needs attention, and Settings, which can also
-//! uninstall Epik.
+//! Delete on a run that needs attention, and Settings, which also adds,
+//! checks and removes hosts, and can uninstall Epik.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use epik_view::{
-    Disposition, Home, NodeState, RepositoryRow, RunPage, Settings, Sidebar as SidebarView,
-    SidebarRun, Stream, Uninstall, UninstallStep,
+    Disposition, Home, HostRow, NodeState, RepositoryRow, RunPage, Settings,
+    Sidebar as SidebarView, SidebarRun, Stream, Uninstall, UninstallStep,
 };
 use leptos::ev::MouseEvent;
 use leptos::html::{Button, Dialog};
@@ -22,7 +22,9 @@ use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::{kept, keyed, part};
 use crate::run_page::RunView;
-use crate::settings::{ConfirmBody, SettingsPage, UninstallBody, Uninstalling};
+use crate::settings::{
+    ConfirmBody, ConfirmHostBody, HostActions, SettingsPage, UninstallBody, Uninstalling,
+};
 use crate::tauri;
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -271,6 +273,20 @@ struct Repo {
 }
 
 #[derive(Serialize)]
+struct Destination {
+    destination: Option<String>,
+}
+
+/// What the confirmation dialog on the Settings page asks about.
+#[derive(Debug, Clone)]
+enum Confirming {
+    /// No longer monitoring a repository.
+    Repository(RepositoryRow),
+    /// Removing a host.
+    Host(HostRow),
+}
+
+#[derive(Serialize)]
 struct Log {
     path: String,
 }
@@ -431,11 +447,33 @@ pub fn MainWindow() -> impl IntoView {
     });
 
     // The dialog on the Settings page that confirms no longer monitoring a
-    // repository.
+    // repository, or removing a host.
     let monitor_error = RwSignal::new(String::new());
+    let host_error = RwSignal::new(String::new());
     let confirm_dialog = NodeRef::<Dialog>::new();
     let cancel = NodeRef::<Button>::new();
-    let confirming = RwSignal::new(None::<RepositoryRow>);
+    let confirming = RwSignal::new(None::<Confirming>);
+    let ask = move |question: Confirming| {
+        confirming.set(Some(question));
+        if let Some(dialog) = confirm_dialog.get_untracked() {
+            dialog.set_return_value("");
+            let _ = dialog.show_modal();
+        }
+        if let Some(cancel) = cancel.get_untracked() {
+            let _ = cancel.focus();
+        }
+    };
+    // Asks the app to `command` with `arguments`, showing why it couldn't.
+    let act = move |command: &'static str, arguments: Destination| {
+        spawn_local(async move {
+            if let Err(reason) = tauri::invoke::<_, ()>(command, &arguments).await {
+                error.set(reason);
+            }
+            refresh();
+        });
+    };
+    let remove_host =
+        move |destination: Option<String>| act("remove_host", Destination { destination });
     let stop_monitoring = move |repo: String| {
         spawn_local(async move {
             if let Err(reason) = tauri::invoke::<_, ()>("stop_monitoring", &Repo { repo }).await {
@@ -449,21 +487,37 @@ pub fn MainWindow() -> impl IntoView {
             stop_monitoring(repository.repo);
             return;
         }
-        confirming.set(Some(repository));
-        if let Some(dialog) = confirm_dialog.get_untracked() {
-            dialog.set_return_value("");
-            let _ = dialog.show_modal();
-        }
-        if let Some(cancel) = cancel.get_untracked() {
-            let _ = cancel.focus();
-        }
+        ask(Confirming::Repository(repository));
     });
+    let host_actions = HostActions {
+        // A host with runs asks first, as a repository does.
+        remove: Callback::new(move |host: HostRow| {
+            if host.runs.is_empty() {
+                remove_host(host.destination);
+            } else {
+                ask(Confirming::Host(host));
+            }
+        }),
+        make_default: Callback::new(move |destination| {
+            act("set_default_host", Destination { destination });
+        }),
+        check: Callback::new(move |destination| {
+            act(
+                "check_host",
+                Destination {
+                    destination: Some(destination),
+                },
+            );
+        }),
+    };
     let confirmed = move |_| {
         let ok = confirm_dialog
             .get_untracked()
             .is_some_and(|dialog| dialog.return_value() == "ok");
-        if let (true, Some(repository)) = (ok, confirming.get_untracked()) {
-            stop_monitoring(repository.repo);
+        match (ok, confirming.get_untracked()) {
+            (true, Some(Confirming::Repository(repository))) => stop_monitoring(repository.repo),
+            (true, Some(Confirming::Host(host))) => remove_host(host.destination),
+            _ => {}
         }
     };
     let on_monitored = Callback::new(move |()| refresh());
@@ -586,8 +640,11 @@ pub fn MainWindow() -> impl IntoView {
                     <SettingsPage
                         settings
                         error=monitor_error
+                        host_error
                         on_stop=Some(on_stop)
                         on_monitored=Some(on_monitored)
+                        host_actions=Some(host_actions)
+                        on_host_added=Some(on_monitored)
                         on_open_uninstall=Some(on_open_uninstall)
                     />
                 })}
@@ -600,10 +657,18 @@ pub fn MainWindow() -> impl IntoView {
         <nav id="sidebar"><Sidebar sidebar page/></nav>
         <main id="page">{body}</main>
         <dialog id="confirm" node_ref=confirm_dialog on:close=confirmed>
-            {move || confirming.get().map(|repository| view! { <ConfirmBody repository/> })}
+            {move || confirming.get().map(|question| match question {
+                Confirming::Repository(repository) => view! { <ConfirmBody repository/> }.into_any(),
+                Confirming::Host(host) => view! { <ConfirmHostBody host/> }.into_any(),
+            })}
             <form method="dialog" class="buttons">
                 <button value="cancel" id="confirm-cancel" autofocus node_ref=cancel>"Cancel"</button>
-                <button value="ok" class="danger">"Stop monitoring"</button>
+                <button value="ok" class="danger">
+                    {move || match confirming.get() {
+                        Some(Confirming::Host(_)) => "Remove",
+                        _ => "Stop monitoring",
+                    }}
+                </button>
             </form>
         </dialog>
         <dialog id="uninstall" node_ref=uninstall_dialog on:cancel=escape>

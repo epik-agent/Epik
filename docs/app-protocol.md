@@ -190,9 +190,10 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
 - `disposition`: `building` while a build runs; `reviewing` while a running build reviews the run's pull request;
   `waiting_for_review` when every issue merged and the pull request into the default branch waits for the user;
   `needs_attention` when the latest build failed or was interrupted, or its pull request was closed without merging.
-  `reason` says why a run needs attention.
+  A build fails, with its pull request left for the user, when the review still asks for changes after its second
+  round. `reason` says why a run needs attention.
 - `pull_request`: the latest build's pull request into the default branch: the epic's, or a single issue's.
-- `review` and `open_threads`, when review was on and the latest build reviewed its pull request: what the review
+- `review` and `open_threads`, when review was on and the latest build reviewed its pull request: what its last review
   concluded, `approve`, `changes`, or `none` when the reviewer left no verdict; and how many of the pull request's
   review threads were unresolved when the build finished. Absent otherwise.
 - `issues`: every issue of the run, including ones merged in earlier builds. Each one's `status` is `waiting`,
@@ -205,7 +206,8 @@ The reply is the run's state, folded from its builds, with `"type": "run"`:
   it ran (`model` is `null` for the agent's default); its `log`, a file name in its build's directory, `build_id`;
   when it started; and its `duration_ms` and `cost_usd`. `duration_ms` is `null` while it runs, and `cost_usd` when
   its agent reported no cost, as Codex never does: an unreported cost is never zero.
-- `sessions`: the run's own sessions, such as reviews of its pull request, over every build. A single issue's run
+- `sessions`: the run's own sessions, such as reviews of its pull request and the coding sessions that address them,
+  over every build. A single issue's run
   has these in its issue's `sessions`.
 - `builds`: oldest first. `running_build` is the one running, if any.
 - `elapsed_ms` and `cost_usd` are summed over the builds so far; a running build's time counts to its latest event.

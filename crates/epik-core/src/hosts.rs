@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::setup::Check;
+
 /// The file the list is kept in.
 pub const FILE: &str = "hosts.json";
 
@@ -29,9 +31,13 @@ pub struct Host {
     /// What was last heard from it, if anything has been.
     #[serde(default)]
     pub state: Option<State>,
-    /// When it last answered, if it ever has.
+    /// When it last answered as an app of this one's minor version, if it
+    /// ever has: when its mirror was last current.
     #[serde(default)]
     pub heard_at: Option<DateTime<Utc>>,
+    /// Its setup items, as it last said, if it has been checked.
+    #[serde(default)]
+    pub setup: Option<Vec<Check>>,
 }
 
 /// What was last heard from a host.
@@ -42,6 +48,9 @@ pub enum State {
     Reachable { version: String, at: DateTime<Utc> },
     /// It couldn't be reached, for `error`.
     Unreachable { error: String, at: DateTime<Utc> },
+    /// It answered, but its app is `version`, another minor version than
+    /// this one's, so it is refused.
+    Mismatch { version: String, at: DateTime<Utc> },
 }
 
 /// What `hosts.json` holds.
@@ -179,6 +188,7 @@ pub fn add(root: &Path, destination: &str, now: DateTime<Utc>) -> io::Result<boo
             added_at: now,
             state: None,
             heard_at: None,
+            setup: None,
         });
         Ok((true, true))
     })
@@ -222,6 +232,20 @@ pub fn set_state(root: &Path, destination: &str, state: State) -> io::Result<()>
     })
 }
 
+/// Records `destination`'s setup items, as it said them.
+pub fn set_setup(root: &Path, destination: &str, items: Vec<Check>) -> io::Result<()> {
+    change(root, |hosts| {
+        let host = hosts
+            .hosts
+            .iter_mut()
+            .find(|h| h.destination == destination)
+            .ok_or_else(|| not_a_host(destination))?;
+        let changed = host.setup.as_ref() != Some(&items);
+        host.setup = Some(items);
+        Ok((changed, ()))
+    })
+}
+
 /// Makes `destination` the host builds go to, or this computer for none.
 pub fn set_default(root: &Path, destination: Option<&str>) -> io::Result<()> {
     change(root, |hosts| {
@@ -239,6 +263,7 @@ pub fn set_default(root: &Path, destination: Option<&str>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::{self, Item};
     use chrono::TimeZone;
 
     fn time(day: u32) -> DateTime<Utc> {
@@ -277,12 +302,14 @@ mod tests {
                     added_at: time(1),
                     state: None,
                     heard_at: None,
+                    setup: None,
                 },
                 Host {
                     destination: "me@build.example.com".to_owned(),
                     added_at: time(2),
                     state: None,
                     heard_at: None,
+                    setup: None,
                 },
             ]
         );
@@ -407,6 +434,52 @@ mod tests {
         set_state(root.path(), "devbox", unreachable).unwrap();
 
         assert_eq!(list(root.path()).unwrap()[0].heard_at, Some(time(2)));
+    }
+
+    #[test]
+    fn a_host_of_another_version_was_last_heard_from_when_it_was_the_same() {
+        let root = tempfile::tempdir().unwrap();
+        add(root.path(), "devbox", time(1)).unwrap();
+        let reachable = State::Reachable {
+            version: "0.4.0".to_owned(),
+            at: time(2),
+        };
+        let mismatch = State::Mismatch {
+            version: "0.3.2".to_owned(),
+            at: time(3),
+        };
+
+        set_state(root.path(), "devbox", reachable).unwrap();
+        set_state(root.path(), "devbox", mismatch.clone()).unwrap();
+
+        let host = &list(root.path()).unwrap()[0];
+        assert_eq!(host.state, Some(mismatch));
+        assert_eq!(host.heard_at, Some(time(2)));
+    }
+
+    #[test]
+    fn a_hosts_setup_is_kept_until_checked_again() {
+        let root = tempfile::tempdir().unwrap();
+        add(root.path(), "devbox", time(1)).unwrap();
+        assert_eq!(list(root.path()).unwrap()[0].setup, None);
+        let items = vec![Check {
+            item: Item::GhAuth,
+            title: "GitHub sign-in".to_owned(),
+            state: setup::State::Missing,
+            detail: "not signed in".to_owned(),
+            usable: false,
+        }];
+
+        set_setup(root.path(), "devbox", items.clone()).unwrap();
+        let reachable = State::Reachable {
+            version: "0.4.0".to_owned(),
+            at: time(2),
+        };
+        set_state(root.path(), "devbox", reachable).unwrap();
+
+        assert_eq!(list(root.path()).unwrap()[0].setup, Some(items));
+        let error = set_setup(root.path(), "other", vec![]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use crate::hosts::{self, State};
 use crate::ipc::{Request, Response};
 use crate::mirror;
-use crate::remote::{Client, Ssh};
+use crate::remote::{self, Client, Ssh};
 use crate::run::{self, Disposition};
 
 /// How often a host is synced while any of its mirrored runs is building.
@@ -91,6 +91,11 @@ impl Mirrors {
             .entry(host.to_owned())
             .or_insert_with(|| (self.connect)(host))
             .clone()
+    }
+
+    /// Checks `host` at once through its client, as [`check`] does.
+    pub fn check(&self, host: &str) -> io::Result<()> {
+        check(&self.root, host, &self.client(host), Utc::now())
     }
 
     /// Starts a thread for each listed host that has none, which syncs it at
@@ -186,18 +191,50 @@ pub fn sync(root: &Path, host: &str, client: &impl Client, now: DateTime<Utc>) -
         mirror::sync(client, &hosts::dir(root, host))?;
         Ok(version)
     });
-    let state = match &synced {
+    heard(root, host, synced, now).map(drop)
+}
+
+/// Checks `host` through `client`, without syncing its mirror: records
+/// what was heard from it at `now`, as [`sync`] does, and its setup items.
+/// A host that can't be reached keeps the setup it last said.
+pub fn check(root: &Path, host: &str, client: &impl Client, now: DateTime<Utc>) -> io::Result<()> {
+    heard(root, host, ping(client), now)?;
+    match client.request(&Request::Setup)? {
+        Response::Setup { items } => hosts::set_setup(root, host, items),
+        Response::Error { message } => Err(io::Error::other(message)),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the host answered setup with {other:?}"),
+        )),
+    }
+}
+
+/// Records `answer`, the version `host` answered with or why it didn't, as
+/// heard at `now`, and returns it.
+fn heard(
+    root: &Path,
+    host: &str,
+    answer: io::Result<String>,
+    now: DateTime<Utc>,
+) -> io::Result<String> {
+    let state = match &answer {
         Ok(version) => State::Reachable {
             version: version.clone(),
             at: now,
         },
-        Err(error) => State::Unreachable {
-            error: error.to_string(),
-            at: now,
+        Err(error) => match remote::mismatched(error) {
+            Some(version) => State::Mismatch {
+                version: version.to_owned(),
+                at: now,
+            },
+            None => State::Unreachable {
+                error: error.to_string(),
+                at: now,
+            },
         },
     };
     hosts::set_state(root, host, state)?;
-    synced.map(|_| ())
+    answer
 }
 
 /// The version of the app `client` reaches.
@@ -235,7 +272,9 @@ mod tests {
     use super::*;
     use crate::ipc;
     use crate::record::{BuildWriter, Event, Kind, Outcome};
+    use crate::remote::Mismatch;
     use crate::run::RunKey;
+    use crate::setup::{self, Check, Item};
 
     fn time(seconds: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 1, 12, 0, 0).unwrap() + chrono::Duration::seconds(seconds)
@@ -283,6 +322,8 @@ mod tests {
     struct Host {
         root: TempDir,
         down: AtomicBool,
+        /// Whether its app is another minor version than this one's.
+        mismatched: AtomicBool,
         /// How many times it has been asked for its runs.
         syncs: AtomicUsize,
     }
@@ -292,6 +333,7 @@ mod tests {
             Arc::new(Self {
                 root: TempDir::new().unwrap(),
                 down: AtomicBool::new(false),
+                mismatched: AtomicBool::new(false),
                 syncs: AtomicUsize::new(0),
             })
         }
@@ -309,9 +351,19 @@ mod tests {
                     "couldn't reach devbox: Connection refused",
                 ));
             }
+            if self.mismatched.load(Ordering::SeqCst) {
+                return Err(Mismatch {
+                    destination: "devbox".to_owned(),
+                    version: "0.3.2".to_owned(),
+                }
+                .into());
+            }
             Ok(match request {
                 Request::Ping => Response::Pong {
                     version: "0.4.1".to_owned(),
+                },
+                Request::Setup => Response::Setup {
+                    items: vec![gh_signed_out()],
                 },
                 Request::Runs => {
                     self.syncs.fetch_add(1, Ordering::SeqCst);
@@ -319,6 +371,17 @@ mod tests {
                 }
                 other => ipc::records(self.root.path(), other.clone()),
             })
+        }
+    }
+
+    /// The GitHub sign-in, missing.
+    fn gh_signed_out() -> Check {
+        Check {
+            item: Item::GhAuth,
+            title: "GitHub sign-in".to_owned(),
+            state: setup::State::Missing,
+            detail: "not signed in".to_owned(),
+            usable: false,
         }
     }
 
@@ -407,6 +470,79 @@ mod tests {
         let mirror = hosts::dir(root.path(), "devbox");
         assert_eq!(run::keys(&mirror).unwrap(), [key(3)]);
         assert!(is_building(&mirror));
+    }
+
+    #[test]
+    fn a_sync_of_a_host_of_another_version_records_its_version() {
+        let root = local();
+        let host = Host::new();
+        host.mismatched.store(true, Ordering::SeqCst);
+
+        let error = sync(root.path(), "devbox", &host, time(5)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            state(root.path()),
+            Some(State::Mismatch {
+                version: "0.3.2".to_owned(),
+                at: time(5),
+            })
+        );
+    }
+
+    #[test]
+    fn a_check_records_the_hosts_version_and_setup_without_mirroring_it() {
+        let root = local();
+        let host = Host::new();
+        build(host.root.path(), 3, false);
+
+        check(root.path(), "devbox", &host, time(5)).unwrap();
+
+        let listed = &hosts::list(root.path()).unwrap()[0];
+        assert_eq!(
+            listed.state,
+            Some(State::Reachable {
+                version: "0.4.1".to_owned(),
+                at: time(5),
+            })
+        );
+        assert_eq!(listed.setup, Some(vec![gh_signed_out()]));
+        assert_eq!(host.syncs(), 0);
+    }
+
+    #[test]
+    fn a_check_of_an_unreachable_host_records_why_and_keeps_its_setup() {
+        let root = local();
+        let host = Host::new();
+        check(root.path(), "devbox", &host, time(5)).unwrap();
+
+        host.down.store(true, Ordering::SeqCst);
+        let error = check(root.path(), "devbox", &host, time(9)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        let listed = &hosts::list(root.path()).unwrap()[0];
+        assert_eq!(
+            listed.state,
+            Some(State::Unreachable {
+                error: "couldn't reach devbox: Connection refused".to_owned(),
+                at: time(9),
+            })
+        );
+        assert_eq!(listed.setup, Some(vec![gh_signed_out()]));
+    }
+
+    #[test]
+    fn mirrors_check_a_host_through_its_client() {
+        let root = local();
+        let host = Host::new();
+        let mirrors = mirrors(root.path(), &host, Duration::from_secs(3600));
+
+        mirrors.check("devbox").unwrap();
+
+        assert_eq!(
+            state(root.path()).map(|s| matches!(s, State::Reachable { .. })),
+            Some(true)
+        );
     }
 
     #[test]

@@ -137,14 +137,11 @@ impl Ssh {
             Ok(Response::Pong { version }) if same_minor(&version, crate::version()) => {
                 Ok(connection)
             }
-            Ok(Response::Pong { version }) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "{} runs Epik {version}; install {}.x there",
-                    self.destination,
-                    minor(crate::version()).unwrap_or(crate::version())
-                ),
-            )),
+            Ok(Response::Pong { version }) => Err(Mismatch {
+                destination: self.destination.clone(),
+                version,
+            }
+            .into()),
             // Most likely no app is running there, and `epik-app stdio`
             // says how to start one.
             Ok(Response::Error { message }) => {
@@ -187,6 +184,43 @@ impl Client for Ssh {
     fn request(&self, request: &Request) -> io::Result<Response> {
         Ssh::request(self, request)
     }
+}
+
+/// Why a host's app is refused: it is another minor version than this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    pub destination: String,
+    /// The version of the host's app.
+    pub version: String,
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} runs Epik {}; install {}.x there",
+            self.destination,
+            self.version,
+            minor(crate::version()).unwrap_or(crate::version())
+        )
+    }
+}
+
+impl std::error::Error for Mismatch {}
+
+impl From<Mismatch> for io::Error {
+    fn from(mismatch: Mismatch) -> Self {
+        io::Error::new(io::ErrorKind::Unsupported, mismatch)
+    }
+}
+
+/// The version of the host's app, when `error` is that it is another
+/// minor version than this one's.
+pub fn mismatched(error: &io::Error) -> Option<&str> {
+    error
+        .get_ref()?
+        .downcast_ref::<Mismatch>()
+        .map(|mismatch| mismatch.version.as_str())
 }
 
 /// Why an exchange got no reply.

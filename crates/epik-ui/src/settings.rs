@@ -1,9 +1,10 @@
 //! Settings, a page of the main window: the monitored repositories, a form
-//! to monitor another, and a button to uninstall Epik.
+//! to monitor another, the hosts builds can run on, a form to add another,
+//! and a button to uninstall Epik.
 
 use std::path::Path;
 
-use epik_view::{Removal, RepositoryRow, Settings, Uninstall, UninstallStep};
+use epik_view::{HostRow, HostStatus, Removal, RepositoryRow, Settings, Uninstall, UninstallStep};
 use leptos::ev::SubmitEvent;
 use leptos::html::Input;
 use leptos::prelude::*;
@@ -12,19 +13,45 @@ use serde::Serialize;
 use crate::tauri;
 use crate::words::GithubLink;
 
+/// Where the docs say how to set up a host.
+const HOST_DOCS: &str = "https://github.com/epik-agent/Epik#build-on-another-machine";
+
+/// What a host's buttons ask for.
+#[derive(Clone, Copy)]
+pub struct HostActions {
+    /// Remove this host.
+    pub remove: Callback<HostRow>,
+    /// Make this host, or this computer for none, the default for builds.
+    pub make_default: Callback<Option<String>>,
+    /// Check this host again.
+    pub check: Callback<String>,
+}
+
 /// The Settings page: the monitored repositories, each with its button,
-/// the form to monitor another, and the button that opens the confirmation
-/// to uninstall Epik. The list is redrawn only when `settings` changes, so
-/// the form keeps what is typed in it.
+/// the form to monitor another, the hosts, each with its buttons, the form
+/// to add another, and the button that opens the confirmation to uninstall
+/// Epik. The lists are redrawn only when `settings` changes, so the forms
+/// keep what is typed in them.
 #[component]
 pub fn SettingsPage(
     #[prop(into)] settings: Signal<Result<Settings, String>>,
     error: RwSignal<String>,
+    host_error: RwSignal<String>,
     #[prop(optional_no_strip)] on_stop: Option<Callback<RepositoryRow>>,
     #[prop(optional_no_strip)] on_monitored: Option<Callback<()>>,
+    #[prop(optional_no_strip)] host_actions: Option<HostActions>,
+    #[prop(optional_no_strip)] on_host_added: Option<Callback<()>>,
     #[prop(optional_no_strip)] on_open_uninstall: Option<Callback<()>>,
 ) -> impl IntoView {
     let settings = Memo::new(move |_| settings.get());
+    let hosts = Memo::new(move |_| {
+        settings.with(|settings| {
+            settings
+                .as_ref()
+                .map(|settings| settings.hosts.clone())
+                .unwrap_or_default()
+        })
+    });
     view! {
         <h1 class="page-title">"Settings"</h1>
         <div class="card settings">
@@ -37,6 +64,17 @@ pub fn SettingsPage(
                     {move || view! { <Repositories settings=settings.get() on_stop/> }}
                 </ul>
                 <MonitorForm error on_monitored/>
+            </section>
+            <section class="hosts">
+                <h3>"Hosts"</h3>
+                <p class="muted">
+                    "Builds run on one of these machines: this one, or another you reach with ssh that runs Epik. "
+                    <GithubLink text="How to set up a host".to_owned() url=HOST_DOCS.to_owned()/>
+                </p>
+                <ul id="hosts">
+                    {move || view! { <Hosts hosts=hosts.get() actions=host_actions/> }}
+                </ul>
+                <HostForm error=host_error on_added=on_host_added/>
             </section>
             <UninstallButton on_open=on_open_uninstall/>
         </div>
@@ -157,6 +195,187 @@ pub fn MonitorForm(
                 <button class="primary">"Add"</button>
             </div>
             <p id="add-error" class="error">{error}</p>
+        </form>
+    }
+}
+
+/// The hosts' rows: each with its mark, what was last heard from it, why
+/// it can't build and what it lacks, and its buttons. This computer can
+/// only be made the default; a remote host can also be checked again and
+/// removed.
+#[component]
+pub fn Hosts(
+    hosts: Vec<HostRow>,
+    #[prop(optional_no_strip)] actions: Option<HostActions>,
+) -> impl IntoView {
+    hosts
+        .into_iter()
+        .map(|host| {
+            let (class, mark) = match host.status {
+                HostStatus::Ready => (
+                    "host",
+                    view! { <span class="status-dot"></span> }.into_any(),
+                ),
+                HostStatus::Unchecked => (
+                    "host unchecked",
+                    view! { <span class="status-none"></span> }.into_any(),
+                ),
+                HostStatus::Incomplete => (
+                    "host incomplete",
+                    view! { <span class="status-warn">"!"</span> }.into_any(),
+                ),
+                HostStatus::Unreachable | HostStatus::Mismatch => (
+                    "host unreachable",
+                    view! { <span class="status-x">"✕"</span> }.into_any(),
+                ),
+            };
+            let why = host
+                .why
+                .clone()
+                .map(|why| view! { <div class="why">{why}</div> });
+            let fixes = (!host.missing.is_empty()).then(|| {
+                let name = host.name.clone();
+                let fixes = host
+                    .missing
+                    .iter()
+                    .map(|fix| {
+                        let commands = fix
+                            .commands
+                            .iter()
+                            .map(|command| view! { <code>{command.clone()}</code> })
+                            .collect_view();
+                        view! {
+                            <li>
+                                {format!("{}: {}. On {name}, run:", fix.title, fix.detail)}
+                                <pre>{commands}</pre>
+                            </li>
+                        }
+                    })
+                    .collect_view();
+                view! { <ul class="fixes">{fixes}</ul> }
+            });
+            let destination = host.destination.clone();
+            let make_default = {
+                let destination = destination.clone();
+                move |_| {
+                    if let Some(actions) = actions {
+                        actions.make_default.run(destination.clone());
+                    }
+                }
+            };
+            let default = if host.default {
+                view! { <span class="default">"Default for builds"</span> }.into_any()
+            } else {
+                view! { <button on:click=make_default>"Make default"</button> }.into_any()
+            };
+            let remote = destination.map(|destination| {
+                let check = move |_| {
+                    if let Some(actions) = actions {
+                        actions.check.run(destination.clone());
+                    }
+                };
+                let row = host.clone();
+                let remove = move |_| {
+                    if let Some(actions) = actions {
+                        actions.remove.run(row.clone());
+                    }
+                };
+                view! {
+                    <button on:click=check>"Check again"</button>
+                    <button on:click=remove>"Remove"</button>
+                }
+            });
+            view! {
+                <li class=class>
+                    {mark}
+                    <div class="host-text">
+                        <div class="host-name">{host.name.clone()}</div>
+                        <div class="muted">{host.about.clone()}</div>
+                        {why}
+                        {fixes}
+                    </div>
+                    <div class="host-buttons">{default}{remote}</div>
+                </li>
+            }
+        })
+        .collect_view()
+}
+
+/// What the dialog that confirms removing `host` asks, with the runs that
+/// would leave the window.
+#[component]
+pub fn ConfirmHostBody(host: HostRow) -> impl IntoView {
+    let text = match host.runs.len() {
+        0 => "Epik will stop checking it. It has no runs in the window.".to_owned(),
+        1 => format!(
+            "Epik will stop checking it, and this run will disappear from the window. The run stays on {}.",
+            host.name
+        ),
+        n => format!(
+            "Epik will stop checking it, and these {n} runs will disappear from the window. They stay on {}.",
+            host.name
+        ),
+    };
+    let runs = host
+        .runs
+        .into_iter()
+        .map(|(run, title)| view! { <li>{format!("{title} ({run})")}</li> })
+        .collect_view();
+    view! {
+        <h2 id="confirm-title">{format!("Remove {}?", host.name)}</h2>
+        <p id="confirm-text">{text}</p>
+        <ul id="confirm-runs">{runs}</ul>
+    }
+}
+
+#[derive(Serialize)]
+struct AddHost {
+    destination: String,
+}
+
+/// The form to add a host by its SSH destination, with why the app
+/// wouldn't under its input. Adding checks the host, which can take a
+/// while; once the app has answered, it calls `on_added`.
+#[component]
+pub fn HostForm(
+    error: RwSignal<String>,
+    #[prop(optional_no_strip)] on_added: Option<Callback<()>>,
+) -> impl IntoView {
+    let input = NodeRef::<Input>::new();
+    let adding = RwSignal::new(false);
+    let submit = move |event: SubmitEvent| {
+        event.prevent_default();
+        let Some(input) = input.get() else {
+            return;
+        };
+        adding.set(true);
+        leptos::task::spawn_local(async move {
+            let host = AddHost {
+                destination: input.value(),
+            };
+            match tauri::invoke::<_, ()>("add_host", &host).await {
+                Ok(()) => {
+                    input.set_value("");
+                    error.set(String::new());
+                }
+                Err(reason) => error.set(reason),
+            }
+            adding.set(false);
+            if let Some(on_added) = on_added {
+                on_added.run(());
+            }
+        });
+    };
+    view! {
+        <form id="add-host" on:submit=submit>
+            <label for="host">"Add a host"</label>
+            <div class="row">
+                <input id="host" placeholder="devbox or me@build.example.com" autocomplete="off" spellcheck="false" node_ref=input/>
+                <button class="primary" disabled=move || adding.get()>
+                    {move || if adding.get() { "Checking…" } else { "Add" }}
+                </button>
+            </div>
+            <p id="add-host-error" class="error">{error}</p>
         </form>
     }
 }
