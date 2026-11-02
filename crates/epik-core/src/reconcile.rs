@@ -233,7 +233,7 @@ mod tests {
                     outcome: Outcome::Succeeded,
                     reason: None,
                     pull_request: Some(4),
-                    duration_ms: 59_000,
+                    duration_ms: Some(59_000),
                     cost_usd: Some(Decimal::new(125, 2)),
                 },
                 Event::IssueMerged {
