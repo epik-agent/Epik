@@ -620,7 +620,7 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(plain(&detail.unblocks), "#18 and #19");
     assert_eq!(plain(&detail.pull_request), "Opens when the tests pass");
     assert_eq!(detail.recent, ["Reading src/eval.rs", "Running cargo test"]);
-    let log = dir.join("b0/16.jsonl").display().to_string();
+    let log = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
     assert_eq!(page.also_building, Vec::<(String, String)>::new());
@@ -706,9 +706,13 @@ fn a_running_issues_log_is_its_latest_sessions() {
     );
 
     let card = |n: u64| page.issues.iter().find(|c| c.number == n).unwrap();
-    let log = dir.join("b0/17-coding-2.jsonl").display().to_string();
+    let log = dir
+        .join("b0")
+        .join("17-coding-2.jsonl")
+        .display()
+        .to_string();
     assert_eq!(card(17).log.as_deref(), Some(log.as_str()));
-    let old = dir.join("b0/16.jsonl").display().to_string();
+    let old = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(card(16).log.as_deref(), Some(old.as_str()), "no sessions");
 }
 
@@ -1362,12 +1366,24 @@ fn rounds(sessions: &[epik_view::SessionRow]) -> Vec<(&str, u32, Option<&str>)> 
         .collect()
 }
 
+/// The run's directory in [`page_of`].
+const RUN_DIR: &str = "/runs/wpm/epik-test/9";
+
+/// The path of `log`, of build `b0`, in [`RUN_DIR`].
+fn logged(log: &str) -> String {
+    Path::new(RUN_DIR)
+        .join("b0")
+        .join(log)
+        .display()
+        .to_string()
+}
+
 fn page_of(run: RunState) -> RunPage {
     run_page(
         &local(run),
         &here([]),
         &[],
-        Some(std::path::Path::new("/runs/wpm/epik-test/9")),
+        Some(Path::new(RUN_DIR)),
         now(),
         &FixedOffset::east_opt(0).unwrap(),
     )
@@ -1414,7 +1430,7 @@ fn a_reviewed_run_lists_its_reviews_and_fix_in_order_under_its_header() {
     assert!(page.sessions[..2].iter().all(|s| s.threads.is_none()));
     assert_eq!(
         last.log.as_deref(),
-        Some("/runs/wpm/epik-test/9/b0/9-review-2.jsonl")
+        Some(logged("9-review-2.jsonl").as_str())
     );
     assert!(!last.running);
 }
@@ -1453,12 +1469,12 @@ fn a_single_issue_runs_review_is_in_its_issues_panel_and_under_the_runs_header()
     assert_eq!(rounds(&page.sessions), [("Review", 1, Some("no verdict"))]);
     assert_eq!(
         card.log.as_deref(),
-        Some("/runs/wpm/epik-test/9/b0/7-review-1.jsonl"),
+        Some(logged("7-review-1.jsonl").as_str()),
         "the latest session's, though the issue isn't running"
     );
     assert_eq!(
         card.sessions[0].log.as_deref(),
-        Some("/runs/wpm/epik-test/9/b0/7.jsonl")
+        Some(logged("7.jsonl").as_str())
     );
 }
 
