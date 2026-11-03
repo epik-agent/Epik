@@ -877,14 +877,7 @@ fn issue_card(
             }
             None => vec![text("Done")],
         },
-        (NodeState::Merged, _) => match issue.pull_request {
-            Some(pr) => {
-                let mut words = vec![text("Merged in ")];
-                words.extend(pr_words(pr));
-                words
-            }
-            None => vec![text("Merged")],
-        },
+        (NodeState::Merged, _) => vec![text("Merged")],
         (NodeState::Running, _) => {
             let action = activity.and_then(|a| a.last_action.as_deref()).map_or_else(
                 || "starting".to_owned(),

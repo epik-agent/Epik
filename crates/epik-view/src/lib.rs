@@ -179,7 +179,7 @@ pub struct IssueCard {
     pub row: usize,
     /// "3m 05s · $0.92", once known.
     pub figures: Option<String>,
-    /// The card's line: "Merged in PR #20", "cargo test · last: 23
+    /// The card's line: "Merged", "cargo test · last: 23
     /// passed, 1 failed", "Starts when #16 and #17 are merged".
     pub line: Words,
     pub life: Option<String>,

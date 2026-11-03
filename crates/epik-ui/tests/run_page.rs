@@ -30,6 +30,26 @@ fn a_merged_issue_card_has_its_figures() {
 }
 
 #[test]
+fn an_issue_card_links_to_its_pull_request_after_its_number() {
+    let mut failed = issue(2, NodeState::Failed, 1, 0);
+    failed.pull_request = vec![link("PR #541", "https://github.com/acme/widgets/pull/541")];
+    let html = render(|| view! { <Issue issue=failed chosen=false/> });
+    assert!(
+        html.contains(
+            r#"#2</a><a href="https://github.com/acme/widgets/pull/541">PR #541</a></div>"#
+        ),
+        "{html}"
+    );
+}
+
+#[test]
+fn an_issue_card_without_a_known_pull_request_has_no_link_to_one() {
+    let html = render(|| view! { <Issue issue=issue(2, NodeState::Running, 1, 0) chosen=false/> });
+    assert!(!html.contains("none yet"), "{html}");
+    assert!(html.contains(r#"#2</a></div>"#), "{html}");
+}
+
+#[test]
 fn a_running_issue_card_has_its_life_line_rather_than_its_figures() {
     let mut running = issue(2, NodeState::Running, 1, 0);
     running.figures = Some("1m 00s · $0.20".into());

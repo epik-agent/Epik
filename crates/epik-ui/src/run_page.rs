@@ -65,6 +65,22 @@ fn number(issue: Signal<IssueCard>) -> impl IntoView {
     }))
 }
 
+/// An issue's pull request, linked to GitHub, once it is known.
+fn known_pull_request(issue: Signal<IssueCard>) -> impl IntoView {
+    let known = part(issue, |issue| {
+        issue
+            .pull_request
+            .iter()
+            .find(|span| span.url.is_some())
+            .cloned()
+    });
+    move || {
+        known.get().map(|span| {
+            view! { <GithubLink text=span.text url=span.url.unwrap_or_default()/> }
+        })
+    }
+}
+
 /// An issue's card, placed in the graph by its column and row. Choosing
 /// it shows its detail panel.
 #[component]
@@ -118,6 +134,7 @@ pub fn Issue(
             <div class="top">
                 <span class="dot"></span>
                 {number(issue)}
+                {known_pull_request(issue)}
                 {corner}
             </div>
             <div class="name">{name}</div>
