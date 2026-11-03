@@ -1,4 +1,4 @@
-use epik_ui::run_page::{Detail, Edges, Issue, RunView, shown_log};
+use epik_ui::run_page::{Detail, Edges, Issue, RunView, panel_issue, shown_log};
 use epik_view::{Change, Entry, Excerpt, LineRange, NodeState, Stream, StreamEntry};
 use leptos::prelude::*;
 
@@ -30,6 +30,26 @@ fn a_merged_issue_card_has_its_figures() {
 }
 
 #[test]
+fn an_issue_card_links_to_its_pull_request_after_its_number() {
+    let mut failed = issue(2, NodeState::Failed, 1, 0);
+    failed.pull_request = vec![link("PR #541", "https://github.com/acme/widgets/pull/541")];
+    let html = render(|| view! { <Issue issue=failed chosen=false/> });
+    assert!(
+        html.contains(
+            r#"#2</a><a href="https://github.com/acme/widgets/pull/541">PR #541</a></div>"#
+        ),
+        "{html}"
+    );
+}
+
+#[test]
+fn an_issue_card_without_a_known_pull_request_has_no_link_to_one() {
+    let html = render(|| view! { <Issue issue=issue(2, NodeState::Running, 1, 0) chosen=false/> });
+    assert!(!html.contains("none yet"), "{html}");
+    assert!(html.contains(r#"#2</a></div>"#), "{html}");
+}
+
+#[test]
 fn a_running_issue_card_has_its_life_line_rather_than_its_figures() {
     let mut running = issue(2, NodeState::Running, 1, 0);
     running.figures = Some("1m 00s · $0.20".into());
@@ -53,6 +73,27 @@ fn a_running_issue_card_has_its_life_line_rather_than_its_figures() {
 fn a_failed_issue_card_is_failed() {
     let html = render(|| view! { <Issue issue=issue(2, NodeState::Failed, 1, 0) chosen=false/> });
     assert!(html.contains(r#"class="issue failed""#), "{html}");
+}
+
+#[test]
+fn a_merged_issue_card_has_a_check_mark_and_a_failed_one_a_cross() {
+    let dot = |state| render(|| view! { <Issue issue=issue(2, state, 1, 0) chosen=false/> });
+    assert!(
+        dot(NodeState::Merged).contains(r#"<span class="dot">✓</span>"#),
+        "merged"
+    );
+    assert!(
+        dot(NodeState::Failed).contains(r#"<span class="dot">✕</span>"#),
+        "failed"
+    );
+    assert!(
+        dot(NodeState::Running).contains(r#"<span class="dot"></span>"#),
+        "running"
+    );
+    assert!(
+        dot(NodeState::NotStarted).contains(r#"<span class="dot"></span>"#),
+        "not started"
+    );
 }
 
 #[test]
@@ -91,9 +132,10 @@ fn an_edge_across_columns_bends_halfway() {
 fn the_detail_panel_has_the_issues_facts_and_activity() {
     let mut running = issue(2, NodeState::Running, 1, 0);
     running.worked = Some("2m 40s · $0.48 so far".into());
-    running.recent = vec!["Read src/lib.rs".into(), "Ran cargo test".into()];
     running.pull_request = vec![link("PR #31", "https://github.com/acme/widgets/pull/31")];
-    let html = render(|| view! { <Detail issue=running summary=true/> });
+    let mut done = stream(vec![], false);
+    done.recent = vec!["Read src/lib.rs".into(), "Ran cargo test".into()];
+    let html = render(|| view! { <Detail issue=running stream=Some(done) summary=true/> });
     assert!(html.starts_with(r#"<section class="detail"><div class="facts"><h3><a href="https://github.com/acme/widgets/issues/2">#2</a> Add a power operator</h3><span class="state running">Waiting for #1</span>"#), "{html}");
     assert!(html.contains(r#"<dl><dt>Working for</dt><dd>2m 40s · $0.48 so far</dd><dt>Depends on</dt><dd><span><a href="https://github.com/acme/widgets/issues/1">#1</a></span></dd><dt>Unblocks</dt><dd><span>nothing</span></dd><dt>Pull request</dt><dd><span><a href="https://github.com/acme/widgets/pull/31">PR #31</a></span></dd></dl></div>"#), "{html}");
     assert!(html.ends_with(&(r#"<div class="doing">"#.to_owned() + SUMMARY_CHOSEN + r#"<ol class="recent"><li>Read src/lib.rs</li><li>Ran cargo test</li></ol></div></section>"#)), "{html}");
@@ -199,6 +241,7 @@ fn stream(entries: Vec<Entry>, working: bool) -> Stream {
             })
             .collect(),
         working,
+        recent: vec![],
     }
 }
 
@@ -233,14 +276,15 @@ fn the_detail_panel_has_a_full_and_summary_switch_with_full_chosen() {
 
 #[test]
 fn summary_shows_the_agents_recent_actions() {
-    let mut running = issue(2, NodeState::Running, 1, 0);
-    running.recent = vec!["Read src/lib.rs".into()];
-    let stream = Some(stream(
+    let running = issue(2, NodeState::Running, 1, 0);
+    let mut stream = stream(
         vec![Entry::Other {
             text: "Thinking".into(),
         }],
         true,
-    ));
+    );
+    stream.recent = vec!["Read src/lib.rs".into()];
+    let stream = Some(stream);
     let html = render(
         move || view! { <Detail issue=running.clone() stream=stream.clone() summary=true/> },
     );
@@ -252,6 +296,27 @@ fn summary_shows_the_agents_recent_actions() {
     );
     assert!(!html.contains("Thinking"), "{html}");
     assert!(!html.contains("cursor"), "{html}");
+}
+
+#[test]
+fn a_finished_issues_summary_lists_what_its_agent_did() {
+    let merged = issue(1, NodeState::Merged, 0, 0);
+    let mut done = stream(vec![], false);
+    done.recent = vec!["Ran cargo test".into()];
+    let html = render(|| view! { <Detail issue=merged stream=Some(done) summary=true/> });
+    assert!(
+        html.contains(r#"<ol class="recent"><li>Ran cargo test</li></ol>"#),
+        "{html}"
+    );
+}
+
+#[test]
+fn summary_without_a_log_says_nothing_yet() {
+    let html = render(|| view! { <Detail issue=issue(2, NodeState::Running, 1, 0) summary=true/> });
+    assert!(
+        html.contains(r#"<ol class="recent"><li class="muted">Nothing yet.</li></ol>"#),
+        "{html}"
+    );
 }
 
 #[test]
@@ -326,6 +391,7 @@ fn an_entry_without_a_time_leaves_its_time_empty() {
             },
         }],
         working: false,
+        recent: vec![],
     });
     assert!(html.contains(r#"<div class="entry other"><time></time><div class="what">Updating its plan</div></div>"#), "{html}");
 }
@@ -726,17 +792,82 @@ fn the_stream_shows_the_session_picked_of_the_issue_or_the_run() {
     );
 }
 
-#[test]
-fn while_the_run_reviews_the_stream_shows_the_review() {
+/// A run page whose review is running, with #2's log known.
+fn reviewing() -> epik_view::RunPage {
     let mut page = run_page();
     let mut review = session("Review", 1, None, "/logs/13-review-1.jsonl");
     review.running = true;
     page.sessions = vec![review];
     page.issues[1].log = Some("/logs/2.jsonl".into());
+    page
+}
+
+#[test]
+fn while_the_run_reviews_an_issues_panel_shows_its_own_log() {
     assert_eq!(
-        shown_log(&page, Some(2), None).as_deref(),
+        shown_log(&reviewing(), Some(2), None).as_deref(),
+        Some("/logs/2.jsonl")
+    );
+    // An issue with no log yet doesn't borrow the review's.
+    assert_eq!(shown_log(&reviewing(), Some(3), None), None);
+}
+
+#[test]
+fn while_the_run_reviews_picking_the_review_shows_it() {
+    assert_eq!(
+        shown_log(&reviewing(), Some(2), Some("/logs/13-review-1.jsonl")).as_deref(),
         Some("/logs/13-review-1.jsonl")
     );
+}
+
+#[test]
+fn with_no_issue_chosen_the_stream_shows_the_runs_running_session() {
+    assert_eq!(
+        shown_log(&reviewing(), None, None).as_deref(),
+        Some("/logs/13-review-1.jsonl")
+    );
+}
+
+/// How many times what follows `panel_issue` runs while `change` happens to
+/// the run page and the chosen issue.
+fn panel_runs(change: impl FnOnce(RwSignal<epik_view::RunPage>, RwSignal<Option<u64>>)) -> usize {
+    let owner = Owner::new();
+    owner.with(|| {
+        let page = RwSignal::new(run_page());
+        let chosen = RwSignal::new(Some(2));
+        let panel = panel_issue(page.into(), chosen.into());
+        let runs = RwSignal::new(0);
+        let drawn = Memo::new(move |_| {
+            runs.update_untracked(|runs| *runs += 1);
+            panel.get()
+        });
+        drawn.get();
+        change(page, chosen);
+        drawn.get();
+        runs.get_untracked()
+    })
+}
+
+#[test]
+fn the_panel_is_kept_while_the_cards_change() {
+    let runs = panel_runs(|page, _| {
+        page.update(|page| {
+            page.issues[0].life = Some("active 1s ago".into());
+            page.issues[1].life = Some("active 2s ago".into());
+        });
+    });
+    assert_eq!(runs, 1);
+}
+
+#[test]
+fn the_panel_is_new_when_another_issue_is_chosen() {
+    assert_eq!(panel_runs(|_, chosen| chosen.set(Some(3))), 2);
+}
+
+#[test]
+fn the_panel_goes_with_its_issue_from_the_page() {
+    let runs = panel_runs(|page, _| page.update(|page| page.issues.retain(|i| i.number != 2)));
+    assert_eq!(runs, 2);
 }
 
 #[test]

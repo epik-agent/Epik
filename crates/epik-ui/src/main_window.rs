@@ -19,7 +19,6 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Serialize;
 
-use crate::flash::{Flashes, Flashing};
 use crate::home::{Act, HomePage};
 use crate::live::{kept, keyed, part};
 use crate::run_page::{RunView, shown_log};
@@ -237,32 +236,6 @@ enum Which {
     Failed(String),
 }
 
-/// The keys of what flashes in `shown`: each running issue whose agent
-/// logged since it was last seen.
-fn flashed(flashes: &mut Flashes, shown: &Shown) -> Vec<String> {
-    let seen: Vec<(String, Option<i64>)> = match shown {
-        Shown::Home(home) => home
-            .building
-            .iter()
-            .flat_map(|card| {
-                card.now
-                    .iter()
-                    .map(|now| (format!("{}#{}", card.run, now.number), now.last_event))
-            })
-            .collect(),
-        Shown::Run(page) => page
-            .issues
-            .iter()
-            .map(|issue| (format!("{}#{}", page.run, issue.number), issue.last_event))
-            .collect(),
-        Shown::Settings(_) | Shown::Failed(_) => vec![],
-    };
-    seen.into_iter()
-        .filter(|(key, last_event)| flashes.changed(key, *last_event))
-        .map(|(key, _)| key)
-        .collect()
-}
-
 #[derive(Serialize)]
 struct Run {
     run: String,
@@ -370,9 +343,6 @@ pub fn MainWindow() -> impl IntoView {
     let picked_logs = RwSignal::new(HashMap::<String, String>::new());
     // The stream of the chosen issue's agent log, and the log's path.
     let streamed = RwSignal::new(None::<(String, Stream)>);
-    let flashing = Flashing(RwSignal::new(HashMap::new()));
-    provide_context(flashing);
-    let flashes = StoredValue::new(Flashes::default());
     let refreshing = StoredValue::new(false);
 
     let refresh = move || {
@@ -415,10 +385,6 @@ pub fn MainWindow() -> impl IntoView {
                         _ => "Epik".to_owned(),
                     };
                     document().set_title(&title);
-                    let keys = flashes
-                        .try_update_value(|flashes| flashed(flashes, &fetched))
-                        .unwrap_or_default();
-                    flashing.flash(keys);
                     shown.set(Some(fetched));
                 }
                 Err(reason) if matches!(at, Page::Run(_)) && reason.starts_with("no run") => {

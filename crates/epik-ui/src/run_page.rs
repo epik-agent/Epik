@@ -5,10 +5,8 @@ use epik_view::{
     Disposition, IssueCard, NodeState, RunPage, SessionRow, Span, Stream, Words as Sentence,
 };
 use leptos::ev::MouseEvent;
-use leptos::html::Button;
 use leptos::prelude::*;
 
-use crate::flash::flash_on;
 use crate::live::{kept, keyed, part};
 use crate::main_window::RunBar;
 use crate::stream::StreamView;
@@ -31,6 +29,15 @@ fn state_class(state: NodeState) -> &'static str {
         NodeState::Running => "running",
         NodeState::NotStarted => "not_started",
         NodeState::Failed => "failed",
+    }
+}
+
+/// What an issue's dot says of how it ended, if it ended.
+fn state_mark(state: NodeState) -> Option<&'static str> {
+    match state {
+        NodeState::Merged => Some("✓"),
+        NodeState::Failed => Some("✕"),
+        NodeState::Running | NodeState::NotStarted => None,
     }
 }
 
@@ -67,21 +74,31 @@ fn number(issue: Signal<IssueCard>) -> impl IntoView {
     }))
 }
 
+/// An issue's pull request, linked to GitHub, once it is known.
+fn known_pull_request(issue: Signal<IssueCard>) -> impl IntoView {
+    let known = part(issue, |issue| {
+        issue
+            .pull_request
+            .iter()
+            .find(|span| span.url.is_some())
+            .cloned()
+    });
+    move || {
+        known.get().map(|span| {
+            view! { <GithubLink text=span.text url=span.url.unwrap_or_default()/> }
+        })
+    }
+}
+
 /// An issue's card, placed in the graph by its column and row. Choosing
-/// it shows its detail panel. A running issue's card flashes when its
-/// agent logs.
+/// it shows its detail panel.
 #[component]
 pub fn Issue(
     #[prop(into)] issue: Signal<IssueCard>,
     #[prop(into)] chosen: Signal<bool>,
-    /// The run, which names what flashes.
-    #[prop(optional, into)]
-    run: String,
     #[prop(optional_no_strip)] on_choose: Option<Callback<u64>>,
 ) -> impl IntoView {
-    let card = NodeRef::<Button>::new();
     let number_of = issue.with_untracked(|issue| issue.number);
-    flash_on(card, format!("{run}#{number_of}"));
     let class = move || {
         let state = issue.with(|issue| state_class(issue.state));
         if chosen.get() {
@@ -121,12 +138,12 @@ pub fn Issue(
             style:width=format!("{CARD_W}px")
             style:height=format!("{CARD_H}px")
             title=title
-            node_ref=card
             on:click=choose
         >
             <div class="top">
-                <span class="dot"></span>
+                <span class="dot">{move || issue.with(|issue| state_mark(issue.state))}</span>
                 {number(issue)}
+                {known_pull_request(issue)}
                 {corner}
             </div>
             <div class="name">{name}</div>
@@ -163,8 +180,8 @@ pub fn Edges(issues: Vec<IssueCard>, edges: Vec<(u64, u64)>) -> impl IntoView {
 }
 
 /// The log the stream shows on `page` with issue `chosen`'s panel open: the
-/// session `picked`, if it is the run's or that issue's, or else the run's
-/// own session while it runs, or else the issue's latest.
+/// session `picked`, if it is the run's or that issue's, or else the issue's
+/// latest, or, with no issue chosen, the run's own session while it runs.
 pub fn shown_log(page: &RunPage, chosen: Option<u64>, picked: Option<&str>) -> Option<String> {
     let issue = chosen.and_then(|number| page.issues.iter().find(|i| i.number == number));
     let sessions = || {
@@ -175,13 +192,25 @@ pub fn shown_log(page: &RunPage, chosen: Option<u64>, picked: Option<&str>) -> O
     picked
         .filter(|picked| sessions().any(|s| s.log.as_deref() == Some(*picked)))
         .map(str::to_owned)
-        .or_else(|| {
-            page.sessions
+        .or_else(|| match issue {
+            Some(issue) => issue.log.clone(),
+            None => page
+                .sessions
                 .last()
                 .filter(|s| s.running)
-                .and_then(|s| s.log.clone())
+                .and_then(|s| s.log.clone()),
         })
-        .or_else(|| issue.and_then(|i| i.log.clone()))
+}
+
+/// The issue on `page` whose detail panel shows: the one `chosen`, while it
+/// is on the page. It stays the same while the page's cards change, so the
+/// panel, and where the user put it, stays too.
+pub fn panel_issue(page: Signal<RunPage>, chosen: Signal<Option<u64>>) -> Memo<Option<u64>> {
+    Memo::new(move |_| {
+        let number = chosen.get()?;
+        page.with(|page| page.issues.iter().any(|issue| issue.number == number))
+            .then_some(number)
+    })
 }
 
 /// Agent sessions, oldest first: each one's role and round, agent and
@@ -243,9 +272,9 @@ pub fn Sessions(
     }
 }
 
-/// The chosen issue's detail panel: its state and facts, and what its
-/// agent is doing, in Full, the stream of its log, or in Summary, its
-/// recent actions.
+/// The chosen issue's detail panel: its state and facts, and what the
+/// agent of the session shown is doing, in Full, the stream of its log, or
+/// in Summary, its recent actions.
 #[component]
 pub fn Detail(
     #[prop(into)] issue: Signal<IssueCard>,
@@ -288,7 +317,12 @@ pub fn Detail(
             </button>
         }
     };
-    let recent = part(issue, |issue| issue.recent.clone());
+    let recent = part(stream, |stream| {
+        stream
+            .as_ref()
+            .map(|stream| stream.recent.clone())
+            .unwrap_or_default()
+    });
     let recent = move || {
         let recent = recent.get();
         if recent.is_empty() {
@@ -361,7 +395,6 @@ pub fn RunView(
     picked: Signal<Option<String>>,
     #[prop(optional)] on_pick: Option<Callback<String>>,
 ) -> impl IntoView {
-    let run = page.with_untracked(|page| page.run.clone());
     let also_building = part(page, |page| page.also_building.clone());
     let epic = part(page, |page| page.epic.clone());
     let about = part(page, |page| page.about.clone());
@@ -405,10 +438,11 @@ pub fn RunView(
             }
         })
     };
+    let panel = panel_issue(page, chosen);
     let detail = move || {
-        let number = chosen.get()?;
-        let issue =
-            issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())?;
+        let number = panel.get()?;
+        let issue = issues
+            .with_untracked(|issues| issues.iter().find(|issue| issue.number == number).cloned())?;
         let issue = kept(issue, move || {
             issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())
         });
@@ -460,7 +494,7 @@ pub fn RunView(
                 {keyed(issues.into(), issue_number, move |issue| {
                     let number = issue.with_untracked(issue_number);
                     let chosen = Signal::derive(move || chosen.get() == Some(number));
-                    view! { <Issue issue chosen run=run.clone() on_choose/> }
+                    view! { <Issue issue chosen on_choose/> }
                 })}
             </div>
         </div>

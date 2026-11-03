@@ -29,7 +29,9 @@ const TAIL: usize = LIMIT - HEAD - 1;
 /// The stream in the agent log at `path`, which is read only as far as it
 /// has grown since it was last read.
 pub fn read(path: &Path) -> io::Result<Stream> {
-    crate::tail::read(path, |readers| readers.stream.stream())
+    crate::tail::read(path, |readers| {
+        readers.stream.stream(readers.activity.activity().recent)
+    })
 }
 
 /// What the stream holds, in order, as far as the log has been read.
@@ -72,7 +74,7 @@ pub fn parse(text: &str) -> Stream {
     for line in text.lines() {
         reader.feed(line);
     }
-    reader.stream()
+    reader.stream(activity::parse(text).recent)
 }
 
 impl Reader {
@@ -143,10 +145,10 @@ impl Reader {
         }
     }
 
-    /// The stream so far. Its entries are made now, once every directory
-    /// the agent works in so far is known, as `activity` describes its
-    /// actions.
-    pub fn stream(&self) -> Stream {
+    /// The stream so far, with the agent's `recent` actions. Its entries
+    /// are made now, once every directory the agent works in so far is
+    /// known, as `activity` describes its actions.
+    pub fn stream(&self, recent: Vec<String>) -> Stream {
         let entries = self
             .items
             .iter()
@@ -169,6 +171,7 @@ impl Reader {
                 .last_call
                 .as_ref()
                 .is_some_and(|id| !self.calls[id].call.finished),
+            recent,
         }
     }
 }

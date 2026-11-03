@@ -56,18 +56,26 @@ fn a_progress_bar_has_a_segment_for_each_part_sized_by_count() {
     let progress = Progress {
         merged: 1,
         running: 1,
-        not_started: 2,
+        failed: 1,
+        not_started: 3,
     };
     let html = render(|| view! { <ProgressBar progress/> });
     assert!(html.starts_with(r#"<div class="progress">"#), "{html}");
-    let merged = html.find(r#"<span class="merged" style="flex-grow:0.25;"></span>"#);
-    let running = html.find(r#"<span class="running" style="flex-grow:0.25;"></span>"#);
+    let merged =
+        html.find(r#"<span class="merged" style="flex-grow:0.16666666666666666;"></span>"#);
+    let running =
+        html.find(r#"<span class="running" style="flex-grow:0.16666666666666666;"></span>"#);
+    let failed =
+        html.find(r#"<span class="failed" style="flex-grow:0.16666666666666666;"></span>"#);
     let not_started = html.find(r#"<span class="not_started" style="flex-grow:0.5;"></span>"#);
     assert!(
-        merged.is_some() && running.is_some() && not_started.is_some(),
+        merged.is_some() && running.is_some() && failed.is_some() && not_started.is_some(),
         "{html}"
     );
-    assert!(merged < running && running < not_started, "{html}");
+    assert!(
+        merged < running && running < failed && failed < not_started,
+        "{html}"
+    );
 }
 
 #[test]
@@ -75,8 +83,9 @@ fn an_empty_progress_bar_has_empty_segments() {
     let progress = Progress {
         merged: 0,
         running: 0,
+        failed: 0,
         not_started: 0,
     };
     let html = render(|| view! { <ProgressBar progress/> });
-    assert_eq!(html.matches(r#"style="flex-grow:0;""#).count(), 3, "{html}");
+    assert_eq!(html.matches(r#"style="flex-grow:0;""#).count(), 4, "{html}");
 }

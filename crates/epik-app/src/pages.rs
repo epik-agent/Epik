@@ -204,10 +204,12 @@ fn progress(run: &RunState) -> Progress {
     let count = |wanted: fn(&IssueState) -> bool| run.issues.iter().filter(|i| wanted(i)).count();
     let merged = count(is_merged);
     let running = count(|i| i.status == IssueStatus::Running);
+    let failed = count(|i| i.status == IssueStatus::Failed);
     Progress {
         merged,
         running,
-        not_started: run.issues.len() - merged - running,
+        failed,
+        not_started: run.issues.len() - merged - running - failed,
     }
 }
 
@@ -304,7 +306,6 @@ fn now_line(run: &RunState, issue: &IssueState, now: DateTime<Utc>) -> NowLine {
         number: issue.issue.number,
         words,
         life: last.map(|at| life(at, now)),
-        last_event: last.map(|at| at.timestamp_millis()),
     }
 }
 
@@ -344,7 +345,6 @@ fn own_now_line(run: &RunState) -> Option<NowLine> {
             text(format!(" {} — {doing}.", run.title)),
         ],
         life: None,
-        last_event: None,
     })
 }
 
@@ -877,14 +877,7 @@ fn issue_card(
             }
             None => vec![text("Done")],
         },
-        (NodeState::Merged, _) => match issue.pull_request {
-            Some(pr) => {
-                let mut words = vec![text("Merged in ")];
-                words.extend(pr_words(pr));
-                words
-            }
-            None => vec![text("Merged")],
-        },
+        (NodeState::Merged, _) => vec![text("Merged")],
         (NodeState::Running, _) => {
             let action = activity.and_then(|a| a.last_action.as_deref()).map_or_else(
                 || "starting".to_owned(),
@@ -982,13 +975,11 @@ fn issue_card(
         life: last
             .filter(|_| state == NodeState::Running)
             .map(|at| life(at, now)),
-        last_event: last.map(|at| at.timestamp_millis()),
         sentence,
         worked,
         depends_on,
         unblocks,
         pull_request,
-        recent: activity.map(|a| a.recent.clone()).unwrap_or_default(),
         log,
         sessions: issue
             .sessions

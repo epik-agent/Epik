@@ -46,12 +46,11 @@ pub fn graph() -> MiniGraph {
     }
 }
 
-pub fn now(number: u64, life: Option<&str>, last_event: Option<i64>) -> NowLine {
+pub fn now(number: u64, life: Option<&str>) -> NowLine {
     NowLine {
         number,
         words: vec![text(&format!("#{number}"))],
         life: life.map(Into::into),
-        last_event,
     }
 }
 
@@ -72,6 +71,7 @@ pub fn card(now: Vec<NowLine>) -> RunCard {
         progress: Progress {
             merged: 1,
             running: 1,
+            failed: 0,
             not_started: 1,
         },
         now,
@@ -162,13 +162,11 @@ pub fn issue(number: u64, state: NodeState, column: usize, row: usize) -> IssueC
             text(" is merged"),
         ],
         life: None,
-        last_event: None,
         sentence: vec![text("Waiting for #1")],
         worked: None,
         depends_on: vec![link("#1", "https://github.com/acme/widgets/issues/1")],
         unblocks: vec![text("nothing")],
         pull_request: vec![text("none yet")],
-        recent: vec![],
         log: None,
         sessions: vec![],
     }

@@ -232,6 +232,21 @@ fn numbered(number: u64) -> RunState {
 }
 
 #[test]
+fn a_failed_issue_counts_as_failed_rather_than_not_started() {
+    let card = run_card(&failed_run(), now());
+
+    assert_eq!(
+        card.progress,
+        Progress {
+            merged: 0,
+            running: 0,
+            failed: 1,
+            not_started: 0
+        }
+    );
+}
+
+#[test]
 fn a_building_run_says_what_is_running_next_and_done() {
     let card = run_card(&exponentiation(), now());
 
@@ -251,6 +266,7 @@ fn a_building_run_says_what_is_running_next_and_done() {
         Progress {
             merged: 2,
             running: 2,
+            failed: 0,
             not_started: 2
         }
     );
@@ -600,7 +616,8 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     );
     assert_eq!((page.columns, page.rows), (4, 2));
     let card = |n: u64| page.issues.iter().find(|c| c.number == n).unwrap();
-    assert_eq!(plain(&card(14).line), "Merged in PR #20");
+    assert_eq!(plain(&card(14).line), "Merged");
+    assert_eq!(plain(&card(14).pull_request), "PR #20");
     assert_eq!(card(14).figures.as_deref(), Some("3m 05s · $0.92"));
     assert_eq!(
         plain(&card(16).line),
@@ -619,7 +636,6 @@ fn the_run_page_says_where_the_run_stands_and_draws_each_issue() {
     assert_eq!(plain(&detail.depends_on), "#15");
     assert_eq!(plain(&detail.unblocks), "#18 and #19");
     assert_eq!(plain(&detail.pull_request), "Opens when the tests pass");
-    assert_eq!(detail.recent, ["Reading src/eval.rs", "Running cargo test"]);
     let log = dir.join("b0").join("16.jsonl").display().to_string();
     assert_eq!(detail.log.as_deref(), Some(log.as_str()));
     assert_eq!(card(14).log, None);
