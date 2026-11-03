@@ -133,8 +133,8 @@ fn a_building_row_folds_and_the_others_dont() {
 #[test]
 fn an_unfolded_building_row_shows_its_now_next_and_done_lines() {
     let mut run = card(vec![
-        now(2, Some("active 2s ago"), Some(1)),
-        now(3, Some("quiet 1m 50s"), Some(1)),
+        now(2, Some("active 2s ago")),
+        now(3, Some("quiet 1m 50s")),
     ]);
     run.next = Some(vec![link("#5", "https://github.com/acme/widgets/issues/5")]);
     run.done = Some(vec![text("#1")]);

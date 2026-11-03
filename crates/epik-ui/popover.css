@@ -4,6 +4,7 @@ header, .runs, hr { margin: 0 4px; }
 header { padding: 8px 6px 10px; border-bottom: 1px solid var(--border); }
 .running { display: flex; align-items: center; gap: 8px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-fill); }
+.dot.building { animation: blink 1s steps(1) infinite; }
 .running .name { font-weight: 600; }
 .about { margin: 4px 0 0 15px; font: 11px var(--mono); color: var(--secondary); }
 .runs { padding-bottom: 4px; border-bottom: 1px solid var(--border); }
@@ -24,9 +25,10 @@ button.run:hover, button.item:hover { background: var(--raised); }
 .count { font: 11px var(--mono); color: var(--secondary); }
 .segments { display: flex; gap: 2px; height: 3px; margin: 7px 0; }
 .segments span { flex: 1; border-radius: 2px; background: var(--raised); }
-.segments .merged { background: #6ee7b7; }
-.segments .running { background: var(--accent); }
+.segments .merged { background: var(--accent-fill); }
+.segments .running { background: var(--accent-fill); animation: blink 1s steps(1) infinite; }
 .segments .failed { background: var(--error); }
+.segments .not_started { background: var(--strong); }
 .place { font-size: 11px; color: var(--secondary); }
 .line { font: 11px var(--mono); color: var(--secondary); }
 .items { padding-top: 4px; }

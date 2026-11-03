@@ -57,6 +57,7 @@ fn card(disposition: Disposition) -> RunCard {
         progress: Progress {
             merged: 1,
             running: 1,
+            failed: 0,
             not_started: 0,
         },
         now: vec![NowLine {
@@ -66,7 +67,6 @@ fn card(disposition: Disposition) -> RunCard {
                 text(" Power"),
             ],
             life: Some("active 2s ago".to_owned()),
-            last_event: Some(1_793_000_000_000),
         }],
         next: None,
         done: Some(vec![text("#14 is merged into "), code("epic/13")]),
@@ -145,7 +145,6 @@ fn run_page() {
                     link("PR #20", "https://github.com/o/r/pull/20"),
                 ],
                 life: None,
-                last_event: None,
                 sentence: vec![text("Merged.")],
                 worked: None,
                 depends_on: vec![],
@@ -176,7 +175,6 @@ fn run_page() {
                 figures: None,
                 line: vec![text("Starts when its build reaches it")],
                 life: Some("quiet 1m 50s".to_owned()),
-                last_event: Some(1_793_000_000_000),
                 sentence: vec![],
                 worked: Some("2m 40s · $0.48 so far".to_owned()),
                 depends_on: vec![link("#14", "https://github.com/o/r/issues/14")],

@@ -38,6 +38,7 @@ body { display: flex; height: 100vh; overflow: hidden; }
 #sidebar .run .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); }
 #sidebar .run.current .title { color: var(--text); }
 #sidebar .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-fill); }
+#sidebar .dot.building { animation: blink 1s steps(1) infinite; }
 #sidebar .dot.needs_attention { background: var(--error); }
 #sidebar .dot.waiting_for_review { background: #6ee7b7; }
 #sidebar .foot { margin-top: auto; padding-top: 12px; }
@@ -104,6 +105,7 @@ table.run-table {
 .progress-cell .progress { margin: 6px 0 0; }
 .run-table .status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--secondary); }
 .run-table .status .dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent-fill); }
+.run-table .status .dot.building { animation: blink 1s steps(1) infinite; }
 .run-table .status .dot.needs_attention { background: var(--error); }
 .run-table .status .dot.waiting_for_review { background: #6ee7b7; }
 .run.needs_attention .status { color: var(--error); }
@@ -116,15 +118,16 @@ table.run-table {
 .mini-graph { overflow: visible; }
 .mini-edge { stroke: var(--strong); stroke-width: 1.2; }
 .mini-node { fill: var(--surface); stroke: var(--strong); stroke-width: 1.2; }
-.mini-node.merged { fill: #6ee7b7; stroke: #6ee7b7; }
-.mini-node.running { fill: var(--accent); stroke: var(--accent); }
+.mini-node.merged { fill: var(--accent-fill); stroke: var(--accent-fill); }
+.mini-node.running { fill: var(--accent-fill); stroke: var(--accent-fill); animation: blink 1s steps(1) infinite; }
 .mini-node.failed { fill: var(--error); stroke: var(--error); }
 
 .progress { display: flex; gap: 3px; height: 4px; margin: 12px 0 8px; }
 .progress span { border-radius: 2px; }
-.progress .merged { background: #6ee7b7; }
-.progress .running { background: var(--accent); }
-.progress .not_started { background: var(--raised); }
+.progress .merged { background: var(--accent-fill); }
+.progress .running { background: var(--accent-fill); animation: blink 1s steps(1) infinite; }
+.progress .failed { background: var(--error); }
+.progress .not_started { background: var(--strong); }
 
 .lines .line { display: flex; gap: 12px; padding: 3px 0; border-radius: 4px; }
 .label {
@@ -137,12 +140,6 @@ table.run-table {
 }
 .life { margin-left: 8px; font: 11px var(--mono); color: var(--accent); white-space: nowrap; }
 .life.quiet { color: var(--muted); }
-
-.flash { animation: flash 1.2s ease-out; }
-@keyframes flash {
-  0% { background: var(--accent-muted); box-shadow: 0 0 0 3px var(--accent-muted); }
-  100% { background: transparent; box-shadow: none; }
-}
 
 .empty { margin-top: 64px; text-align: center; font-size: 14px; }
 
@@ -222,22 +219,25 @@ table.run-table {
 }
 .issue:hover { background: var(--surface); border-color: var(--strong); }
 .issue .top { display: flex; align-items: center; gap: 6px; font: 12px var(--mono); }
-.issue .top a { color: var(--text); }
+.issue .top a { flex: none; color: var(--text); }
 .issue .top .life, .issue .top .figures-small { margin-left: auto; }
+.issue .top .figures-small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .figures-small { font: 11px var(--mono); color: var(--muted); }
 .issue .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-line { font-size: 12px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.issue .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--strong); }
-.issue.merged .dot { background: #6ee7b7; border-color: #6ee7b7; }
-.issue.merged .card-line { color: var(--accent); }
-.issue.running { border: 1.5px solid var(--accent); }
-.issue.running.chosen { background: var(--accent-muted); }
-.issue.running .dot { background: var(--accent); border-color: var(--accent); }
+.issue .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--strong); }
+.issue.not_started { border: 1px dashed var(--strong); background: transparent; }
+.issue.not_started, .issue.not_started a, .issue.not_started .card-line { color: var(--muted); }
+.issue.running { border: 1.5px solid var(--accent); background: var(--surface); }
+.issue.running .dot { background: var(--accent-fill); border-color: var(--accent-fill); animation: blink 1s steps(1) infinite; }
 .issue.running .card-line { color: var(--accent); }
-.issue.not_started { border-style: dashed; background: transparent; }
-.issue.failed { border-color: var(--error); }
-.issue.failed .dot { background: var(--error); border-color: var(--error); }
+.issue.merged { border-color: var(--accent); background: var(--accent-muted); }
+.issue.merged .dot { background: var(--accent); }
+.issue.merged .card-line { color: var(--accent); }
+.issue.failed { border: 1.5px solid var(--error); background: var(--error-muted); }
+.issue.failed .dot { background: var(--error); }
 .issue.failed .card-line { color: var(--error); }
+.issue.merged .dot, .issue.failed .dot { width: 14px; height: 14px; border: none; color: #fff; font-size: 9px; line-height: 14px; text-align: center; }
 .issue.chosen { outline: 2px solid var(--text); outline-offset: 2px; }
 
 .detail {
@@ -297,7 +297,6 @@ table.run-table {
 .output .added { color: var(--accent); }
 .output .more { font-style: italic; color: var(--muted); }
 .cursor { display: block; width: 7px; height: 14px; margin: 10px 0 0 68px; background: var(--accent); animation: blink 1s steps(1) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
 .latest {
   position: absolute;
   right: 14px;

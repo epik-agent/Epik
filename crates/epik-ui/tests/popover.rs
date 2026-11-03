@@ -16,6 +16,15 @@ fn the_header_says_epik_is_running_and_what_it_is_doing() {
 }
 
 #[test]
+fn the_headers_dot_is_a_building_dot_while_a_run_builds() {
+    let html = render(|| view! { <Header about=popover(vec![]).about building=true/> });
+    assert!(
+        html.contains(r#"<span class="dot building"></span>"#),
+        "{html}"
+    );
+}
+
+#[test]
 fn a_run_row_has_its_title_count_segments_and_line() {
     let html = render(|| view! { <RunRow run=tray_run()/> });
     assert!(

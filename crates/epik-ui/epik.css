@@ -21,6 +21,8 @@
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+@keyframes blink { 50% { opacity: 0; } }
+
 body {
   margin: 0;
   background: var(--bg);

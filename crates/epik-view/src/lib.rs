@@ -24,12 +24,13 @@ pub struct Span {
 /// A sentence of [`Span`]s.
 pub type Words = Vec<Span>;
 
-/// How many of a run's issues are merged or closed, running, and not
-/// started.
+/// How many of a run's issues are merged or closed, running, failed, and
+/// not started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub merged: usize,
     pub running: usize,
+    pub failed: usize,
     pub not_started: usize,
 }
 
@@ -70,9 +71,6 @@ pub struct NowLine {
     pub words: Words,
     /// "active 2s ago" or "quiet 1m 50s".
     pub life: Option<String>,
-    /// When its agent last logged, in milliseconds, so the page flashes the
-    /// line when it changes.
-    pub last_event: Option<i64>,
 }
 
 /// A run, as Home shows it.
@@ -181,11 +179,10 @@ pub struct IssueCard {
     pub row: usize,
     /// "3m 05s · $0.92", once known.
     pub figures: Option<String>,
-    /// The card's line: "Merged in PR #20", "cargo test · last: 23
+    /// The card's line: "Merged", "cargo test · last: 23
     /// passed, 1 failed", "Starts when #16 and #17 are merged".
     pub line: Words,
     pub life: Option<String>,
-    pub last_event: Option<i64>,
     /// The detail panel's sentence about its state.
     pub sentence: Words,
     /// "2m 40s · $0.48 so far".
