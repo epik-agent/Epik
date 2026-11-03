@@ -23,6 +23,10 @@
 //! has the coding agent address it on the pull request's branch, then the
 //! checks and the review run again, up to [`REVIEW_ROUNDS`] reviews. An
 //! epic's issues merge with no review between them.
+//!
+//! As agents start, the build sets their issue's status on the repository's
+//! GitHub Projects. A status that can't be set is recorded, and the build goes
+//! on.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -68,6 +72,12 @@ pub const RESOLVE_SESSIONS: u32 = 2;
 /// should soon settle before it gives up: whether a pull request can merge,
 /// whether its update has landed, whether its new head has checks.
 const SETTLE_READS: u32 = 20;
+
+/// The project status of an issue an agent is working on.
+const IN_PROGRESS: &str = "In progress";
+
+/// The project status of an issue whose pull request an agent is reviewing.
+const IN_REVIEW: &str = "In review";
 
 /// How often a waiting build looks at the cancel signal.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -444,6 +454,9 @@ impl<'a> Build<'a> {
     }
 
     fn orchestrate(&self, cancel: &AtomicBool) {
+        if self.kind == Kind::Epic {
+            self.set_status(self.number, IN_PROGRESS);
+        }
         let mut closed = self.closed.clone();
         let mut running = BTreeSet::new();
         let mut failed = BTreeSet::new();
@@ -564,6 +577,7 @@ impl<'a> Build<'a> {
                 err_path: self.dir.join(format!("{number}-review-{round}.err")),
                 model: role.model.clone(),
             };
+            self.set_status(number, IN_REVIEW);
             self.session_started(role, SessionRole::Review, round, &request);
             let outcome = self.reviewer.run(&request, cancel);
             if cancel.load(Ordering::SeqCst) {
@@ -669,6 +683,7 @@ impl<'a> Build<'a> {
             model: self.roles.coding.model.clone(),
         };
         let coding = &self.roles.coding;
+        self.set_status(number, IN_PROGRESS);
         let outcome = self.session(
             self.agent,
             coding,
@@ -688,6 +703,19 @@ impl<'a> Build<'a> {
             )));
         }
         Ok(())
+    }
+
+    /// Sets issue `number`'s status on the repository's projects. A status
+    /// that can't be set never stops a build: the failure is only recorded.
+    fn set_status(&self, number: u64, status: &str) {
+        if let Err(error) = self.github.set_project_status(&self.repo, number, status) {
+            self.append(Event::StatusNotSet {
+                at: Utc::now(),
+                number,
+                status: status.to_owned(),
+                reason: error.message,
+            });
+        }
     }
 
     /// Runs `agent` on `request` as session `round` of `role`, with the
@@ -763,6 +791,7 @@ impl<'a> Build<'a> {
             model: self.roles.coding.model.clone(),
         };
         let coding = &self.roles.coding;
+        self.set_status(number, IN_PROGRESS);
         let outcome = self.session(self.agent, coding, SessionRole::Coding, 1, &request, cancel);
         if cancel.load(Ordering::SeqCst) {
             // What the agent spent before it was stopped still counts: its
@@ -1187,6 +1216,8 @@ mod tests {
         /// together.
         finish_together: Option<Barrier>,
         requests: Mutex<Vec<AgentRequest>>,
+        /// The status last set on each agent's issue as it started.
+        statuses_seen: Mutex<Vec<Option<String>>>,
         running: AtomicUsize,
         most_running: AtomicUsize,
     }
@@ -1200,6 +1231,7 @@ mod tests {
                 resolves: Mutex::new(VecDeque::new()),
                 finish_together: None,
                 requests: Mutex::new(Vec::new()),
+                statuses_seen: Mutex::new(Vec::new()),
                 running: AtomicUsize::new(0),
                 most_running: AtomicUsize::new(0),
             }
@@ -1332,6 +1364,24 @@ mod tests {
         request.prompt.starts_with("Resolve pull request")
     }
 
+    /// The status last set on issue `number`'s projects, if any was. An
+    /// agent's thread keeps it for its test to check: a panic there would
+    /// leave the build waiting for that thread forever.
+    fn last_status(github: &FakeGitHub, number: u64) -> Option<String> {
+        let statuses = github.project_statuses();
+        let last = statuses.iter().rev().find(|(_, issue, _)| *issue == number);
+        last.map(|(_, _, status)| status.clone())
+    }
+
+    /// Each issue and status set on its projects, in order.
+    fn statuses(github: &FakeGitHub) -> Vec<(u64, String)> {
+        let calls = github.project_statuses();
+        calls
+            .into_iter()
+            .map(|(_, n, status)| (n, status))
+            .collect()
+    }
+
     /// Whether `request` addresses a review: a coding session after the
     /// first, whose log is `<n>-coding-<round>.jsonl`.
     fn addresses(request: &AgentRequest) -> bool {
@@ -1341,6 +1391,8 @@ mod tests {
 
     impl Agent for FakeAgent<'_> {
         fn run(&self, request: &AgentRequest, cancel: &AtomicBool) -> AgentOutcome {
+            let status = last_status(self.github, request.issue);
+            self.statuses_seen.lock().unwrap().push(status);
             self.requests.lock().unwrap().push(request.clone());
             let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
             self.most_running.fetch_max(now, Ordering::SeqCst);
@@ -1376,6 +1428,8 @@ mod tests {
         markers: Vec<Option<&'static str>>,
         open_threads: usize,
         requests: Mutex<Vec<AgentRequest>>,
+        /// The status last set on the run's issue as each review started.
+        statuses_seen: Mutex<Vec<Option<String>>>,
         /// The pull request's checks and the run's disposition, as each
         /// review saw them.
         seen: Mutex<Vec<(Checks, run::Disposition)>>,
@@ -1389,6 +1443,7 @@ mod tests {
                 markers: vec![marker],
                 open_threads: 0,
                 requests: Mutex::new(Vec::new()),
+                statuses_seen: Mutex::new(Vec::new()),
                 seen: Mutex::new(Vec::new()),
             }
         }
@@ -1402,6 +1457,8 @@ mod tests {
 
     impl Agent for FakeReviewer<'_> {
         fn run(&self, request: &AgentRequest, _cancel: &AtomicBool) -> AgentOutcome {
+            let status = last_status(self.github, request.issue);
+            self.statuses_seen.lock().unwrap().push(status);
             let round = {
                 let mut requests = self.requests.lock().unwrap();
                 requests.push(request.clone());
@@ -1620,6 +1677,12 @@ mod tests {
             Event::PullRequestClosed { pull_request, .. } => {
                 format!("pull_request_closed #{pull_request}")
             }
+            Event::StatusNotSet {
+                number,
+                status,
+                reason,
+                ..
+            } => format!("status_not_set {number} {status} ({reason})"),
         }
     }
 
@@ -1715,6 +1778,113 @@ mod tests {
 
         assert_eq!(state.status, BuildStatus::Succeeded);
         assert_eq!(state.cost_usd, Decimal::from_str("1.00").unwrap());
+    }
+
+    #[test]
+    fn an_epics_build_sets_the_epic_and_then_each_issue_in_progress() {
+        let github = epic([(2, &[]), (3, &[2])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+
+        build(&github, &agent, root.path(), 1);
+
+        let in_progress = "In progress".to_owned();
+        assert_eq!(
+            statuses(&github),
+            [
+                (1, in_progress.clone()),
+                (2, in_progress.clone()),
+                (3, in_progress.clone()),
+            ]
+        );
+        assert_eq!(
+            *agent.statuses_seen.lock().unwrap(),
+            [Some(in_progress.clone()), Some(in_progress)]
+        );
+    }
+
+    #[test]
+    fn a_single_issue_is_in_progress_in_review_and_in_progress_again_to_address_it() {
+        let github = single();
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer =
+            FakeReviewer::new(&github, root.path(), Some("changes")).then(Some("approve"));
+
+        build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        let (working, reviewing) = ("In progress".to_owned(), "In review".to_owned());
+        assert_eq!(
+            statuses(&github),
+            [
+                (7, working.clone()),
+                (7, reviewing.clone()),
+                (7, working.clone()),
+                (7, reviewing.clone()),
+            ]
+        );
+        assert_eq!(
+            *agent.statuses_seen.lock().unwrap(),
+            [Some(working.clone()), Some(working)]
+        );
+        assert_eq!(
+            *reviewer.statuses_seen.lock().unwrap(),
+            [Some(reviewing.clone()), Some(reviewing)]
+        );
+    }
+
+    #[test]
+    fn an_epics_review_sets_the_epic_in_review() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+
+        build_reviewed(&github, &agent, &reviewer, root.path(), 1, reviewing());
+
+        let (working, reviewing) = ("In progress".to_owned(), "In review".to_owned());
+        assert_eq!(
+            statuses(&github),
+            [(1, working.clone()), (2, working), (1, reviewing)]
+        );
+    }
+
+    #[test]
+    fn a_build_with_problems_sets_no_status() {
+        let github = epic([(2, &[3]), (3, &[2])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+
+        let state = build(&github, &agent, root.path(), 1);
+
+        assert_eq!(state.status, BuildStatus::Failed);
+        assert_eq!(statuses(&github), []);
+    }
+
+    #[test]
+    fn a_status_that_cannot_be_set_is_logged_and_the_build_goes_on() {
+        let github = single();
+        github.fail("set_project_status", "Roadmap: it has no status");
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let reviewer = FakeReviewer::new(&github, root.path(), Some("approve"));
+
+        let state = build_reviewed(&github, &agent, &reviewer, root.path(), 7, reviewing());
+
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(state.reason, None);
+        let pr = pr_of(&github, 7);
+        assert_eq!(
+            events(root.path(), &state),
+            [
+                "build_started Issue main 7[]".to_owned(),
+                "issue_started 7".to_owned(),
+                "status_not_set 7 In progress (Roadmap: it has no status)".to_owned(),
+                format!("issue_finished 7 Succeeded #{pr}"),
+                "status_not_set 7 In review (Roadmap: it has no status)".to_owned(),
+                format!("build_finished Succeeded #{pr} Approve 0 open"),
+            ]
+        );
     }
 
     #[test]

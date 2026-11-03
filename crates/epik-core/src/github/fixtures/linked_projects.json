@@ -1,0 +1,86 @@
+[
+  {
+    "data": {
+      "repository": {
+        "projectsV2": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Mw"
+          },
+          "nodes": [
+            {
+              "id": "PVT_kwDOD1yToc4BkmEz",
+              "title": "Epik",
+              "closed": false,
+              "field": {
+                "id": "PVTSSF_lADOD1yToc4BkmEzzhjWHq0",
+                "options": [
+                  {
+                    "id": "f75ad846",
+                    "name": "Backlog"
+                  },
+                  {
+                    "id": "47fc9ee4",
+                    "name": "In progress"
+                  },
+                  {
+                    "id": "df73e18b",
+                    "name": "In review"
+                  },
+                  {
+                    "id": "b5a4d6fd",
+                    "name": "Done"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PVT_kwDOD1yToc4BkDbS",
+              "title": "Epik",
+              "closed": true,
+              "field": {
+                "id": "PVTSSF_lADOD1yToc4BkDbSzhi1eOo",
+                "options": [
+                  {
+                    "id": "f75ad846",
+                    "name": "Backlog"
+                  },
+                  {
+                    "id": "47fc9ee4",
+                    "name": "In progress"
+                  },
+                  {
+                    "id": "df73e18b",
+                    "name": "In review"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PVT_kwDOD1yToc4BkDa9",
+              "title": "Epik",
+              "closed": true,
+              "field": {
+                "id": "PVTSSF_lADOD1yToc4BkDa9zhi1d6c",
+                "options": [
+                  {
+                    "id": "f75ad846",
+                    "name": "Todo"
+                  },
+                  {
+                    "id": "47fc9ee4",
+                    "name": "In Progress"
+                  },
+                  {
+                    "id": "98236657",
+                    "name": "Done"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+]

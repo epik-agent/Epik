@@ -292,6 +292,13 @@ pub trait GitHub: Send + Sync {
 
     /// How many of pull request `pr`'s review threads are unresolved.
     fn open_review_threads(&self, repo: &str, pr: u64) -> Result<usize>;
+
+    /// Sets issue `number`'s status to `status`, matched ignoring case, on
+    /// each of the repository's linked projects, its open ones, adding the
+    /// issue to any it isn't on. A project with no such status keeps the
+    /// issue with the status it has. A failure on one project doesn't stop
+    /// the others: the error names each project that failed.
+    fn set_project_status(&self, repo: &str, number: u64, status: &str) -> Result<()>;
 }
 
 /// The keywords by which a pull request's body closes an issue.
