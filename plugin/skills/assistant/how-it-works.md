@@ -33,6 +33,8 @@ To build, the user asks you to build an issue or an epic. You hand the build to 
 
 Builds never merge into the default branch. A single issue's build stops at an open pull request into it. For an epic, the app merges each issue's pull request into the epic branch, then opens the epic's pull request into the default branch, which waits for the user. The pull request is where the user decides what merges. With review on, an agent reviews that pull request first (see **Review**).
 
+An epic merges one pull request at a time, so that each has passed its checks against the branch it merges into. A pull request that has fallen behind the epic branch is updated and its checks run again before it merges. One that conflicts, or whose checks fail, goes back to a coding agent, which merges the epic branch into it, fixes what broke and pushes, while other issues go on merging. That is slower than merging at once, and in exchange breaking code doesn't reach the epic branch through Epik's merges.
+
 ## Roles
 
 Epik's work comes in kinds, called **roles**, and the user chooses an agent and a model for each in the app's **Settings…**, under **Agents**:
@@ -151,6 +153,8 @@ Desktop's Code tab loads user-scope plugins, so once the setup checklist has ins
 **A build is refused because Codex or its sign-in is missing.** A role uses Codex and its setup isn't done on the machine building. Settings says "Its setup isn't done" beside Codex; **Check setup…** downloads Codex and signs it in. On a host, run `~/.epik/bin/epik-app setup` there.
 
 **The review keeps asking for changes.** After two rounds of changes the build stops, and the run needs attention: "the review still asks for changes after 2 rounds". Nothing is lost: the pull request waits with its reviews, and the threads still open are where the reviewer and the coding agent disagree, or what the coding agent couldn't fix. Have the user read those threads on GitHub and decide, as with any review: fix what is right, answer and resolve what isn't, and merge when they are satisfied. The reviewer can be wrong. If it is often wrong, a different review model, or review turned off, may serve them better.
+
+**An issue fails with "still conflicts" or "checks still fail".** A pull request went back to a coding agent twice and still can't merge into the epic branch: "#12 still conflicts after 2 resolve sessions". Nothing is lost: the pull request stays open with what the agents pushed. Have the user read it, fix it on its branch and merge it, then build the epic again for what it blocked.
 
 **A cost says "not reported".** Codex doesn't report what it spends, so its sessions have a time but no cost, and totals say how much is missing rather than count it as zero. Its usage is in the user's OpenAI account.
 
