@@ -37,6 +37,7 @@ An epic is an issue with sub-issues: the epic issue states the goal, and its sub
 
 An agent implementing an issue knows only what the issue tells it and what it finds in the repository. It never sees this conversation. So:
 
+- **Create every issue with `issue_create`**, the epic issue and its sub-issues included, never with `gh`: it also puts the issue on the repository's open GitHub Projects. When it reports `project_failures`, the issue exists; tell the user which projects it isn't on.
 - **An issue is self-contained.** Whatever the agent needs from the epic, from the issues around it, or from what the user said to you is written into the issue. Do not rely on a link being followed.
 - **The trades are already made.** Agents do not turn the dials; they hold none of the conversation the dials are turned in. An issue says what is in scope and what is not, which existing component to use, and what debt is accepted. Where an agent finds a decision the issue does not cover, it takes the smaller option.
 - **Issues are for planned work.** Investigation is something you do with the user, not something you file. Every issue describes work you could hand to an agent today.

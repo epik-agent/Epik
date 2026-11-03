@@ -31,6 +31,13 @@ pub enum Work<'a> {
         pull_request: u64,
         head: &'a str,
     },
+    /// Resolve what keeps `pull_request`, open on branch `head`, which
+    /// implements `issue`, from merging into the target branch.
+    Resolve {
+        issue: u64,
+        pull_request: u64,
+        head: &'a str,
+    },
 }
 
 /// The prompt for `work` in `repo`, whose pull request goes into `branch`.
@@ -75,6 +82,26 @@ pub fn prompt(repo: &str, work: Work, branch: &str) -> String {
                 format!("{ISSUE_PROCEDURE}\n{addressing}"),
             )
         }
+        Work::Resolve {
+            issue,
+            pull_request,
+            head,
+        } => (
+            format!(
+                "Resolve pull request #{pull_request} of the GitHub repository {repo}, \
+                 which implements issue #{issue}."
+            ),
+            format!(
+                "Pull request #{pull_request} is already open, on branch `{head}`, and \
+                 conflicts with `{branch}` or fails its checks against it. This replaces \
+                 the procedure's first steps: make the worktree from `{head}`, not a new \
+                 branch; there, merge `{branch}` into it, resolve any conflicts and make \
+                 the tests pass; push to `{head}`; and open no new pull request. Then \
+                 wait for its checks as the procedure says.\n\
+                 \n"
+            ),
+            ISSUE_PROCEDURE.to_owned(),
+        ),
     };
     format!(
         "{task} The target branch is `{branch}`.\n\
@@ -232,6 +259,36 @@ mod tests {
             "{header}"
         );
         assert!(header.contains("Push to it directly"), "{header}");
+    }
+
+    #[test]
+    fn a_resolve_prompt_names_the_pull_request_and_says_to_merge_the_target_branch() {
+        let work = Work::Resolve {
+            issue: 7,
+            pull_request: 12,
+            head: "issue-7-thing",
+        };
+        let prompt = prompt("owner/repo", work, "epic/1-thing");
+
+        let (header, rest) = prompt.split_once("# Epik's rules").unwrap();
+        assert!(header.contains("Resolve pull request #12"), "{header}");
+        assert!(header.contains("issue #7"), "{header}");
+        assert!(header.contains("owner/repo"), "{header}");
+        assert!(header.contains("`issue-7-thing`"), "{header}");
+        assert!(header.contains("merge `epic/1-thing`"), "{header}");
+        assert!(header.contains("resolve any conflicts"), "{header}");
+        assert!(header.contains("make the tests pass"), "{header}");
+        assert!(header.contains("wait for its checks"), "{header}");
+        assert!(header.contains("open no new pull request"), "{header}");
+        assert!(header.contains("no one will answer questions"), "{header}");
+        let (rules, procedure) = rest.split_once("# The procedure").unwrap();
+        assert!(rules.contains(RULES), "{rules}");
+        assert!(procedure.contains(ISSUE_PROCEDURE), "{procedure}");
+    }
+
+    #[test]
+    fn the_issue_procedure_merges_the_target_branch_before_the_work_ends() {
+        assert!(ISSUE_PROCEDURE.contains("merge the target branch into the branch"));
     }
 
     #[test]

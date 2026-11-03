@@ -16,8 +16,8 @@ use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
 use super::{
-    Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
+    BranchUpdate, Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub,
+    Issue, MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
     closing_pull_request,
 };
 
@@ -41,6 +41,11 @@ impl GhCli {
         Self {
             run: Box::new(run_gh),
         }
+    }
+
+    /// Runs `gh` through `run`.
+    pub(crate) fn with(run: impl Fn(&[&str]) -> Result<String> + Send + Sync + 'static) -> Self {
+        Self { run: Box::new(run) }
     }
 
     fn gh<const N: usize>(&self, args: [&str; N]) -> Result<String> {
@@ -69,6 +74,77 @@ impl GhCli {
     fn head_of(&self, repo: &str, branch: &str) -> Result<Option<String>> {
         let refs = self.list(&format!("repos/{repo}/git/matching-refs/heads/{branch}"))?;
         Ok(head_among(refs, branch))
+    }
+
+    /// The repository's linked projects: its open ones.
+    pub(crate) fn linked_projects(&self, repo: &str) -> Result<Vec<LinkedProject>> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| Error::new(format!("{repo} is not owner/name")))?;
+        let pages: Vec<ProjectsPage> = self.json([
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            &format!("query={LINKED_PROJECTS_QUERY}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("name={name}"),
+        ])?;
+        Ok(pages
+            .into_iter()
+            .flat_map(|page| page.data.repository.projects.nodes)
+            .filter(|project| !project.closed)
+            .collect())
+    }
+
+    /// Adds the issue with node ID `issue` to `project` and returns its
+    /// item's ID. GitHub answers for an issue already on the project with
+    /// the item it has.
+    pub(crate) fn add_to_project(&self, project: &LinkedProject, issue: &str) -> Result<String> {
+        let added: AddedToProject = self.json([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={ADD_TO_PROJECT}"),
+            "-f",
+            &format!("project={}", project.id),
+            "-f",
+            &format!("content={issue}"),
+        ])?;
+        Ok(added.data.added.item.id)
+    }
+
+    /// Puts the issue with node ID `issue` on `project` with `status`, or
+    /// when the project has no such status, with the one it has.
+    fn set_status_on(&self, project: &LinkedProject, issue: &str, status: &str) -> Result<()> {
+        let item = self.add_to_project(project, issue)?;
+        let found = project.status_field.as_ref().and_then(|field| {
+            let option = field
+                .options
+                .iter()
+                .find(|option| option.name.eq_ignore_ascii_case(status))?;
+            Some((field.id.as_str(), option.id.as_str()))
+        });
+        let (field, option) =
+            found.ok_or_else(|| Error::new(format!("it has no status \"{status}\"")))?;
+        self.gh([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={SET_PROJECT_STATUS}"),
+            "-f",
+            &format!("project={}", project.id),
+            "-f",
+            &format!("item={item}"),
+            "-f",
+            &format!("field={field}"),
+            "-f",
+            &format!("option={option}"),
+        ])?;
+        Ok(())
     }
 }
 
@@ -198,6 +274,21 @@ impl GitHub for GhCli {
         Ok(merged.sha)
     }
 
+    fn behind_by(&self, repo: &str, base: &str, head: &str) -> Result<u64> {
+        let path = format!("repos/{repo}/compare/{base}...{head}");
+        let compared: Compared = self.json(["api", &path])?;
+        Ok(compared.behind_by)
+    }
+
+    fn update_branch(&self, repo: &str, pr: u64) -> Result<BranchUpdate> {
+        let path = format!("repos/{repo}/pulls/{pr}/update-branch");
+        match self.gh(["api", "-X", "PUT", &path]) {
+            Ok(_) => Ok(BranchUpdate::Started),
+            Err(error) if is_conflict(&error) => Ok(BranchUpdate::Conflict),
+            Err(error) => Err(error),
+        }
+    }
+
     fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()> {
         self.gh([
             "api",
@@ -216,6 +307,8 @@ impl GitHub for GhCli {
             state: pull.state(),
             merge_commit: pull.merge_commit_sha.filter(|_| pull.merged_at.is_some()),
             head: pull.head.name,
+            head_sha: pull.head.sha,
+            mergeable: pull.mergeable,
         })
     }
 
@@ -305,6 +398,26 @@ impl GitHub for GhCli {
         ])?;
         Ok(unresolved(pages))
     }
+
+    fn set_project_status(&self, repo: &str, number: u64, status: &str) -> Result<()> {
+        let projects = self.linked_projects(repo)?;
+        if projects.is_empty() {
+            return Ok(());
+        }
+        let issue: IssueNodeId = self.json(["api", &format!("repos/{repo}/issues/{number}")])?;
+        let failures: Vec<String> = projects
+            .iter()
+            .filter_map(|project| {
+                let set = self.set_status_on(project, &issue.node_id, status);
+                set.err().map(|error| format!("{}: {error}", project.title))
+            })
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::new(failures.join("; ")))
+        }
+    }
 }
 
 /// Runs the `gh` on the `PATH`, failing with its stderr.
@@ -348,6 +461,18 @@ fn head_among(refs: Vec<RawRef>, branch: &str) -> Option<String> {
     refs.into_iter()
         .find(|found| found.name == wanted)
         .map(|found| found.object.sha)
+}
+
+/// Whether GitHub refused an update because of a conflict: "merge conflict
+/// between base and head (HTTP 422)".
+fn is_conflict(error: &Error) -> bool {
+    error.message.contains("(HTTP 422)") && error.message.contains("conflict")
+}
+
+/// What comparing two branches answers.
+#[derive(Deserialize)]
+struct Compared {
+    behind_by: u64,
 }
 
 /// What merging a pull request answers.
@@ -455,6 +580,10 @@ struct RawPull {
     merge_commit_sha: Option<String>,
     body: Option<String>,
     head: RawBranch,
+    /// Absent from a list of pull requests, and null while GitHub works it
+    /// out.
+    #[serde(default)]
+    mergeable: Option<bool>,
 }
 
 /// A pull request's branch, as the REST API returns it.
@@ -462,6 +591,7 @@ struct RawPull {
 struct RawBranch {
     #[serde(rename = "ref")]
     name: String,
+    sha: String,
 }
 
 impl RawPull {
@@ -537,6 +667,90 @@ fn unresolved(pages: Vec<ThreadsPage>) -> usize {
         .flat_map(|page| &page.data.repository.pull_request.review_threads.nodes)
         .filter(|thread| !thread.is_resolved)
         .count()
+}
+
+/// A repository's projects, a page at a time, as
+/// [`REVIEW_THREADS_QUERY`] pages its threads.
+const LINKED_PROJECTS_QUERY: &str = "query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { projectsV2(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { id title closed field(name: \"Status\") { ... on ProjectV2SingleSelectField { id options { id name } } } } } } }";
+
+const ADD_TO_PROJECT: &str = "mutation($project: ID!, $content: ID!) { addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } } }";
+
+const SET_PROJECT_STATUS: &str = "mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) { updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } } }";
+
+/// One page of [`LINKED_PROJECTS_QUERY`]'s reply.
+#[derive(Deserialize)]
+struct ProjectsPage {
+    data: ProjectsData,
+}
+
+#[derive(Deserialize)]
+struct ProjectsData {
+    repository: ProjectsRepository,
+}
+
+#[derive(Deserialize)]
+struct ProjectsRepository {
+    #[serde(rename = "projectsV2")]
+    projects: Projects,
+}
+
+#[derive(Deserialize)]
+struct Projects {
+    nodes: Vec<LinkedProject>,
+}
+
+/// A GitHub Project linked to a repository.
+#[derive(Deserialize)]
+pub(crate) struct LinkedProject {
+    id: String,
+    pub(crate) title: String,
+    closed: bool,
+    /// Its field named Status. A field of that name that isn't single
+    /// select comes back empty.
+    #[serde(rename = "field")]
+    status_field: Option<StatusField>,
+}
+
+#[derive(Deserialize)]
+struct StatusField {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    options: Vec<StatusOption>,
+}
+
+#[derive(Deserialize)]
+struct StatusOption {
+    id: String,
+    name: String,
+}
+
+/// What [`ADD_TO_PROJECT`] answers.
+#[derive(Deserialize)]
+struct AddedToProject {
+    data: AddedData,
+}
+
+#[derive(Deserialize)]
+struct AddedData {
+    #[serde(rename = "addProjectV2ItemById")]
+    added: AddedItem,
+}
+
+#[derive(Deserialize)]
+struct AddedItem {
+    item: ProjectItem,
+}
+
+#[derive(Deserialize)]
+struct ProjectItem {
+    id: String,
+}
+
+/// An issue's GraphQL ID, as the REST API returns it.
+#[derive(Deserialize)]
+struct IssueNodeId {
+    node_id: String,
 }
 
 #[derive(Deserialize)]
@@ -756,7 +970,7 @@ mod tests {
     #[test]
     fn an_unmerged_closed_pull_request_is_closed() {
         let pull: RawPull =
-            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a"}}"#)
+            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a", "sha": "b"}}"#)
                 .unwrap();
         assert_eq!(pull.state(), PullState::Closed);
     }
@@ -967,6 +1181,64 @@ mod tests {
         let open = gh.pull_request(REPO, 367).unwrap();
         assert_eq!(open.state, PullState::Open);
         assert_eq!(open.merge_commit, None);
+    }
+
+    #[test]
+    fn reads_whether_a_pull_request_can_merge_and_its_head_commit() {
+        let unknown = open_pull();
+        let mergeable = open_pull().replace("\"merged\": true", "\"mergeable\": true");
+        let conflicting = open_pull().replace("\"merged\": true", "\"mergeable\": false");
+        let path = || vec!["api", "repos/epik-agent/Epik/pulls/367"];
+        let (gh, _) = scripted(vec![
+            (path(), ok(&unknown)),
+            (path(), ok(&mergeable)),
+            (path(), ok(&conflicting)),
+        ]);
+        let read = gh.pull_request(REPO, 367).unwrap();
+        assert_eq!(read.mergeable, None);
+        assert_eq!(read.head_sha, "edbb8412fc97b3483af130acc955209d7f90ca7f");
+        assert_eq!(gh.pull_request(REPO, 367).unwrap().mergeable, Some(true));
+        assert_eq!(gh.pull_request(REPO, 367).unwrap().mergeable, Some(false));
+    }
+
+    #[test]
+    fn reads_how_far_behind_its_base_a_branch_is() {
+        let (gh, _) = scripted(vec![(
+            vec!["api", "repos/epik-agent/Epik/compare/epic/1-x...issue-2"],
+            ok(&fixture("compare.json")),
+        )]);
+        assert_eq!(gh.behind_by(REPO, "epic/1-x", "issue-2").unwrap(), 1);
+    }
+
+    /// The call updating pull request 367's branch.
+    fn update_branch() -> Vec<&'static str> {
+        vec![
+            "api",
+            "-X",
+            "PUT",
+            "repos/epik-agent/Epik/pulls/367/update-branch",
+        ]
+    }
+
+    #[test]
+    fn updating_a_branch_starts_the_update() {
+        let accepted = r#"{"message": "Updating pull request branch."}"#;
+        let (gh, _) = scripted(vec![(update_branch(), ok(accepted))]);
+        assert_eq!(gh.update_branch(REPO, 367), Ok(BranchUpdate::Started));
+    }
+
+    #[test]
+    fn a_branch_refused_for_a_conflict_is_a_conflict() {
+        let refused = "gh: merge conflict between base and head (HTTP 422)";
+        let (gh, _) = scripted(vec![(update_branch(), Err(Error::new(refused)))]);
+        assert_eq!(gh.update_branch(REPO, 367), Ok(BranchUpdate::Conflict));
+    }
+
+    #[test]
+    fn a_branch_refused_for_another_reason_is_an_error() {
+        let refused = "gh: There are no new commits on the base branch. (HTTP 422)";
+        let (gh, _) = scripted(vec![(update_branch(), Err(Error::new(refused)))]);
+        assert_eq!(gh.update_branch(REPO, 367), Err(Error::new(refused)));
     }
 
     #[test]
@@ -1200,6 +1472,188 @@ mod tests {
             reviews[2].body,
             "Two concerns, inline.\n\n<!-- epik-review: changes round=1 -->"
         );
+    }
+
+    /// The call that reads `epik-agent/Epik`'s projects.
+    fn linked_projects_call() -> Vec<&'static str> {
+        let query: &'static str =
+            Box::leak(format!("query={LINKED_PROJECTS_QUERY}").into_boxed_str());
+        vec![
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            query,
+            "-f",
+            "owner=epik-agent",
+            "-f",
+            "name=Epik",
+        ]
+    }
+
+    /// One open project `title`, with `statuses`, as a page of projects.
+    fn one_project(title: &str, statuses: &str) -> Result<String> {
+        Ok(format!(
+            r#"[{{"data": {{"repository": {{"projectsV2": {{"nodes": [
+                {{"id": "project-1", "title": "{title}", "closed": false, "field": {statuses}}}
+            ]}}}}}}}}]"#
+        ))
+    }
+
+    /// The call adding issue `issue-9` to `project`, and its reply.
+    fn add_call(project: &str, reply: Result<String>) -> (Vec<&'static str>, Result<String>) {
+        let query: &'static str = Box::leak(format!("query={ADD_TO_PROJECT}").into_boxed_str());
+        let project: &'static str = Box::leak(format!("project={project}").into_boxed_str());
+        let args = vec![
+            "api",
+            "graphql",
+            "-f",
+            query,
+            "-f",
+            project,
+            "-f",
+            "content=issue-9",
+        ];
+        (args, reply)
+    }
+
+    /// The call setting `item-9` to `option` on the fixture's open project.
+    fn set_call(option: &'static str) -> (Vec<&'static str>, Result<String>) {
+        let query: &'static str = Box::leak(format!("query={SET_PROJECT_STATUS}").into_boxed_str());
+        let args = vec![
+            "api",
+            "graphql",
+            "-f",
+            query,
+            "-f",
+            "project=PVT_kwDOD1yToc4BkmEz",
+            "-f",
+            "item=item-9",
+            "-f",
+            "field=PVTSSF_lADOD1yToc4BkmEzzhjWHq0",
+            "-f",
+            option,
+        ];
+        (args, ok("{}"))
+    }
+
+    fn added() -> Result<String> {
+        ok(r#"{"data": {"addProjectV2ItemById": {"item": {"id": "item-9"}}}}"#)
+    }
+
+    fn issue_read() -> (Vec<&'static str>, Result<String>) {
+        (
+            vec!["api", "repos/epik-agent/Epik/issues/9"],
+            ok(r#"{"node_id": "issue-9"}"#),
+        )
+    }
+
+    #[test]
+    fn the_linked_projects_are_the_open_ones() {
+        let (gh, _) = scripted(vec![(
+            linked_projects_call(),
+            ok(&fixture("linked_projects.json")),
+        )]);
+
+        let projects = gh.linked_projects(REPO).unwrap();
+
+        let ids: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["PVT_kwDOD1yToc4BkmEz"]);
+        assert_eq!(projects[0].title, "Epik");
+    }
+
+    #[test]
+    fn the_status_is_set_on_a_linked_project_adding_the_issue_ignoring_case() {
+        let (gh, _) = scripted(vec![
+            (linked_projects_call(), ok(&fixture("linked_projects.json"))),
+            issue_read(),
+            add_call("PVT_kwDOD1yToc4BkmEz", added()),
+            set_call("option=47fc9ee4"),
+        ]);
+
+        // The fixture's project calls it "In progress".
+        gh.set_project_status(REPO, 9, "In Progress").unwrap();
+    }
+
+    #[test]
+    fn a_repository_with_no_linked_project_does_nothing() {
+        let (gh, calls) = scripted(vec![(
+            linked_projects_call(),
+            ok(r#"[{"data": {"repository": {"projectsV2": {"nodes": []}}}}]"#),
+        )]);
+
+        gh.set_project_status(REPO, 9, "In progress").unwrap();
+
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_project_without_the_status_keeps_the_issue_and_says_so() {
+        // No call sets a status: the script holds none.
+        let (gh, _) = scripted(vec![
+            (
+                linked_projects_call(),
+                one_project(
+                    "Epik",
+                    r#"{"id": "field", "options": [{"id": "a", "name": "Todo"}]}"#,
+                ),
+            ),
+            issue_read(),
+            add_call("project-1", added()),
+        ]);
+
+        let error = gh.set_project_status(REPO, 9, "In review").unwrap_err();
+
+        assert_eq!(error.message, "Epik: it has no status \"In review\"");
+    }
+
+    #[test]
+    fn a_project_whose_status_field_is_missing_or_not_single_select_has_no_such_status() {
+        for field in ["null", "{}"] {
+            let (gh, _) = scripted(vec![
+                (linked_projects_call(), one_project("Epik", field)),
+                issue_read(),
+                add_call("project-1", added()),
+            ]);
+
+            let error = gh.set_project_status(REPO, 9, "In review").unwrap_err();
+
+            assert_eq!(error.message, "Epik: it has no status \"In review\"");
+        }
+    }
+
+    #[test]
+    fn a_failure_on_one_project_names_it_and_the_others_are_still_set() {
+        let pages = r#"[{"data": {"repository": {"projectsV2": {"nodes": [
+            {"id": "project-1", "title": "First", "closed": false, "field": null},
+            {"id": "PVT_kwDOD1yToc4BkmEz", "title": "Second", "closed": false, "field":
+                {"id": "PVTSSF_lADOD1yToc4BkmEzzhjWHq0", "options": [{"id": "b", "name": "Done"}]}}
+        ]}}}}]"#;
+        let (gh, calls) = scripted(vec![
+            (linked_projects_call(), ok(pages)),
+            issue_read(),
+            add_call("project-1", Err(Error::new("forbidden"))),
+            add_call("PVT_kwDOD1yToc4BkmEz", added()),
+            set_call("option=b"),
+        ]);
+
+        let error = gh.set_project_status(REPO, 9, "Done").unwrap_err();
+
+        assert_eq!(error.message, "First: forbidden");
+        assert_eq!(calls.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn projects_that_cannot_be_read_fail_the_call() {
+        let (gh, _) = scripted(vec![(
+            linked_projects_call(),
+            Err(Error::new("missing scope")),
+        )]);
+
+        let error = gh.set_project_status(REPO, 9, "Done").unwrap_err();
+
+        assert_eq!(error.message, "missing scope");
     }
 
     #[test]

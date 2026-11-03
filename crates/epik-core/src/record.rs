@@ -225,6 +225,14 @@ pub enum Event {
         at: DateTime<Utc>,
         pull_request: u64,
     },
+    /// Issue `number`'s status couldn't be set on its repository's Projects.
+    /// The build goes on regardless.
+    StatusNotSet {
+        at: DateTime<Utc>,
+        number: u64,
+        status: String,
+        reason: String,
+    },
 }
 
 impl Event {
@@ -239,7 +247,8 @@ impl Event {
             | Event::IssueMerged { at, .. }
             | Event::BuildFinished { at, .. }
             | Event::BuildInterrupted { at, .. }
-            | Event::PullRequestClosed { at, .. } => *at,
+            | Event::PullRequestClosed { at, .. }
+            | Event::StatusNotSet { at, .. } => *at,
         }
     }
 }
@@ -716,7 +725,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
     for event in rest {
         state.latest_at = state.latest_at.max(event.at());
         match event {
-            Event::BuildStarted { .. } => {}
+            Event::BuildStarted { .. } | Event::StatusNotSet { .. } => {}
             Event::IssueStarted { at, number } => {
                 if let Some(issue) = state.issue_mut(*number) {
                     issue.status = IssueStatus::Running;
