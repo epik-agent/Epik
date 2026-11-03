@@ -514,7 +514,7 @@ impl Builds {
         }
     }
 
-    /// Checks GitHub for every run not building: see [`reconcile`].
+    /// Checks GitHub for every run: see [`reconcile`].
     pub fn reconcile(&self) -> reconcile::Report {
         reconcile::reconcile(&self.root, &*self.github, &self.active())
     }

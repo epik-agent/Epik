@@ -1,7 +1,9 @@
 //! Reconciling runs with GitHub, which the app does on a timer.
 //!
-//! GitHub decides when a run is over. On each check, for every monitored
-//! repository and each of its runs not building:
+//! GitHub decides when a run is over, and whether a failed issue's pull
+//! request merged after all. On each check, for every monitored repository,
+//! each failed issue of each of its epic runs, building or not, turns merged
+//! if its pull request has; and for each of its runs not building:
 //!
 //! | GitHub says | The library |
 //! |---|---|
@@ -20,7 +22,7 @@ use chrono::Utc;
 
 use crate::comment::{self, Merge};
 use crate::github::{GitHub, PullState, State};
-use crate::record::{BuildWriter, Event};
+use crate::record::{self, BuildWriter, Event, IssueStatus, Kind};
 use crate::repositories;
 use crate::run::{self, Disposition, RunKey, RunState};
 
@@ -44,8 +46,8 @@ pub struct Report {
     pub errors: Vec<String>,
 }
 
-/// Checks GitHub for every run of the monitored repositories under `root`,
-/// leaving alone the runs in `building`.
+/// Checks GitHub for every run of the monitored repositories under `root`.
+/// Of the runs in `building`, it only records failed issues that merged.
 pub fn reconcile(root: &Path, github: &dyn GitHub, building: &[RunKey]) -> Report {
     let mut report = Report::default();
     let monitored = match repositories::list(root) {
@@ -84,6 +86,9 @@ pub fn reconcile(root: &Path, github: &dyn GitHub, building: &[RunKey]) -> Repor
             }
         }
         for state in runs.iter().filter(|r| r.repo.eq_ignore_ascii_case(&repo)) {
+            if state.kind == Kind::Epic {
+                record_merged_issues(root, github, state, &mut report);
+            }
             if building.contains(&state.run) || state.disposition.is_building() {
                 continue;
             }
@@ -93,6 +98,66 @@ pub fn reconcile(root: &Path, github: &dyn GitHub, building: &[RunKey]) -> Repor
         }
     }
     report
+}
+
+/// Records as merged each failed issue of `state`'s latest build whose pull
+/// request has merged. An issue only an earlier build has stays failed: its
+/// merge can't be recorded in the latest build, whose fold would ignore it.
+fn record_merged_issues(root: &Path, github: &dyn GitHub, state: &RunState, report: &mut Report) {
+    let builds = match record::list_builds(root, &state.run) {
+        Ok(builds) => builds,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("{}: couldn't read its builds: {error}", state.run));
+            return;
+        }
+    };
+    let Some(latest) = builds.last() else {
+        return;
+    };
+    let failed = latest
+        .issues
+        .iter()
+        .filter(|issue| issue.status == IssueStatus::Failed);
+    for issue in failed {
+        let number = issue.issue.number;
+        if let Err(error) = record_if_merged(root, github, state, &latest.build_id, number) {
+            report
+                .errors
+                .push(format!("{}: #{number}: {error}", state.run));
+        }
+    }
+}
+
+/// Appends `issue_merged` to build `build_id` if issue `number`'s pull request
+/// into the run's branch has merged.
+fn record_if_merged(
+    root: &Path,
+    github: &dyn GitHub,
+    state: &RunState,
+    build_id: &str,
+    number: u64,
+) -> Result<(), String> {
+    let found = github
+        .find_pull_request(&state.repo, &state.branch, number)
+        .map_err(|error| format!("couldn't find its pull request: {error}"))?;
+    let Some(pr) = found.filter(|pr| pr.merged) else {
+        return Ok(());
+    };
+    let pull = github
+        .pull_request(&state.repo, pr.number)
+        .map_err(|error| format!("couldn't read #{}: {error}", pr.number))?;
+    BuildWriter::open(root, &state.run, build_id)
+        .and_then(|mut writer| {
+            writer.append(&Event::IssueMerged {
+                at: Utc::now(),
+                number,
+                pull_request: pr.number,
+                merge_commit: pull.merge_commit,
+            })
+        })
+        .map_err(|error| format!("couldn't record that #{} merged: {error}", pr.number))
 }
 
 /// Checks one run that isn't building.
@@ -169,7 +234,7 @@ pub fn finish(root: &Path, github: &dyn GitHub, state: &RunState) -> Result<(), 
 mod tests {
     use super::*;
     use crate::github::FakeGitHub;
-    use crate::record::{Issue, Kind, Outcome};
+    use crate::record::{Issue, Outcome};
     use chrono::{DateTime, TimeZone};
     use rust_decimal::Decimal;
 
@@ -255,6 +320,271 @@ mod tests {
         for event in &events {
             writer.append(event).unwrap();
         }
+    }
+
+    /// A build of a run of `kind` with `issues`, started at `at`. Each of
+    /// `failed` failed; the build failed too, unless `ended` is false.
+    fn record_failed(
+        root: &Path,
+        build_id: &str,
+        at: DateTime<Utc>,
+        kind: Kind,
+        issues: &[u64],
+        failed: &[u64],
+        ended: bool,
+    ) {
+        repositories::add(root, REPO, false, time(0)).unwrap();
+        let mut writer = BuildWriter::create(root, &key(), build_id).unwrap();
+        let started = Event::BuildStarted {
+            at,
+            build_id: build_id.to_owned(),
+            repo: REPO.to_owned(),
+            number: 1,
+            title: "The epic".to_owned(),
+            kind,
+            branch: "epic/1".to_owned(),
+            issues: issues
+                .iter()
+                .map(|number| Issue {
+                    number: *number,
+                    title: format!("Issue {number}"),
+                    blocked_by: vec![],
+                })
+                .collect(),
+            closed: vec![],
+            roles: Default::default(),
+        };
+        writer.append(&started).unwrap();
+        for number in failed {
+            writer
+                .append(&Event::IssueFinished {
+                    at,
+                    number: *number,
+                    outcome: Outcome::Failed,
+                    reason: Some("the merge was refused".to_owned()),
+                    pull_request: None,
+                    duration_ms: None,
+                    cost_usd: None,
+                })
+                .unwrap();
+        }
+        if ended {
+            writer
+                .append(&Event::BuildFinished {
+                    at,
+                    outcome: Outcome::Failed,
+                    reason: Some("an issue failed".to_owned()),
+                    pull_request: None,
+                    review: None,
+                    open_threads: None,
+                })
+                .unwrap();
+        }
+    }
+
+    /// A run of epic 1 whose build `b` failed issue 2; or, if `ended` is
+    /// false, is still building.
+    fn record_failed_issue(root: &Path, ended: bool) {
+        record_failed(root, "b", time(0), Kind::Epic, &[2], &[2], ended);
+    }
+
+    /// Opens a pull request into `epic/1` that closes `issue`.
+    fn open_issue_pull(github: &FakeGitHub, issue: u64) -> u64 {
+        let head = format!("issue-{issue}");
+        github.add_branch(REPO, &head);
+        github
+            .open_pull_request(
+                REPO,
+                &head,
+                "epic/1",
+                "The fix",
+                &format!("Closes #{issue}"),
+            )
+            .unwrap()
+    }
+
+    /// How many `issue_merged` events build `build_id` holds.
+    fn merges_recorded(root: &Path, build_id: &str) -> usize {
+        record::read_events(root, &key(), build_id)
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, Event::IssueMerged { .. }))
+            .count()
+    }
+
+    fn assert_merged(root: &Path, issue: u64, pull_request: u64) {
+        let run = run::read(root, &key()).unwrap();
+        let issue = run.issue(issue).unwrap();
+        assert_eq!(issue.status, IssueStatus::Merged);
+        assert_eq!(issue.reason, None);
+        assert_eq!(issue.pull_request, Some(pull_request));
+        assert_eq!(
+            issue.merge_commit,
+            Some(FakeGitHub::merge_commit(pull_request))
+        );
+    }
+
+    fn assert_failed(root: &Path, issue: u64) {
+        let run = run::read(root, &key()).unwrap();
+        let issue = run.issue(issue).unwrap();
+        assert_eq!(issue.status, IssueStatus::Failed);
+        assert_eq!(issue.reason.as_deref(), Some("the merge was refused"));
+    }
+
+    #[test]
+    fn a_failed_issue_whose_pull_request_merged_turns_merged_in_an_ended_run() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed_issue(root.path(), true);
+        let github = github();
+        let pr = open_issue_pull(&github, 2);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        assert_eq!(report, Report::default());
+        assert_merged(root.path(), 2, pr);
+        let run = run::read(root.path(), &key()).unwrap();
+        assert_eq!(
+            run.disposition,
+            Disposition::NeedsAttention,
+            "the run still needs a rerun"
+        );
+    }
+
+    #[test]
+    fn a_failed_issue_whose_pull_request_merged_turns_merged_in_a_building_run() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed_issue(root.path(), false);
+        let github = github();
+        let pr = open_issue_pull(&github, 2);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+        github.set_state(REPO, 1, State::Closed);
+
+        let report = reconcile(root.path(), &github, &[key()]);
+
+        assert_eq!(report, Report::default(), "the rest of the check skips it");
+        assert_merged(root.path(), 2, pr);
+        assert_eq!(
+            run::read(root.path(), &key()).unwrap().disposition,
+            Disposition::Building
+        );
+    }
+
+    #[test]
+    fn a_failed_issue_whose_pull_request_is_open_or_absent_stays_failed() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed(
+            root.path(),
+            "b",
+            time(0),
+            Kind::Epic,
+            &[2, 5],
+            &[2, 5],
+            true,
+        );
+        let github = github();
+        github.add_issue(REPO, 5, "Another issue");
+        open_issue_pull(&github, 2);
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        assert_eq!(report, Report::default());
+        assert_failed(root.path(), 2);
+        assert_failed(root.path(), 5);
+        assert_eq!(merges_recorded(root.path(), "b"), 0);
+    }
+
+    #[test]
+    fn a_second_check_doesnt_record_the_merge_again() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed_issue(root.path(), true);
+        let github = github();
+        let pr = open_issue_pull(&github, 2);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+
+        reconcile(root.path(), &github, &[]);
+        reconcile(root.path(), &github, &[]);
+
+        assert_eq!(merges_recorded(root.path(), "b"), 1);
+    }
+
+    #[test]
+    fn a_failed_issue_the_latest_build_doesnt_have_isnt_recorded_on_every_check() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed(root.path(), "a", time(0), Kind::Epic, &[2], &[2], true);
+        record_failed(root.path(), "b", time(100), Kind::Epic, &[5], &[], true);
+        let github = github();
+        let pr = open_issue_pull(&github, 2);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+
+        reconcile(root.path(), &github, &[]);
+
+        assert_eq!(merges_recorded(root.path(), "a"), 0);
+        assert_eq!(merges_recorded(root.path(), "b"), 0);
+    }
+
+    #[test]
+    fn a_github_error_on_a_failed_issue_is_reported_and_the_check_goes_on() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed(
+            root.path(),
+            "b",
+            time(0),
+            Kind::Epic,
+            &[2, 5],
+            &[2, 5],
+            true,
+        );
+        let github = github();
+        github.add_issue(REPO, 5, "Another issue");
+        github.fail("find_pull_request", "gh: rate limited");
+        github.set_state(REPO, 1, State::Closed);
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        let [first, second] = &report.errors[..] else {
+            panic!("an error for each issue: {report:?}");
+        };
+        assert!(
+            first.contains("#2") && first.contains("rate limited"),
+            "{first}"
+        );
+        assert!(
+            second.contains("#5") && second.contains("rate limited"),
+            "{second}"
+        );
+        assert_eq!(report.finished, [key()], "the rest of the check went on");
+    }
+
+    #[test]
+    fn a_merge_commit_that_cant_be_read_is_recorded_on_a_later_check() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed_issue(root.path(), true);
+        let github = github();
+        let pr = open_issue_pull(&github, 2);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+        github.fail("pull_request", "gh: rate limited");
+
+        let report = reconcile(root.path(), &github, &[]);
+
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert_failed(root.path(), 2);
+        github.succeed("pull_request");
+        reconcile(root.path(), &github, &[]);
+        assert_merged(root.path(), 2, pr);
+    }
+
+    #[test]
+    fn a_single_issue_run_stays_failed() {
+        let root = tempfile::tempdir().unwrap();
+        record_failed(root.path(), "b", time(0), Kind::Issue, &[1], &[1], true);
+        let github = github();
+        let pr = open_issue_pull(&github, 1);
+        github.set_pull_state(REPO, pr, PullState::Merged);
+
+        reconcile(root.path(), &github, &[]);
+
+        assert_eq!(merges_recorded(root.path(), "b"), 0);
     }
 
     #[test]
@@ -420,9 +750,7 @@ mod tests {
         assert_eq!(github.repo(REPO).issues[&1].comments.len(), 1);
         assert!(!commented(root.path(), &key()).exists());
         assert_eq!(
-            fs::read_dir(crate::record::runs_dir(root.path()))
-                .unwrap()
-                .count(),
+            fs::read_dir(record::runs_dir(root.path())).unwrap().count(),
             0
         );
     }

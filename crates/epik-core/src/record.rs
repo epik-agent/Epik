@@ -759,6 +759,7 @@ pub fn fold(events: &[Event]) -> Option<BuildState> {
             } => {
                 if let Some(issue) = state.issue_mut(*number) {
                     issue.status = IssueStatus::Merged;
+                    issue.reason = None;
                     issue.pull_request = Some(*pull_request);
                     issue.merge_commit = merge_commit.clone();
                 }
@@ -1197,6 +1198,26 @@ mod tests {
         assert_eq!(failed.reason.as_deref(), Some("tests failed"));
         assert_eq!(state.issue(14).unwrap().status, IssueStatus::Waiting);
         assert_eq!(state.cost_usd, dollars("0.05"));
+    }
+
+    #[test]
+    fn fold_of_a_failed_issue_that_then_merged_keeps_no_reason() {
+        let events = vec![
+            epic_started("build", time(0)),
+            finished(10, 13, Outcome::Failed, "0.05"),
+            Event::IssueMerged {
+                at: time(20),
+                number: 13,
+                pull_request: 113,
+                merge_commit: Some("abc".to_owned()),
+            },
+        ];
+        let state = fold(&events).unwrap();
+        let merged = state.issue(13).unwrap();
+        assert_eq!(merged.status, IssueStatus::Merged);
+        assert_eq!(merged.reason, None);
+        assert_eq!(merged.pull_request, Some(113));
+        assert_eq!(merged.merge_commit.as_deref(), Some("abc"));
     }
 
     #[test]
