@@ -120,13 +120,14 @@ pub fn shortcut(key: &str) -> Option<Item> {
         .find(|item| item.key() == Some(key.to_ascii_uppercase()))
 }
 
-/// That Epik is running, and its runs, agents and time up.
+/// That Epik is running, and its runs, agents and time up. Its dot blinks
+/// while a run is `building`.
 #[component]
-pub fn Header(about: String) -> impl IntoView {
+pub fn Header(about: String, #[prop(optional)] building: bool) -> impl IntoView {
     view! {
         <header>
             <div class="running">
-                <span class="dot"></span>
+                <span class=if building { "dot building" } else { "dot" }></span>
                 <span class="name">"Epik is running"</span>
             </div>
             <div class="about">{about}</div>
@@ -320,7 +321,7 @@ pub fn PopoverWindow() -> impl IntoView {
     view! {
         {move || match drawn.get() {
             Some(Ok(popover)) => view! {
-                <Header about=popover.about/>
+                <Header about=popover.about building=!popover.runs.is_empty()/>
                 <Runs runs=popover.runs/>
             }
             .into_any(),

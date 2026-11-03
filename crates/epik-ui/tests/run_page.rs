@@ -76,6 +76,27 @@ fn a_failed_issue_card_is_failed() {
 }
 
 #[test]
+fn a_merged_issue_card_has_a_check_mark_and_a_failed_one_a_cross() {
+    let dot = |state| render(|| view! { <Issue issue=issue(2, state, 1, 0) chosen=false/> });
+    assert!(
+        dot(NodeState::Merged).contains(r#"<span class="dot">✓</span>"#),
+        "merged"
+    );
+    assert!(
+        dot(NodeState::Failed).contains(r#"<span class="dot">✕</span>"#),
+        "failed"
+    );
+    assert!(
+        dot(NodeState::Running).contains(r#"<span class="dot"></span>"#),
+        "running"
+    );
+    assert!(
+        dot(NodeState::NotStarted).contains(r#"<span class="dot"></span>"#),
+        "not started"
+    );
+}
+
+#[test]
 fn the_chosen_issue_card_is_chosen() {
     let html = render(|| view! { <Issue issue=issue(2, NodeState::Running, 1, 0) chosen=true/> });
     assert!(html.contains(r#"class="issue running chosen""#), "{html}");

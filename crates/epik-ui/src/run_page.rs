@@ -32,6 +32,15 @@ fn state_class(state: NodeState) -> &'static str {
     }
 }
 
+/// What an issue's dot says of how it ended, if it ended.
+fn state_mark(state: NodeState) -> Option<&'static str> {
+    match state {
+        NodeState::Merged => Some("✓"),
+        NodeState::Failed => Some("✕"),
+        NodeState::Running | NodeState::NotStarted => None,
+    }
+}
+
 fn disposition_class(disposition: Disposition) -> &'static str {
     match disposition {
         Disposition::Building | Disposition::Reviewing => "building",
@@ -132,7 +141,7 @@ pub fn Issue(
             on:click=choose
         >
             <div class="top">
-                <span class="dot"></span>
+                <span class="dot">{move || issue.with(|issue| state_mark(issue.state))}</span>
                 {number(issue)}
                 {known_pull_request(issue)}
                 {corner}
