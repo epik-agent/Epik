@@ -9,7 +9,7 @@
 mod fake;
 mod gh;
 
-pub use fake::FakeGitHub;
+pub use fake::{FakeGitHub, FakePull};
 pub use gh::GhCli;
 
 use std::fmt;
@@ -115,13 +115,26 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
-/// A pull request's state, its merge commit once it has merged, and the
-/// branch it is on.
+/// A pull request's state, its merge commit once it has merged, the branch
+/// it is on and that branch's commit, and whether it can merge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullStatus {
     pub state: PullState,
     pub merge_commit: Option<String>,
     pub head: String,
+    pub head_sha: String,
+    /// False when it conflicts with its base. `None` while GitHub works it
+    /// out, and for good once it is closed or merged.
+    pub mergeable: Option<bool>,
+}
+
+/// What GitHub said to updating a pull request's branch from its base.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchUpdate {
+    /// The update has started; the branch's head moves when it lands.
+    Started,
+    /// It refused, because the branch conflicts with the base.
+    Conflict,
 }
 
 /// How a pull request is merged.
@@ -240,6 +253,12 @@ pub trait GitHub: Send + Sync {
     /// none, and returns the merge commit's SHA. An already-merged pull
     /// request is success.
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
+
+    /// How many commits branch `base` has that branch `head` doesn't.
+    fn behind_by(&self, repo: &str, base: &str, head: &str) -> Result<u64>;
+
+    /// Starts updating pull request `pr`'s branch from its base.
+    fn update_branch(&self, repo: &str, pr: u64) -> Result<BranchUpdate>;
 
     /// Comments `body` on issue `number`.
     fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()>;
