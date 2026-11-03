@@ -15,4 +15,6 @@ Implement the issue on its own branch, and open a pull request into the target b
    pull request into the default branch waits for the user's review.
 6. Remove the git worktree. Leave its branch: the open pull request needs it.
 
-The issue is complete when its pull request is open with every check passing and its worktree has been removed.
+The issue is complete when its pull request is open with every check passing and its worktree has been removed. Do not
+end your turn before then. Nothing wakes you once your turn has ended: Epik closes the session, and anything still
+running or not yet pushed is lost. Run every command in the foreground and wait for it.
