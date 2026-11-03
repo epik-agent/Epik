@@ -5,16 +5,16 @@
 //! left behind with [`FakeGitHub::repo`]. As on GitHub, a repository's
 //! issues and pull requests share one sequence of numbers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 
 use super::{
-    Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethod, MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
-    closing_pull_request,
+    BranchUpdate, Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub,
+    Issue, MergeMethod, MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State,
+    SubIssue, closing_pull_request,
 };
 
 /// A label's color and description.
@@ -53,6 +53,45 @@ pub struct FakePull {
     pub reviews: Vec<Review>,
     /// How many of its review threads are unresolved.
     pub open_review_threads: usize,
+    /// How many commits its base has that it doesn't. Each merge into its
+    /// base adds one.
+    pub behind: u64,
+    /// Whether it conflicts with its base, so that it can be neither updated
+    /// nor merged.
+    pub conflicting: bool,
+    /// Whether GitHub says it can merge although it conflicts.
+    pub conflict_unnoticed: bool,
+    /// How many more reads of it say GitHub is still working out whether it
+    /// can merge.
+    pub mergeable_unknown_reads: u32,
+    /// What the next reads of its checks say, the last staying as `checks`.
+    pub check_reads: VecDeque<Checks>,
+    /// What [`check_reads`](Self::check_reads) becomes when its branch takes
+    /// a push. When empty, its checks stay as they are.
+    pub checks_after_push: Vec<Checks>,
+    /// How many pushes its branch has taken, which its head commit shows.
+    pub pushes: u32,
+    /// How many updates of its branch GitHub has started.
+    pub updates: u32,
+    /// How many reads of it pass before an update lands.
+    pub update_lag: u32,
+    /// How many more reads of it pass before the update under way lands.
+    pub update_landing_in: Option<u32>,
+    /// How far behind its base it was, and what its checks said, when it
+    /// merged.
+    pub merged_on: Option<(u64, Checks)>,
+}
+
+impl FakePull {
+    /// Takes its base into its branch and pushes, as an update or an agent
+    /// does: it is caught up, conflicts no more, and is on a new head.
+    pub fn take_base(&mut self) {
+        self.behind = 0;
+        self.conflicting = false;
+        self.conflict_unnoticed = false;
+        self.pushes += 1;
+        self.check_reads = self.checks_after_push.iter().copied().collect();
+    }
 }
 
 /// A repository the fake holds.
@@ -120,7 +159,7 @@ fn not_found() -> Error {
 
 /// The name of each [`GitHub`] operation, which [`FakeGitHub::fail`]
 /// takes.
-const OPERATIONS: [&str; 18] = [
+const OPERATIONS: [&str; 20] = [
     "issue",
     "sub_issues",
     "blocked_by",
@@ -131,6 +170,8 @@ const OPERATIONS: [&str; 18] = [
     "find_pull_request",
     "checks",
     "merge_pull_request",
+    "behind_by",
+    "update_branch",
     "close_issue",
     "open_pull_request",
     "comment",
@@ -295,7 +336,8 @@ impl FakeGitHub {
         });
     }
 
-    fn arrange_pull(&self, repo: &str, pr: u64, change: impl FnOnce(&mut FakePull)) {
+    /// Changes pull request `pr`.
+    pub fn arrange_pull(&self, repo: &str, pr: u64, change: impl FnOnce(&mut FakePull)) {
         self.arrange(repo, |fake| {
             change(fake.pull_mut(pr).expect("pull request exists"));
         });
@@ -400,8 +442,11 @@ impl GitHub for FakeGitHub {
     }
 
     fn checks(&self, repo: &str, pr: u64) -> Result<Checks> {
-        let world = self.enter("checks")?;
-        let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
+        let mut world = self.enter("checks")?;
+        let pull = world.repo_mut(repo)?.pull_mut(pr)?;
+        if let Some(next) = pull.check_reads.pop_front() {
+            pull.checks = next;
+        }
         Ok(pull.checks)
     }
 
@@ -413,14 +458,48 @@ impl GitHub for FakeGitHub {
         match pull.state {
             PullState::Closed => Err(Error::new("gh: Pull Request is not mergeable (HTTP 405)")),
             PullState::Merged => Ok(pull.merge_commit.clone().unwrap_or_default()),
+            PullState::Open if pull.conflicting => {
+                Err(Error::new("gh: Pull Request is not mergeable (HTTP 405)"))
+            }
             PullState::Open => {
                 pull.merged_with = Some(methods.choose(repo)?);
                 pull.state = PullState::Merged;
+                pull.merged_on = Some((pull.behind, pull.checks));
                 let sha = FakeGitHub::merge_commit(pr);
                 pull.merge_commit = Some(sha.clone());
+                let base = pull.base.clone();
+                for other in fake.pulls.values_mut() {
+                    if other.base == base && other.state == PullState::Open {
+                        other.behind += 1;
+                    }
+                }
                 Ok(sha)
             }
         }
+    }
+
+    fn behind_by(&self, repo: &str, base: &str, head: &str) -> Result<u64> {
+        let world = self.enter("behind_by")?;
+        let mut pulls = world.repo(repo)?.pulls.values();
+        let pull = pulls
+            .find(|pull| pull.head == head && pull.base == base)
+            .ok_or_else(not_found)?;
+        Ok(pull.behind)
+    }
+
+    fn update_branch(&self, repo: &str, pr: u64) -> Result<BranchUpdate> {
+        let mut world = self.enter("update_branch")?;
+        let pull = world.repo_mut(repo)?.pull_mut(pr)?;
+        if pull.conflicting {
+            return Ok(BranchUpdate::Conflict);
+        }
+        pull.updates += 1;
+        if pull.update_lag == 0 {
+            pull.take_base();
+        } else {
+            pull.update_landing_in = Some(pull.update_lag);
+        }
+        Ok(BranchUpdate::Started)
     }
 
     fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()> {
@@ -431,13 +510,29 @@ impl GitHub for FakeGitHub {
     }
 
     fn pull_request(&self, repo: &str, pr: u64) -> Result<PullStatus> {
-        let world = self.enter("pull_request")?;
-        let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
-        Ok(PullStatus {
+        let mut world = self.enter("pull_request")?;
+        let pull = world.repo_mut(repo)?.pull_mut(pr)?;
+        let status = PullStatus {
             state: pull.state,
             merge_commit: pull.merge_commit.clone(),
             head: pull.head.clone(),
-        })
+            head_sha: format!("{}-{}", pull.head, pull.pushes),
+            mergeable: if pull.state != PullState::Open || pull.mergeable_unknown_reads > 0 {
+                None
+            } else {
+                Some(!pull.conflicting || pull.conflict_unnoticed)
+            },
+        };
+        pull.mergeable_unknown_reads = pull.mergeable_unknown_reads.saturating_sub(1);
+        match pull.update_landing_in {
+            Some(1) => {
+                pull.update_landing_in = None;
+                pull.take_base();
+            }
+            Some(left) => pull.update_landing_in = Some(left - 1),
+            None => {}
+        }
+        Ok(status)
     }
 
     fn repo_exists(&self, repo: &str) -> Result<bool> {
@@ -484,6 +579,17 @@ impl GitHub for FakeGitHub {
             merge_commit: None,
             reviews: Vec::new(),
             open_review_threads: 0,
+            behind: 0,
+            conflicting: false,
+            conflict_unnoticed: false,
+            mergeable_unknown_reads: 0,
+            check_reads: VecDeque::new(),
+            checks_after_push: Vec::new(),
+            pushes: 0,
+            updates: 0,
+            update_lag: 0,
+            update_landing_in: None,
+            merged_on: None,
         };
         fake.pulls.insert(number, pull);
         Ok(number)
@@ -715,17 +821,17 @@ mod tests {
     }
 
     #[test]
-    fn merges_with_a_merge_commit_by_default() {
-        assert_eq!(merged_with(MergeMethods::ALL), Ok(MergeMethod::Merge));
+    fn merges_with_a_squash_by_default() {
+        assert_eq!(merged_with(MergeMethods::ALL), Ok(MergeMethod::Squash));
     }
 
     #[test]
     fn merges_with_a_method_the_repository_allows() {
-        let squash = MergeMethods {
-            squash: true,
+        let rebase = MergeMethods {
+            rebase: true,
             ..MergeMethods::NONE
         };
-        assert_eq!(merged_with(squash), Ok(MergeMethod::Squash));
+        assert_eq!(merged_with(rebase), Ok(MergeMethod::Rebase));
         assert!(merged_with(MergeMethods::NONE).is_err());
     }
 
@@ -749,6 +855,103 @@ mod tests {
         assert_eq!(github.checks(REPO, pr).unwrap(), Checks::None);
         github.set_checks(REPO, pr, Checks::Passing);
         assert_eq!(github.checks(REPO, pr).unwrap(), Checks::Passing);
+    }
+
+    /// Opens a pull request from `issue-2` into `epic/1` in [`epic`].
+    fn opened(github: &FakeGitHub) -> u64 {
+        github
+            .open_pull_request(REPO, "issue-2", "epic/1", "First", "Closes #2")
+            .unwrap()
+    }
+
+    #[test]
+    fn a_pull_request_falls_behind_when_another_merges_into_its_base() {
+        let github = epic();
+        let pr = opened(&github);
+        github.add_branch(REPO, "issue-3");
+        let other = github
+            .open_pull_request(REPO, "issue-3", "epic/1", "Second", "Closes #3")
+            .unwrap();
+        assert_eq!(github.behind_by(REPO, "epic/1", "issue-2").unwrap(), 0);
+        github.merge_pull_request(REPO, other).unwrap();
+        assert_eq!(github.behind_by(REPO, "epic/1", "issue-2").unwrap(), 1);
+        let merged_on = |pr| github.repo(REPO).pulls[&pr].merged_on;
+        assert_eq!(merged_on(other), Some((0, Checks::None)));
+        github.merge_pull_request(REPO, pr).unwrap();
+        assert_eq!(merged_on(pr), Some((1, Checks::None)));
+    }
+
+    #[test]
+    fn updating_a_branch_catches_it_up_on_a_new_head_with_new_checks() {
+        let github = epic();
+        let pr = opened(&github);
+        github.set_checks(REPO, pr, Checks::Passing);
+        github.arrange_pull(REPO, pr, |pull| {
+            pull.behind = 2;
+            pull.checks_after_push = vec![Checks::None, Checks::Pending];
+        });
+        let before = github.pull_request(REPO, pr).unwrap().head_sha;
+        assert_eq!(github.update_branch(REPO, pr), Ok(BranchUpdate::Started));
+        assert_eq!(github.behind_by(REPO, "epic/1", "issue-2").unwrap(), 0);
+        assert_ne!(github.pull_request(REPO, pr).unwrap().head_sha, before);
+        assert_eq!(github.checks(REPO, pr).unwrap(), Checks::None);
+        assert_eq!(github.checks(REPO, pr).unwrap(), Checks::Pending);
+        assert_eq!(github.checks(REPO, pr).unwrap(), Checks::Pending);
+    }
+
+    #[test]
+    fn an_update_lands_after_some_reads_of_the_pull_request() {
+        let github = epic();
+        let pr = opened(&github);
+        github.arrange_pull(REPO, pr, |pull| {
+            pull.behind = 1;
+            pull.update_lag = 2;
+        });
+        let before = github.pull_request(REPO, pr).unwrap().head_sha;
+        github.update_branch(REPO, pr).unwrap();
+        let head = || github.pull_request(REPO, pr).unwrap().head_sha;
+        assert_eq!(head(), before);
+        assert_eq!(head(), before);
+        assert_ne!(head(), before);
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_cant_be_updated_or_merged() {
+        let github = epic();
+        let pr = opened(&github);
+        github.arrange_pull(REPO, pr, |pull| pull.conflicting = true);
+        let read = github.pull_request(REPO, pr).unwrap();
+        assert_eq!(read.mergeable, Some(false));
+        assert_eq!(github.update_branch(REPO, pr), Ok(BranchUpdate::Conflict));
+        assert!(github.merge_pull_request(REPO, pr).is_err());
+        github.arrange_pull(REPO, pr, FakePull::take_base);
+        assert_eq!(github.pull_request(REPO, pr).unwrap().mergeable, Some(true));
+        github.merge_pull_request(REPO, pr).unwrap();
+    }
+
+    #[test]
+    fn a_conflict_can_go_unnoticed_until_an_update_is_refused() {
+        let github = epic();
+        let pr = opened(&github);
+        github.arrange_pull(REPO, pr, |pull| {
+            pull.conflicting = true;
+            pull.conflict_unnoticed = true;
+        });
+        let read = github.pull_request(REPO, pr).unwrap();
+        assert_eq!(read.mergeable, Some(true));
+        assert_eq!(github.update_branch(REPO, pr), Ok(BranchUpdate::Conflict));
+    }
+
+    #[test]
+    fn mergeable_is_unknown_for_some_reads_and_once_closed() {
+        let github = epic();
+        let pr = opened(&github);
+        github.arrange_pull(REPO, pr, |pull| pull.mergeable_unknown_reads = 1);
+        let mergeable = || github.pull_request(REPO, pr).unwrap().mergeable;
+        assert_eq!(mergeable(), None);
+        assert_eq!(mergeable(), Some(true));
+        github.merge_pull_request(REPO, pr).unwrap();
+        assert_eq!(mergeable(), None);
     }
 
     #[test]

@@ -8,10 +8,14 @@
 //! [`Agent`], so it is tested with fakes of each.
 //!
 //! An agent's work ends at an open pull request. For an epic, the build
-//! waits for that pull request's checks, merges it into the epic branch and
-//! closes the issue, which GitHub does only for merges into the default
-//! branch. For a single issue, the pull request targets the default branch
-//! and is left for the user to merge.
+//! merges it into the epic branch and closes the issue, which GitHub does
+//! only for merges into the default branch. An epic merges one pull request
+//! at a time: holding the epic's merge slot, an issue updates a pull request
+//! that is behind and waits for its checks, so what merges has passed on the
+//! base it merges into. A pull request that conflicts or fails goes back to
+//! the coding agent, without the slot, up to [`RESOLVE_SESSIONS`] times. For
+//! a single issue, the pull request targets the default branch and is left
+//! for the user to merge.
 //!
 //! With review on, the run's pull request into the default branch, the
 //! single issue's or the epic's, is reviewed once its checks pass, and the
@@ -29,9 +33,9 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,7 +45,9 @@ use rust_decimal::Decimal;
 use crate::agent::{Agent, AgentOutcome, AgentRequest};
 use crate::cleanup;
 use crate::comment;
-use crate::github::{self, Checks, GitHub, PullRequest, State};
+use crate::github::{
+    self, BranchUpdate, Checks, GitHub, PullRequest, PullState, PullStatus, State,
+};
 use crate::graph::Graph;
 use crate::prompt::{self, Work};
 use crate::record::{
@@ -57,6 +63,15 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// How many times the run's pull request is reviewed before a review that
 /// still asks for changes leaves it to the user.
 pub const REVIEW_ROUNDS: u32 = 2;
+
+/// How many times a pull request that conflicts or fails its checks goes back
+/// to the coding agent before its issue fails.
+pub const RESOLVE_SESSIONS: u32 = 2;
+
+/// How many times, a [`CHECK_INTERVAL`] apart, the build reads what GitHub
+/// should soon settle before it gives up: whether a pull request can merge,
+/// whether its update has landed, whether its new head has checks.
+const SETTLE_READS: u32 = 20;
 
 /// The project status of an issue an agent is working on.
 const IN_PROGRESS: &str = "In progress";
@@ -303,6 +318,7 @@ pub fn start<'a>(
         problems,
         roles: request.roles.clone(),
         check_interval: CHECK_INTERVAL,
+        merge_slot: Mutex::new(()),
         log: Mutex::new(log),
     })
 }
@@ -336,7 +352,17 @@ pub struct Build<'a> {
     problems: Vec<String>,
     roles: Settings,
     check_interval: Duration,
+    /// Held by the one issue merging its pull request.
+    merge_slot: Mutex<()>,
     log: Mutex<Log>,
+}
+
+/// How one try at merging a pull request ended.
+enum MergeAttempt {
+    /// It merged, with this merge commit.
+    Merged(String),
+    /// It needs the coding agent, for this reason.
+    HandBack(String),
 }
 
 /// How one issue's turn ended.
@@ -605,18 +631,48 @@ impl<'a> Build<'a> {
     /// Runs the coding agent on the run's pull request `pr` into `base` as
     /// session `round`, to address the review on the pull request's branch.
     fn address(&self, pr: u64, round: u32, base: &str, cancel: &AtomicBool) -> Result<(), Stop> {
-        let number = self.number;
-        let head = self
-            .github
-            .pull_request(&self.repo, pr)
-            .map_err(|error| Stop::Failed(format!("couldn't read #{pr}: {error}")))?
-            .head;
+        let head = self.read_pull(pr)?.head;
         let work = Work::Address {
-            issue: number,
+            issue: self.number,
             epic: self.kind == Kind::Epic,
             pull_request: pr,
             head: &head,
         };
+        self.coding_session(
+            self.number,
+            round,
+            work,
+            base,
+            "addressing the review",
+            cancel,
+        )
+    }
+
+    /// Runs the coding agent on `pr`, issue `number`'s pull request into the
+    /// run's branch, as session `round`, to resolve what keeps it from
+    /// merging. It holds no merge slot.
+    fn resolve(&self, number: u64, pr: u64, round: u32, cancel: &AtomicBool) -> Result<(), Stop> {
+        let head = self.read_pull(pr)?.head;
+        let work = Work::Resolve {
+            issue: number,
+            pull_request: pr,
+            head: &head,
+        };
+        let doing = format!("resolving #{pr}");
+        self.coding_session(number, round, work, &self.branch, &doing, cancel)
+    }
+
+    /// Runs the coding agent on `work` for `number` as session `round`, on a
+    /// pull request into `base`. `doing` says what for, if it stops.
+    fn coding_session(
+        &self,
+        number: u64,
+        round: u32,
+        work: Work,
+        base: &str,
+        doing: &str,
+        cancel: &AtomicBool,
+    ) -> Result<(), Stop> {
         let request = AgentRequest {
             prompt: prompt::prompt(&self.repo, work, base),
             issue: number,
@@ -641,7 +697,7 @@ impl<'a> Build<'a> {
         }
         if !outcome.exited_cleanly {
             return Err(Stop::Failed(format!(
-                "the agent addressing the review stopped ({}): {}",
+                "the agent {doing} stopped ({}): {}",
                 outcome.stop_reason,
                 outcome.error.as_deref().unwrap_or("no error given")
             )));
@@ -722,7 +778,7 @@ impl<'a> Build<'a> {
     }
 
     /// Runs issue `number`'s agent, then finds its pull request, and for an
-    /// epic waits for its checks, merges it, and closes the issue.
+    /// epic merges it and closes the issue.
     fn build_issue(&self, number: u64, cancel: &AtomicBool) -> Finished {
         let dir = &self.dir;
         let request = AgentRequest {
@@ -774,7 +830,7 @@ impl<'a> Build<'a> {
         if self.kind == Kind::Issue {
             return Finished::Done(pr.number);
         }
-        let closed = self.merge(pr, cancel).and_then(|sha| {
+        let closed = self.merge(number, pr, cancel).and_then(|sha| {
             self.append(Event::IssueMerged {
                 at: Utc::now(),
                 number,
@@ -795,15 +851,136 @@ impl<'a> Build<'a> {
         }
     }
 
-    /// Waits for `pr`'s checks, unless it has merged already, merges it,
-    /// and returns its merge commit.
-    fn merge(&self, pr: PullRequest, cancel: &AtomicBool) -> Result<String, Stop> {
-        if !pr.merged {
-            self.await_checks(pr.number, cancel)?;
+    /// Merges `pr`, issue `number`'s pull request, unless it has merged
+    /// already, and returns its merge commit. Each try holds the merge slot;
+    /// between tries the coding agent resolves what stopped it, up to
+    /// [`RESOLVE_SESSIONS`] times.
+    fn merge(&self, number: u64, pr: PullRequest, cancel: &AtomicBool) -> Result<String, Stop> {
+        let pr = match pr {
+            PullRequest {
+                merged: true,
+                number,
+            } => return self.merge_now(number),
+            PullRequest { number, .. } => number,
+        };
+        let mut had_checks = false;
+        let mut sessions = 0;
+        loop {
+            let slot = self.take_merge_slot(cancel)?;
+            let attempt = self.try_merge(pr, &mut had_checks, cancel)?;
+            drop(slot);
+            let stuck = match attempt {
+                MergeAttempt::Merged(sha) => return Ok(sha),
+                MergeAttempt::HandBack(stuck) => stuck,
+            };
+            if sessions == RESOLVE_SESSIONS {
+                return Err(Stop::Failed(format!(
+                    "{stuck} after {RESOLVE_SESSIONS} resolve sessions"
+                )));
+            }
+            sessions += 1;
+            // The issue's first coding session was round 1.
+            self.resolve(number, pr, sessions + 1, cancel)?;
         }
+    }
+
+    /// Waits for the merge slot, until cancelled.
+    fn take_merge_slot(&self, cancel: &AtomicBool) -> Result<MutexGuard<'_, ()>, Stop> {
+        loop {
+            match self.merge_slot.try_lock() {
+                Ok(slot) => return Ok(slot),
+                Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+            if !wait(CANCEL_POLL, cancel) {
+                return Err(Stop::Cancelled);
+            }
+        }
+    }
+
+    /// One try at merging `pr`, holding the merge slot: a conflict hands it
+    /// back to the agent, a pull request behind is updated, and once its
+    /// checks pass on its current head, it merges. `had_checks` remembers
+    /// whether it has had checks, so that a new head's having none yet isn't
+    /// passing. One no longer open has nothing to wait for.
+    fn try_merge(
+        &self,
+        pr: u64,
+        had_checks: &mut bool,
+        cancel: &AtomicBool,
+    ) -> Result<MergeAttempt, Stop> {
+        let status = self.await_pull(
+            pr,
+            |status| status.state != PullState::Open || status.mergeable.is_some(),
+            format!("GitHub never said whether #{pr} can merge"),
+            cancel,
+        )?;
+        if status.state == PullState::Open {
+            *had_checks |= self.read_checks(pr)? != Checks::None;
+            let conflicts = || MergeAttempt::HandBack(format!("#{pr} still conflicts"));
+            if status.mergeable == Some(false) {
+                return Ok(conflicts());
+            }
+            let behind = self
+                .github
+                .behind_by(&self.repo, &self.branch, &status.head)
+                .map_err(|error| Stop::Failed(format!("couldn't compare #{pr}: {error}")))?;
+            if behind > 0 {
+                let update = self
+                    .github
+                    .update_branch(&self.repo, pr)
+                    .map_err(|error| Stop::Failed(format!("couldn't update #{pr}: {error}")))?;
+                if update == BranchUpdate::Conflict {
+                    return Ok(conflicts());
+                }
+                // Until the head moves, the checks are the old head's.
+                self.await_pull(
+                    pr,
+                    |now| now.head_sha != status.head_sha,
+                    format!("the update of #{pr}'s branch never landed"),
+                    cancel,
+                )?;
+            }
+            if !self.checks_pass(pr, *had_checks, cancel)? {
+                let failing = format!("checks still fail on #{pr}");
+                return Ok(MergeAttempt::HandBack(failing));
+            }
+        }
+        self.merge_now(pr).map(MergeAttempt::Merged)
+    }
+
+    /// Merges `pr` and returns its merge commit.
+    fn merge_now(&self, pr: u64) -> Result<String, Stop> {
         self.github
-            .merge_pull_request(&self.repo, pr.number)
-            .map_err(|error| Stop::Failed(format!("couldn't merge #{}: {error}", pr.number)))
+            .merge_pull_request(&self.repo, pr)
+            .map_err(|error| Stop::Failed(format!("couldn't merge #{pr}: {error}")))
+    }
+
+    fn read_pull(&self, pr: u64) -> Result<PullStatus, Stop> {
+        self.github
+            .pull_request(&self.repo, pr)
+            .map_err(|error| Stop::Failed(format!("couldn't read #{pr}: {error}")))
+    }
+
+    /// Reads `pr` until `settled` says of it, failing with `never` after
+    /// [`SETTLE_READS`] reads.
+    fn await_pull(
+        &self,
+        pr: u64,
+        settled: impl Fn(&PullStatus) -> bool,
+        never: String,
+        cancel: &AtomicBool,
+    ) -> Result<PullStatus, Stop> {
+        for _ in 0..SETTLE_READS {
+            let status = self.read_pull(pr)?;
+            if settled(&status) {
+                return Ok(status);
+            }
+            if !wait(self.check_interval, cancel) {
+                return Err(Stop::Cancelled);
+            }
+        }
+        Err(Stop::Failed(never))
     }
 
     /// Closes issue `number`, merged by `pr`, with a comment of its time and
@@ -829,26 +1006,46 @@ impl<'a> Build<'a> {
             })
     }
 
-    /// Reads `pr`'s checks until none is pending. No checks count as
-    /// passing.
+    /// Reads `pr`'s checks until none is pending, and fails if they failed.
+    /// No checks count as passing.
     fn await_checks(&self, pr: u64, cancel: &AtomicBool) -> Result<(), Stop> {
+        if self.checks_pass(pr, false, cancel)? {
+            Ok(())
+        } else {
+            Err(Stop::Failed(format!("checks failed on #{pr}")))
+        }
+    }
+
+    /// Reads `pr`'s checks until none is pending, and says whether they
+    /// passed. No checks count as passing, unless `expected`: then they are
+    /// pending, for up to [`SETTLE_READS`] reads.
+    fn checks_pass(&self, pr: u64, expected: bool, cancel: &AtomicBool) -> Result<bool, Stop> {
+        let mut empty_reads = 0;
         loop {
-            match self.github.checks(&self.repo, pr) {
-                Ok(Checks::Passing | Checks::None) => return Ok(()),
-                Ok(Checks::Pending) => {}
-                Ok(Checks::Failing) => {
-                    return Err(Stop::Failed(format!("checks failed on #{pr}")));
+            match self.read_checks(pr)? {
+                Checks::Passing => return Ok(true),
+                Checks::Failing => return Ok(false),
+                Checks::None if !expected => return Ok(true),
+                Checks::None => {
+                    empty_reads += 1;
+                    if empty_reads == SETTLE_READS {
+                        return Err(Stop::Failed(format!(
+                            "no checks appeared on #{pr}'s new head"
+                        )));
+                    }
                 }
-                Err(error) => {
-                    return Err(Stop::Failed(format!(
-                        "couldn't read the checks on #{pr}: {error}"
-                    )));
-                }
+                Checks::Pending => {}
             }
             if !wait(self.check_interval, cancel) {
                 return Err(Stop::Cancelled);
             }
         }
+    }
+
+    fn read_checks(&self, pr: u64) -> Result<Checks, Stop> {
+        self.github
+            .checks(&self.repo, pr)
+            .map_err(|error| Stop::Failed(format!("couldn't read the checks on #{pr}: {error}")))
     }
 
     fn issue_finished(
@@ -957,9 +1154,10 @@ fn numbered<'a>(numbers: impl IntoIterator<Item = &'a u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{FakeGitHub, MergeMethods, PullState};
+    use crate::github::{FakeGitHub, FakePull, MergeMethods, PullState};
     use crate::record::{BuildStatus, IssueStatus, ReviewVerdict};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Barrier;
     use std::sync::atomic::AtomicUsize;
 
     const REPO: &str = "owner/repo";
@@ -970,6 +1168,9 @@ mod tests {
     enum Act {
         /// Opens a pull request closing the issue, with these checks.
         Pull(Checks),
+        /// Opens a pull request closing the issue, with passing checks, and
+        /// arranges it so.
+        PullArranged(fn(&mut FakePull)),
         /// Ends cleanly without a pull request.
         NoPull,
         /// Fails, as an agent that couldn't start does.
@@ -978,6 +1179,26 @@ mod tests {
         Cancel,
         /// Runs until cancelled.
         Hang,
+    }
+
+    /// What the fake agent does in a resolve session.
+    #[derive(Clone, Copy)]
+    enum Resolve {
+        /// Merges the target branch, fixes what broke and pushes, after which
+        /// the checks pass.
+        Fixes,
+        /// Ends cleanly, having changed nothing.
+        Leaves,
+        /// Fails, as an agent that couldn't start does.
+        Crashes,
+        /// Sets the cancel signal, as the user would mid-run.
+        Cancels,
+        /// Merges the pull request itself, as the user might.
+        Merges,
+        /// Pushes a head whose checks appear only after some reads.
+        PushesChecksToCome,
+        /// Fixes it, but only once issue 3's pull request has merged.
+        FixesOnce3Merges,
     }
 
     /// An [`Agent`] that acts on a [`FakeGitHub`] as an agent following the
@@ -989,6 +1210,11 @@ mod tests {
         /// Whether addressing a review fails, as an agent that couldn't
         /// start does.
         address_crashes: bool,
+        /// What each resolve session does in turn. The rest fix it.
+        resolves: Mutex<VecDeque<Resolve>>,
+        /// What agents wait at once they have acted, so that they finish
+        /// together.
+        finish_together: Option<Barrier>,
         requests: Mutex<Vec<AgentRequest>>,
         /// The status last set on each agent's issue as it started.
         statuses_seen: Mutex<Vec<Option<String>>>,
@@ -1002,6 +1228,8 @@ mod tests {
                 github,
                 acts: BTreeMap::from(acts),
                 address_crashes: false,
+                resolves: Mutex::new(VecDeque::new()),
+                finish_together: None,
                 requests: Mutex::new(Vec::new()),
                 statuses_seen: Mutex::new(Vec::new()),
                 running: AtomicUsize::new(0),
@@ -1009,6 +1237,78 @@ mod tests {
             }
         }
 
+        /// Makes the resolve sessions do `resolves`, in turn.
+        fn resolving(self, resolves: &[Resolve]) -> Self {
+            *self.resolves.lock().unwrap() = resolves.iter().copied().collect();
+            self
+        }
+
+        /// How many resolve sessions ran.
+        fn resolve_sessions(&self) -> usize {
+            let requests = self.requests.lock().unwrap();
+            requests.iter().filter(|r| resolves(r)).count()
+        }
+
+        /// Opens a pull request from `issue-<number>` into `branch` closing
+        /// issue `number`.
+        fn open(&self, number: u64, branch: &str) -> u64 {
+            let head = format!("issue-{number}");
+            self.github.add_branch(REPO, &head);
+            let title = format!("Issue {number}");
+            let body = format!("Closes #{number}");
+            self.github
+                .open_pull_request(REPO, &head, branch, &title, &body)
+                .unwrap()
+        }
+
+        /// Pushes to issue `number`'s pull request what it needs to merge,
+        /// with these checks to come.
+        fn push(&self, number: u64, checks: Vec<Checks>) {
+            let pr = pr_of(self.github, number);
+            self.github.arrange_pull(REPO, pr, |pull| {
+                pull.checks_after_push = checks;
+                pull.take_base();
+            });
+        }
+
+        /// Runs a resolve session on issue `number`'s pull request.
+        fn resolve(&self, number: u64, cancel: &AtomicBool) -> Option<String> {
+            let next = self.resolves.lock().unwrap().pop_front();
+            match next.unwrap_or(Resolve::Fixes) {
+                Resolve::Fixes => self.push(number, vec![Checks::Passing]),
+                Resolve::PushesChecksToCome => {
+                    let checks = [Checks::None, Checks::None, Checks::None, Checks::Passing];
+                    self.push(number, checks.to_vec());
+                }
+                Resolve::Merges => {
+                    let pr = pr_of(self.github, number);
+                    self.github.set_pull_state(REPO, pr, PullState::Merged);
+                }
+                Resolve::FixesOnce3Merges => {
+                    let merged = || {
+                        let pulls = self.github.repo(REPO).pulls;
+                        pulls
+                            .values()
+                            .any(|pull| pull.head == "issue-3" && pull.state == PullState::Merged)
+                    };
+                    let until = Instant::now() + Duration::from_secs(2);
+                    while !merged() {
+                        if Instant::now() > until {
+                            return Some("issue 3 never merged".into());
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    self.push(number, vec![Checks::Passing]);
+                }
+                Resolve::Leaves => {}
+                Resolve::Crashes => return Some("agent_failed".into()),
+                Resolve::Cancels => {
+                    cancel.store(true, Ordering::SeqCst);
+                    return Some("cancelled".into());
+                }
+            }
+            None
+        }
         /// Each agent's issue and target branch, in the order they ran.
         fn issues(&self) -> Vec<(u64, String)> {
             let requests = self.requests.lock().unwrap();
@@ -1020,6 +1320,9 @@ mod tests {
 
         fn act(&self, request: &AgentRequest, cancel: &AtomicBool) -> Option<String> {
             let (number, branch) = (request.issue, request.branch.as_str());
+            if resolves(request) {
+                return self.resolve(number, cancel);
+            }
             if addresses(request) {
                 return self.address_crashes.then(|| "agent_failed".into());
             }
@@ -1030,15 +1333,14 @@ mod tests {
                 .unwrap_or(Act::Pull(Checks::Passing))
             {
                 Act::Pull(checks) => {
-                    let head = format!("issue-{number}");
-                    self.github.add_branch(REPO, &head);
-                    let title = format!("Issue {number}");
-                    let body = format!("Closes #{number}");
-                    let pr = self
-                        .github
-                        .open_pull_request(REPO, &head, branch, &title, &body)
-                        .unwrap();
+                    let pr = self.open(number, branch);
                     self.github.set_checks(REPO, pr, checks);
+                    None
+                }
+                Act::PullArranged(arrange) => {
+                    let pr = self.open(number, branch);
+                    self.github.set_checks(REPO, pr, Checks::Passing);
+                    self.github.arrange_pull(REPO, pr, arrange);
                     None
                 }
                 Act::NoPull => None,
@@ -1055,6 +1357,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Whether `request` is a resolve session.
+    fn resolves(request: &AgentRequest) -> bool {
+        request.prompt.starts_with("Resolve pull request")
     }
 
     /// The status last set on issue `number`'s projects, if any was. An
@@ -1092,6 +1399,9 @@ mod tests {
             // Long enough for issues started together to overlap.
             thread::sleep(Duration::from_millis(50));
             let stopped = self.act(request, cancel);
+            if let Some(barrier) = &self.finish_together {
+                barrier.wait();
+            }
             self.running.fetch_sub(1, Ordering::SeqCst);
             AgentOutcome {
                 exited_cleanly: stopped.is_none(),
@@ -1762,9 +2072,10 @@ mod tests {
     }
 
     #[test]
-    fn failing_checks_fail_the_issue_and_leave_it_open() {
+    fn checks_still_failing_after_two_resolve_sessions_fail_the_issue_and_leave_it_open() {
         let github = epic([(2, &[])]);
-        let agent = FakeAgent::new(&github, [(2, Act::Pull(Checks::Failing))]);
+        let agent = FakeAgent::new(&github, [(2, Act::Pull(Checks::Failing))])
+            .resolving(&[Resolve::Leaves, Resolve::Leaves]);
         let root = tempfile::tempdir().unwrap();
         let state = build(&github, &agent, root.path(), 1);
 
@@ -1774,10 +2085,14 @@ mod tests {
             [
                 "issue_started 2".to_owned(),
                 format!("issue_finished 2 Succeeded #{pr}"),
-                format!("issue_finished 2 Failed #{pr} (checks failed on #{pr})"),
+                format!(
+                    "issue_finished 2 Failed #{pr} (checks still fail on #{pr} \
+                     after 2 resolve sessions)"
+                ),
                 "build_finished Failed (failed: #2)".to_owned(),
             ]
         );
+        assert_eq!(agent.resolve_sessions(), 2);
         let repo = github.repo(REPO);
         assert_eq!(repo.pulls[&pr].state, PullState::Open);
         assert_eq!(repo.issues[&2].state, State::Open);
@@ -1819,6 +2134,393 @@ mod tests {
         );
         let repo = github.repo(REPO);
         assert_eq!(repo.issues[&2].state, State::Closed);
+    }
+
+    /// Builds epic 1 of issue 2 alone, whose agent arranges its pull request
+    /// with `arrange` and resolves it as `resolves` say. The build, the pull
+    /// request, and how many resolve sessions ran.
+    fn build_arranged(
+        github: &FakeGitHub,
+        arrange: fn(&mut FakePull),
+        resolves: &[Resolve],
+        root: &Path,
+    ) -> (BuildState, u64, usize) {
+        let agent = FakeAgent::new(github, [(2, Act::PullArranged(arrange))]).resolving(resolves);
+        let state = build(github, &agent, root, 1);
+        (state, pr_of(github, 2), agent.resolve_sessions())
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_gets_a_resolve_session_then_merges() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let conflicting: fn(&mut FakePull) = |pull| pull.conflicting = true;
+        let agent = FakeAgent::new(&github, [(2, Act::PullArranged(conflicting))]);
+        let state = build(&github, &agent, root.path(), 1);
+
+        let pr = pr_of(&github, 2);
+        assert_eq!(agent.resolve_sessions(), 1);
+        let requests = agent.requests.lock().unwrap();
+        let resolve = &requests[1];
+        assert_eq!(resolve.branch, EPIC_BRANCH);
+        assert!(resolve.prompt.contains(&format!("#{pr}")));
+        assert!(resolve.prompt.contains("`issue-2`"));
+        let events = all_events(root.path(), &state);
+        assert!(
+            events.contains(&"session_started 2 Coding 2 claude None 2-coding-2.jsonl".to_owned()),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&format!("issue_merged 2 #{pr}")),
+            "{events:?}"
+        );
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Merged);
+    }
+
+    #[test]
+    fn a_pull_request_still_conflicting_after_two_resolve_sessions_fails_its_issue() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| pull.conflicting = true,
+            &[Resolve::Leaves, Resolve::Leaves],
+            root.path(),
+        );
+        assert_eq!(sessions, 2);
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!(
+                "issue_finished 2 Failed #{pr} (#{pr} still conflicts after 2 resolve sessions)"
+            )
+        );
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn an_agent_that_fails_to_resolve_fails_the_issue() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, _) = build_arranged(
+            &github,
+            |pull| pull.conflicting = true,
+            &[Resolve::Crashes],
+            root.path(),
+        );
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!(
+                "issue_finished 2 Failed #{pr} \
+                 (the agent resolving #{pr} stopped (agent_failed): it broke)"
+            )
+        );
+    }
+
+    #[test]
+    fn cancelling_a_resolve_session_interrupts_the_build() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, _) = build_arranged(
+            &github,
+            |pull| pull.conflicting = true,
+            &[Resolve::Cancels],
+            root.path(),
+        );
+        assert_eq!(state.status, BuildStatus::Interrupted);
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn a_pull_request_behind_is_updated_its_new_checks_awaited_then_merged() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 3;
+                pull.checks_after_push = vec![Checks::Pending, Checks::Passing];
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 0);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let repo = github.repo(REPO);
+        assert_eq!(repo.pulls[&pr].updates, 1);
+        assert_eq!(repo.pulls[&pr].merged_on, Some((0, Checks::Passing)));
+    }
+
+    #[test]
+    fn an_update_not_yet_landed_is_waited_for_before_the_checks_count() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (_, pr, _) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.update_lag = 3;
+                pull.checks_after_push = vec![Checks::Pending, Checks::Passing];
+            },
+            &[],
+            root.path(),
+        );
+        let repo = github.repo(REPO);
+        assert_eq!(repo.pulls[&pr].updates, 1);
+        assert_eq!(repo.pulls[&pr].merged_on, Some((0, Checks::Passing)));
+    }
+
+    #[test]
+    fn an_update_that_never_lands_fails_the_issue() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, _) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.update_lag = u32::MAX;
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!("issue_finished 2 Failed #{pr} (the update of #{pr}'s branch never landed)")
+        );
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn checks_failing_after_an_update_go_back_to_the_agent() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.checks_after_push = vec![Checks::Pending, Checks::Failing];
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let repo = github.repo(REPO);
+        assert_eq!(repo.pulls[&pr].updates, 1);
+        assert_eq!(repo.pulls[&pr].merged_on, Some((0, Checks::Passing)));
+    }
+
+    #[test]
+    fn a_conflict_github_finds_only_on_update_goes_back_to_the_agent() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.conflicting = true;
+                pull.conflict_unnoticed = true;
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        assert_eq!(github.repo(REPO).pulls[&pr].updates, 0);
+    }
+
+    #[test]
+    fn two_issues_merge_one_at_a_time_and_the_second_is_retested_on_the_first() {
+        let slow_checks: fn(&mut FakePull) = |pull| {
+            pull.check_reads = VecDeque::from([Checks::Pending, Checks::Pending, Checks::Passing]);
+            pull.checks_after_push = vec![Checks::Pending, Checks::Passing];
+        };
+        let github = epic([(2, &[]), (3, &[])]);
+        let acts = [
+            (2, Act::PullArranged(slow_checks)),
+            (3, Act::PullArranged(slow_checks)),
+        ];
+        let mut agent = FakeAgent::new(&github, acts);
+        agent.finish_together = Some(Barrier::new(2));
+        let root = tempfile::tempdir().unwrap();
+        let state = build(&github, &agent, root.path(), 1);
+
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let repo = github.repo(REPO);
+        let (first, second) = (
+            &repo.pulls[&pr_of(&github, 2)],
+            &repo.pulls[&pr_of(&github, 3)],
+        );
+        let mut updates = [first.updates, second.updates];
+        updates.sort();
+        assert_eq!(updates, [0, 1]);
+        for pull in [first, second] {
+            assert_eq!(pull.merged_on, Some((0, Checks::Passing)));
+        }
+    }
+
+    #[test]
+    fn a_resolve_session_does_not_hold_the_merge_slot() {
+        let github = epic([(2, &[]), (3, &[])]);
+        let conflicting: fn(&mut FakePull) = |pull| pull.conflicting = true;
+        let agent = FakeAgent::new(&github, [(2, Act::PullArranged(conflicting))])
+            .resolving(&[Resolve::FixesOnce3Merges]);
+        let root = tempfile::tempdir().unwrap();
+        let state = build(&github, &agent, root.path(), 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let pr = pr_of(&github, 2);
+        assert_eq!(
+            github.repo(REPO).pulls[&pr].merged_on,
+            Some((0, Checks::Passing))
+        );
+    }
+
+    #[test]
+    fn a_new_head_with_no_checks_yet_is_not_passing() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (_, pr, _) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.checks_after_push = vec![Checks::None, Checks::None, Checks::Passing];
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(
+            github.repo(REPO).pulls[&pr].merged_on,
+            Some((0, Checks::Passing))
+        );
+    }
+
+    #[test]
+    fn checks_that_never_appear_on_a_new_head_fail_the_issue() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| {
+                pull.behind = 1;
+                pull.checks_after_push = vec![Checks::None];
+            },
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 0);
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!("issue_finished 2 Failed #{pr} (no checks appeared on #{pr}'s new head)")
+        );
+        assert_eq!(github.repo(REPO).pulls[&pr].state, PullState::Open);
+    }
+
+    #[test]
+    fn a_new_head_from_a_resolve_session_with_no_checks_yet_is_not_passing() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (_, pr, sessions) = build_arranged(
+            &github,
+            |pull| pull.conflicting = true,
+            &[Resolve::PushesChecksToCome],
+            root.path(),
+        );
+        assert_eq!(sessions, 1);
+        assert_eq!(
+            github.repo(REPO).pulls[&pr].merged_on,
+            Some((0, Checks::Passing))
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_checks_still_merges_after_an_update() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(
+            &github,
+            [(
+                2,
+                Act::PullArranged(|pull| {
+                    pull.checks = Checks::None;
+                    pull.behind = 1;
+                }),
+            )],
+        );
+        let root = tempfile::tempdir().unwrap();
+        let state = build(&github, &agent, root.path(), 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let pr = pr_of(&github, 2);
+        assert_eq!(
+            github.repo(REPO).pulls[&pr].merged_on,
+            Some((0, Checks::None))
+        );
+    }
+
+    #[test]
+    fn an_unknown_mergeable_is_read_again_not_a_conflict() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, _, sessions) = build_arranged(
+            &github,
+            |pull| pull.mergeable_unknown_reads = 3,
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 0);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+    }
+
+    #[test]
+    fn a_mergeable_never_known_fails_the_issue() {
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| pull.mergeable_unknown_reads = u32::MAX,
+            &[],
+            root.path(),
+        );
+        assert_eq!(sessions, 0);
+        assert_eq!(
+            events(root.path(), &state)[3],
+            format!("issue_finished 2 Failed #{pr} (GitHub never said whether #{pr} can merge)")
+        );
+    }
+
+    #[test]
+    fn a_pull_request_merged_meanwhile_counts_as_merged() {
+        // GitHub never says whether a merged pull request can merge.
+        let github = epic([(2, &[])]);
+        let root = tempfile::tempdir().unwrap();
+        let (state, pr, sessions) = build_arranged(
+            &github,
+            |pull| pull.conflicting = true,
+            &[Resolve::Merges],
+            root.path(),
+        );
+        assert_eq!(sessions, 1);
+        assert_eq!(state.status, BuildStatus::Succeeded);
+        let events = events(root.path(), &state);
+        assert!(
+            events.contains(&format!("issue_merged 2 #{pr}")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn cancelling_stops_an_issue_waiting_for_the_merge_slot() {
+        let github = epic([(2, &[])]);
+        let agent = FakeAgent::new(&github, []);
+        let root = tempfile::tempdir().unwrap();
+        let build = start(&github, &agent, &request(root.path(), 1)).unwrap();
+        let _held = build.merge_slot.lock().unwrap();
+        let cancel = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| build.take_merge_slot(&cancel).map(drop));
+            thread::sleep(Duration::from_millis(20));
+            assert!(!waiting.is_finished());
+            cancel.store(true, Ordering::SeqCst);
+            assert!(matches!(waiting.join().unwrap(), Err(Stop::Cancelled)));
+        });
     }
 
     #[test]

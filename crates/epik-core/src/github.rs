@@ -9,7 +9,7 @@
 mod fake;
 mod gh;
 
-pub use fake::FakeGitHub;
+pub use fake::{FakeGitHub, FakePull};
 pub use gh::GhCli;
 
 use std::fmt;
@@ -115,13 +115,26 @@ pub fn closing_pull_request<'a>(
     first(PullState::Merged).or_else(|| first(PullState::Open))
 }
 
-/// A pull request's state, its merge commit once it has merged, and the
-/// branch it is on.
+/// A pull request's state, its merge commit once it has merged, the branch
+/// it is on and that branch's commit, and whether it can merge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullStatus {
     pub state: PullState,
     pub merge_commit: Option<String>,
     pub head: String,
+    pub head_sha: String,
+    /// False when it conflicts with its base. `None` while GitHub works it
+    /// out, and for good once it is closed or merged.
+    pub mergeable: Option<bool>,
+}
+
+/// What GitHub said to updating a pull request's branch from its base.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BranchUpdate {
+    /// The update has started; the branch's head moves when it lands.
+    Started,
+    /// It refused, because the branch conflicts with the base.
+    Conflict,
 }
 
 /// How a pull request is merged.
@@ -167,12 +180,12 @@ impl MergeMethods {
         rebase: false,
     };
 
-    /// The first allowed of merge commit, squash and rebase, or an error
+    /// The first allowed of squash, merge commit and rebase, or an error
     /// naming `repo` when none is.
     pub fn choose(self, repo: &str) -> Result<MergeMethod> {
         [
-            (self.merge_commit, MergeMethod::Merge),
             (self.squash, MergeMethod::Squash),
+            (self.merge_commit, MergeMethod::Merge),
             (self.rebase, MergeMethod::Rebase),
         ]
         .into_iter()
@@ -236,10 +249,16 @@ pub trait GitHub: Send + Sync {
     fn checks(&self, repo: &str, pr: u64) -> Result<Checks>;
 
     /// Merges pull request `pr` with the first method the repository
-    /// allows of merge commit, squash and rebase, failing when it allows
+    /// allows of squash, merge commit and rebase, failing when it allows
     /// none, and returns the merge commit's SHA. An already-merged pull
     /// request is success.
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
+
+    /// How many commits branch `base` has that branch `head` doesn't.
+    fn behind_by(&self, repo: &str, base: &str, head: &str) -> Result<u64>;
+
+    /// Starts updating pull request `pr`'s branch from its base.
+    fn update_branch(&self, repo: &str, pr: u64) -> Result<BranchUpdate>;
 
     /// Comments `body` on issue `number`.
     fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()>;
@@ -410,18 +429,18 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_commit_is_preferred_to_squash_and_rebase() {
-        assert_eq!(MergeMethods::ALL.choose("o/r"), Ok(MergeMethod::Merge));
+    fn squash_is_preferred_to_a_merge_commit_and_rebase() {
+        assert_eq!(MergeMethods::ALL.choose("o/r"), Ok(MergeMethod::Squash));
     }
 
     #[test]
-    fn squash_is_preferred_to_rebase() {
+    fn a_merge_commit_is_preferred_to_rebase() {
         let both = MergeMethods {
-            squash: true,
+            merge_commit: true,
             rebase: true,
             ..MergeMethods::NONE
         };
-        assert_eq!(both.choose("o/r"), Ok(MergeMethod::Squash));
+        assert_eq!(both.choose("o/r"), Ok(MergeMethod::Merge));
     }
 
     #[test]

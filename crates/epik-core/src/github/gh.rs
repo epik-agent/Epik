@@ -16,8 +16,8 @@ use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
 use super::{
-    Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub, Issue,
-    MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
+    BranchUpdate, Checks, EPIC_LABEL, EPIC_LABEL_COLOR, EPIC_LABEL_DESCRIPTION, Error, GitHub,
+    Issue, MergeMethods, PullRequest, PullState, PullStatus, Result, Review, State, SubIssue,
     closing_pull_request,
 };
 
@@ -274,6 +274,21 @@ impl GitHub for GhCli {
         Ok(merged.sha)
     }
 
+    fn behind_by(&self, repo: &str, base: &str, head: &str) -> Result<u64> {
+        let path = format!("repos/{repo}/compare/{base}...{head}");
+        let compared: Compared = self.json(["api", &path])?;
+        Ok(compared.behind_by)
+    }
+
+    fn update_branch(&self, repo: &str, pr: u64) -> Result<BranchUpdate> {
+        let path = format!("repos/{repo}/pulls/{pr}/update-branch");
+        match self.gh(["api", "-X", "PUT", &path]) {
+            Ok(_) => Ok(BranchUpdate::Started),
+            Err(error) if is_conflict(&error) => Ok(BranchUpdate::Conflict),
+            Err(error) => Err(error),
+        }
+    }
+
     fn comment(&self, repo: &str, number: u64, body: &str) -> Result<()> {
         self.gh([
             "api",
@@ -292,6 +307,8 @@ impl GitHub for GhCli {
             state: pull.state(),
             merge_commit: pull.merge_commit_sha.filter(|_| pull.merged_at.is_some()),
             head: pull.head.name,
+            head_sha: pull.head.sha,
+            mergeable: pull.mergeable,
         })
     }
 
@@ -446,6 +463,18 @@ fn head_among(refs: Vec<RawRef>, branch: &str) -> Option<String> {
         .map(|found| found.object.sha)
 }
 
+/// Whether GitHub refused an update because of a conflict: "merge conflict
+/// between base and head (HTTP 422)".
+fn is_conflict(error: &Error) -> bool {
+    error.message.contains("(HTTP 422)") && error.message.contains("conflict")
+}
+
+/// What comparing two branches answers.
+#[derive(Deserialize)]
+struct Compared {
+    behind_by: u64,
+}
+
 /// What merging a pull request answers.
 #[derive(Deserialize)]
 struct Merged {
@@ -551,6 +580,10 @@ struct RawPull {
     merge_commit_sha: Option<String>,
     body: Option<String>,
     head: RawBranch,
+    /// Absent from a list of pull requests, and null while GitHub works it
+    /// out.
+    #[serde(default)]
+    mergeable: Option<bool>,
 }
 
 /// A pull request's branch, as the REST API returns it.
@@ -558,6 +591,7 @@ struct RawPull {
 struct RawBranch {
     #[serde(rename = "ref")]
     name: String,
+    sha: String,
 }
 
 impl RawPull {
@@ -936,7 +970,7 @@ mod tests {
     #[test]
     fn an_unmerged_closed_pull_request_is_closed() {
         let pull: RawPull =
-            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a"}}"#)
+            parse(r#"{"number": 1, "state": "closed", "merged_at": null, "body": null, "head": {"ref": "a", "sha": "b"}}"#)
                 .unwrap();
         assert_eq!(pull.state(), PullState::Closed);
     }
@@ -1147,6 +1181,64 @@ mod tests {
         let open = gh.pull_request(REPO, 367).unwrap();
         assert_eq!(open.state, PullState::Open);
         assert_eq!(open.merge_commit, None);
+    }
+
+    #[test]
+    fn reads_whether_a_pull_request_can_merge_and_its_head_commit() {
+        let unknown = open_pull();
+        let mergeable = open_pull().replace("\"merged\": true", "\"mergeable\": true");
+        let conflicting = open_pull().replace("\"merged\": true", "\"mergeable\": false");
+        let path = || vec!["api", "repos/epik-agent/Epik/pulls/367"];
+        let (gh, _) = scripted(vec![
+            (path(), ok(&unknown)),
+            (path(), ok(&mergeable)),
+            (path(), ok(&conflicting)),
+        ]);
+        let read = gh.pull_request(REPO, 367).unwrap();
+        assert_eq!(read.mergeable, None);
+        assert_eq!(read.head_sha, "edbb8412fc97b3483af130acc955209d7f90ca7f");
+        assert_eq!(gh.pull_request(REPO, 367).unwrap().mergeable, Some(true));
+        assert_eq!(gh.pull_request(REPO, 367).unwrap().mergeable, Some(false));
+    }
+
+    #[test]
+    fn reads_how_far_behind_its_base_a_branch_is() {
+        let (gh, _) = scripted(vec![(
+            vec!["api", "repos/epik-agent/Epik/compare/epic/1-x...issue-2"],
+            ok(&fixture("compare.json")),
+        )]);
+        assert_eq!(gh.behind_by(REPO, "epic/1-x", "issue-2").unwrap(), 1);
+    }
+
+    /// The call updating pull request 367's branch.
+    fn update_branch() -> Vec<&'static str> {
+        vec![
+            "api",
+            "-X",
+            "PUT",
+            "repos/epik-agent/Epik/pulls/367/update-branch",
+        ]
+    }
+
+    #[test]
+    fn updating_a_branch_starts_the_update() {
+        let accepted = r#"{"message": "Updating pull request branch."}"#;
+        let (gh, _) = scripted(vec![(update_branch(), ok(accepted))]);
+        assert_eq!(gh.update_branch(REPO, 367), Ok(BranchUpdate::Started));
+    }
+
+    #[test]
+    fn a_branch_refused_for_a_conflict_is_a_conflict() {
+        let refused = "gh: merge conflict between base and head (HTTP 422)";
+        let (gh, _) = scripted(vec![(update_branch(), Err(Error::new(refused)))]);
+        assert_eq!(gh.update_branch(REPO, 367), Ok(BranchUpdate::Conflict));
+    }
+
+    #[test]
+    fn a_branch_refused_for_another_reason_is_an_error() {
+        let refused = "gh: There are no new commits on the base branch. (HTTP 422)";
+        let (gh, _) = scripted(vec![(update_branch(), Err(Error::new(refused)))]);
+        assert_eq!(gh.update_branch(REPO, 367), Err(Error::new(refused)));
     }
 
     #[test]

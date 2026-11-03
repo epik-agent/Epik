@@ -11,9 +11,11 @@ Implement the issue on its own branch, and open a pull request into the target b
    - Errors in the continuous integration pipeline
    - Source conflicts
    - A base branch that needs to be refreshed
-5. Never merge the pull request, and never close the issue. Epik merges a pull request into an epic branch itself; a
+5. Before your work ends, merge the target branch into the branch, run the tests one last time, push if that changed
+   anything, and wait for checks.
+6. Never merge the pull request, and never close the issue. Epik merges a pull request into an epic branch itself; a
    pull request into the default branch waits for the user's review.
-6. Remove the git worktree. Leave its branch: the open pull request needs it.
+7. Remove the git worktree. Leave its branch: the open pull request needs it.
 
 The issue is complete when its pull request is open with every check passing and its worktree has been removed. Do not
 end your turn before then. Nothing wakes you once your turn has ended: Epik closes the session, and anything still
