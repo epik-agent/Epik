@@ -719,3 +719,14 @@ fn a_codex_log_reads_as_a_stream() {
     );
     assert!(!stream.working);
 }
+
+#[test]
+fn a_stream_has_the_agents_recent_actions() {
+    let log = [
+        session(),
+        started("t1", "Bash"),
+        input("t1", "Bash", json!({"command": "cargo test"})),
+    ]
+    .join("\n");
+    assert_eq!(parse(&log).recent, ["Running cargo test"]);
+}

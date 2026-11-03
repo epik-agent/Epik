@@ -190,8 +190,6 @@ pub struct IssueCard {
     pub depends_on: Words,
     pub unblocks: Words,
     pub pull_request: Words,
-    /// What its agent has done, in words, oldest first.
-    pub recent: Vec<String>,
     /// Its latest agent session's log, the one its stream shows unless
     /// another session is chosen.
     pub log: Option<String>,
@@ -466,6 +464,8 @@ pub struct Stream {
     /// Whether its last tool call hasn't completed, so the agent is still
     /// at work.
     pub working: bool,
+    /// Its agent's latest actions in words, oldest first.
+    pub recent: Vec<String>,
 }
 
 /// One thing an agent said or did.

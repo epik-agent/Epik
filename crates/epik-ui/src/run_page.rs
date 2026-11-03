@@ -180,8 +180,8 @@ pub fn Edges(issues: Vec<IssueCard>, edges: Vec<(u64, u64)>) -> impl IntoView {
 }
 
 /// The log the stream shows on `page` with issue `chosen`'s panel open: the
-/// session `picked`, if it is the run's or that issue's, or else the run's
-/// own session while it runs, or else the issue's latest.
+/// session `picked`, if it is the run's or that issue's, or else the issue's
+/// latest, or, with no issue chosen, the run's own session while it runs.
 pub fn shown_log(page: &RunPage, chosen: Option<u64>, picked: Option<&str>) -> Option<String> {
     let issue = chosen.and_then(|number| page.issues.iter().find(|i| i.number == number));
     let sessions = || {
@@ -192,13 +192,25 @@ pub fn shown_log(page: &RunPage, chosen: Option<u64>, picked: Option<&str>) -> O
     picked
         .filter(|picked| sessions().any(|s| s.log.as_deref() == Some(*picked)))
         .map(str::to_owned)
-        .or_else(|| {
-            page.sessions
+        .or_else(|| match issue {
+            Some(issue) => issue.log.clone(),
+            None => page
+                .sessions
                 .last()
                 .filter(|s| s.running)
-                .and_then(|s| s.log.clone())
+                .and_then(|s| s.log.clone()),
         })
-        .or_else(|| issue.and_then(|i| i.log.clone()))
+}
+
+/// The issue on `page` whose detail panel shows: the one `chosen`, while it
+/// is on the page. It stays the same while the page's cards change, so the
+/// panel, and where the user put it, stays too.
+pub fn panel_issue(page: Signal<RunPage>, chosen: Signal<Option<u64>>) -> Memo<Option<u64>> {
+    Memo::new(move |_| {
+        let number = chosen.get()?;
+        page.with(|page| page.issues.iter().any(|issue| issue.number == number))
+            .then_some(number)
+    })
 }
 
 /// Agent sessions, oldest first: each one's role and round, agent and
@@ -260,9 +272,9 @@ pub fn Sessions(
     }
 }
 
-/// The chosen issue's detail panel: its state and facts, and what its
-/// agent is doing, in Full, the stream of its log, or in Summary, its
-/// recent actions.
+/// The chosen issue's detail panel: its state and facts, and what the
+/// agent of the session shown is doing, in Full, the stream of its log, or
+/// in Summary, its recent actions.
 #[component]
 pub fn Detail(
     #[prop(into)] issue: Signal<IssueCard>,
@@ -305,7 +317,12 @@ pub fn Detail(
             </button>
         }
     };
-    let recent = part(issue, |issue| issue.recent.clone());
+    let recent = part(stream, |stream| {
+        stream
+            .as_ref()
+            .map(|stream| stream.recent.clone())
+            .unwrap_or_default()
+    });
     let recent = move || {
         let recent = recent.get();
         if recent.is_empty() {
@@ -421,10 +438,11 @@ pub fn RunView(
             }
         })
     };
+    let panel = panel_issue(page, chosen);
     let detail = move || {
-        let number = chosen.get()?;
-        let issue =
-            issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())?;
+        let number = panel.get()?;
+        let issue = issues
+            .with_untracked(|issues| issues.iter().find(|issue| issue.number == number).cloned())?;
         let issue = kept(issue, move || {
             issues.with(|issues| issues.iter().find(|issue| issue.number == number).cloned())
         });

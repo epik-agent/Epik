@@ -129,6 +129,7 @@ mod tests {
         append(&path, more.as_bytes());
         let whole = format!("{first}{more}");
         assert_eq!(stream::read(&path).unwrap(), stream::parse(&whole));
+        assert_eq!(stream::read(&path).unwrap().recent, ["Running cargo test"]);
         assert_eq!(
             activity::read(&path).unwrap().recent,
             activity::parse(&whole).recent

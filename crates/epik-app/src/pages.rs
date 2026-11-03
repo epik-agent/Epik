@@ -980,7 +980,6 @@ fn issue_card(
         depends_on,
         unblocks,
         pull_request,
-        recent: activity.map(|a| a.recent.clone()).unwrap_or_default(),
         log,
         sessions: issue
             .sessions
