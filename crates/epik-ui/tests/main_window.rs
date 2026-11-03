@@ -132,6 +132,7 @@ fn said(text: &str) -> Stream {
             what: Entry::Narration { text: text.into() },
         }],
         working: true,
+        recent: vec![],
     }
 }
 

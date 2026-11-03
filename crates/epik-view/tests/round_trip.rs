@@ -150,7 +150,6 @@ fn run_page() {
                 depends_on: vec![],
                 unblocks: vec![link("#15", "https://github.com/o/r/issues/15")],
                 pull_request: vec![link("PR #20", "https://github.com/o/r/pull/20")],
-                recent: vec!["Ran cargo test".to_owned()],
                 log: Some("the log".to_owned()),
                 sessions: vec![SessionRow {
                     role: "Coding".to_owned(),
@@ -180,7 +179,6 @@ fn run_page() {
                 depends_on: vec![link("#14", "https://github.com/o/r/issues/14")],
                 unblocks: vec![],
                 pull_request: vec![],
-                recent: vec![],
                 log: None,
                 sessions: vec![],
             },
@@ -342,6 +340,7 @@ fn stream() {
             },
         ],
         working: true,
+        recent: vec!["Running cargo test".to_owned()],
     });
 }
 

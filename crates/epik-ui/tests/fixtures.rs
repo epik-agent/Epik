@@ -167,7 +167,6 @@ pub fn issue(number: u64, state: NodeState, column: usize, row: usize) -> IssueC
         depends_on: vec![link("#1", "https://github.com/acme/widgets/issues/1")],
         unblocks: vec![text("nothing")],
         pull_request: vec![text("none yet")],
-        recent: vec![],
         log: None,
         sessions: vec![],
     }
