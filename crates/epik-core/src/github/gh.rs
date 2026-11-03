@@ -43,6 +43,11 @@ impl GhCli {
         }
     }
 
+    /// Runs `gh` through `run`.
+    pub(crate) fn with(run: impl Fn(&[&str]) -> Result<String> + Send + Sync + 'static) -> Self {
+        Self { run: Box::new(run) }
+    }
+
     fn gh<const N: usize>(&self, args: [&str; N]) -> Result<String> {
         (self.run)(&args)
     }

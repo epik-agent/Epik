@@ -13,6 +13,7 @@ mod build;
 mod epic_status;
 pub mod gh;
 mod gh_raw;
+mod issues;
 mod labels;
 mod projects;
 mod runs;
@@ -159,6 +160,7 @@ fn run(context: &Context, name: &str, args: &Args) -> Result<Reply, String> {
         "project_list_items" => projects::list_items(context, args),
         "project_get_item" => projects::get_item(context, args),
         "project_set_status" => projects::set_status(context, args),
+        "issue_create" => issues::create(context, args),
         "issue_set_blocked_by" => blocked_by::set(context, args),
         "issue_remove_blocked_by" => blocked_by::remove(context, args),
         "issue_list_blocked_by" => blocked_by::list(context, args),
@@ -323,7 +325,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn every_tool_the_node_server_offered_is_listed() {
+    fn every_tool_is_listed() {
         let names: Vec<String> = server(vec![])
             .tools()
             .iter()
@@ -344,6 +346,7 @@ pub(crate) mod tests {
                 "project_list_items",
                 "project_get_item",
                 "project_set_status",
+                "issue_create",
                 "issue_set_blocked_by",
                 "issue_remove_blocked_by",
                 "issue_list_blocked_by",
