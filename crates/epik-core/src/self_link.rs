@@ -6,11 +6,14 @@
 //! a symbolic link on macOS and Linux; on Windows, where symbolic links
 //! need privileges, a copy. Not a hard link: Claude Code runs the link, and
 //! a running hard link to the installed app would keep its installer from
-//! replacing it.
+//! replacing it. An app running from a build's clone leaves the link alone:
+//! clones are temporary, so the link must never lead into one.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::cleanup::builds_dir;
 
 /// The link's file name.
 pub const NAME: &str = if cfg!(windows) {
@@ -33,15 +36,21 @@ pub enum Refreshed {
     Made,
     /// The link led elsewhere, or was a stale copy, so it was replaced.
     Replaced,
+    /// The app runs from a build's clone, so the link was left as it was.
+    FromClone,
 }
 
 /// Makes `<root>/bin/epik-app` lead to `exe`, the running app, leaving a
-/// link that already does.
+/// link that already does, and leaving the link whatever it is if `exe` is
+/// in a build's clone.
 pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     let link = path(root);
     // An app started through the link may be told it is the link. Its
     // real file is what the link must lead to, never the link itself.
     let exe = &fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
+    if fs::canonicalize(builds_dir(root)).is_ok_and(|builds| exe.starts_with(builds)) {
+        return Ok(Refreshed::FromClone);
+    }
     if fs::canonicalize(&link).is_ok_and(|resolved| &resolved == exe) {
         return Ok(Refreshed::Kept);
     }
@@ -185,5 +194,51 @@ mod tests {
         assert_eq!(refresh(root.path(), &new).unwrap(), Refreshed::Replaced);
 
         assert_eq!(contents(&path(root.path())), "the app");
+    }
+
+    /// A stand-in for an app built in a clone under `<root>/builds`.
+    fn app_in_a_clone(root: &Path) -> PathBuf {
+        let target = builds_dir(root).join("a-build").join("target");
+        fs::create_dir_all(&target).unwrap();
+        app(&target, "epik-app", "the clone's app")
+    }
+
+    #[test]
+    fn an_app_in_a_clone_makes_no_link() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = app_in_a_clone(root.path());
+
+        assert_eq!(refresh(root.path(), &exe).unwrap(), Refreshed::FromClone);
+
+        assert!(fs::symlink_metadata(path(root.path())).is_err());
+    }
+
+    #[test]
+    fn an_app_in_a_clone_leaves_a_link_to_another_app() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = app(root.path(), "Epik", "the app");
+        refresh(root.path(), &installed).unwrap();
+        let exe = app_in_a_clone(root.path());
+
+        assert_eq!(refresh(root.path(), &exe).unwrap(), Refreshed::FromClone);
+
+        assert_eq!(contents(&path(root.path())), "the app");
+    }
+
+    /// On macOS a temporary directory is reached through a symbolic link,
+    /// so the root may not be spelled the way the executable's real path is.
+    #[cfg(unix)]
+    #[test]
+    fn an_app_in_a_clone_is_recognized_under_a_root_reached_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let root = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &root).unwrap();
+        let exe = app_in_a_clone(&real);
+
+        assert_eq!(refresh(&root, &exe).unwrap(), Refreshed::FromClone);
+
+        assert!(fs::symlink_metadata(path(&root)).is_err());
     }
 }
