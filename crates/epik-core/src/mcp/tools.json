@@ -281,6 +281,43 @@
     }
   },
   {
+    "name": "issue_create",
+    "description": "Create an issue and add it to every open GitHub Project linked to its repository. Adding it sets no status: the project's own workflows decide that.\n\nArgs:\n    repo: Repository in owner/name format.\n    title: The issue's title.\n    body: The issue's body.\n    labels: Names of labels to give it.\n    milestone: The number of the milestone to put it in.\n\nReturns { number, url, project_failures }. The issue exists even when\nproject_failures, which names each project it could not be added to, is not empty.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/]+\\/[^/]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestone": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "repo",
+        "title",
+        "body"
+      ]
+    }
+  },
+  {
     "name": "issue_set_blocked_by",
     "description": "Mark an issue as blocked by another issue.\n\nArgs:\n    repo: Repository of the blocked issue, in owner/name format.\n    issue_number: The issue that is blocked.\n    blocked_by_number: The issue that blocks it.\n    blocked_by_repo: Repository of the blocking issue. Defaults to repo.",
     "inputSchema": {
