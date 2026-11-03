@@ -6,3 +6,8 @@ const APP: &str = include_str!("../app.css");
 fn nothing_flashes() {
     assert!(!APP.contains("flash"));
 }
+
+#[test]
+fn a_progress_bar_draws_failed_issues_in_red() {
+    assert!(APP.contains(".progress .failed { background: var(--error); }"));
+}

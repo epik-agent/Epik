@@ -24,12 +24,13 @@ pub struct Span {
 /// A sentence of [`Span`]s.
 pub type Words = Vec<Span>;
 
-/// How many of a run's issues are merged or closed, running, and not
-/// started.
+/// How many of a run's issues are merged or closed, running, failed, and
+/// not started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub merged: usize,
     pub running: usize,
+    pub failed: usize,
     pub not_started: usize,
 }
 

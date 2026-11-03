@@ -204,10 +204,12 @@ fn progress(run: &RunState) -> Progress {
     let count = |wanted: fn(&IssueState) -> bool| run.issues.iter().filter(|i| wanted(i)).count();
     let merged = count(is_merged);
     let running = count(|i| i.status == IssueStatus::Running);
+    let failed = count(|i| i.status == IssueStatus::Failed);
     Progress {
         merged,
         running,
-        not_started: run.issues.len() - merged - running,
+        failed,
+        not_started: run.issues.len() - merged - running - failed,
     }
 }
 

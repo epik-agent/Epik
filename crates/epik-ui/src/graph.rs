@@ -58,15 +58,17 @@ pub fn MiniGraph(graph: epik_view::MiniGraph) -> impl IntoView {
     }
 }
 
-/// A bar of merged, running and not-started issues.
+/// A bar of merged, running, failed and not-started issues.
 #[component]
 pub fn ProgressBar(progress: Progress) -> impl IntoView {
-    let total = (progress.merged + progress.running + progress.not_started).max(1) as f64;
+    let total =
+        (progress.merged + progress.running + progress.failed + progress.not_started).max(1) as f64;
     let grow = move |count: usize| (count as f64 / total).to_string();
     view! {
         <div class="progress">
             <span class="merged" style:flex-grow=grow(progress.merged)></span>
             <span class="running" style:flex-grow=grow(progress.running)></span>
+            <span class="failed" style:flex-grow=grow(progress.failed)></span>
             <span class="not_started" style:flex-grow=grow(progress.not_started)></span>
         </div>
     }

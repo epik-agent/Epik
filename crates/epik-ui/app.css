@@ -124,6 +124,7 @@ table.run-table {
 .progress span { border-radius: 2px; }
 .progress .merged { background: #6ee7b7; }
 .progress .running { background: var(--accent); }
+.progress .failed { background: var(--error); }
 .progress .not_started { background: var(--raised); }
 
 .lines .line { display: flex; gap: 12px; padding: 3px 0; border-radius: 4px; }

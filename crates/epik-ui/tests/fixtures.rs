@@ -71,6 +71,7 @@ pub fn card(now: Vec<NowLine>) -> RunCard {
         progress: Progress {
             merged: 1,
             running: 1,
+            failed: 0,
             not_started: 1,
         },
         now,

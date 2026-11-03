@@ -232,6 +232,21 @@ fn numbered(number: u64) -> RunState {
 }
 
 #[test]
+fn a_failed_issue_counts_as_failed_rather_than_not_started() {
+    let card = run_card(&failed_run(), now());
+
+    assert_eq!(
+        card.progress,
+        Progress {
+            merged: 0,
+            running: 0,
+            failed: 1,
+            not_started: 0
+        }
+    );
+}
+
+#[test]
 fn a_building_run_says_what_is_running_next_and_done() {
     let card = run_card(&exponentiation(), now());
 
@@ -251,6 +266,7 @@ fn a_building_run_says_what_is_running_next_and_done() {
         Progress {
             merged: 2,
             running: 2,
+            failed: 0,
             not_started: 2
         }
     );

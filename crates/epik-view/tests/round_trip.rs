@@ -57,6 +57,7 @@ fn card(disposition: Disposition) -> RunCard {
         progress: Progress {
             merged: 1,
             running: 1,
+            failed: 0,
             not_started: 0,
         },
         now: vec![NowLine {
