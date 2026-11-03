@@ -180,6 +180,23 @@ fn tray_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
     )
 }
 
+/// What the About Epik panel shows. The mark is given here because a debug
+/// build has no bundle to read it from.
+#[cfg(target_os = "macos")]
+fn about_metadata() -> tauri::menu::AboutMetadata<'static> {
+    tauri::menu::AboutMetadata {
+        version: Some(epik_core::version().to_string()),
+        // The build number the panel adds in parentheses. Empty, because a
+        // bundle's is the version again: "Version 0.3.0 (0.3.0)".
+        short_version: Some(String::new()),
+        icon: Some(
+            Image::from_bytes(include_bytes!("../icons/128x128@2x.png"))
+                .expect("the app icon is a PNG"),
+        ),
+        ..Default::default()
+    }
+}
+
 /// The app's menu on macOS: the default menu's Epik, Edit and Window
 /// menus, whose Quit Epik stops Epik as the tray menu's does.
 #[cfg(target_os = "macos")]
@@ -194,6 +211,8 @@ fn app_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> 
                 "Epik",
                 true,
                 &[
+                    &PredefinedMenuItem::about(handle, Some("About Epik"), Some(about_metadata()))?,
+                    &separator()?,
                     &PredefinedMenuItem::hide(handle, None)?,
                     &PredefinedMenuItem::hide_others(handle, None)?,
                     &PredefinedMenuItem::show_all(handle, None)?,
@@ -446,6 +465,15 @@ fn png(name: &str) -> &'static [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn about_epik_shows_the_mark_and_the_version() {
+        let about = about_metadata();
+        assert_eq!(about.version.as_deref(), Some(epik_core::version()));
+        assert_eq!(about.short_version.as_deref(), Some(""));
+        assert!(about.icon.is_some());
+    }
 
     #[test]
     fn templates_show_whether_anything_is_building() {
