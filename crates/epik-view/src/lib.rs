@@ -70,9 +70,6 @@ pub struct NowLine {
     pub words: Words,
     /// "active 2s ago" or "quiet 1m 50s".
     pub life: Option<String>,
-    /// When its agent last logged, in milliseconds, so the page flashes the
-    /// line when it changes.
-    pub last_event: Option<i64>,
 }
 
 /// A run, as Home shows it.
@@ -185,7 +182,6 @@ pub struct IssueCard {
     /// passed, 1 failed", "Starts when #16 and #17 are merged".
     pub line: Words,
     pub life: Option<String>,
-    pub last_event: Option<i64>,
     /// The detail panel's sentence about its state.
     pub sentence: Words,
     /// "2m 40s · $0.48 so far".

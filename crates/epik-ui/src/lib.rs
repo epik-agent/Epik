@@ -5,7 +5,6 @@
 //! The windows draw the view models in `epik-view`, which they get from the
 //! app's Tauri commands.
 
-pub mod flash;
 pub mod graph;
 pub mod home;
 pub mod live;

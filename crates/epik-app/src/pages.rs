@@ -304,7 +304,6 @@ fn now_line(run: &RunState, issue: &IssueState, now: DateTime<Utc>) -> NowLine {
         number: issue.issue.number,
         words,
         life: last.map(|at| life(at, now)),
-        last_event: last.map(|at| at.timestamp_millis()),
     }
 }
 
@@ -344,7 +343,6 @@ fn own_now_line(run: &RunState) -> Option<NowLine> {
             text(format!(" {} — {doing}.", run.title)),
         ],
         life: None,
-        last_event: None,
     })
 }
 
@@ -982,7 +980,6 @@ fn issue_card(
         life: last
             .filter(|_| state == NodeState::Running)
             .map(|at| life(at, now)),
-        last_event: last.map(|at| at.timestamp_millis()),
         sentence,
         worked,
         depends_on,

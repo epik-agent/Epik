@@ -138,12 +138,6 @@ table.run-table {
 .life { margin-left: 8px; font: 11px var(--mono); color: var(--accent); white-space: nowrap; }
 .life.quiet { color: var(--muted); }
 
-.flash { animation: flash 1.2s ease-out; }
-@keyframes flash {
-  0% { background: var(--accent-muted); box-shadow: 0 0 0 3px var(--accent-muted); }
-  100% { background: transparent; box-shadow: none; }
-}
-
 .empty { margin-top: 64px; text-align: center; font-size: 14px; }
 
 /* A run's page */

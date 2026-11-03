@@ -4,10 +4,8 @@
 
 use epik_view::{Disposition, Home, NowLine, RunCard, Words as Sentence};
 use leptos::ev::MouseEvent;
-use leptos::html::Div;
 use leptos::prelude::*;
 
-use crate::flash::flash_on;
 use crate::graph::{MiniGraph, ProgressBar};
 use crate::live::{keyed, part};
 use crate::main_window::{disposition_class, href};
@@ -71,18 +69,12 @@ fn life_class(life: &Option<String>) -> &'static str {
     }
 }
 
-/// A running issue's line: what it's doing and its agent's life line. It
-/// flashes when its agent logs.
-fn now_line(run: String, line: Signal<NowLine>) -> impl IntoView {
-    let row = NodeRef::<Div>::new();
-    flash_on(
-        row,
-        format!("{run}#{}", line.with_untracked(|line| line.number)),
-    );
+/// A running issue's line: what it's doing and its agent's life line.
+fn now_line(line: Signal<NowLine>) -> impl IntoView {
     let words = part(line, |line| line.words.clone());
     let life = part(line, |line| line.life.clone());
     view! {
-        <div class="line" node_ref=row>
+        <div class="line">
             <span class="label">"Now"</span>
             {move || view! { <Words spans=words.get()/> }}
             <span class=move || life.with(life_class)>{move || life.get()}</span>
@@ -148,35 +140,31 @@ fn run_row(
     let elapsed = part(card, |card| card.elapsed.clone());
     let cost = part(card, |card| card.cost.clone());
     let now = part(card, |card| card.now.clone());
-    let actions = {
-        let run = run.clone();
-        move || {
-            if disposition.get() != Disposition::NeedsAttention {
-                return view! { <a href=page class="open">"Open ›"</a> }.into_any();
-            }
-            let act = |command: &'static str| {
-                let run = run.clone();
-                move |_: MouseEvent| {
-                    if let Some(on_act) = on_act {
-                        on_act.run((command, run.clone()));
-                    }
-                }
-            };
-            view! {
-                <button class="primary" on:click=act("rerun")>"Rerun"</button>
-                <button on:click=act("delete_run")>"Delete"</button>
-            }
-            .into_any()
+    let actions = move || {
+        if disposition.get() != Disposition::NeedsAttention {
+            return view! { <a href=page class="open">"Open ›"</a> }.into_any();
         }
+        let act = |command: &'static str| {
+            let run = run.clone();
+            move |_: MouseEvent| {
+                if let Some(on_act) = on_act {
+                    on_act.run((command, run.clone()));
+                }
+            }
+        };
+        view! {
+            <button class="primary" on:click=act("rerun")>"Rerun"</button>
+            <button on:click=act("delete_run")>"Delete"</button>
+        }
+        .into_any()
     };
     let lines = move || {
-        let run = run.clone();
         open.get().then(|| {
             view! {
                 <tr class="lines">
                     <td></td>
                     <td colspan="6">
-                        {keyed(now.into(), |line: &NowLine| line.number, move |line| now_line(run.clone(), line))}
+                        {keyed(now.into(), |line: &NowLine| line.number, now_line)}
                         {line("Next", part(card, |card| card.next.clone()))}
                         {line("Done", part(card, |card| card.done.clone()))}
                     </td>
