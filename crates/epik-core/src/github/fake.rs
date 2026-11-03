@@ -683,17 +683,17 @@ mod tests {
     }
 
     #[test]
-    fn merges_with_a_merge_commit_by_default() {
-        assert_eq!(merged_with(MergeMethods::ALL), Ok(MergeMethod::Merge));
+    fn merges_with_a_squash_by_default() {
+        assert_eq!(merged_with(MergeMethods::ALL), Ok(MergeMethod::Squash));
     }
 
     #[test]
     fn merges_with_a_method_the_repository_allows() {
-        let squash = MergeMethods {
-            squash: true,
+        let rebase = MergeMethods {
+            rebase: true,
             ..MergeMethods::NONE
         };
-        assert_eq!(merged_with(squash), Ok(MergeMethod::Squash));
+        assert_eq!(merged_with(rebase), Ok(MergeMethod::Rebase));
         assert!(merged_with(MergeMethods::NONE).is_err());
     }
 

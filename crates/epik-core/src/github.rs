@@ -167,12 +167,12 @@ impl MergeMethods {
         rebase: false,
     };
 
-    /// The first allowed of merge commit, squash and rebase, or an error
+    /// The first allowed of squash, merge commit and rebase, or an error
     /// naming `repo` when none is.
     pub fn choose(self, repo: &str) -> Result<MergeMethod> {
         [
-            (self.merge_commit, MergeMethod::Merge),
             (self.squash, MergeMethod::Squash),
+            (self.merge_commit, MergeMethod::Merge),
             (self.rebase, MergeMethod::Rebase),
         ]
         .into_iter()
@@ -236,7 +236,7 @@ pub trait GitHub: Send + Sync {
     fn checks(&self, repo: &str, pr: u64) -> Result<Checks>;
 
     /// Merges pull request `pr` with the first method the repository
-    /// allows of merge commit, squash and rebase, failing when it allows
+    /// allows of squash, merge commit and rebase, failing when it allows
     /// none, and returns the merge commit's SHA. An already-merged pull
     /// request is success.
     fn merge_pull_request(&self, repo: &str, pr: u64) -> Result<String>;
@@ -403,18 +403,18 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_commit_is_preferred_to_squash_and_rebase() {
-        assert_eq!(MergeMethods::ALL.choose("o/r"), Ok(MergeMethod::Merge));
+    fn squash_is_preferred_to_a_merge_commit_and_rebase() {
+        assert_eq!(MergeMethods::ALL.choose("o/r"), Ok(MergeMethod::Squash));
     }
 
     #[test]
-    fn squash_is_preferred_to_rebase() {
+    fn a_merge_commit_is_preferred_to_rebase() {
         let both = MergeMethods {
-            squash: true,
+            merge_commit: true,
             rebase: true,
             ..MergeMethods::NONE
         };
-        assert_eq!(both.choose("o/r"), Ok(MergeMethod::Squash));
+        assert_eq!(both.choose("o/r"), Ok(MergeMethod::Merge));
     }
 
     #[test]
