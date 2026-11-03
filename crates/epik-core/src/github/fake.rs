@@ -90,6 +90,8 @@ impl FakeRepo {
 struct World {
     repos: BTreeMap<String, FakeRepo>,
     clones: Vec<(String, PathBuf)>,
+    /// Each call of [`GitHub::set_project_status`], failed or not.
+    project_statuses: Vec<(String, u64, String)>,
     /// The error each named operation fails with, for as long as it is
     /// set.
     failures: BTreeMap<String, String>,
@@ -118,7 +120,7 @@ fn not_found() -> Error {
 
 /// The name of each [`GitHub`] operation, which [`FakeGitHub::fail`]
 /// takes.
-const OPERATIONS: [&str; 17] = [
+const OPERATIONS: [&str; 18] = [
     "issue",
     "sub_issues",
     "blocked_by",
@@ -136,6 +138,7 @@ const OPERATIONS: [&str; 17] = [
     "repo_exists",
     "reviews",
     "open_review_threads",
+    "set_project_status",
 ];
 
 /// [`GitHub`] in memory.
@@ -273,6 +276,12 @@ impl FakeGitHub {
     /// Each repository cloned, and where, in order.
     pub fn clones(&self) -> Vec<(String, PathBuf)> {
         self.world().clones.clone()
+    }
+
+    /// Each repository, issue and status [`GitHub::set_project_status`] was
+    /// called with, in order, whether or not it failed.
+    pub fn project_statuses(&self) -> Vec<(String, u64, String)> {
+        self.world().project_statuses.clone()
     }
 
     fn arrange(&self, repo: &str, change: impl FnOnce(&mut FakeRepo)) {
@@ -491,6 +500,13 @@ impl GitHub for FakeGitHub {
         let pull = world.repo(repo)?.pulls.get(&pr).ok_or_else(not_found)?;
         Ok(pull.open_review_threads)
     }
+
+    fn set_project_status(&self, repo: &str, number: u64, status: &str) -> Result<()> {
+        let mut world = self.world();
+        let call = (repo.to_owned(), number, status.to_owned());
+        world.project_statuses.push(call);
+        world.check("set_project_status")
+    }
 }
 
 #[cfg(test)]
@@ -536,6 +552,22 @@ mod tests {
         let subs = github.sub_issues(REPO, 1).unwrap();
         assert_eq!(subs[2].repo, "other/repo");
         assert_eq!(subs[2].title, "Elsewhere");
+    }
+
+    #[test]
+    fn project_statuses_are_recorded_even_when_they_fail() {
+        let github = epic();
+        github.set_project_status(REPO, 2, "In progress").unwrap();
+        github.fail("set_project_status", "no");
+        let failed = github.set_project_status(REPO, 3, "In review");
+        assert_eq!(failed.unwrap_err().message, "no");
+        assert_eq!(
+            github.project_statuses(),
+            [
+                (REPO.to_owned(), 2, "In progress".to_owned()),
+                (REPO.to_owned(), 3, "In review".to_owned()),
+            ]
+        );
     }
 
     #[test]
