@@ -289,7 +289,8 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
         RESTART => {
             let building = building_here(&handle.state::<main_window::Window>().runs);
             let question = pages::restart_question(building);
-            popover::ask_to_restart(handle, question, building, "Restart", |handle| {
+            let warning = pages::restart_warning(building);
+            popover::ask_to_restart(handle, question, warning, "Restart", |handle| {
                 handle.state::<popover::Quit>().restart();
             });
             Ok(())

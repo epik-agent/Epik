@@ -11,7 +11,7 @@ use tauri::{
     WindowEvent,
 };
 
-use crate::{main_window, navigation, pages, setup_window, tray, update};
+use crate::{main_window, navigation, setup_window, tray, update};
 
 /// The menu's label.
 pub(crate) const LABEL: &str = "popover";
@@ -150,14 +150,13 @@ pub fn check_for_updates(handle: AppHandle, window: State<'_, main_window::Windo
     update::choose(&handle, tray::building_here(&window.runs));
 }
 
-/// Asks `question` in a dialog before restarting, warning of the
-/// `building` runs it interrupts, and calls `restart` if the user chooses
-/// `choice`: for Linux's native tray menu, which can't ask itself, and for
-/// updating.
+/// Asks `question` in a dialog before restarting, saying `warning`, and
+/// calls `restart` if the user chooses `choice`: for Linux's native tray
+/// menu, which can't ask itself, and for updating.
 pub fn ask_to_restart(
     handle: &AppHandle,
     question: String,
-    building: usize,
+    warning: String,
     choice: &str,
     restart: impl FnOnce(AppHandle) + Send + 'static,
 ) {
@@ -165,7 +164,7 @@ pub fn ask_to_restart(
     let answered = handle.clone();
     handle
         .dialog()
-        .message(pages::restart_warning(building))
+        .message(warning)
         .title(question)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(

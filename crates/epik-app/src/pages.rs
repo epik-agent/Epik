@@ -15,7 +15,7 @@ use epik_core::hosts::{Host, State};
 use epik_core::record::{
     BuildStatus, IssueState, IssueStatus, Kind, ReviewVerdict, Session, SessionRole,
 };
-use epik_core::remote::Mismatch;
+use epik_core::remote::{Mismatch, same_minor};
 use epik_core::repositories::Repository;
 use epik_core::run::{BuildSummary, Disposition, RunState};
 use epik_core::settings;
@@ -714,6 +714,29 @@ pub fn restart_warning(building: usize) -> String {
             lowercased_first(&number_word(n))
         ),
     }
+}
+
+/// What the dialog that confirms updating to `version` says, with
+/// `building` runs building: the restart's warning, and which of `hosts`
+/// will be refused, being on another minor version when last heard from.
+pub fn update_warning(version: &str, building: usize, hosts: &[Host]) -> String {
+    let warning = restart_warning(building);
+    let refused: Vec<&str> = hosts
+        .iter()
+        .filter(|host| match &host.state {
+            Some(State::Reachable { version: was, .. } | State::Mismatch { version: was, .. }) => {
+                !same_minor(was, version)
+            }
+            Some(State::Unreachable { .. }) | None => false,
+        })
+        .map(|host| host.destination.as_str())
+        .collect();
+    let (names, their) = match refused.as_slice() {
+        [] => return warning,
+        [host] => ((*host).to_owned(), "its"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "their"),
+    };
+    format!("{warning} {names} will be refused until {their} app is upgraded to {version}.")
 }
 
 /// What Check for updates reads, with the newer version `update` found,

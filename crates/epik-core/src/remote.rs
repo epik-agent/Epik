@@ -341,8 +341,9 @@ fn minor(version: &str) -> Option<&str> {
     (minor.contains('.') && !patch.is_empty()).then_some(minor)
 }
 
-/// Whether `a` and `b` are versions with the same major and minor parts.
-fn same_minor(a: &str, b: &str) -> bool {
+/// Whether `a` and `b` are versions with the same major and minor parts:
+/// whether an app at one accepts a host's app at the other.
+pub fn same_minor(a: &str, b: &str) -> bool {
     matches!((minor(a), minor(b)), (Some(a), Some(b)) if a == b)
 }
 
