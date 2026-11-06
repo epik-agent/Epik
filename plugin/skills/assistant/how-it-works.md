@@ -118,7 +118,7 @@ When a host isn't working, Settings says why:
 
 ## The app
 
-The app appears in the menu bar (macOS), the notification area (Windows) or the system tray (Linux). Clicking its icon opens Epik's tray menu: whether Epik is running, each active run with its progress, and **Open Dashboard**, **Restart**, **Settings…**, **Check setup…**, **Check for updates…** (which opens Epik's releases on GitHub) and **Quit Epik**. **Open Dashboard** opens its window, which lists every run and shows each one's issues live, with what each agent is doing. On Linux, where tray clicks aren't reported, the tray has a native menu of the same items, without the runs, and Epik opens its window when it starts, since not every desktop shows tray icons.
+The app appears in the menu bar (macOS), the notification area (Windows) or the system tray (Linux). Clicking its icon opens Epik's tray menu: whether Epik is running, each active run with its progress, and **Open Dashboard**, **Restart**, **Settings…**, **Check setup…**, **Check for updates…** (which reads **Update to x.y.z** once Epik finds a newer release, and installs it and restarts when chosen; a `.deb` install opens Epik's releases on GitHub instead) and **Quit Epik**. **Open Dashboard** opens its window, which lists every run and shows each one's issues live, with what each agent is doing. On Linux, where tray clicks aren't reported, the tray has a native menu of the same items, without the runs, and Epik opens its window when it starts, since not every desktop shows tray icons.
 
 ## Runs, builds and their records
 

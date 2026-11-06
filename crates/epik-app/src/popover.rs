@@ -11,7 +11,7 @@ use tauri::{
     WindowEvent,
 };
 
-use crate::{main_window, navigation, pages, setup_window};
+use crate::{main_window, navigation, pages, setup_window, tray, update};
 
 /// The menu's label.
 pub(crate) const LABEL: &str = "popover";
@@ -25,9 +25,15 @@ pub const RELEASES: &str = "https://github.com/epik-agent/Epik/releases";
 
 /// Set to quit the app, as the tray's Quit does; and to start it again
 /// once it has quit, as Restart does.
+#[derive(Clone, Default)]
 pub struct Quit {
     pub stop: Arc<AtomicBool>,
     pub restart: Arc<AtomicBool>,
+    /// Set once serving has stopped.
+    pub stopped: Arc<AtomicBool>,
+    /// Set when an installer is to end the app, as on Windows, rather
+    /// than the app ending itself once serving stops.
+    pub installing: Arc<AtomicBool>,
 }
 
 impl Quit {
@@ -40,6 +46,16 @@ impl Quit {
     pub fn restart(&self) {
         self.restart.store(true, Ordering::SeqCst);
         self.quit();
+    }
+
+    /// Stops the builds and the server and waits until they have, leaving
+    /// the app running for an installer to end.
+    pub fn stop_for_installer(&self) {
+        self.installing.store(true, Ordering::SeqCst);
+        self.quit();
+        while !self.stopped.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -126,30 +142,39 @@ pub fn check_setup(handle: AppHandle) -> Result<(), String> {
     setup_window::open(&handle).map_err(|error| error.to_string())
 }
 
-/// Opens Epik's releases in the browser, from the menu, and hides it.
+/// Checks for updates or installs the one found, from the menu, and
+/// hides it.
 #[tauri::command]
-pub fn check_for_updates(handle: AppHandle) -> Result<(), String> {
+pub fn check_for_updates(handle: AppHandle, window: State<'_, main_window::Window>) {
     hide(&handle);
-    open::that_detached(RELEASES).map_err(|error| error.to_string())
+    update::choose(&handle, tray::building_here(&window.runs));
 }
 
-/// Asks in a dialog before restarting, warning of the `building` runs it
-/// interrupts: for Linux's native tray menu, which can't ask itself.
-pub fn ask_to_restart(handle: &AppHandle, building: usize) {
+/// Asks `question` in a dialog before restarting, warning of the
+/// `building` runs it interrupts, and calls `restart` if the user chooses
+/// `choice`: for Linux's native tray menu, which can't ask itself, and for
+/// updating.
+pub fn ask_to_restart(
+    handle: &AppHandle,
+    question: String,
+    building: usize,
+    choice: &str,
+    restart: impl FnOnce(AppHandle) + Send + 'static,
+) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     let answered = handle.clone();
     handle
         .dialog()
         .message(pages::restart_warning(building))
-        .title(pages::restart_question(building))
+        .title(question)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Restart".to_owned(),
+            choice.to_owned(),
             "Cancel".to_owned(),
         ))
-        .show(move |restart| {
-            if restart {
-                answered.state::<Quit>().restart();
+        .show(move |chosen| {
+            if chosen {
+                restart(answered);
             }
         });
 }
@@ -182,10 +207,7 @@ mod tests {
 
     #[test]
     fn restarting_quits_first() {
-        let quit = Quit {
-            stop: Arc::default(),
-            restart: Arc::default(),
-        };
+        let quit = Quit::default();
         quit.restart();
         assert!(quit.stop.load(Ordering::SeqCst));
         assert!(quit.restart.load(Ordering::SeqCst));
@@ -193,12 +215,28 @@ mod tests {
 
     #[test]
     fn quitting_doesnt_restart() {
-        let quit = Quit {
-            stop: Arc::default(),
-            restart: Arc::default(),
-        };
+        let quit = Quit::default();
         quit.quit();
         assert!(quit.stop.load(Ordering::SeqCst));
         assert!(!quit.restart.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn an_installer_stops_serving_and_waits_but_leaves_the_app_to_it() {
+        let quit = Quit::default();
+        let server = std::thread::spawn({
+            let quit = quit.clone();
+            move || {
+                while !quit.stop.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                quit.stopped.store(true, Ordering::SeqCst);
+            }
+        });
+        quit.stop_for_installer();
+        assert!(quit.stopped.load(Ordering::SeqCst));
+        assert!(quit.installing.load(Ordering::SeqCst));
+        assert!(!quit.restart.load(Ordering::SeqCst));
+        server.join().unwrap();
     }
 }

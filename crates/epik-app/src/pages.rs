@@ -657,8 +657,14 @@ pub fn sidebar(
 }
 
 /// The tray menu, for the same runs as Home, at `now`, for an Epik that
-/// started at `started`. Restarting interrupts only the builds here.
-pub fn popover(shown: &Shown, started: DateTime<Utc>, now: DateTime<Utc>) -> Popover {
+/// started at `started` and has found the newer version `update`, if any.
+/// Restarting interrupts only the builds here.
+pub fn popover(
+    shown: &Shown,
+    started: DateTime<Utc>,
+    now: DateTime<Utc>,
+    update: Option<&str>,
+) -> Popover {
     let building: Vec<&HostedRun> = shown
         .runs
         .iter()
@@ -678,6 +684,7 @@ pub fn popover(shown: &Shown, started: DateTime<Utc>, now: DateTime<Utc>) -> Pop
             duration(up)
         ),
         restart: restart_question(here),
+        update: update_label(update),
         runs: building
             .iter()
             .map(|run| tray_run(run, shown, now))
@@ -707,6 +714,56 @@ pub fn restart_warning(building: usize) -> String {
             lowercased_first(&number_word(n))
         ),
     }
+}
+
+/// What Check for updates reads, with the newer version `update` found,
+/// if any: "Update to 0.4.0".
+pub fn update_label(update: Option<&str>) -> String {
+    match update {
+        None => "Check for updates…".to_owned(),
+        Some(version) => format!("Update to {version}"),
+    }
+}
+
+/// What the dialog that confirms updating to `version` asks, with
+/// `building` runs building, whose warning is the restart's.
+pub fn update_question(version: &str, building: usize) -> String {
+    match building {
+        0 => format!("Update to {version}?"),
+        1 => format!("Update to {version} and interrupt one build?"),
+        n => format!(
+            "Update to {version} and interrupt {} builds?",
+            lowercased_first(&number_word(n))
+        ),
+    }
+}
+
+/// The title of the dialog that says no newer version was found.
+pub const UP_TO_DATE: &str = "Epik is up to date";
+
+/// What it says, for Epik at `version`.
+pub fn up_to_date(version: &str) -> String {
+    format!("Epik {version} is the newest version.")
+}
+
+/// The title of the dialog that says checking for a newer version failed.
+pub const COULDNT_CHECK: &str = "Couldn't check for updates";
+
+/// What it says, failing with `error`.
+pub fn couldnt_check(error: &str) -> String {
+    format!(
+        "Epik couldn't find out whether there is a newer version ({error}), so the releases page will open."
+    )
+}
+
+/// The title of the dialog that says installing a newer version failed.
+pub const COULDNT_UPDATE: &str = "Couldn't update Epik";
+
+/// What it says, failing with `error`.
+pub fn couldnt_update(error: &str) -> String {
+    format!(
+        "Epik couldn't install the new version ({error}). It is still running the version it was."
+    )
 }
 
 /// A building run's row in the tray menu, among the runs `shown`, at
