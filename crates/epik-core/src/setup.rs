@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent::CODEX_ACP;
+use crate::marketplace;
 use crate::settings::Settings;
 
 /// The oldest Node major version Epik runs on.
@@ -557,9 +558,55 @@ fn plugin(root: &Path, runner: &dyn Runner) -> Check {
     };
     let plugins: Vec<Value> = serde_json::from_str(&out.stdout).unwrap_or_default();
     match plugins.iter().find(|plugin| plugin["id"] == "epik@epik") {
-        Some(plugin) if plugin["enabled"] == true => Check::new(item, State::Done, "installed"),
+        Some(plugin) if plugin["enabled"] == true => installed_from(root, runner),
         Some(_) => Check::new(item, State::Missing, "installed but turned off"),
         None => Check::new(item, State::Missing, "not installed"),
+    }
+}
+
+/// An installed plugin, done when it is from the app's marketplace, else
+/// outdated.
+fn installed_from(root: &Path, runner: &dyn Runner) -> Check {
+    let item = Item::Plugin;
+    let marketplaces: Vec<Value> = runner
+        .run(&claude(root), &["plugin", "marketplace", "list", "--json"])
+        .ok()
+        .filter(|out| out.success)
+        .and_then(|out| serde_json::from_str(&out.stdout).ok())
+        .unwrap_or_default();
+    let epik = marketplaces
+        .iter()
+        .find(|marketplace| marketplace["name"] == "epik");
+    match epik {
+        Some(epik)
+            if epik["source"] == "directory"
+                && epik["path"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path) == marketplace::path(root)) =>
+        {
+            Check::new(item, State::Done, "installed")
+        }
+        Some(epik) if epik["source"] == "github" => {
+            Check::new(item, State::Outdated, "installed from GitHub")
+        }
+        _ => Check::new(
+            item,
+            State::Outdated,
+            "installed from somewhere other than the app",
+        ),
+    }
+}
+
+/// Has Claude Code refresh its copy of the plugin from the marketplace, if
+/// the plugin is installed. Says whether it was, or why the refresh failed.
+pub fn update_plugin(root: &Path, runner: &dyn Runner) -> Result<bool, String> {
+    if plugin(root, runner).detail == "not installed" {
+        return Ok(false);
+    }
+    match runner.run(&claude(root), &["plugin", "update", "epik@epik"]) {
+        Ok(out) if out.success => Ok(true),
+        Ok(out) => Err(first_line(&out.stderr, "claude plugin update failed")),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -624,11 +671,12 @@ fn command(words: &[&str]) -> Vec<String> {
     words.iter().map(|word| (*word).to_owned()).collect()
 }
 
-/// The step for `check`, or none when it's done.
-pub fn step(check: &Check) -> Option<Step> {
+/// The step for `check` under `root`, or none when it's done.
+pub fn step(root: &Path, check: &Check) -> Option<Step> {
     if check.state == State::Done {
         return None;
     }
+    let marketplace = marketplace::path(root).display().to_string();
     let (label, action) = match check.item {
         Item::Gh | Item::Node => {
             let label = if check.state == State::Outdated {
@@ -714,14 +762,14 @@ pub fn step(check: &Check) -> Option<Step> {
         Item::Plugin if check.state == State::Outdated => (
             "Update the plugin".to_owned(),
             Action::Run(vec![
-                command(&["claude", "plugin", "marketplace", "update", "epik"]),
+                command(&["claude", "plugin", "marketplace", "add", &marketplace]),
                 command(&["claude", "plugin", "update", "epik@epik"]),
             ]),
         ),
         Item::Plugin => (
             "Install the plugin".to_owned(),
             Action::Run(vec![
-                command(&["claude", "plugin", "marketplace", "add", "epik-agent/Epik"]),
+                command(&["claude", "plugin", "marketplace", "add", &marketplace]),
                 command(&[
                     "claude",
                     "plugin",
@@ -875,6 +923,11 @@ pub(crate) mod tests {
                 .answer_stderr(&codex("login status"), true, "Logged in using ChatGPT\n")
                 .answer("node --version", true, "v26.10.0\n")
                 .answer("claude plugin list --json", true, PLUGINS)
+                .answer(
+                    "claude plugin marketplace list --json",
+                    true,
+                    &from_directory(ROOT),
+                )
         }
     }
 
@@ -891,6 +944,22 @@ pub(crate) mod tests {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, command))
         }
     }
+
+    /// Where the tests' Epik is: a place with no private copies of tools.
+    pub(crate) const ROOT: &str = "/nowhere/.epik";
+
+    /// Claude Code's marketplaces, Epik's in `root`'s marketplace
+    /// directory.
+    fn from_directory(root: &str) -> String {
+        serde_json::json!([
+            {"name": "openai-codex", "source": "github", "repo": "openai/codex-plugin-cc"},
+            {"name": "epik", "source": "directory", "path": crate::marketplace::path(Path::new(root))},
+        ])
+        .to_string()
+    }
+
+    const FROM_GITHUB: &str =
+        r#"[{"name": "epik", "source": "github", "repo": "epik-agent/Epik"}]"#;
 
     /// The adapter's Codex run with `args`, as [`Recorded`] writes it.
     fn codex(args: &str) -> String {
@@ -914,15 +983,13 @@ pub(crate) mod tests {
     const PLUGINS: &str = r#"[{"id": "codex@openai-codex", "enabled": true}, {"id": "epik@epik", "version": "b7d47eea19b5", "scope": "user", "enabled": true}]"#;
 
     fn state(runner: &Recorded, item: Item) -> (State, String) {
-        let root = tempfile::tempdir().unwrap();
-        let check = check(&root.path().join(".epik"), runner, &Unknown, item);
+        let check = check(Path::new(ROOT), runner, &Unknown, item);
         (check.state, check.detail)
     }
 
     #[test]
     fn on_a_complete_machine_every_item_is_done() {
-        let root = tempfile::tempdir().unwrap();
-        let checks = check_all(&root.path().join(".epik"), &Recorded::complete(), &Unknown);
+        let checks = check_all(Path::new(ROOT), &Recorded::complete(), &Unknown);
 
         let details: Vec<(&str, State, &str)> = checks
             .iter()
@@ -1025,6 +1092,63 @@ pub(crate) mod tests {
         assert_eq!(
             state(&off, Item::Plugin),
             (State::Missing, "installed but turned off".into())
+        );
+    }
+
+    #[test]
+    fn a_plugin_installed_from_anywhere_but_the_apps_marketplace_is_outdated() {
+        let from_github =
+            Recorded::complete().answer("claude plugin marketplace list --json", true, FROM_GITHUB);
+        assert_eq!(
+            state(&from_github, Item::Plugin),
+            (State::Outdated, "installed from GitHub".into())
+        );
+        let from_a_clone = Recorded::complete().answer(
+            "claude plugin marketplace list --json",
+            true,
+            &from_directory("/somewhere/Epik"),
+        );
+        assert_eq!(
+            state(&from_a_clone, Item::Plugin),
+            (
+                State::Outdated,
+                "installed from somewhere other than the app".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_plugin_turned_off_is_turned_on_wherever_it_is_from() {
+        let off = PLUGINS.replace(r#""scope": "user", "enabled": true"#, r#""enabled": false"#);
+        let off = Recorded::complete()
+            .answer("claude plugin list --json", true, &off)
+            .answer("claude plugin marketplace list --json", true, FROM_GITHUB);
+
+        let check = check(Path::new(ROOT), &off, &Unknown, Item::Plugin);
+
+        assert_eq!(
+            step(Path::new(ROOT), &check).unwrap().label,
+            "Turn the plugin on"
+        );
+    }
+
+    #[test]
+    fn the_plugin_is_updated_after_the_marketplace_changes_only_when_installed() {
+        let installed =
+            Recorded::complete().answer("claude plugin update epik@epik", true, "updated\n");
+        assert_eq!(update_plugin(Path::new(ROOT), &installed), Ok(true));
+
+        let not_installed = installed.answer("claude plugin list --json", true, "[]");
+        assert_eq!(update_plugin(Path::new(ROOT), &not_installed), Ok(false));
+
+        let failing = Recorded::complete().answer_stderr(
+            "claude plugin update epik@epik",
+            false,
+            "something broke\n",
+        );
+        assert_eq!(
+            update_plugin(Path::new(ROOT), &failing),
+            Err("something broke".to_owned())
         );
     }
 
@@ -1326,7 +1450,7 @@ pub(crate) mod tests {
     }
 
     fn step_of(item: Item, state: State, detail: &str) -> Option<Step> {
-        step(&Check::new(item, state, detail))
+        step(Path::new(ROOT), &Check::new(item, state, detail))
     }
 
     #[test]
@@ -1339,6 +1463,9 @@ pub(crate) mod tests {
     #[test]
     fn each_item_offers_the_one_step_that_does_it() {
         let label = |item, state, detail| step_of(item, state, detail).unwrap().label;
+        let marketplace = crate::marketplace::path(Path::new(ROOT))
+            .display()
+            .to_string();
         assert_eq!(
             label(Item::Gh, State::Missing, "not installed"),
             "Install a private copy"
@@ -1410,7 +1537,7 @@ pub(crate) mod tests {
                 .unwrap()
                 .action,
             Action::Run(vec![
-                command(&["claude", "plugin", "marketplace", "add", "epik-agent/Epik"]),
+                command(&["claude", "plugin", "marketplace", "add", &marketplace]),
                 command(&[
                     "claude",
                     "plugin",
@@ -1426,8 +1553,14 @@ pub(crate) mod tests {
             "Turn the plugin on"
         );
         assert_eq!(
-            label(Item::Plugin, State::Outdated, "behind"),
-            "Update the plugin"
+            step_of(Item::Plugin, State::Outdated, "installed from GitHub").unwrap(),
+            Step {
+                label: "Update the plugin".to_owned(),
+                action: Action::Run(vec![
+                    command(&["claude", "plugin", "marketplace", "add", &marketplace]),
+                    command(&["claude", "plugin", "update", "epik@epik"]),
+                ]),
+            }
         );
         assert_eq!(
             step_of(Item::Codex, State::Missing, "npm error").unwrap(),

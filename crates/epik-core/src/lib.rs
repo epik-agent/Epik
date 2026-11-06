@@ -13,6 +13,7 @@ pub mod hosted;
 pub mod hosts;
 pub mod install;
 pub mod ipc;
+pub mod marketplace;
 pub mod mcp;
 pub mod mirror;
 pub mod mirrors;

@@ -48,7 +48,7 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     // An app started through the link may be told it is the link. Its
     // real file is what the link must lead to, never the link itself.
     let exe = &fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
-    if fs::canonicalize(builds_dir(root)).is_ok_and(|builds| exe.starts_with(builds)) {
+    if in_a_clone(root, exe) {
         return Ok(Refreshed::FromClone);
     }
     if fs::canonicalize(&link).is_ok_and(|resolved| &resolved == exe) {
@@ -68,6 +68,12 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     } else {
         Refreshed::Made
     })
+}
+
+/// Whether `exe` is in one of the build clones under `root`.
+pub fn in_a_clone(root: &Path, exe: &Path) -> bool {
+    let exe = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
+    fs::canonicalize(builds_dir(root)).is_ok_and(|builds| exe.starts_with(builds))
 }
 
 /// Moves an old link out of the way. On Windows a running program can't be
