@@ -6375,6 +6375,11 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.3.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "xxhash-rust"
