@@ -12,7 +12,9 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-use crate::{pages, popover, tray};
+use epik_core::hosts;
+
+use crate::{main_window, pages, popover, tray};
 
 /// How often a running Epik checks for a newer version.
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -143,11 +145,14 @@ pub fn choose(handle: &AppHandle, building: usize) {
     }
 }
 
-/// Asks before installing `update`, as Restart does; then installs it and
-/// restarts into it, or says why it couldn't.
+/// Asks before installing `update`, as Restart does, warning too of the
+/// hosts it cuts off; then installs it and restarts into it, or says why
+/// it couldn't. If the hosts can't be read, none is warned of.
 fn offer(handle: &AppHandle, update: Update, building: usize) {
     let question = pages::update_question(&update.version, building);
-    popover::ask_to_restart(handle, question, building, "Update", move |handle| {
+    let hosts = hosts::list(&handle.state::<main_window::Window>().root).unwrap_or_default();
+    let warning = pages::update_warning(&update.version, building, &hosts);
+    popover::ask_to_restart(handle, question, warning, "Update", move |handle| {
         tauri::async_runtime::spawn(async move {
             match update.download_and_install(|_, _| {}, || {}).await {
                 Ok(()) => handle.state::<popover::Quit>().restart(),

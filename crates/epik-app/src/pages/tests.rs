@@ -524,6 +524,66 @@ fn updating_warns_of_the_builds_it_interrupts() {
     );
 }
 
+/// `destination`, whose app was last recorded as `version`.
+fn host_on(destination: &str, version: &str) -> Host {
+    Host {
+        destination: destination.to_owned(),
+        ..devbox(Some(State::Reachable {
+            version: version.to_owned(),
+            at: time(119),
+        }))
+    }
+}
+
+#[test]
+fn updating_with_no_hosts_warns_only_of_the_builds() {
+    assert_eq!(update_warning("0.4.0", 1, &[]), restart_warning(1));
+}
+
+#[test]
+fn updating_doesnt_warn_of_a_host_on_the_new_minor_version() {
+    assert_eq!(
+        update_warning("0.4.0", 0, &[host_on("devbox", "0.4.2")]),
+        restart_warning(0)
+    );
+}
+
+#[test]
+fn updating_warns_of_a_host_on_another_minor_version() {
+    assert_eq!(
+        update_warning("0.4.0", 0, &[host_on("devbox", "0.3.2")]),
+        "Epik will quit and start again. devbox will be refused until its app is upgraded to 0.4.0."
+    );
+    let refused = devbox(Some(State::Mismatch {
+        version: "0.2.0".to_owned(),
+        at: time(119),
+    }));
+    assert_eq!(
+        update_warning("0.4.0", 0, &[refused]),
+        "Epik will quit and start again. devbox will be refused until its app is upgraded to 0.4.0."
+    );
+}
+
+#[test]
+fn updating_names_each_host_it_cuts_off() {
+    let hosts = [
+        host_on("devbox", "0.3.2"),
+        host_on("gpu", "0.4.1"),
+        host_on("me@build.example.com", "0.3.0"),
+        host_on("old", "0.2.9"),
+    ];
+    assert_eq!(
+        update_warning("0.4.0", 0, &hosts),
+        "Epik will quit and start again. devbox, me@build.example.com and old will be refused until their app is upgraded to 0.4.0."
+    );
+}
+
+#[test]
+fn updating_leaves_out_a_host_with_no_recorded_version() {
+    let hosts = [devbox(None), unreachable()];
+    assert_eq!(update_warning("0.4.0", 0, &hosts), restart_warning(0));
+}
+
 #[test]
 fn checking_says_whether_epik_is_up_to_date_or_couldnt_check() {
     assert_eq!(UP_TO_DATE, "Epik is up to date");
