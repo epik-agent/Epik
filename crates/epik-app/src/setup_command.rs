@@ -65,7 +65,7 @@ fn list(root: &Path) -> ExitCode {
             State::Outdated => "outdated",
         };
         println!("{:width$}  {state:8}  {}", check.title, check.detail);
-        for command in setup::step(check)
+        for command in setup::step(root, check)
             .map(|step| commands(root, &step))
             .unwrap_or_default()
         {
@@ -96,7 +96,7 @@ fn install(root: &Path, id: &str) -> ExitCode {
     };
     if !item.installable() {
         let check = setup::check(root, &setup::System, &setup::Unknown, item);
-        match setup::step(&check) {
+        match setup::step(root, &check) {
             Some(step) => eprintln!(
                 "epik-app setup: Epik doesn't install {id}; run:\n{}",
                 commands(root, &step)
