@@ -15,6 +15,8 @@ mod setup_command;
 mod setup_window;
 #[cfg(feature = "desktop")]
 mod tray;
+#[cfg(feature = "desktop")]
+mod update;
 
 #[cfg(feature = "desktop")]
 use std::path::PathBuf;

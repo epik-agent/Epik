@@ -476,7 +476,7 @@ fn an_agent_is_active_for_a_minute_then_quiet() {
 fn the_tray_menu_counts_the_runs_and_agents_and_says_how_long_epik_has_been_up() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&here(runs), time(0), time(4 * 3600 + 12 * 60 + 30));
+    let menu = popover(&here(runs), time(0), time(4 * 3600 + 12 * 60 + 30), None);
 
     assert_eq!(menu.about, "3 runs · 2 agents · up 4h 12m");
 }
@@ -498,14 +498,61 @@ fn restarting_warns_of_the_builds_it_interrupts() {
 }
 
 #[test]
+fn check_for_updates_reads_as_the_update_once_one_is_found() {
+    assert_eq!(update_label(None), "Check for updates…");
+    assert_eq!(update_label(Some("0.4.0")), "Update to 0.4.0");
+    assert_eq!(
+        popover(&here([]), time(0), time(5), None).update,
+        "Check for updates…"
+    );
+    assert_eq!(
+        popover(&here([]), time(0), time(5), Some("0.4.0")).update,
+        "Update to 0.4.0"
+    );
+}
+
+#[test]
+fn updating_warns_of_the_builds_it_interrupts() {
+    assert_eq!(update_question("0.4.0", 0), "Update to 0.4.0?");
+    assert_eq!(
+        update_question("0.4.0", 1),
+        "Update to 0.4.0 and interrupt one build?"
+    );
+    assert_eq!(
+        update_question("0.4.0", 2),
+        "Update to 0.4.0 and interrupt two builds?"
+    );
+}
+
+#[test]
+fn checking_says_whether_epik_is_up_to_date_or_couldnt_check() {
+    assert_eq!(UP_TO_DATE, "Epik is up to date");
+    assert_eq!(up_to_date("0.3.0"), "Epik 0.3.0 is the newest version.");
+    assert_eq!(COULDNT_CHECK, "Couldn't check for updates");
+    assert_eq!(
+        couldnt_check("404 Not Found"),
+        "Epik couldn't find out whether there is a newer version (404 Not Found), so the releases page will open."
+    );
+}
+
+#[test]
+fn a_failed_update_says_why_and_that_epik_is_still_running() {
+    assert_eq!(COULDNT_UPDATE, "Couldn't update Epik");
+    assert_eq!(
+        couldnt_update("the signature is invalid"),
+        "Epik couldn't install the new version (the signature is invalid). It is still running the version it was."
+    );
+}
+
+#[test]
 fn the_tray_menu_asks_before_interrupting_its_building_runs() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
     assert_eq!(
-        popover(&here(runs), time(0), time(5)).restart,
+        popover(&here(runs), time(0), time(5), None).restart,
         "Interrupt one build?"
     );
     assert_eq!(
-        popover(&here([]), time(0), time(5)).restart,
+        popover(&here([]), time(0), time(5), None).restart,
         "Restart Epik?"
     );
 }
@@ -515,11 +562,11 @@ fn the_tray_menus_counts_read_as_english() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.issue.number != 17);
     assert_eq!(
-        popover(&here([run]), time(0), time(5)).about,
+        popover(&here([run]), time(0), time(5), None).about,
         "1 run · 1 agent · up 5s"
     );
     assert_eq!(
-        popover(&here([]), time(0), time(0)).about,
+        popover(&here([]), time(0), time(0), None).about,
         "0 runs · 0 agents · up 0s"
     );
 }
@@ -528,7 +575,7 @@ fn the_tray_menus_counts_read_as_english() {
 fn the_tray_menu_lists_each_building_run_with_its_progress() {
     let runs = [exponentiation(), waiting_run(), failed_run()];
 
-    let menu = popover(&here(runs), time(0), now());
+    let menu = popover(&here(runs), time(0), now(), None);
 
     assert_eq!(menu.runs.len(), 1);
     let run = &menu.runs[0];
@@ -555,7 +602,7 @@ fn a_tray_menu_row_times_its_longest_running_issue() {
     run.issues[2].started_at = Some(time(60));
     run.issues[3].started_at = Some(time(30));
 
-    let menu = popover(&here([run]), time(0), now());
+    let menu = popover(&here([run]), time(0), now(), None);
 
     assert_eq!(
         menu.runs[0].line,
@@ -568,14 +615,14 @@ fn a_tray_menu_row_with_nothing_running_is_starting() {
     let mut run = exponentiation();
     run.issues.retain(|i| i.status != IssueStatus::Running);
 
-    let menu = popover(&here([run]), time(0), now());
+    let menu = popover(&here([run]), time(0), now(), None);
 
     assert_eq!(menu.runs[0].line, "starting · wpm/epik-test#13");
 }
 
 #[test]
 fn the_tray_menu_lists_no_runs_when_nothing_is_building() {
-    let menu = popover(&here([waiting_run(), failed_run()]), time(0), now());
+    let menu = popover(&here([waiting_run(), failed_run()]), time(0), now(), None);
 
     assert!(menu.runs.is_empty());
 }
@@ -1327,7 +1374,7 @@ fn the_tray_menu_says_where_each_run_builds() {
         vec![on(&unreachable(), exponentiation()), local(numbered(4))],
     );
 
-    let menu = popover(&shown, time(0), now());
+    let menu = popover(&shown, time(0), now(), None);
 
     assert_eq!(menu.runs[0].run, "devbox:wpm/epik-test#13");
     assert_eq!(
@@ -1346,13 +1393,13 @@ fn restarting_interrupts_only_the_builds_here() {
     let host = reachable();
     let shown = with(&host, vec![on(&host, numbered(1)), local(numbered(2))]);
     assert_eq!(
-        popover(&shown, time(0), now()).restart,
+        popover(&shown, time(0), now(), None).restart,
         "Interrupt one build?"
     );
 
     let only_remote = with(&host, vec![on(&host, numbered(1))]);
     assert_eq!(
-        popover(&only_remote, time(0), now()).restart,
+        popover(&only_remote, time(0), now(), None).restart,
         "Restart Epik?"
     );
 }

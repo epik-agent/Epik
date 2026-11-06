@@ -164,6 +164,9 @@ pub struct Popover {
     pub about: String,
     /// What Restart asks before it restarts: "Interrupt two builds?".
     pub restart: String,
+    /// What Check for updates reads: "Update to 0.4.0" once a newer
+    /// version is found.
+    pub update: String,
     /// The building runs.
     pub runs: Vec<TrayRun>,
 }

@@ -27,7 +27,7 @@ use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use crate::App;
 use crate::runs::Runs;
-use crate::{main_window, popover, setup_window};
+use crate::{main_window, pages, popover, setup_window, update};
 
 /// How often the icon is checked against what is building and what needs
 /// attention, besides each time a build changes.
@@ -39,6 +39,9 @@ const SETTINGS: &str = "settings";
 const CHECK_SETUP: &str = "check-setup";
 const CHECK_FOR_UPDATES: &str = "check-for-updates";
 const QUIT: &str = "quit";
+
+/// The tray icon's id, by which its menu is found to relabel.
+const TRAY: &str = "epik";
 
 /// Runs the app in the tray until Quit, SIGINT or SIGTERM, or headless
 /// where there is no tray.
@@ -84,9 +87,11 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         })
         .manage(popover::Quit {
             stop: app.stop.clone(),
-            restart: Arc::default(),
+            ..Default::default()
         })
+        .manage(update::Found::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_menu_event(chosen)
         .invoke_handler(tauri::generate_handler![
             main_window::home,
@@ -135,7 +140,7 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
 
     let failed = |error: tauri::Error| error.to_string();
     let idle = look(TEMPLATE, false, false);
-    let tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::with_id(TRAY)
         .icon(icon(idle))
         .icon_as_template(idle.template)
         .tooltip("Epik")
@@ -154,15 +159,15 @@ fn open(app: &App) -> Result<(tauri::App, TrayIcon), String> {
         });
     // Linux doesn't report tray clicks, so there the menu is native.
     #[cfg(target_os = "linux")]
-    let tray = tray.menu(&tray_menu(tauri.handle()).map_err(failed)?);
+    let tray = tray.menu(&tray_menu(tauri.handle(), &pages::update_label(None)).map_err(failed)?);
     let tray = tray.build(&tauri).map_err(failed)?;
     Ok((tauri, tray))
 }
 
 /// The tray's native menu on Linux: the tray menu's items, without its
-/// header and runs.
+/// header and runs, with Check for updates reading `update`.
 #[cfg(target_os = "linux")]
-fn tray_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+fn tray_menu(handle: &AppHandle, update: &str) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     let item = |id, label| MenuItem::with_id(handle, id, label, true, None::<&str>);
     Menu::with_items(
@@ -174,10 +179,31 @@ fn tray_menu(handle: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
             &PredefinedMenuItem::separator(handle)?,
             &item(SETTINGS, "Settings…")?,
             &item(CHECK_SETUP, "Check setup…")?,
-            &item(CHECK_FOR_UPDATES, "Check for updates…")?,
+            &item(CHECK_FOR_UPDATES, update)?,
             &item(QUIT, "Quit Epik")?,
         ],
     )
+}
+
+/// Has Check for updates read as updating to `version`: on Linux, in the
+/// native tray menu; elsewhere the tray menu reads it each time it draws.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub(crate) fn show_update(handle: &AppHandle, version: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let label = pages::update_label(Some(version));
+        let relabeler = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let relabeled = tray_menu(&relabeler, &label).and_then(|menu| {
+                relabeler
+                    .tray_by_id(TRAY)
+                    .map_or(Ok(()), |tray| tray.set_menu(Some(menu)))
+            });
+            if let Err(error) = relabeled {
+                eprintln!("epik-app: couldn't show the update in the tray menu: {error}");
+            }
+        });
+    }
 }
 
 /// What the About Epik panel shows. The mark is given here because a debug
@@ -254,11 +280,18 @@ fn chosen(handle: &AppHandle, event: MenuEvent) {
         OPEN_DASHBOARD => main_window::open(handle, "").map_err(|e| e.to_string()),
         SETTINGS => main_window::open(handle, "settings").map_err(|e| e.to_string()),
         CHECK_SETUP => setup_window::open(handle).map_err(|e| e.to_string()),
-        CHECK_FOR_UPDATES => open::that_detached(popover::RELEASES).map_err(|e| e.to_string()),
+        CHECK_FOR_UPDATES => {
+            let runs = &handle.state::<main_window::Window>().runs;
+            update::choose(handle, building_here(runs));
+            Ok(())
+        }
         // Only Linux's native tray menu has Restart, and it can't ask first.
         RESTART => {
-            let runs = &handle.state::<main_window::Window>().runs;
-            popover::ask_to_restart(handle, building_here(runs));
+            let building = building_here(&handle.state::<main_window::Window>().runs);
+            let question = pages::restart_question(building);
+            popover::ask_to_restart(handle, question, building, "Restart", |handle| {
+                handle.state::<popover::Quit>().restart();
+            });
             Ok(())
         }
         QUIT => {
@@ -286,7 +319,7 @@ pub(crate) fn building(runs: &Runs) -> usize {
 
 /// How many runs are building on this computer, which restarting
 /// interrupts. If the runs can't be read, none is.
-fn building_here(runs: &Runs) -> usize {
+pub(crate) fn building_here(runs: &Runs) -> usize {
     runs.monitored().map_or(0, |shown| {
         shown
             .runs
@@ -359,13 +392,21 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
             }
         }
     });
-    let restart = tauri.state::<popover::Quit>().restart.clone();
+    update::check_daily(tauri.handle());
+    let quit = tauri.state::<popover::Quit>().inner().clone();
     let env = tauri.env();
     let handle = tauri.handle().clone();
-    let server = thread::spawn(move || {
-        let code = app.serve();
-        handle.exit(0);
-        code
+    let server = thread::spawn({
+        let quit = quit.clone();
+        move || {
+            let code = app.serve();
+            quit.stopped.store(true, Ordering::SeqCst);
+            // An installer ends the app itself, once it has started.
+            if !quit.installing.load(Ordering::SeqCst) {
+                handle.exit(0);
+            }
+            code
+        }
     });
     tauri.run_return(|handle, event| match event {
         // Closing the last window doesn't quit an app that lives in the
@@ -391,7 +432,7 @@ fn in_tray(app: App, tauri: tauri::App, tray: TrayIcon, changes: Receiver<()>) -
     let code = server.join().unwrap_or(ExitCode::FAILURE);
     // The builds and the server have stopped, so the new Epik can take the
     // socket.
-    if restart.load(Ordering::SeqCst) {
+    if quit.restart.load(Ordering::SeqCst) {
         eprintln!("epik-app: restarting");
         tauri::process::restart(&env);
     }

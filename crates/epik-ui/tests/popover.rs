@@ -218,3 +218,11 @@ fn a_hosts_run_row_opens_its_run_page_by_host() {
         Command::OpenMain("run/devbox:acme/widgets#13".into())
     );
 }
+
+#[test]
+fn check_for_updates_reads_as_the_update_found() {
+    let html = render(|| view! { <Items mac=true update="Update to 0.4.0"/> });
+    assert!(html.contains("Update to 0.4.0"), "{html}");
+    assert!(!html.contains("Check for updates"), "{html}");
+    assert!(html.contains(r#"id="check-for-updates""#), "{html}");
+}

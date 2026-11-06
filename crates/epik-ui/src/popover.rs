@@ -188,9 +188,14 @@ pub fn Runs(runs: Vec<TrayRun>) -> impl IntoView {
     })
 }
 
-/// An item, with its shortcut if it has one.
+/// An item, with its shortcut if it has one, reading `label` if given
+/// rather than its own.
 #[component]
-fn ItemButton(item: Item, mac: bool) -> impl IntoView {
+fn ItemButton(
+    item: Item,
+    mac: bool,
+    #[prop(optional)] label: Option<Signal<String>>,
+) -> impl IntoView {
     let shortcut = item.key().map(|key| {
         let shown = if mac {
             format!("⌘{key}")
@@ -205,7 +210,9 @@ fn ItemButton(item: Item, mac: bool) -> impl IntoView {
     };
     view! {
         <button type="button" class="item" id=item.id() on:click=choose>
-            <span class="label">{item.label()}</span>
+            <span class="label">
+                {move || label.map_or_else(|| item.label().to_owned(), |label| label.get())}
+            </span>
             {shortcut}
         </button>
     }
@@ -259,16 +266,23 @@ fn RestartItem(restart: Signal<String>, confirming: bool) -> impl IntoView {
 /// The items, grouped: the dashboard, Restart, then the rest. Shortcuts
 /// are drawn with Cmd on a Mac and Ctrl elsewhere. Restart asks `restart`
 /// before it restarts; `confirming` is whether it starts out asking.
+/// Check for updates reads `update` if given: "Update to 0.4.0".
 #[component]
 pub fn Items(
     mac: bool,
     #[prop(optional, into)] restart: Signal<String>,
     #[prop(optional)] confirming: bool,
+    #[prop(optional, into)] update: Option<Signal<String>>,
 ) -> impl IntoView {
     let button = move |item| view! { <ItemButton item mac/> };
     let rest = Item::ALL[2..]
         .iter()
-        .map(|&item| button(item))
+        .map(|&item| match (item, update) {
+            (Item::CheckForUpdates, Some(label)) => {
+                view! { <ItemButton item mac label/> }.into_any()
+            }
+            _ => button(item).into_any(),
+        })
         .collect_view();
     view! {
         <nav class="items">
@@ -318,6 +332,10 @@ pub fn PopoverWindow() -> impl IntoView {
         Some(Ok(popover)) => popover.restart,
         _ => Item::Restart.label().to_owned() + "?",
     });
+    let update = Signal::derive(move || match drawn.get() {
+        Some(Ok(popover)) => popover.update,
+        _ => Item::CheckForUpdates.label().to_owned(),
+    });
     view! {
         {move || match drawn.get() {
             Some(Ok(popover)) => view! {
@@ -328,6 +346,6 @@ pub fn PopoverWindow() -> impl IntoView {
             Some(Err(reason)) => view! { <p class="error">{reason}</p> }.into_any(),
             None => ().into_any(),
         }}
-        <Items mac restart/>
+        <Items mac restart update/>
     }
 }
