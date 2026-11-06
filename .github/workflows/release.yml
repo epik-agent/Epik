@@ -20,6 +20,14 @@
 #   epik-app-linux-x64.tar.gz     Linux, x86-64
 #   epik-app-linux-arm64.tar.gz   Linux, ARM64
 #
+# and, when updates are armed (below), the files Tauri's updater
+# downloads, each with its signature:
+#
+#   Epik.app.tar.gz, Epik.app.tar.gz.sig   macOS, universal
+#   Epik.msi.sig                           Windows, beside Epik.msi
+#   Epik_amd64.AppImage.sig                Linux, beside the AppImage
+#   latest.json                            the manifest naming them
+#
 # Each tarball holds the one binary, epik-app, and comes with a .sha256
 # that `sha256sum -c` checks. The website doesn't link them; the docs for
 # setting up a host do.
@@ -47,6 +55,16 @@
 # for the build and removes it afterwards.
 #
 # Windows is unsigned for now, so SmartScreen warns on first run.
+#
+# Update files are armed the same way, by the updater's key:
+#
+#   TAURI_SIGNING_PRIVATE_KEY           the key from `cargo tauri signer generate`
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#
+# Without them no update files are built. With them every release builds
+# them, but only a tag without a suffix publishes latest.json: a
+# pre-release offers no update. The key stays out of tauri.conf.json, so
+# local builds need none.
 
 name: Release
 
@@ -178,15 +196,37 @@ jobs:
             echo "::notice::No notarization secrets; the .dmg will be signed but not notarized."
           fi
 
+      - name: Arm update files
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::notice::No updater key; no update files will be built."
+            exit 0
+          fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<__EOF__"; echo "$KEY"; echo "__EOF__"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      # cargo xtask dmg arms the macOS build itself.
       - name: Bundle
         working-directory: crates/epik-app
+        shell: bash
         env:
           # The AppImage tool is itself an AppImage, and the runner has no
           # FUSE to mount it: unpack it instead.
           APPIMAGE_EXTRACT_AND_RUN: 1
           # linuxdeploy's own strip fails on newer Ubuntu libraries.
           NO_STRIP: true
-        run: ${{ matrix.build }}
+        run: |
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] && [ "$RUNNER_OS" != macOS ]; then
+            ${{ matrix.build }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            ${{ matrix.build }}
+          fi
 
       # Version-free names, so the latest release's download links never
       # change. Each glob must match exactly one file.
@@ -216,6 +256,21 @@ jobs:
               cp "$(one 'target/release/bundle/deb/*.deb')" dist/Epik_amd64.deb
               ;;
           esac
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            case "$RUNNER_OS" in
+              macOS)
+                bundle=target/universal-apple-darwin/release/bundle/macos
+                cp "$(one "$bundle/*.app.tar.gz")" dist/Epik.app.tar.gz
+                cp "$(one "$bundle/*.app.tar.gz.sig")" dist/Epik.app.tar.gz.sig
+                ;;
+              Windows)
+                cp "$(one 'target/release/bundle/msi/*.msi.sig')" dist/Epik.msi.sig
+                ;;
+              Linux)
+                cp "$(one 'target/release/bundle/appimage/*.AppImage.sig')" dist/Epik_amd64.AppImage.sig
+                ;;
+            esac
+          fi
           ls -l dist
 
       - uses: actions/upload-artifact@v7
@@ -267,6 +322,8 @@ jobs:
     needs: [build, headless]
     runs-on: ubuntu-24.04
     steps:
+      # For cargo xtask latest-json.
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: installers-*
@@ -277,13 +334,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          ARMED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
           ls -l dist
-          for f in Epik.dmg Epik.msi Epik_amd64.AppImage Epik_amd64.deb \
-            epik-app-linux-x64.tar.gz epik-app-linux-x64.tar.gz.sha256 \
-            epik-app-linux-arm64.tar.gz epik-app-linux-arm64.tar.gz.sha256; do
+          files="Epik.dmg Epik.msi Epik_amd64.AppImage Epik_amd64.deb
+            epik-app-linux-x64.tar.gz epik-app-linux-x64.tar.gz.sha256
+            epik-app-linux-arm64.tar.gz epik-app-linux-arm64.tar.gz.sha256"
+          if [ "$ARMED" = true ]; then
+            files="$files Epik.app.tar.gz Epik.app.tar.gz.sig Epik.msi.sig Epik_amd64.AppImage.sig"
+          fi
+          for f in $files; do
             test -f "dist/$f" || { echo "::error::dist/$f is missing"; exit 1; }
           done
+          case "$TAG" in
+            *-*) echo "::notice::$TAG has a suffix; no latest.json." ;;
+            *) if [ "$ARMED" = true ]; then cargo xtask latest-json "${TAG#v}" "$TAG" dist; fi ;;
+          esac
           # A rerun replaces the files on the release it already made.
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber

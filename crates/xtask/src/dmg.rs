@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub type Error = Box<dyn std::error::Error>;
+use crate::Error;
 
 /// What the build environment promised the `.dmg` would be, read from the
 /// same variables the Tauri bundler reads. The check demands each promise.
@@ -48,17 +48,30 @@ fn bundle_dir() -> PathBuf {
     app_dir().join("../../target/universal-apple-darwin/release/bundle/dmg")
 }
 
-/// Builds the `.dmg` as the release workflow does.
+/// The Tauri CLI's arguments for the universal build. With an updater
+/// signing key, the build also makes the `app` bundle, whose `.app.tar.gz`
+/// and `.sig` are the update files.
+fn build_args(updater: bool) -> Vec<&'static str> {
+    let mut args = vec!["build", "--target", "universal-apple-darwin", "--bundles"];
+    if updater {
+        args.extend([
+            "app,dmg",
+            "--config",
+            r#"{"bundle":{"createUpdaterArtifacts":true}}"#,
+        ]);
+    } else {
+        args.push("dmg");
+    }
+    args
+}
+
+/// Builds the `.dmg` as the release workflow does, and the update files
+/// when `TAURI_SIGNING_PRIVATE_KEY` is set.
 pub fn build() -> Result<PathBuf, Error> {
+    let updater = std::env::var_os("TAURI_SIGNING_PRIVATE_KEY").is_some();
     let status = Command::new("cargo")
-        .args([
-            "tauri",
-            "build",
-            "--target",
-            "universal-apple-darwin",
-            "--bundles",
-            "dmg",
-        ])
+        .arg("tauri")
+        .args(build_args(updater))
         .current_dir(app_dir())
         .status()?;
     if !status.success() {
@@ -274,6 +287,36 @@ mod tests {
                 signed: true,
                 notarized: true
             }
+        );
+    }
+
+    #[test]
+    fn unarmed_builds_only_the_dmg() {
+        assert_eq!(
+            build_args(false),
+            [
+                "build",
+                "--target",
+                "universal-apple-darwin",
+                "--bundles",
+                "dmg"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_signing_key_also_builds_the_app_and_its_update_files() {
+        assert_eq!(
+            build_args(true),
+            [
+                "build",
+                "--target",
+                "universal-apple-darwin",
+                "--bundles",
+                "app,dmg",
+                "--config",
+                r#"{"bundle":{"createUpdaterArtifacts":true}}"#,
+            ]
         );
     }
 

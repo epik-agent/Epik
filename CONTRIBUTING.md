@@ -59,3 +59,9 @@ follows demands each of those the environment promised. Notarization
 credentials are repository secrets, so a local build is signed at most;
 `cargo xtask check-dmg [path]` checks a `.dmg` already built, such as
 one downloaded from a release.
+
+With `TAURI_SIGNING_PRIVATE_KEY` set, the build also makes the update
+files, `Epik.app.tar.gz` and its `.sig`. `cargo xtask latest-json
+<version> <tag> <dir>` writes the manifest the updater reads for the
+update files in `<dir>`, as the release workflow does for each final
+release.
