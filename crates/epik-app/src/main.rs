@@ -32,7 +32,7 @@ use epik_core::builds::Builds;
 use epik_core::cleanup;
 use epik_core::ipc::{Address, BindError, Server};
 use epik_core::mirrors::Mirrors;
-use epik_core::{record, run, self_link};
+use epik_core::{marketplace, record, run, self_link, setup};
 
 /// How often the app checks GitHub for runs whose epic issue closed or
 /// whose pull request was closed. Modest to start with; tune it.
@@ -43,6 +43,7 @@ const USAGE: &str = "usage: epik-app [--headless | --version | mcp | stdio | set
 fn main() -> ExitCode {
     find_epiks_tools();
     link_self();
+    refresh_marketplace();
     match std::env::args().nth(1).as_deref() {
         Some("--version") => {
             println!("epik-app {}", epik_core::version());
@@ -165,6 +166,27 @@ fn link_self() {
             "epik-app: couldn't link {} to this app: {error}",
             self_link::path(&root).display()
         );
+    }
+}
+
+/// Makes `~/.epik/marketplace` hold the plugin this app carries, and when
+/// that changed it, has Claude Code refresh its copy of the plugin. A
+/// failure is only reported.
+fn refresh_marketplace() {
+    let (Some(root), Ok(exe)) = (record::default_root(), std::env::current_exe()) else {
+        return;
+    };
+    match marketplace::refresh(&root, &exe) {
+        Ok(marketplace::Refreshed::Changed) => {
+            if let Err(error) = setup::update_plugin(&root, &setup::System) {
+                eprintln!("epik-app: couldn't update the Epik plugin: {error}");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!(
+            "epik-app: couldn't write the plugin to {}: {error}",
+            marketplace::path(&root).display()
+        ),
     }
 }
 

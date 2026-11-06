@@ -15,7 +15,7 @@ When the user opens the app, its **Set up Epik** checklist walks them through:
 - **Codex:** downloads OpenAI's Codex with the adapter Epik runs it through.
 - **Codex sign-in:** signs Codex in, in their browser, with ChatGPT or an API key.
 - **Node:** uses Node 26 or later from their computer, or installs a private copy. It runs the app's coding agents.
-- **The Epik plugin:** adds Epik's marketplace to Claude Code and installs the plugin for the user.
+- **The Epik plugin:** adds the marketplace the app carries, `~/.epik/marketplace`, to Claude Code and installs the plugin for the user. Upgrading the app upgrades the plugin.
 
 The Claude Code and Codex items are needed only while a role uses that agent (see **Roles**): with the defaults, that is Claude Code alone, and an agent no role uses shows as not needed. Claude Code is still where the user plans with Epik, so they keep it to talk to you.
 

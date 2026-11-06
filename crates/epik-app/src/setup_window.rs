@@ -30,9 +30,9 @@ fn shown(state: setup::State) -> ItemState {
     }
 }
 
-/// The checklist for `checks`: each item's state, and the one button of
+/// The checklist for `checks` under `root`: each item's state, and the one button of
 /// each that isn't done. It is complete when every item needed is done.
-pub fn checklist(checks: &[Check]) -> Checklist {
+pub fn checklist(root: &Path, checks: &[Check]) -> Checklist {
     Checklist {
         rows: checks
             .iter()
@@ -41,7 +41,7 @@ pub fn checklist(checks: &[Check]) -> Checklist {
                 title: check.title.clone(),
                 state: shown(check.state),
                 detail: check.detail.clone(),
-                button: setup::step(check).map(|step| step.label),
+                button: setup::step(root, check).map(|step| step.label),
                 needed: check.needed,
             })
             .collect(),
@@ -65,7 +65,7 @@ pub struct Setup {
 #[tauri::command]
 pub async fn setup_checklist(setup: State<'_, Setup>) -> Result<Checklist, String> {
     let checks = setup.builds.setup(None)?;
-    let list = checklist(&checks);
+    let list = checklist(&setup.root, &checks);
     if list.complete {
         mark_done(&setup.root);
     }
@@ -110,7 +110,8 @@ fn start_step(
         .into_iter()
         .find(|check| check.item == item)
         .ok_or_else(|| format!("no setup item {id:?}"))?;
-    let step = setup::step(&check).ok_or_else(|| format!("{} is already done", check.title))?;
+    let step =
+        setup::step(&root, &check).ok_or_else(|| format!("{} is already done", check.title))?;
     {
         let mut outputs = outputs.lock().unwrap();
         if outputs.get(&id).is_some_and(|output| output.running) {
@@ -212,7 +213,7 @@ mod tests {
             "Node 22.1.0; Epik needs 26 or later",
         );
 
-        let list = checklist(&checks);
+        let list = checklist(Path::new("/nowhere/.epik"), &checks);
 
         assert!(!list.complete);
         let buttons: Vec<(&str, Option<&str>)> = list
@@ -247,7 +248,7 @@ mod tests {
             "not signed in",
         ));
 
-        let list = checklist(&checks);
+        let list = checklist(Path::new("/nowhere/.epik"), &checks);
 
         assert!(list.complete);
         let needed: Vec<(&str, bool)> = list
@@ -267,11 +268,11 @@ mod tests {
 
     #[test]
     fn with_every_item_done_the_checklist_is_complete() {
-        let list = checklist(&all_done());
+        let list = checklist(Path::new("/nowhere/.epik"), &all_done());
 
         assert!(list.complete);
         assert!(list.rows.iter().all(|row| row.button.is_none()));
-        assert!(!checklist(&[]).complete);
+        assert!(!checklist(Path::new("/nowhere/.epik"), &[]).complete);
     }
 
     #[test]
