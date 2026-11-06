@@ -26,7 +26,7 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::popover::Quit;
 use crate::runs::Runs;
-use crate::{navigation, pages};
+use crate::{navigation, pages, update};
 
 /// What the window's commands reach.
 pub struct Window {
@@ -70,9 +70,18 @@ pub fn sidebar(window: State<'_, Window>) -> Result<Sidebar, String> {
 }
 
 #[tauri::command]
-pub fn popover(window: State<'_, Window>) -> Result<Popover, String> {
+pub fn popover(
+    window: State<'_, Window>,
+    found: State<'_, update::Found>,
+) -> Result<Popover, String> {
     let shown = window.runs.monitored().map_err(failed)?;
-    Ok(pages::popover(&shown, window.started, Utc::now()))
+    let update = found.version();
+    Ok(pages::popover(
+        &shown,
+        window.started,
+        Utc::now(),
+        update.as_deref(),
+    ))
 }
 
 #[tauri::command]

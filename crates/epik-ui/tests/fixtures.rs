@@ -104,6 +104,7 @@ pub fn popover(runs: Vec<TrayRun>) -> Popover {
     Popover {
         about: "3 runs · 4 agents · up 4h 12m".into(),
         restart: "Interrupt one build?".into(),
+        update: "Check for updates…".into(),
         runs,
     }
 }
