@@ -1,9 +1,13 @@
-# Build Epik's installers when a version tag is pushed, and attach them to
-# a draft GitHub Release for a person to publish.
+# Build Epik's installers and attach them to a draft GitHub Release for a
+# person to publish. The workflow is run by hand, from the Actions page
+# ("Run workflow"), and makes the release's tag itself.
 #
-# The tag must be `v<version>` or `v<version>-<suffix>`, where <version> is
-# epik-app's version (the workspace version in the root Cargo.toml). A tag
-# with a suffix, such as `v0.3.0-test`, makes a pre-release.
+# The tag is `v<version>`, or `v<version>-<suffix>` when the form is given
+# a suffix, where <version> is epik-app's version (the workspace version in
+# the root Cargo.toml) on the chosen branch. A tag with a suffix, such as
+# `v0.3.0-rc1`, makes a pre-release. The run fails if the tag already
+# exists: bump the version first. Tags pushed by the workflow's token start
+# no other workflow.
 #
 # Every file is uploaded under a name without the version, so the website's
 # download buttons can link to
@@ -69,8 +73,15 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      suffix:
+        description: >-
+          Leave empty for the final release. A suffix such as rc1 makes the
+          pre-release v<version>-<suffix>. <version> is the workspace version
+          in Cargo.toml on the chosen branch.
+        type: string
+        required: false
 
 # Creating the release and uploading its files.
 permissions:
@@ -86,24 +97,31 @@ env:
 
 jobs:
   version:
-    name: Tag matches the app's version
+    name: Tag the version
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
-      - name: Check the tag
+      - name: Tag the version
+        id: tag
         env:
-          TAG: ${{ github.ref_name }}
+          SUFFIX: ${{ inputs.suffix }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "epik-app") | .version')
-          echo "epik-app is version $version; the tag is $TAG."
-          case "$TAG" in
-            "v$version" | "v$version-"?*) ;;
-            *)
-              echo "::error::The tag $TAG is not v$version or v$version-<suffix>. Bump the workspace version in Cargo.toml, or tag v$version."
-              exit 1
-              ;;
-          esac
+          tag="v$version${SUFFIX:+-$SUFFIX}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "::error::The tag $tag already exists. Bump the workspace version in Cargo.toml."
+            exit 1
+          fi
+          line="Releasing $version as $tag from $BRANCH at $GITHUB_SHA"
+          echo "::notice::$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.os }})
@@ -319,7 +337,7 @@ jobs:
 
   release:
     name: Draft the release
-    needs: [build, headless]
+    needs: [version, build, headless]
     runs-on: ubuntu-24.04
     steps:
       # For cargo xtask latest-json.
@@ -333,7 +351,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
           ARMED: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
           ls -l dist
