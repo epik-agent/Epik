@@ -119,10 +119,12 @@ fn stdio() -> ExitCode {
 }
 
 /// Starts this executable with no arguments, in the tray or headless,
-/// detached so that it outlives the MCP server that started it.
+/// detached so that it outlives the MCP server that started it. It runs by
+/// its real path, not the link, so that macOS finds its bundle and names it
+/// "Epik" in the menu bar.
 fn start_detached() -> std::io::Result<()> {
     use std::process::{Command, Stdio};
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(self_link::real_path(&std::env::current_exe()?));
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
