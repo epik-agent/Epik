@@ -47,7 +47,7 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     let link = path(root);
     // An app started through the link may be told it is the link. Its
     // real file is what the link must lead to, never the link itself.
-    let exe = &fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
+    let exe = &real_path(exe);
     if in_a_clone(root, exe) {
         return Ok(Refreshed::FromClone);
     }
@@ -70,9 +70,17 @@ pub fn refresh(root: &Path, exe: &Path) -> io::Result<Refreshed> {
     })
 }
 
+/// The file `exe` really is, following the link and any other symbolic
+/// links, or `exe` itself if it can't be resolved. An app started through
+/// the link is told it is the link; macOS finds an app's bundle, and so its
+/// name, only from the executable's real path.
+pub fn real_path(exe: &Path) -> PathBuf {
+    fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned())
+}
+
 /// Whether `exe` is in one of the build clones under `root`.
 pub fn in_a_clone(root: &Path, exe: &Path) -> bool {
-    let exe = fs::canonicalize(exe).unwrap_or_else(|_| exe.to_owned());
+    let exe = real_path(exe);
     fs::canonicalize(builds_dir(root)).is_ok_and(|builds| exe.starts_with(builds))
 }
 
@@ -229,6 +237,27 @@ mod tests {
         assert_eq!(refresh(root.path(), &exe).unwrap(), Refreshed::FromClone);
 
         assert_eq!(contents(&path(root.path())), "the app");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_real_path_of_the_link_is_the_app() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = app(root.path(), "Epik", "the app");
+        refresh(root.path(), &exe).unwrap();
+
+        assert_eq!(
+            real_path(&path(root.path())),
+            fs::canonicalize(&exe).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_real_path_of_a_path_that_is_no_link_is_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = fs::canonicalize(app(root.path(), "Epik", "the app")).unwrap();
+
+        assert_eq!(real_path(&exe), exe);
     }
 
     /// On macOS a temporary directory is reached through a symbolic link,
