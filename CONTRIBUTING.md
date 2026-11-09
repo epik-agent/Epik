@@ -65,3 +65,18 @@ files, `Epik.app.tar.gz` and its `.sig`. `cargo xtask latest-json
 <version> <tag> <dir>` writes the manifest the updater reads for the
 update files in `<dir>`, as the release workflow does for each final
 release.
+
+## Making a release
+
+1. Bump the workspace version in the root `Cargo.toml` in a pull request,
+   and merge it.
+2. On the Actions page, choose Release, then Run workflow. Leave the
+   suffix empty for the final release, or give one, such as `rc1`, for a
+   release candidate.
+3. The workflow tags the commit `v<version>` or `v<version>-<suffix>`,
+   builds the installers, and drafts the release. It fails if the tag
+   already exists.
+4. Publish the draft on the Releases page.
+
+A release is never created on the Releases page, which publishes it before
+anything is built.
