@@ -75,8 +75,13 @@ release.
    release candidate.
 3. The workflow tags the commit `v<version>` or `v<version>-<suffix>`,
    builds the installers, and drafts the release. It fails if the tag
-   already exists.
-4. Publish the draft on the Releases page.
+   already exists. If the draft already exists, it uploads onto it.
+4. If a job fails, fix the cause and choose Re-run failed jobs on that
+   run, which keeps the tag. Running the workflow again would refuse the
+   tag that already exists. To abandon the run instead, delete the tag
+   with `git push --delete origin v<version>` and the draft, then run the
+   workflow again.
+5. Publish the draft on the Releases page.
 
 A release is never created on the Releases page, which publishes it before
 anything is built.
