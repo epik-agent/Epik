@@ -67,8 +67,10 @@
 #
 # Without them no update files are built. With them every release builds
 # them, but only a tag without a suffix publishes latest.json: a
-# pre-release offers no update. The key stays out of tauri.conf.json, so
-# local builds need none.
+# pre-release offers no update. The key is proved first: before the tag is
+# made, it signs a scratch file, and a key or password that can't sign
+# stops the run there. The key stays out of tauri.conf.json, so local
+# builds need none.
 
 name: Release
 
@@ -89,6 +91,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Tauri CLI that proves the updater key and builds the app.
+  TAURI_CLI: 2.12.4
   # Sets Git's init.defaultBranch for every job, which silences the
   # hint actions/checkout's `git init` prints.
   GIT_CONFIG_COUNT: 1
@@ -103,11 +107,10 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
-      - name: Tag the version
+      - name: Choose the tag
         id: tag
         env:
           SUFFIX: ${{ inputs.suffix }}
-          BRANCH: ${{ github.ref_name }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "epik-app") | .version')
@@ -116,12 +119,51 @@ jobs:
             echo "::error::The tag $tag already exists. Bump the workspace version in Cargo.toml."
             exit 1
           fi
-          line="Releasing $version as $tag from $BRANCH at $GITHUB_SHA"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # The same CLI as the build jobs, for the runner this job is on.
+      - name: Install the Tauri CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir="$RUNNER_TEMP/tauri-cli"
+          gh release download "tauri-cli-v$TAURI_CLI" --repo tauri-apps/tauri \
+            --pattern "cargo-tauri-x86_64-unknown-linux-gnu.tgz" --dir "$dir"
+          tar -xzf "$dir/cargo-tauri-x86_64-unknown-linux-gnu.tgz" -C "$dir"
+          echo "$dir" >> "$GITHUB_PATH"
+
+      # A key that can't sign would fail every Bundle step after minutes of
+      # compiling, and leave its tag behind: sign a scratch file first.
+      - name: Prove the updater key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::notice::No updater key; no update files will be built."
+            exit 0
+          fi
+          scratch="$RUNNER_TEMP/scratch"
+          echo scratch > "$scratch"
+          if ! out=$(cargo tauri signer sign "$scratch" 2>&1 < /dev/null); then
+            message=$(echo "$out" | sed -n 's/^ *Error //p' | tail -n 1)
+            echo "::error::The updater key can't be used: ${message:-$out}. Check TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD."
+            exit 1
+          fi
+          echo "::notice::The updater key signed a scratch file."
+
+      - name: Tag the version
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          line="Releasing $VERSION as $TAG from $BRANCH at $GITHUB_SHA"
           echo "::notice::$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
-          git tag "$tag" "$GITHUB_SHA"
-          git push origin "refs/tags/$tag"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
 
   build:
     name: Build (${{ matrix.os }})
@@ -169,7 +211,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAURI_CLI: 2.12.4
         run: |
           target=$(rustc -vV | sed -n 's/^host: //p')
           dir="$RUNNER_TEMP/tauri-cli"
