@@ -1,5 +1,7 @@
 # Epik
 
+[![codecov](https://codecov.io/gh/epik-agent/Epik/graph/badge.svg)](https://codecov.io/gh/epik-agent/Epik)
+
 _You say it. We make it._
 
 Epik is a software-design partner that turns a conversation into working code.

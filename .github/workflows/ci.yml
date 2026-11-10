@@ -82,6 +82,43 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  coverage:
+    # Runs the whole test suite once under coverage, on the Linux leg's
+    # setup, and sends the result to Codecov.
+    name: Coverage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linux system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      # cargo-llvm-cov reads the profiles with the toolchain's LLVM tools.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14,cargo-llvm-cov
+      - name: Build the windows
+        working-directory: crates/epik-ui
+        run: trunk build
+      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      # A failed upload fails the job, so it is seen rather than silent.
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
+
   rust-headless:
     # A server with no desktop builds the app without its tray and windows.
     # This job installs none of the GUI packages the Linux job above does,
