@@ -539,7 +539,12 @@ fn node_check(root: &Path, runner: &dyn Runner) -> Check {
                 ),
             }
         }
-        _ => Check::new(item, State::Missing, "not installed"),
+        Ok(out) => Check::new(
+            item,
+            State::Missing,
+            first_line(&out.stderr, "it doesn't run"),
+        ),
+        Err(_) => Check::new(item, State::Missing, "not installed"),
     }
 }
 
@@ -1077,6 +1082,29 @@ pub(crate) mod tests {
         assert_eq!(
             refusal(&checks, &Settings::default()).unwrap(),
             "Epik's setup is incomplete: Node. Choose Check setup in the Epik menu."
+        );
+    }
+
+    #[test]
+    fn node_that_does_not_run_says_why() {
+        let broken = Recorded::complete().answer_stderr(
+            "node --version",
+            false,
+            "node: error while loading shared libraries: libatomic.so.1: \
+             cannot open shared object file: No such file or directory\n",
+        );
+        assert_eq!(
+            state(&broken, Item::Node),
+            (
+                State::Missing,
+                "node: error while loading shared libraries: libatomic.so.1: \
+                 cannot open shared object file: No such file or directory"
+                    .into()
+            )
+        );
+        assert_eq!(
+            state(&Recorded::default(), Item::Node),
+            (State::Missing, "not installed".into())
         );
     }
 
