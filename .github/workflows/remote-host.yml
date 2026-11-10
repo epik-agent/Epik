@@ -1,0 +1,27 @@
+name: Remote host
+
+# An integration test run by hand from the Actions page, not part of CI:
+# the app on a real host, a Docker container reached over real ssh.
+on:
+  workflow_dispatch:
+
+jobs:
+  remote-host:
+    name: Remote host
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The shell opens ~/.ssh/config before host.sh runs.
+      - run: mkdir -p ~/.ssh
+      - run: crates/epik-app/tests/host/host.sh up >> ~/.ssh/config
+      - run: cargo test -p epik-app --no-default-features --test host
+        env:
+          EPIK_TEST_HOST: devbox

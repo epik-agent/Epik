@@ -116,7 +116,9 @@ says what to run for each item that isn't done:
 It installs private copies of the GitHub CLI and Node in `~/.epik/tools/`,
 checked against their published checksums, with
 `~/.epik/bin/epik-app setup install gh` and
-`~/.epik/bin/epik-app setup install node`. If your roles use Claude Code
+`~/.epik/bin/epik-app setup install node`. Node needs `libatomic1`,
+which a minimal Debian or Ubuntu lacks: install it with
+`sudo apt-get install libatomic1`. If your roles use Claude Code
 and it's missing, install it with Anthropic's installer:
 
 ```sh
@@ -188,6 +190,10 @@ administrator for it: have one run `sudo loginctl enable-linger <user>`.
 **Hosts** add the host as you'd type it after `ssh`. Settings says whether
 it's reachable and whether its setup is complete. Make it the default for
 builds there, or name it when you ask for a build: "build #12 on devbox".
+
+To develop Epik against a throwaway host,
+`crates/epik-app/tests/host/host.sh up >> ~/.ssh/config` starts one in a
+Docker container as `devbox`, set up as above but for the sign-ins.
 
 ### When a host isn't working
 
